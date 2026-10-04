@@ -35,7 +35,7 @@ SVC_PSQL=(env PGAPPNAME=ser_b psql -v ON_ERROR_STOP=1 -A -t -q)
 FAILED=0
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/golfraven-partner-ser.XXXXXX")"
 
-ORG1="ee24f000-0000-0000-0000-0000000000a1"; ORG2="ee24f000-0000-0000-0000-0000000000a2"; ORG3="ee24f000-0000-0000-0000-0000000000a3"; ORG4="ee24f000-0000-0000-0000-0000000000a4"; ORG5="ee24f000-0000-0000-0000-0000000000a5"
+ORG1="ee24f000-0000-0000-0000-0000000000a1"; ORG2="ee24f000-0000-0000-0000-0000000000a2"; ORG3="ee24f000-0000-0000-0000-0000000000a3"; ORG4="ee24f000-0000-0000-0000-0000000000a4"; ORG5="ee24f000-0000-0000-0000-0000000000a5"; ORG6="ee24f000-0000-0000-0000-0000000000a6"; ORG7="ee24f000-0000-0000-0000-0000000000a7"
 U1="ee24f000-0000-0000-0000-0000000000b1"; U2="ee24f000-0000-0000-0000-0000000000b2"; U3="ee24f000-0000-0000-0000-0000000000b3"; U4="ee24f000-0000-0000-0000-0000000000b4"; U5="ee24f000-0000-0000-0000-0000000000b5"; U6="ee24f000-0000-0000-0000-0000000000b6"
 C1="ee24f000-0000-0000-0000-0000000000c1"; C2="ee24f000-0000-0000-0000-0000000000c2"; C3="ee24f000-0000-0000-0000-0000000000c3"; C4="ee24f000-0000-0000-0000-0000000000c4"; C5="ee24f000-0000-0000-0000-0000000000c5"; C6="ee24f000-0000-0000-0000-0000000000c6"
 S1="ee24f000-0000-0000-0000-0000000000d1"; S2="ee24f000-0000-0000-0000-0000000000d2"; S3="ee24f000-0000-0000-0000-0000000000d3"; S4="ee24f000-0000-0000-0000-0000000000d4"; S5="ee24f000-0000-0000-0000-0000000000d5"; S6="ee24f000-0000-0000-0000-0000000000d6"
@@ -98,7 +98,7 @@ hx "
   SET ROLE service_role;
   INSERT INTO auth.users (id, email) VALUES ('$U1', 'ser1@partner.test'), ('$U2', 'ser2@partner.test'), ('$U3', 'ser3@partner.test'), ('$U4', 'ser4@partner.test'), ('$U5', 'ser5@partner.test'), ('$U6', 'ser6@partner.test')
     ON CONFLICT (id) DO NOTHING;
-  INSERT INTO app.partner_org (id, kind, name) VALUES ('$ORG1', 'facility', 'ser org 1'), ('$ORG2', 'facility', 'ser org 2'), ('$ORG3', 'facility', 'ser org 3'), ('$ORG4', 'facility', 'ser org 4'), ('$ORG5', 'facility', 'ser org 5');
+  INSERT INTO app.partner_org (id, kind, name) VALUES ('$ORG1', 'facility', 'ser org 1'), ('$ORG2', 'facility', 'ser org 2'), ('$ORG3', 'facility', 'ser org 3'), ('$ORG4', 'facility', 'ser org 4'), ('$ORG5', 'facility', 'ser org 5'), ('$ORG6', 'facility', 'ser org 6'), ('$ORG7', 'facility', 'ser org 7');
   INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG1', 'fac_x'), ('$ORG2', 'fac_x'), ('$ORG3', 'fac_x'), ('$ORG4', 'fac_x'), ('$ORG5', 'fac_x');
   INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$U1', '$ORG1', 'staff'), ('$U2', '$ORG2', 'staff'), ('$U3', '$ORG3', 'staff'), ('$U4', '$ORG1', 'staff'), ('$U5', '$ORG4', 'staff'), ('$U6', '$ORG5', 'staff');
   RESET ROLE;"
@@ -230,6 +230,25 @@ echo "tools/db/test-partner-serialisation.sh: 3b. the same, for an action that W
 revoker_first "revoker first (write path)" "$H6" "$U6"
 
 # ---------------------------------------------------------------------------
+# 3c. The one-facility-scope invariant under CONCURRENT writers (S1.1a gate L8): two sessions each add a DIFFERENT facility scope to the SAME facility org (so the unique key cannot
+#     help). Without the per-org advisory lock both commit and the org holds two scopes; with it the second WAITS (seen in pg_locks) and then sees the first's row and is refused.
+# ---------------------------------------------------------------------------
+echo "tools/db/test-partner-serialisation.sh: 3c. two concurrent scope inserts for one facility org"
+env PGAPPNAME=ser_a psql -v ON_ERROR_STOP=1 -A -t -q -c "BEGIN; SET LOCAL ROLE service_role; INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG6', 'fac_x'); SELECT pg_sleep(3.5); COMMIT;" >"$OUT_DIR/a.out" 2>"$OUT_DIR/a.err" &
+PA=$!
+sleep 1.0
+"${SVC_PSQL[@]}" -c "SET ROLE service_role; INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG6', 'fac_y');" >"$OUT_DIR/b.out" 2>"$OUT_DIR/b.err" &
+PB=$!
+W=$(waits ser_b)
+set +e; wait "$PA"; SA=$?; wait "$PB"; SB=$?; set -e
+N=$(hq "SET ROLE service_role; SELECT count(*) FROM app.partner_scope WHERE org_id = '$ORG6'" | tail -1)
+if [ "$SA" -ne 0 ]; then fail "scope invariant: the first insert failed"; cat "$OUT_DIR/a.err" >&2 || true
+elif [ "$W" != "yes" ]; then fail "scope invariant: the second insert was never seen WAITING in pg_locks (no per-org lock)"
+elif [ "$SB" -eq 0 ] || ! grep -q "a facility org holds at most one scope row" "$OUT_DIR/b.err"; then fail "scope invariant: the second insert was not refused as 'at most one scope row' (status $SB): $(cat "$OUT_DIR/b.err")"
+elif [ "$N" != "1" ]; then fail "scope invariant: the org holds $N scope rows, expected exactly 1"
+else echo "PASS: concurrent scope inserts for one facility org -> the second waited on the per-org lock and was refused; the org holds exactly one scope"; fi
+
+# ---------------------------------------------------------------------------
 # 4. The planted GUC: the change session's GUCs do not widen an open action's reach
 # ---------------------------------------------------------------------------
 echo "tools/db/test-partner-serialisation.sh: 4. planted GUCs during an open action"
@@ -251,6 +270,20 @@ elif [ "$(session_revoked "$S2")" != "false" ]; then
 else
   echo "PASS: planted GUCs -> a partner-bound private_definer writer with every GUC planted at another user's live session changed 0 rows and could not see it (the delete_my_data window is closed under a partner binding); the session is still live"
 fi
+
+# ---------------------------------------------------------------------------
+# 5. READ COMMITTED only (S1.1a gate, the unstated reliance): the seam and the scope invariant both depend on a fresh snapshot per statement, so a REPEATABLE READ transaction is refused
+# ---------------------------------------------------------------------------
+echo "tools/db/test-partner-serialisation.sh: 5. REPEATABLE READ is refused by the seam and by the scope invariant"
+RR1=$(printf '%s\n' "BEGIN ISOLATION LEVEL REPEATABLE READ;" "SET LOCAL ROLE edge_partner;" "SELECT private.bind_partner_session('$H4');" "SELECT private.zz24s_action('fac_x', 'A0');" "COMMIT;" | edge ser_n 2>&1 || true)
+RR1B=$(printf '%s\n' "BEGIN;" "SET LOCAL ROLE edge_partner;" "SELECT private.bind_partner_session('$H4');" "SELECT 'rc_ok:' || private.zz24s_action('fac_x', 'A0');" "COMMIT;" | edge ser_n 2>&1 || true)
+RR2=$("${HARNESS_PSQL[@]}" -c "BEGIN ISOLATION LEVEL REPEATABLE READ; SET LOCAL ROLE service_role; INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG7', 'fac_x'); COMMIT;" 2>&1 || true)
+RR2B=$("${HARNESS_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE service_role; INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG7', 'fac_x'); COMMIT;" 2>&1 || true)
+if ! printf '%s' "$RR1" | grep -q "partner_authorize: requires a READ COMMITTED transaction"; then fail "authorize under REPEATABLE READ was not refused: $RR1"
+elif ! printf '%s' "$RR1B" | grep -q "rc_ok:"; then fail "authorize under READ COMMITTED (control) was refused: $RR1B"
+elif ! printf '%s' "$RR2" | grep -q "written under READ COMMITTED only"; then fail "a facility scope insert under REPEATABLE READ was not refused: $RR2"
+elif [ "$(hq "SET ROLE service_role; SELECT count(*) FROM app.partner_scope WHERE org_id = '$ORG7'" | tail -1)" != "1" ]; then fail "the READ COMMITTED control scope insert did not land exactly once: $RR2B"
+else echo "PASS: REPEATABLE READ is refused by partner_authorize and by the scope invariant; READ COMMITTED (control) passes"; fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "tools/db/test-partner-serialisation.sh: FAILED" >&2

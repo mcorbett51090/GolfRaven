@@ -14,7 +14,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(291);
+SELECT plan(295);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
@@ -451,9 +451,10 @@ DECLARE
   v_col text;
 BEGIN
   FOR t IN SELECT n.nspname, c.relname, c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-           WHERE c.relkind = 'r' AND n.nspname = 'app' AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+           WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_' AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
              AND CASE p_cmd WHEN 'SELECT' THEN has_table_privilege('edge_actor', c.oid, 'SELECT')
                             WHEN 'DELETE' THEN has_table_privilege('edge_actor', c.oid, 'DELETE')
+                            WHEN 'INSERT' THEN has_any_column_privilege('edge_actor', c.oid, 'INSERT')
                             ELSE has_any_column_privilege('edge_actor', c.oid, 'UPDATE') END
            ORDER BY 2 LOOP
     BEGIN
@@ -461,6 +462,18 @@ BEGIN
         EXECUTE format('SELECT count(*)::int FROM %I.%I', t.nspname, t.relname) INTO v_n;
       ELSIF p_cmd = 'DELETE' THEN
         EXECUTE format('WITH d AS (DELETE FROM %I.%I RETURNING 1) SELECT count(*)::int FROM d', t.nspname, t.relname) INTO v_n;
+      ELSIF p_cmd = 'INSERT' THEN
+        -- RLS WITH CHECK is evaluated BEFORE the table's constraints, but AFTER its BEFORE ROW triggers (which pg_temp.disable_insert_triggers() has switched off for the sweep, inside the
+        -- savepoint), so SQLSTATE 42501 (a policy refusal or no privilege) means REFUSED; success OR any other error (a NOT NULL violation, say) means the policy let the row through.
+        -- n = 1 when it got through, 0 when refused.
+        BEGIN
+          EXECUTE format('INSERT INTO %I.%I DEFAULT VALUES', t.nspname, t.relname);
+          v_n := 1;
+        EXCEPTION WHEN insufficient_privilege THEN
+          v_n := 0;
+        WHEN OTHERS THEN
+          v_n := 1;
+        END;
       ELSE
         SELECT a.attname INTO v_col FROM pg_attribute a WHERE a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('edge_actor', t.oid, a.attnum, 'UPDATE') ORDER BY a.attnum LIMIT 1;
         EXECUTE format('WITH u AS (UPDATE %I.%I SET %I = %I RETURNING 1) SELECT count(*)::int FROM u', t.nspname, t.relname, v_col, v_col) INTO v_n;
@@ -475,8 +488,23 @@ BEGIN
 END
 $f$;
 GRANT EXECUTE ON FUNCTION pg_temp.sweep_tables(text) TO PUBLIC;
+CREATE FUNCTION pg_temp.disable_insert_triggers() RETURNS int LANGUAGE plpgsql AS $f$
+DECLARE
+  t record;
+  n int := 0;
+BEGIN
+  FOR t IN SELECT ns.nspname, c.relname FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace
+           WHERE c.relkind = 'r' AND ns.nspname NOT IN ('pg_catalog', 'information_schema') AND ns.nspname !~ '^pg_' AND has_any_column_privilege('edge_actor', c.oid, 'INSERT')
+             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e') LOOP
+    EXECUTE format('ALTER TABLE %I.%I DISABLE TRIGGER USER', t.nspname, t.relname);
+    n := n + 1;
+  END LOOP;
+  RETURN n;
+END
+$f$;
 -- under a PARTNER binding of player A
 SAVEPOINT pa3b_p;
+SELECT pg_temp.disable_insert_triggers() AS _n \gset
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_pa');
 RESET ROLE;
@@ -487,16 +515,29 @@ SELECT is((SELECT array_agg(s.rel || '=' || s.n ORDER BY s.rel) FROM pg_temp.swe
   'PA-3b: every app table edge_actor can SELECT answers ZERO rows under the partner binding (the open-read catalog tables aside)');
 SELECT is((SELECT array_agg(s.rel || '=' || s.n ORDER BY s.rel) FROM pg_temp.sweep_tables('DELETE') s WHERE s.n > 0), NULL::text[], 'PA-3b: a DELETE on every table edge_actor can delete from affects ZERO rows under the partner binding');
 SELECT is((SELECT array_agg(s.rel || '=' || s.n ORDER BY s.rel) FROM pg_temp.sweep_tables('UPDATE') s WHERE s.n > 0), NULL::text[], 'PA-3b: an UPDATE on every table edge_actor can update affects ZERO rows under the partner binding');
+SELECT is((SELECT array_agg(s.rel || '=' || s.n ORDER BY s.rel) FROM pg_temp.sweep_tables('INSERT') s WHERE s.n > 0), NULL::text[], 'PA-3b (S1.1a gate L3): an INSERT into every table edge_actor holds any INSERT privilege on is REFUSED by RLS under the partner binding (every schema, not only app)');
 SELECT cmp_ok((SELECT count(*)::int FROM pg_temp.sweep_tables('SELECT')), '>', 10, 'PA-3b: the sweep is not vacuous: it covers more than 10 tables (generated from the catalog)');
+SELECT cmp_ok((SELECT count(*)::int FROM pg_temp.sweep_tables('INSERT')), '>', 0, 'PA-3b: ... and the INSERT sweep is not vacuous either (edge_actor holds INSERT on at least one table)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pa3b_p;
 -- the SAME sweeps under a USER binding of the same player: they find rows, so the zeros above are the binding kind and not empty tables
 SAVEPOINT pa3b_u;
+SELECT pg_temp.disable_insert_triggers() AS _n \gset
 SET LOCAL ROLE edge_actor;
 SELECT private.bind_actor('00000000-0000-0000-0000-00000000000a');
 SELECT cmp_ok((SELECT count(*)::int FROM pg_temp.sweep_tables('SELECT') s WHERE s.n > 0 AND s.rel NOT IN (SELECT o.rel FROM zz24_open_read o)), '>=', 8, 'PA-3b control: under a USER binding the same SELECT sweep finds rows in at least 8 non-open tables');
 -- (edge_actor holds no DELETE on any app table today, so the DELETE sweep above is empty: it is there so a table granted DELETE later is covered without a hand list)
 SELECT cmp_ok((SELECT count(*)::int FROM pg_temp.sweep_tables('UPDATE') s WHERE s.n > 0), '>=', 1, 'PA-3b control: ... and the UPDATE sweep updates rows in at least 1');
+-- the INSERT sweep's detector, proved on a planted table whose policy lets a row through (edge_actor INSERT, WITH CHECK (true)): it must answer 1 for it
+RESET ROLE;
+CREATE TABLE app.zz24_ins (a int);
+GRANT INSERT ON app.zz24_ins TO edge_actor;
+ALTER TABLE app.zz24_ins ENABLE ROW LEVEL SECURITY;
+CREATE POLICY zz24_ins_p ON app.zz24_ins FOR INSERT TO edge_actor WITH CHECK (true);
+SET LOCAL ROLE edge_actor;
+SELECT is((SELECT s.n FROM pg_temp.sweep_tables('INSERT') s WHERE s.rel = 'app.zz24_ins'), 1, 'PA-3b control: the INSERT sweep reports a planted table whose policy lets a row through (the detector is not blind)');
+RESET ROLE;
+SET LOCAL ROLE edge_actor;
 SELECT cmp_ok(cardinality(pg_temp.sweep_functions('00000000-0000-0000-0000-00000000000a')), '>', 5, 'PA-3b control: ... and more functions answer than the five binding-independent ones');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pa3b_u;
@@ -740,17 +781,139 @@ CREATE FUNCTION pg_temp.upd_rows(p_sql text) RETURNS int LANGUAGE plpgsql AS $f$
 GRANT EXECUTE ON FUNCTION pg_temp.upd_rows(text) TO PUBLIC;
 CREATE FUNCTION pg_temp.consume() RETURNS boolean LANGUAGE sql AS $f$ SELECT private.partner_pin_grant_consume() $f$;
 GRANT EXECUTE ON FUNCTION pg_temp.consume() TO PUBLIC;
--- (i) with EVERY existing private_definer policy installed (the 0016 pd_setnull_partner_member_invited_by pair included), a partner-BOUND private_definer cannot un-revoke or promote the bound
--- user's own membership: no policy admits the UPDATE (this migration added NO policy on partner_member, partner_scope or admin_user for locking)
+-- (i) THE WINDOWS (S1.1a gate H1). Every GUC-keyed private_definer policy in the schema is a window; inside a PARTNER-bound transaction none may be open. The first version of this cell never
+-- planted a GUC, so it proved nothing about the 0016 windows (the gate un-revoked and promoted a member, deleted a membership and an admin_user row through them). It now plants EVERY
+-- setting the repository has ever keyed a policy on, runs the three gate probes with a no-binding control, and then does the same over the CATALOG: for every (table, command) a window
+-- policy covers, the rows reached with the settings planted must equal the rows reached with them unset, under a partner binding.
+CREATE FUNCTION pg_temp.plant_all(p_user uuid) RETURNS void LANGUAGE plpgsql AS $f$
+BEGIN
+  PERFORM set_config('app.delete_my_data.target_user_id', p_user::text, true), set_config('app.delete_my_data.target_email', 'player-a@example.test', true),
+          set_config('app.delete_my_data.target_handle', 'x', true), set_config('app.delete_my_data.target_pseudonym', 'x', true),
+          set_config('app.edge.link_attest_key', 'x', true), set_config('app.edge.link_device_id', p_user::text, true), set_config('app.edge.link_hash', 'x', true),
+          set_config('app.edge.purge_fix_coords', 'on', true),
+          set_config('app.guard.entitlement_id', p_user::text, true), set_config('app.guard.offer_code_id', p_user::text, true), set_config('app.guard.play_id', p_user::text, true),
+          set_config('app.offline_code.target_device_id', p_user::text, true),
+          set_config('app.signin.proof_id', p_user::text, true), set_config('app.signin.proof_purge', 'on', true), set_config('app.signin.target_user_id', p_user::text, true);
+END
+$f$;
+CREATE FUNCTION pg_temp.unplant_all() RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE
+  g text;
+BEGIN
+  FOR g IN SELECT unnest(ARRAY['app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym',
+                               'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id',
+                               'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id']) LOOP
+    PERFORM set_config(g, '', true);
+  END LOOP;
+END
+$f$;
+-- a setting a window policy reads that plant_all does not know: the cell below would silently test nothing for it, so it FAILS (a later slice that adds a window must add its setting here)
+CREATE FUNCTION pg_temp.unplanted_settings() RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(DISTINCT m[1] ORDER BY m[1])
+  FROM pg_policy pol
+  CROSS JOIN LATERAL regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), 'current_setting\(''([^'']+)''', 'g') AS m
+  WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
+    AND m[1] NOT IN ('app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym',
+                     'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id',
+                     'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id')
+$f$;
+-- measure one statement in a sub-transaction that is always rolled back: the number of rows it reached (-1 if it raised), with the settings planted or unset
+CREATE FUNCTION pg_temp.measure(p_sql text, p_planted boolean, p_user uuid) RETURNS int LANGUAGE plpgsql AS $f$
+DECLARE
+  v_n int;
+  v_msg text;
+BEGIN
+  IF p_planted THEN PERFORM pg_temp.plant_all(p_user); ELSE PERFORM pg_temp.unplant_all(); END IF;
+  EXECUTE p_sql INTO v_n;
+  RAISE EXCEPTION 'measured:%', v_n USING ERRCODE = 'P0001';
+EXCEPTION WHEN SQLSTATE 'P0001' THEN
+  GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  IF v_msg LIKE 'measured:%' THEN RETURN substr(v_msg, 10)::int; END IF;
+  RETURN -1;
+WHEN OTHERS THEN
+  RETURN -1;
+END
+$f$;
+-- every (relation, command) a GUC-keyed private_definer policy covers, as one statement each
+CREATE FUNCTION pg_temp.window_statements() RETURNS TABLE (rel text, cmd text, stmt text) LANGUAGE plpgsql AS $f$
+DECLARE
+  w record;
+  v_col text;
+BEGIN
+  FOR w IN SELECT DISTINCT n.nspname || '.' || c.relname AS rel, c.oid AS relid, x.cmd
+           FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+           CROSS JOIN LATERAL unnest(CASE pol.polcmd WHEN '*' THEN ARRAY['r', 'w', 'd'] WHEN 'a' THEN ARRAY[]::text[] ELSE ARRAY[pol.polcmd::text] END) AS x(cmd)
+           WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
+             AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%')
+           ORDER BY 1, 3 LOOP
+    rel := w.rel;
+    cmd := w.cmd;
+    IF w.cmd = 'r' THEN
+      stmt := format('SELECT count(*)::int FROM %s', w.rel);
+    ELSIF w.cmd = 'd' THEN
+      stmt := format('WITH d AS (DELETE FROM %s RETURNING 1) SELECT count(*)::int FROM d', w.rel);
+    ELSE
+      SELECT a.attname INTO v_col FROM pg_attribute a WHERE a.attrelid = w.relid AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('private_definer', w.relid, a.attnum, 'UPDATE') ORDER BY a.attnum LIMIT 1;
+      IF v_col IS NULL THEN CONTINUE; END IF;
+      stmt := format('WITH u AS (UPDATE %s SET %I = %I RETURNING 1) SELECT count(*)::int FROM u', w.rel, v_col, v_col);
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END
+$f$;
+-- the pairs whose reach CHANGES when the settings are planted
+CREATE FUNCTION pg_temp.window_diffs(p_user uuid) RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(s.rel || ':' || s.cmd || '=' || pg_temp.measure(s.stmt, false, p_user) || '->' || pg_temp.measure(s.stmt, true, p_user) ORDER BY s.rel, s.cmd)
+  FROM pg_temp.window_statements() s
+  WHERE pg_temp.measure(s.stmt, false, p_user) IS DISTINCT FROM pg_temp.measure(s.stmt, true, p_user)
+$f$;
+GRANT EXECUTE ON FUNCTION pg_temp.plant_all(uuid), pg_temp.unplant_all(), pg_temp.unplanted_settings(), pg_temp.measure(text, boolean, uuid), pg_temp.window_statements(), pg_temp.window_diffs(uuid) TO PUBLIC;
+SELECT is(pg_temp.unplanted_settings(), NULL::text[], 'PA-4c (i): every setting a GUC-keyed private_definer policy reads is one this file plants (a new window must be added to plant_all, or the catalog cells below would test nothing for it)');
+SELECT cmp_ok((SELECT count(*)::int FROM pg_temp.window_statements()), '>=', 60, 'PA-4c (i): the catalog-driven statements cover at least 60 (table, command) pairs (not vacuous)');
+-- the gate's three probes: a revoked staff member (a2) invited by manager_x (b1)
+SET LOCAL ROLE service_role;
+UPDATE app.partner_member SET invited_by = '00000000-0000-0000-0000-2000000000b1' WHERE user_id = '00000000-0000-0000-0000-1000000000a2';
+RESET ROLE;
 SAVEPOINT pa4c_i;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 RESET ROLE;
+SELECT pg_temp.plant_all('00000000-0000-0000-0000-2000000000b1') AS _p \gset
 SET LOCAL ROLE private_definer;
-SELECT is(pg_temp.upd_rows($$UPDATE app.partner_member SET revoked_at = NULL, role = 'manager', invited_by = NULL WHERE user_id = '00000000-0000-0000-0000-1000000000a1'$$), 0, 'PA-4c (i): UPDATE partner_member SET revoked_at = NULL, role = manager, invited_by = NULL under a partner binding affects 0 rows (R3-M1: the lock policy that made it succeed is gone)');
-SELECT is(pg_temp.upd_rows($$UPDATE app.partner_member SET revoked_at = NULL WHERE user_id = '00000000-0000-0000-0000-1000000000a1'$$), 0, 'PA-4c (i): ... nor a plain un-revoke');
+SELECT is(pg_temp.upd_rows($$UPDATE app.partner_member SET revoked_at = NULL, role = 'manager', invited_by = NULL WHERE user_id = '00000000-0000-0000-0000-1000000000a2'$$), 0, 'PA-4c (i): with the windows PLANTED at the inviter, UPDATE partner_member SET revoked_at = NULL, role = manager, invited_by = NULL on the revoked member he invited affects 0 rows under a partner binding (the R3-M1 outcome the gate reproduced)');
+SELECT is(pg_temp.upd_rows($$DELETE FROM app.partner_member WHERE user_id = '00000000-0000-0000-0000-2000000000b1'$$), 0, 'PA-4c (i): ... nor can it DELETE the planted user''s membership');
+RESET ROLE;
+SELECT pg_temp.plant_all('00000000-0000-0000-0000-4000000000d0') AS _p \gset
+SET LOCAL ROLE private_definer;
+SELECT is(pg_temp.upd_rows($$DELETE FROM app.admin_user WHERE user_id = '00000000-0000-0000-0000-4000000000d0'$$), 0, 'PA-4c (i): ... nor DELETE an admin_user row');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pa4c_i;
+-- the SAME three statements with the SAME settings planted and NO partner binding reach their rows: the windows are real and the zeros above are the binding kind
+SAVEPOINT pa4c_i_ctl;
+SELECT pg_temp.plant_all('00000000-0000-0000-0000-2000000000b1') AS _p \gset
+SET LOCAL ROLE private_definer;
+SELECT is(pg_temp.upd_rows($$UPDATE app.partner_member SET revoked_at = NULL, role = 'manager', invited_by = NULL WHERE user_id = '00000000-0000-0000-0000-1000000000a2'$$), 1, 'PA-4c (i) control: the same UPDATE with the same settings and NO partner binding un-revokes and promotes (1 row): the window is the delete_my_data one, open as designed');
+SELECT is(pg_temp.upd_rows($$DELETE FROM app.partner_member WHERE user_id = '00000000-0000-0000-0000-2000000000b1'$$), 1, 'PA-4c (i) control: ... and the DELETE of the membership reaches its row');
+RESET ROLE;
+SELECT pg_temp.plant_all('00000000-0000-0000-0000-4000000000d0') AS _p \gset
+SET LOCAL ROLE private_definer;
+SELECT is(pg_temp.upd_rows($$DELETE FROM app.admin_user WHERE user_id = '00000000-0000-0000-0000-4000000000d0'$$), 1, 'PA-4c (i) control: ... and the admin_user DELETE');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT pa4c_i_ctl;
+-- catalog-driven, under a partner binding: planting changes nothing for ANY covered (table, command)
+SAVEPOINT pa4c_i_cat;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT is(pg_temp.window_diffs('00000000-0000-0000-0000-00000000000a'), NULL::text[], 'PA-4c (i): CATALOG-DRIVEN: under a partner binding, for every (table, command) a GUC-keyed private_definer policy covers, the rows reached with every setting planted at player A equal the rows reached with them unset');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT pa4c_i_cat;
+SAVEPOINT pa4c_i_cat2;
+SET LOCAL ROLE private_definer;
+SELECT cmp_ok(cardinality(pg_temp.window_diffs('00000000-0000-0000-0000-00000000000a')), '>=', 20, 'PA-4c (i) control: with NO partner binding the same catalog statements reach more rows when the settings are planted, for at least 20 pairs (the windows are open: the zero above is the binding kind)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT pa4c_i_cat2;
 -- (ii) as edge_partner PLANT every GUC the repository uses, then drive each writer of partner_session against ANOTHER user's session: 0 rows every time
 SAVEPOINT pa4c_ii;
 SET LOCAL ROLE edge_partner;
@@ -1039,6 +1202,337 @@ SELECT is(has_function_privilege('edge_actor', 'private.offline_code_record_step
 SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname = 'private' AND p.proname = 'offline_code_record_step_for_actor' AND (has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_partner', p.oid, 'EXECUTE') OR has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE'))), 0,
   'PA-9c: ... under any signature, and neither can any partner lane role');
+
+-- ============================================================================
+-- S1.1a gate M1: private_definer's view of partner_invite (the invitee_email and token_hash of every pending invite)
+-- ============================================================================
+SAVEPOINT g_m1_none;
+SET LOCAL ROLE private_definer;
+SELECT is((SELECT count(*)::int FROM app.partner_invite), 0, 'M1: private_definer sees NO partner_invite row with no binding and no window (it used to see every pending invite: 2 of 2, with the invitee address and the token hash)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_m1_none;
+SAVEPOINT g_m1_user;
+SET LOCAL ROLE edge_actor;
+SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a1');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT is((SELECT count(*)::int FROM app.partner_invite), 0, 'M1: ... nor under a USER binding');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_m1_user;
+SAVEPOINT g_m1_partner;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx_pin');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT is((SELECT count(*)::int FROM app.partner_invite), 0, 'M1: ... nor under a PARTNER binding');
+RESET ROLE;
+SELECT pg_temp.plant_all('00000000-0000-0000-0000-00000000000a') AS _p \gset
+SET LOCAL ROLE private_definer;
+SELECT is((SELECT count(*)::int FROM app.partner_invite), 0, 'M1: ... not even under a partner binding with every window planted');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_m1_partner;
+SAVEPOINT g_m1_window;
+SELECT pg_temp.plant_all('00000000-0000-0000-0000-00000000000a') AS _p \gset
+SET LOCAL ROLE private_definer;
+SELECT cmp_ok((SELECT count(*)::int FROM app.partner_invite), '>=', 2, 'M1 control: with the delete_my_data window OPEN (a setting planted, no partner binding) the set-null companions see the rows delete_my_data must redact (so the fix did not close the real window)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_m1_window;
+SAVEPOINT g_m1_cred;
+SET LOCAL ROLE private_definer;
+SELECT is((SELECT count(*)::int FROM app.partner_credential) + (SELECT count(*)::int FROM app.partner_enrolment_token), 0, 'M1: the same for the other two set-null companions this migration adds (partner_credential, partner_enrolment_token): no rows without a window');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_m1_cred;
+
+-- ============================================================================
+-- S1.1a gate M2: the INSERT guards (the issuer has a relation-wide INSERT with WITH CHECK (true))
+-- ============================================================================
+SET CONSTRAINTS ALL IMMEDIATE;
+ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;
+ALTER TABLE app.partner_credential ENABLE TRIGGER partner_credential_insert_guard_trg;
+CREATE FUNCTION pg_temp.try_ins_session(p_user uuid, p_cred uuid, p_over jsonb) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE
+  j jsonb := jsonb_build_object('id', gen_random_uuid(), 'token_hash', md5(random()::text) || md5(random()::text), 'user_id', p_user, 'credential_id', p_cred, 'aal', 1,
+                                'created_at', clock_timestamp(), 'last_seen_at', clock_timestamp(), 'expires_at', clock_timestamp() + interval '8 hours', 'mint_kind', 'sign_in',
+                                'mint_nonce_hash', '\x' || md5(random()::text) || md5(random()::text), 'mint_authenticator_data', '\x' || repeat('04', 40),
+                                'mint_client_data_json', '\x7b7d', 'mint_signature', '\x' || repeat('05', 70));
+BEGIN
+  INSERT INTO app.partner_session SELECT * FROM jsonb_populate_record(NULL::app.partner_session, j || p_over);
+  RAISE EXCEPTION 'inserted' USING ERRCODE = 'P0001';
+EXCEPTION WHEN SQLSTATE 'P0001' THEN
+  RETURN 'ok';
+WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$f$;
+CREATE FUNCTION pg_temp.try_ins_cred(p_user uuid, p_over jsonb) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE
+  j jsonb := jsonb_build_object('id', gen_random_uuid(), 'user_id', p_user, 'credential_id', '\x' || md5(random()::text) || md5(random()::text), 'public_key', '\x' || repeat('0c', 77),
+                                'alg', -7, 'created_at', clock_timestamp(), 'sign_count', 0, 'transports', '{}', 'backup_eligible', false, 'backup_state', false, 'label', '');
+BEGIN
+  INSERT INTO app.partner_credential SELECT * FROM jsonb_populate_record(NULL::app.partner_credential, j || p_over);
+  RAISE EXCEPTION 'inserted' USING ERRCODE = 'P0001';
+EXCEPTION WHEN SQLSTATE 'P0001' THEN
+  RETURN 'ok';
+WHEN OTHERS THEN
+  RETURN SQLSTATE;
+END
+$f$;
+GRANT EXECUTE ON FUNCTION pg_temp.try_ins_session(uuid, uuid, jsonb), pg_temp.try_ins_cred(uuid, jsonb) TO PUBLIC;
+SELECT gen_random_uuid() AS g_gosess \gset
+SET LOCAL ROLE service_role;
+INSERT INTO auth.sessions (id, user_id, created_at) VALUES (:'g_gosess', '00000000-0000-0000-0000-1000000000a1', clock_timestamp());
+RESET ROLE;
+SET LOCAL ROLE partner_session_issuer;
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', '{}'::jsonb), 'ok', 'M2 control: the issuer inserts a well-formed sign_in session (aal 1, nothing verified, the database clock, 8 hours)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', '{"aal": 2}'::jsonb), '23514', 'M2: a session is born at aal 1: aal 2 is refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('pin_grant_until', clock_timestamp() + interval '1 day')), '23514', 'M2: ... with a PIN grant: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('reauth_until', clock_timestamp() + interval '1 day')), '23514', 'M2: ... with a reauth window: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('mfa_until', clock_timestamp() + interval '1 day')), '23514', 'M2: ... with an mfa window: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('otp_proof_until', clock_timestamp() + interval '1 hour')), '23514', 'M2: ... with an OTP proof window: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('otp_proof_gotrue_session_id', :'g_gosess'::uuid, 'otp_proof_until', clock_timestamp() + interval '5 minutes')), '23514', 'M2: ... with an OTP proof bound to a GoTrue session: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('revoked_at', clock_timestamp())), '23514', 'M2: ... already revoked: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', '{"revoke_reason": "x"}'::jsonb), '23514', 'M2: ... with a revoke reason: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('authority_touched_at', clock_timestamp())), '23514', 'M2: ... with a touch: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('expires_at', clock_timestamp() + interval '10 years')), '23514', 'M2: a 10-YEAR session is refused (the gate''s issuer insert)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('expires_at', clock_timestamp() + interval '8 hours 2 minutes')), '23514', 'M2: ... staff: 8 hours is the ceiling (8 h 2 min refused)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-3000000000c1', :'c_op', jsonb_build_object('expires_at', clock_timestamp() + interval '3 hours 59 minutes')), 'ok', 'M2: ... an OPERATOR session of 3 h 59 min is accepted ...');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-3000000000c1', :'c_op', jsonb_build_object('expires_at', clock_timestamp() + interval '4 hours 2 minutes')), '23514', 'M2: ... and 4 h 2 min is refused (operator ceiling 4 h)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-4000000000d0', :'c_ad', jsonb_build_object('expires_at', clock_timestamp() + interval '59 minutes')), 'ok', 'M2: ... an ADMIN session of 59 minutes is accepted ...');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-4000000000d0', :'c_ad', jsonb_build_object('expires_at', clock_timestamp() + interval '1 hour 2 minutes')), '23514', 'M2: ... and 1 h 2 min is refused (admin ceiling 1 h)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('created_at', clock_timestamp() - interval '1 day', 'expires_at', clock_timestamp() + interval '1 hour')), '23514', 'M2: a back-dated created_at is refused (the clock is the database''s)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('last_seen_at', clock_timestamp() + interval '1 day')), '23514', 'M2: ... and a last_seen_at a day in the future (it would extend the idle window)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('last_seen_at', clock_timestamp() - interval '1 day')), '23514', 'M2: ... or in the past');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('enrolment_until', clock_timestamp() + interval '10 minutes')), '23514', 'M2: an enrolment window on a SIGN-IN mint is refused (it belongs to a register mint)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('mint_kind', 'register', 'mint_signature', NULL, 'enrolment_until', clock_timestamp() + interval '10 minutes')), 'ok', 'M2: ... a REGISTER mint with a 10-minute enrolment window is accepted ...');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('mint_kind', 'register', 'mint_signature', NULL, 'enrolment_until', clock_timestamp() + interval '16 minutes')), '23514', 'M2: ... and 16 minutes is refused (at most 15)');
+SELECT is(pg_temp.try_ins_cred('00000000-0000-0000-0000-1000000000a1', '{}'::jsonb), 'ok', 'M2 control: the issuer inserts a well-formed credential');
+SELECT is(pg_temp.try_ins_cred('00000000-0000-0000-0000-1000000000a1', jsonb_build_object('revoked_at', clock_timestamp())), '23514', 'M2: a credential is born LIVE: a revoked one is refused');
+SELECT is(pg_temp.try_ins_cred('00000000-0000-0000-0000-1000000000a1', jsonb_build_object('revoked_by', '00000000-0000-0000-0000-2000000000b1'::uuid)), '23514', 'M2: ... with a revoked_by: refused');
+SELECT is(pg_temp.try_ins_cred('00000000-0000-0000-0000-1000000000a1', '{"revoke_reason": "x"}'::jsonb), '23514', 'M2: ... with a revoke reason: refused');
+SELECT is(pg_temp.try_ins_cred('00000000-0000-0000-0000-1000000000a1', jsonb_build_object('last_used_at', clock_timestamp())), '23514', 'M2: ... already used: refused');
+SELECT is(pg_temp.try_ins_cred('00000000-0000-0000-0000-1000000000a1', jsonb_build_object('created_at', clock_timestamp() - interval '1 year')), '23514', 'M2: ... back-dated: refused');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('aal', 2, 'expires_at', clock_timestamp() + interval '10 years', 'pin_grant_until', clock_timestamp() + interval '1 day',
+          'reauth_until', clock_timestamp() + interval '1 day', 'mfa_until', clock_timestamp() + interval '1 day')), '23514', 'M2: the gate''s own insert (aal 2, 10 years, 1-day PIN / reauth / mfa windows) is refused');
+RESET ROLE;
+SET CONSTRAINTS ALL IMMEDIATE;
+ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
+
+-- ============================================================================
+-- S1.1a gate M3 / L1: partner_sessions_revoke (R5-L2) had NO test; the member trigger's column list and its re-point branch; authorize's re-reads
+-- ============================================================================
+-- fresh, live fixtures for these cells (the guard cells above revoked s_sx)
+CREATE FUNCTION pg_temp.live_count(p_uid uuid) RETURNS int LANGUAGE sql AS $f$ SELECT count(*)::int FROM app.partner_session WHERE user_id = p_uid AND revoked_at IS NULL $f$;
+GRANT EXECUTE ON FUNCTION pg_temp.live_count(uuid) TO PUBLIC;
+CREATE FUNCTION pg_temp.audit_rows(p_action text, p_subject text) RETURNS jsonb LANGUAGE sql AS $f$
+  SELECT coalesce(jsonb_agg(jsonb_build_object('table', a.subject_table, 'actor', a.actor_user_id, 'detail', a.detail) ORDER BY a.created_at), '[]'::jsonb) FROM app.audit_log a WHERE a.action = p_action AND a.subject_id = p_subject
+$f$;
+GRANT EXECUTE ON FUNCTION pg_temp.audit_rows(text, text) TO PUBLIC;
+-- who may call it
+SELECT is(has_function_privilege('private_definer', 'private.partner_sessions_revoke(text, uuid, text)', 'EXECUTE'), true, 'R5-L2: private_definer may EXECUTE partner_sessions_revoke ...');
+SELECT is((SELECT array_agg(r ORDER BY r) FROM unnest(ARRAY['edge_actor', 'edge_partner', 'edge_partner_minter', 'partner_session_issuer', 'partner_pin_verifier', 'anon', 'authenticated', 'service_role']) r
+           WHERE has_function_privilege(r, 'private.partner_sessions_revoke(text, uuid, text)', 'EXECUTE')), NULL::text[], 'R5-L2: ... and no edge role, owner role or API role can');
+SELECT is((SELECT count(*)::int FROM pg_proc p, aclexplode(p.proacl) a WHERE p.oid = 'private.partner_sessions_revoke(text, uuid, text)'::regprocedure AND a.grantee = 0), 0, 'R5-L2: ... and not PUBLIC');
+-- the USER subject
+SAVEPOINT g_rev_user;
+SELECT pg_temp.mk_cred('g_ra', '00000000-0000-0000-0000-1000000000a1') AS g_ca \gset
+SELECT pg_temp.mk_session('g_r1', '00000000-0000-0000-0000-1000000000a1', :'g_ca') AS g_s1 \gset
+SELECT pg_temp.mk_session('g_r2', '00000000-0000-0000-0000-1000000000a1', :'g_ca') AS g_s2 \gset
+SELECT pg_temp.mk_session('g_r3', '00000000-0000-0000-0000-2000000000b1', :'c_mx') AS g_s3 \gset
+SELECT pg_temp.live_count('00000000-0000-0000-0000-1000000000a1') AS g_before \gset
+SET LOCAL ROLE private_definer;
+SELECT private.partner_sessions_revoke('user', '00000000-0000-0000-0000-1000000000a1', 'zz_user') AS g_n \gset
+RESET ROLE;
+SELECT is(:g_n::int, :g_before::int, 'R5-L2 user: the call returns the number of live sessions it revoked (all of the user''s)');
+SELECT is(pg_temp.live_count('00000000-0000-0000-0000-1000000000a1'), 0, 'R5-L2 user: ... and the user has none left');
+SELECT is((SELECT revoke_reason FROM app.partner_session WHERE id = :'g_s1'::uuid), 'zz_user', 'R5-L2 user: ... with the reason given');
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'g_s3'::uuid), true, 'R5-L2 user: ... and another user''s session is untouched');
+SET LOCAL ROLE service_role;
+SELECT pg_temp.audit_rows('partner.sessions_revoke', '00000000-0000-0000-0000-1000000000a1') AS g_aud \gset
+RESET ROLE;
+SELECT is(jsonb_array_length(:'g_aud'::jsonb), 1, 'R5-L2 user: exactly ONE audit_log row per call');
+SELECT is((:'g_aud'::jsonb -> 0) ->> 'table', 'auth.users', 'R5-L2 user: ... naming the SUBJECT''s own table (auth.users, not app.partner_session)');
+SELECT is(((:'g_aud'::jsonb -> 0) -> 'detail') ->> 'kind', 'user', 'R5-L2 user: ... the subject kind');
+SELECT is((((:'g_aud'::jsonb -> 0) -> 'detail') ->> 'revoked')::int, :g_n::int, 'R5-L2 user: ... and how many sessions died');
+SELECT is(((:'g_aud'::jsonb -> 0) -> 'detail') ->> 'reason', 'zz_user', 'R5-L2 user: ... and the reason');
+ROLLBACK TO SAVEPOINT g_rev_user;
+-- the ORG subject: active members only (S1.1a gate L1)
+SAVEPOINT g_rev_org;
+SET LOCAL ROLE service_role;
+INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('00000000-0000-0000-0000-2000000000b2', '10000000-0000-0000-0000-000000000002', 'staff');
+RESET ROLE;
+SELECT pg_temp.mk_session('g_r4', '00000000-0000-0000-0000-2000000000b2', :'c_mxr') AS g_s4 \gset
+SELECT pg_temp.mk_session('g_r5', '00000000-0000-0000-0000-2000000000b1', :'c_mx') AS g_s5 \gset
+SELECT pg_temp.mk_session('g_r6', '00000000-0000-0000-0000-3000000000c1', :'c_op') AS g_s6 \gset
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'g_s4'::uuid), true, 'L1 precondition: manager_x_revoked is REVOKED in org 1 (helpers) and ACTIVE in org 2 (just added), with a live session');
+SELECT (SELECT count(*)::int FROM app.partner_session s WHERE s.revoked_at IS NULL AND s.user_id IN (SELECT m.user_id FROM app.partner_member m WHERE m.org_id = '10000000-0000-0000-0000-000000000001' AND m.revoked_at IS NULL)) AS g_exp \gset
+SET LOCAL ROLE private_definer;
+SELECT private.partner_sessions_revoke('org', '10000000-0000-0000-0000-000000000001', 'zz_org') AS g_n \gset
+RESET ROLE;
+SELECT is(:g_n::int, :g_exp::int, 'R5-L2 org: the call revokes the live sessions of the org''s ACTIVE members, and only those (the count the catalog predicts)');
+SELECT is((SELECT revoked_at IS NOT NULL AND revoke_reason = 'zz_org' FROM app.partner_session WHERE id = :'g_s5'::uuid), true, 'R5-L2 org: an active member of the org (manager_x) lost his session');
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'g_s4'::uuid), true, 'L1: a REVOKED member of org 1 who is ACTIVE in org 2 keeps his session there (the org revoke no longer reaches former members)');
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'g_s6'::uuid), true, 'R5-L2 org: a member of ANOTHER org (the operator) is untouched');
+SET LOCAL ROLE service_role;
+SELECT pg_temp.audit_rows('partner.sessions_revoke', '10000000-0000-0000-0000-000000000001') AS g_aud \gset
+RESET ROLE;
+SELECT is((:'g_aud'::jsonb -> 0) ->> 'table', 'app.partner_org', 'R5-L2 org: the audit row names app.partner_org and the org id');
+SELECT is(((:'g_aud'::jsonb -> 0) -> 'detail') ->> 'kind', 'org', 'R5-L2 org: ... kind org');
+ROLLBACK TO SAVEPOINT g_rev_org;
+-- the CREDENTIAL subject: that credential's sessions, not the user's
+SAVEPOINT g_rev_cred;
+SELECT pg_temp.mk_cred('g_rb', '00000000-0000-0000-0000-1000000000a1') AS g_cb \gset
+SELECT pg_temp.mk_session('g_r7', '00000000-0000-0000-0000-1000000000a1', :'g_cb') AS g_s7 \gset
+SELECT pg_temp.mk_session('g_r8', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS g_s8 \gset
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx_pin');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT private.partner_sessions_revoke('credential', :'g_cb'::uuid, 'zz_cred') AS g_n \gset
+RESET ROLE;
+SELECT is(:g_n::int, 1, 'R5-L2 credential: exactly the sessions of THAT credential die (1)');
+SELECT is((SELECT revoked_at IS NOT NULL FROM app.partner_session WHERE id = :'g_s7'::uuid), true, 'R5-L2 credential: ... the session minted by it');
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'g_s8'::uuid), true, 'R5-L2 credential: ... and the same user''s session under ANOTHER credential is untouched (it revokes by credential, not by user)');
+SET LOCAL ROLE service_role;
+SELECT pg_temp.audit_rows('partner.sessions_revoke', :'g_cb') AS g_aud \gset
+RESET ROLE;
+SELECT is((:'g_aud'::jsonb -> 0) ->> 'table', 'app.partner_credential', 'R5-L2 credential: the audit row names app.partner_credential');
+SELECT is((:'g_aud'::jsonb -> 0) ->> 'actor', '00000000-0000-0000-0000-1000000000a1', 'R5-L2: the audit row carries the CALLER''s binding (the partner-bound staff_x)');
+ROLLBACK TO SAVEPOINT g_rev_cred;
+SET LOCAL ROLE private_definer;
+SELECT throws_ok($$SELECT private.partner_sessions_revoke('team', gen_random_uuid(), 'zz_reason')$$, '22023', NULL, 'R5-L2: an unknown subject kind is refused');
+SELECT throws_ok($$SELECT private.partner_sessions_revoke('user', NULL, 'zz_reason')$$, '22023', NULL, 'R5-L2: a NULL subject id is refused');
+SELECT throws_ok($$SELECT private.partner_sessions_revoke('user', gen_random_uuid(), 'Not A Reason')$$, '22023', NULL, 'R5-L2: a reason that is not a short snake_case token is refused');
+SELECT throws_ok($$SELECT private.partner_sessions_revoke('user', gen_random_uuid(), NULL)$$, '22023', NULL, 'R5-L2: a NULL reason is refused');
+RESET ROLE;
+
+-- the member trigger: a ROLE change and a RE-POINT of user_id both kill sessions (the column list and the OLD uid)
+SAVEPOINT g_t_role;
+SELECT pg_temp.mk_session('g_t1', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS g_s1 \gset
+SET LOCAL ROLE service_role;
+UPDATE app.partner_member SET role = 'manager' WHERE user_id = '00000000-0000-0000-0000-1000000000a1' AND org_id = '10000000-0000-0000-0000-000000000001';
+RESET ROLE;
+SELECT is((SELECT revoked_at IS NOT NULL AND revoke_reason = 'authority_changed' FROM app.partner_session WHERE id = :'g_s1'::uuid), true, 'M3: a ROLE change (staff to manager) of a membership revokes the member''s sessions (the trigger fires on UPDATE OF role)');
+ROLLBACK TO SAVEPOINT g_t_role;
+SAVEPOINT g_t_repoint;
+SELECT pg_temp.mk_session('g_t2', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS g_s1 \gset
+SELECT pg_temp.mk_session('g_t3', '00000000-0000-0000-0000-00000000000b', :'c_pb') AS g_s2 \gset
+SET LOCAL ROLE service_role;
+UPDATE app.partner_member SET user_id = '00000000-0000-0000-0000-00000000000b' WHERE user_id = '00000000-0000-0000-0000-1000000000a1' AND org_id = '10000000-0000-0000-0000-000000000001';
+RESET ROLE;
+SELECT is((SELECT revoked_at IS NOT NULL FROM app.partner_session WHERE id = :'g_s1'::uuid), true, 'M3: RE-POINTING a membership to another user revokes the OLD user''s sessions (the OLD uid is not ignored)');
+SELECT is((SELECT revoked_at IS NOT NULL FROM app.partner_session WHERE id = :'g_s2'::uuid), true, 'M3: ... and the NEW user''s too (a new membership is new authority)');
+ROLLBACK TO SAVEPOINT g_t_repoint;
+
+-- ============================================================================
+-- S1.1a gate L6: admin_user UPDATE and TRUNCATE (service_role holds UPDATE; TRUNCATE fires no row trigger)
+-- ============================================================================
+SAVEPOINT g_t_adm;
+SELECT pg_temp.mk_session('g_t4', '00000000-0000-0000-0000-4000000000d0', :'c_ad', interval '0', interval '1 hour', 2) AS g_s1 \gset
+SET LOCAL ROLE service_role;
+UPDATE app.admin_user SET user_id = '00000000-0000-0000-0000-00000000000b' WHERE user_id = '00000000-0000-0000-0000-4000000000d0';
+RESET ROLE;
+SELECT is((SELECT revoked_at IS NOT NULL AND revoke_reason = 'authority_changed' FROM app.partner_session WHERE id = :'g_s1'::uuid), true, 'L6: an UPDATE of an admin_user row (re-pointing the admin) revokes the old admin''s sessions');
+ROLLBACK TO SAVEPOINT g_t_adm;
+SAVEPOINT g_t_tr1;
+SET CONSTRAINTS ALL IMMEDIATE;
+SELECT pg_temp.live_count('00000000-0000-0000-0000-4000000000d0') AS g_live0 \gset
+TRUNCATE app.admin_user;
+SELECT is((SELECT count(*)::int FROM app.partner_session WHERE revoked_at IS NULL), 0, 'L6: TRUNCATE app.admin_user revokes EVERY live session (a statement trigger: no row trigger fires on TRUNCATE)');
+ROLLBACK TO SAVEPOINT g_t_tr1;
+SAVEPOINT g_t_tr2;
+SET CONSTRAINTS ALL IMMEDIATE;
+TRUNCATE app.partner_member CASCADE;
+SELECT is((SELECT count(*)::int FROM app.partner_session WHERE revoked_at IS NULL), 0, 'L6: TRUNCATE app.partner_member (CASCADE) revokes every live session');
+ROLLBACK TO SAVEPOINT g_t_tr2;
+SAVEPOINT g_t_tr3;
+SET CONSTRAINTS ALL IMMEDIATE;
+TRUNCATE app.partner_scope CASCADE;
+SELECT is((SELECT count(*)::int FROM app.partner_session WHERE revoked_at IS NULL), 0, 'L6: TRUNCATE app.partner_scope (CASCADE) revokes every live session');
+ROLLBACK TO SAVEPOINT g_t_tr3;
+
+-- ============================================================================
+-- authorize re-reads that were proven only at BIND (S1.1a gate M3 / NIT): a session that goes revoked, idle, expired or demo AFTER the bind
+-- ============================================================================
+SAVEPOINT g_az_rev;
+SELECT pg_temp.mk_session('g_az1', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS g_s1 \gset
+SELECT pg_temp.th('g_az1') AS g_th \gset
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'g_th');
+SELECT is(private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A0'), '00000000-0000-0000-0000-1000000000a1'::uuid, 'authorize re-read: control: the freshly bound session is authorised');
+RESET ROLE;
+UPDATE app.partner_session SET revoked_at = clock_timestamp(), revoke_reason = 'zz' WHERE id = :'g_s1'::uuid;
+SET LOCAL ROLE edge_partner;
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A0')$$, '42501', 'partner_authorize: the session is not live', 'M3: a session REVOKED in the SAME transaction after the bind is refused by the very next authorize (the revoked_at re-check is its own line of defence)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_az_rev;
+SAVEPOINT g_az_idle;
+SELECT pg_temp.mk_session('g_az2', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS g_s1 \gset
+SELECT pg_temp.th('g_az2') AS g_th \gset
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'g_th');
+RESET ROLE;
+SET CONSTRAINTS ALL IMMEDIATE;
+ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_guard_trg;
+UPDATE app.partner_session SET last_seen_at = clock_timestamp() - interval '31 minutes' WHERE id = :'g_s1'::uuid;
+SET LOCAL ROLE edge_partner;
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A0')$$, '42501', 'partner_authorize: the session is not live', 'NIT: a session that goes IDLE (31 minutes, staff limit 30) after the bind is refused at authorize (the idle rule is not only the binder''s)');
+RESET ROLE;
+UPDATE app.partner_session SET last_seen_at = clock_timestamp(), expires_at = clock_timestamp() - interval '1 second' WHERE id = :'g_s1'::uuid;
+SET LOCAL ROLE edge_partner;
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A0')$$, '42501', 'partner_authorize: the session is not live', 'NIT: ... and one that passes its ABSOLUTE expiry');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_az_idle;
+SAVEPOINT g_az_demo;
+SELECT pg_temp.mk_session('g_az3', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS g_s1 \gset
+SELECT pg_temp.th('g_az3') AS g_th \gset
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'g_th');
+RESET ROLE;
+SET LOCAL ROLE service_role;
+INSERT INTO app.app_review_demo_account (user_id) VALUES ('00000000-0000-0000-0000-1000000000a1');
+RESET ROLE;
+SET LOCAL ROLE edge_partner;
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A0')$$, '42501', 'partner_authorize: the member holds no active partner role', 'NIT: an account that becomes the app-review DEMO account after the bind is refused at authorize (the demo rule is not only the binder''s)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_az_demo;
+
+-- ============================================================================
+-- S1.1a gate L5: the PEEK class (GET session: a live session, no scope, no aal gate, and it must NOT advance last_seen_at)
+-- ============================================================================
+SAVEPOINT g_peek;
+SELECT pg_temp.mk_session('g_pk1', '00000000-0000-0000-0000-1000000000a1', :'c_sx', interval '5 minutes') AS g_s1 \gset
+SELECT pg_temp.th('g_pk1') AS g_th \gset
+SELECT last_seen_at AS g_ls0 FROM app.partner_session WHERE id = :'g_s1' \gset
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'g_th');
+SELECT is(private.zz24_authz_for_partner(NULL, NULL, NULL, 'PEEK'), '00000000-0000-0000-0000-1000000000a1'::uuid, 'L5: PEEK needs a live session and nothing else (no scope, no role list)');
+RESET ROLE;
+SELECT is((SELECT last_seen_at = :'g_ls0'::timestamptz FROM app.partner_session WHERE id = :'g_s1'), true, 'L5: ... and did NOT advance last_seen_at (reading one''s own session does not keep it alive: 4.2)');
+SET LOCAL ROLE edge_partner;
+SELECT private.zz24_authz_for_partner(NULL, NULL, NULL, 'SESSION') AS _x \gset
+RESET ROLE;
+SELECT is((SELECT last_seen_at > :'g_ls0'::timestamptz FROM app.partner_session WHERE id = :'g_s1'), true, 'L5 control: the SESSION class (sign-out, lock) DOES advance it, so the cell above is the class');
+ROLLBACK TO SAVEPOINT g_peek;
+SAVEPOINT g_peek2;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_op1');
+SELECT is(private.zz24_authz_for_partner(NULL, NULL, NULL, 'PEEK'), '00000000-0000-0000-0000-3000000000c1'::uuid, 'L5: PEEK has no aal gate: an aal 1 operator session can read itself (GET session reports the required assurance)');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A0')$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', 'L5: ... and the same session is refused a real class (control)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT g_peek2;
+
+-- ============================================================================
+-- S1.1a gate L7: authenticated keeps SELECT on the masked offer columns only
+-- ============================================================================
+SELECT is((SELECT array_agg(c ORDER BY c) FROM unnest(ARRAY['budget_cap', 'budget_used', 'budget_reserved', 'eligibility', 'max_redemptions']) c WHERE has_column_privilege('authenticated', 'app.offer', c, 'SELECT')), NULL::text[], 'L7: authenticated has NO SELECT on the five budget / eligibility columns of app.offer');
+SELECT is(has_table_privilege('authenticated', 'app.offer', 'SELECT'), false, 'L7: ... and no whole-table SELECT');
+SELECT is((SELECT array_agg(c ORDER BY c) FROM unnest(ARRAY['id', 'terms_id', 'trail_id', 'facility_id', 'funder', 'sponsorship_id', 'valid_from', 'valid_to', 'status']) c WHERE NOT has_column_privilege('authenticated', 'app.offer', c, 'SELECT')), NULL::text[], 'L7: ... but keeps the nine columns the masked api.offer view reads');
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-00000000000b'::uuid));
+SELECT lives_ok($$SELECT id, status FROM api.offer$$, 'L7: the masked api.offer view still answers for a player (it reads only the granted columns)');
+SELECT lives_ok($$SELECT * FROM api.my_offers()$$, 'L7: ... and api.my_offers()');
+SELECT throws_ok($$SELECT budget_cap FROM app.offer$$, '42501', NULL, 'L7: ... while a direct read of app.offer.budget_cap is refused');
+SELECT tests.clear_actor();
 
 SELECT * FROM finish();
 ROLLBACK;

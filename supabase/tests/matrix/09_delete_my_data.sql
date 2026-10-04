@@ -11,7 +11,7 @@
 -- test below catches directly).
 
 BEGIN;
-SELECT plan(33);
+SELECT plan(34);
 
 -- S1 restricted-mode fix: private.delete_my_data is granted to
 -- service_role only (0015) -- its real production caller (the me-delete
@@ -148,6 +148,16 @@ SELECT is(
   (SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key = '00000000-0000-0000-0000-00000000000a:me-delete:user'),
   1,
   'P3d should-fix 3: the in-flight me-delete:user bucket itself survives deletion, deliberately, so a retry of THIS SAME call stays rate-limited'
+);
+
+-- S1.1a gate L4: the skip below is by PRIVILEGE (a table service_role cannot read cannot be counted here), so a future table that loses service_role's SELECT by accident would silently
+-- drop out of this pass. The skipped set is therefore an explicit list: a table added to it needs a line here AND a proof that its rows are really gone (partner_pin / partner_totp
+-- of S1.3 / S1.4 must be added deliberately, with their own cells in 24_partner_auth_spine.sql PA-1b).
+SELECT is(
+  (SELECT array_agg(DISTINCT table_name::text ORDER BY table_name::text) FROM private.pii_retention_policy
+   WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null') AND NOT has_any_column_privilege('service_role', format('app.%I', table_name), 'SELECT')),
+  ARRAY['partner_auth_challenge', 'partner_credential', 'partner_enrolment_token', 'partner_session'],
+  'the catalog-driven pass below skips EXACTLY the four partner-auth tables service_role holds no privilege on (an explicit list: any other table dropping out fails here)'
 );
 
 -- Generic, catalog-driven pass: every `delete_row` / `set_null` policy row
