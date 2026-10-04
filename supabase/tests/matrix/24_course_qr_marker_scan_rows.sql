@@ -6,7 +6,7 @@
 -- Scenarios C1..C8 are listed in the edge file (section 11a). Today's date is the facility-LOCAL date (America/Chicago for fac_s24a / b / e / h).
 
 \set QUIET 1
-SELECT plan(71);
+SELECT plan(88);
 SET ROLE service_role;
 
 -- ----------------------------------------------------------------------------
@@ -23,7 +23,7 @@ SELECT is((SELECT (cosignal ? 'awaiting') FROM app.purchase_evidence WHERE user_
 SELECT is((SELECT count(*)::int FROM app.marker_credit c JOIN app.purchase_evidence p ON p.id = c.purchase_evidence_id WHERE c.user_id = 'ee240000-0000-0000-0000-0000000000a0' AND c.status = 'credited' AND c.facility_id = 'fac_s24a'), 2, 'C1: two credited credits, each linked to its own purchase');
 SELECT is((SELECT used_by_user FROM app.course_qr_token WHERE nonce_hash = encode(sha256(convert_to('s24-tok-10', 'UTF8')), 'hex')), 'ee240000-0000-0000-0000-0000000000a0'::uuid, 'C1: the token is consumed, by PA (the buyer, not the staff member who minted it)');
 SELECT is((SELECT used_at IS NOT NULL FROM app.course_qr_token WHERE nonce_hash = encode(sha256(convert_to('s24-tok-10', 'UTF8')), 'hex')), true, 'C1: and has a use time');
-SELECT is((SELECT count(*)::int FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 22) n) AND used_at IS NOT NULL), 6,
+SELECT is((SELECT count(*)::int FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 49) n) AND used_at IS NOT NULL), 6,
   'only the tokens a COMMITTED scan consumed are used (10, 11, 12, 13, 20, 21): every rolled-back scan left its token unused');
 
 -- ----------------------------------------------------------------------------
@@ -53,14 +53,14 @@ SELECT is((SELECT status::text FROM app.purchase_evidence WHERE id = 'ee240000-0
 -- ----------------------------------------------------------------------------
 -- C4 PD: the printed QR, no fix
 -- ----------------------------------------------------------------------------
-SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0'), 1, 'C4: one purchase (fac_s24e is on one trail)');
-SELECT is((SELECT qr_variant::text || '/' || status::text || '/' || ref_id FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0'),
-  'static_pin/pending/pin:fac_s24e:' || to_char((now() AT TIME ZONE 'America/Chicago')::date, 'YYYY-MM-DD') || ':0', 'C4: static_pin, pending, the ref is the PIN''s facility, date and epoch (never the PIN)');
+SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24e'), 1, 'C4: one purchase (fac_s24e is on one trail)');
+SELECT is((SELECT qr_variant::text || '/' || status::text || '/' || ref_id FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24e'),
+  'static_pin/pending/pin:fac_s24e:' || to_char((now() AT TIME ZONE 'America/Chicago')::date, 'YYYY-MM-DD'), 'C4: static_pin, pending, the ref is the facility and the local date (no epoch: a rotation must not allow a second same-day purchase; never the PIN)');
 SELECT is((SELECT (cosignal -> 'awaiting' ->> 'from')::timestamptz = (date_trunc('day', now() AT TIME ZONE 'America/Chicago')) AT TIME ZONE 'America/Chicago'
               AND (cosignal -> 'awaiting' ->> 'to')::timestamptz = ((date_trunc('day', now() AT TIME ZONE 'America/Chicago') + interval '1 day') AT TIME ZONE 'America/Chicago') - interval '1 millisecond'
-           FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0'), true, 'C4: for the printed QR the window is the facility-local DAY (local midnight to the millisecond before the next; DST-safe)');
+           FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24e'), true, 'C4: for the printed QR the window is the facility-local DAY (local midnight to the millisecond before the next; DST-safe)');
 SELECT is((SELECT status::text FROM app.marker_credit WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24e'), 'pending', 'C4: the credit is pending');
-SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE ref_id ~* '^pin:' AND ref_id ~ '[0-9]{4}$' AND ref_id !~ ':[0-9]{1,3}$'), 0, 'no purchase ref ends in a 4-digit PIN (only the epoch, a short integer, is in it)');
+SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE ref_id ~* '^pin:' AND ref_id !~ '^pin:[a-z0-9_]+:[0-9]{4}-[0-9]{2}-[0-9]{2}$'), 0, 'every printed-QR purchase ref is exactly pin:<facility>:<local date> (no PIN, no epoch)');
 
 -- ----------------------------------------------------------------------------
 -- C5 PE: an unattestable fix -> held_review
@@ -102,18 +102,44 @@ SELECT is((SELECT count(*)::int FROM app.marker_credit c JOIN app.purchase_evide
 SELECT is((SELECT count(*)::int FROM app.purchase_evidence p WHERE p.user_id::text LIKE 'ee240000-%' AND p.method = 'course_qr' AND p.status = 'valid' AND (p.cosignal ->> 'fixId') IS NULL), 0, 'AT(3): and not one valid course_qr purchase lacks a fix');
 SELECT is((SELECT count(*)::int FROM app.purchase_evidence p WHERE p.user_id::text LIKE 'ee240000-%' AND p.method = 'course_qr' AND p.status = 'pending' AND (p.cosignal ? 'awaiting') IS NOT TRUE), 0, 'every pending course_qr purchase records the window it awaits a co-signal in');
 SELECT is((SELECT count(*)::int FROM app.play WHERE user_id::text LIKE 'ee240000-%'), 0, 'AT(4): a marker purchase alone creates NO play (not one app.play row for any account of this file)');
-SELECT is((SELECT count(*)::int FROM app.evidence WHERE user_id::text LIKE 'ee240000-%' AND source_ref <> 'edge24-pa-queued'), 0, 'AT(4): and the database scan writes no play evidence (the fix''s foreground_checkin row is the Edge''s, once: supabase/tests/integration/marker-scan.deno.test.ts)');
+SELECT is((SELECT count(*)::int FROM app.evidence WHERE user_id::text LIKE 'ee240000-%' AND source_ref <> 'edge24-pa-queued' AND source_ref NOT LIKE 'fix:%'), 0,
+  'AT(4): and the database scan writes no evidence of its own: every evidence row here is a co-signal row the (simulated) Edge wrote before the scan, facility-level foreground_checkin (supabase/tests/integration/marker-scan.deno.test.ts runs the real Edge)');
+SELECT is((SELECT count(*)::int FROM app.evidence WHERE user_id::text LIKE 'ee240000-%' AND source = 'foreground_checkin' AND created_at > (SELECT max(created_at) FROM app.evidence WHERE source_ref = 'fix:fixA1') + interval '1 second'), 0,
+  'AT(4): and none of them was written after the seed (the scans and the intake wrote no evidence row)');
 
 -- ----------------------------------------------------------------------------
 -- The alarm (11c): 30 wrong PINs from six players at fac_s24h
 -- ----------------------------------------------------------------------------
 SELECT is((SELECT pin_epoch FROM app.facility_programme WHERE facility_id = 'fac_s24h'), 1, 'AT(19): the 30th wrong PIN at fac_s24h rotated its PIN (pin_epoch 0 -> 1)');
 SELECT is((SELECT count(*)::int FROM app.course_pin_alarm WHERE facility_id = 'fac_s24h' AND local_date = (now() AT TIME ZONE 'America/Chicago')::date AND pin_epoch_before = 0 AND pin_epoch_after = 1 AND failures = 30), 1, 'AT(19): and the operator alert (one alarm row: facility, local date, epoch 0 -> 1, 30 failures)');
-SELECT is((SELECT count(*)::int FROM app.course_pin_alarm WHERE facility_id <> 'fac_s24h'), 0, 'no other facility raised an alarm (the rolled-back 30th failure at fac_s24a left no alarm)');
+SELECT is((SELECT array_agg(facility_id ORDER BY facility_id) FROM app.course_pin_alarm WHERE facility_id LIKE 'fac\_s24%'), ARRAY['fac_s24h', 'fac_s24m'], 'no other facility raised an alarm (the rolled-back 30th failure at fac_s24a left no alarm): fac_s24h and fac_s24m only');
 SELECT is((SELECT array_agg(pin_epoch ORDER BY facility_id) FROM app.facility_programme WHERE facility_id IN ('fac_s24a', 'fac_s24e')), ARRAY[0, 0, 0], 'the other facilities'' epochs are untouched (including both trail rows of fac_s24a)');
 SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:pin-fail:u:ee240000-%:fac_s24h:%' AND count = 5), 6, 'the counters of the six players are the committed failures: five each');
 SELECT is((SELECT sum(count)::int FROM private.rate_limit_bucket WHERE bucket_key = 'marker-scan:pin-fail:f:fac_s24h:' || to_char((now() AT TIME ZONE 'America/Chicago')::date, 'YYYY-MM-DD') || ':0'), 30, 'and the facility counter of that epoch is 30');
 SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:pin-fail:%' AND bucket_key ~ ':[0-9]{4}$' AND bucket_key !~ ':[0-9]{4}-[0-9]{2}-[0-9]{2}$' AND bucket_key !~ ':[0-9]{1,3}$'), 0, 'no counter key contains a PIN');
+
+
+-- ----------------------------------------------------------------------------
+-- The follow-ups' committed scenarios (C9..C11)
+-- ----------------------------------------------------------------------------
+SELECT is((SELECT status::text || '/' || qr_variant::text FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24r'), 'valid/static_pin', 'C9 (M1): a printed-QR scan whose fix is dated YESTERDAY, uploaded after two rotations, is valid');
+SELECT is((SELECT ref_id FROM app.purchase_evidence WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24r'), 'pin:fac_s24r:' || to_char(((SELECT created_at FROM app.evidence WHERE source_ref = 'fix:fixR_d') AT TIME ZONE 'America/Chicago')::date - 1, 'YYYY-MM-DD'),
+  'C9: dated by the FIX (yesterday''s local date), whatever the epoch live then or now');
+SELECT is((SELECT status::text FROM app.marker_credit WHERE user_id = 'ee240000-0000-0000-0000-0000000000d0' AND facility_id = 'fac_s24r'), 'credited', 'C9: and credited');
+SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:pin-fail:u:ee240000-0000-0000-0000-0000000000d0:fac_s24r:%'), 0, 'C9 (M1): NOT ONE failure was counted for the honest player: a queued scan is never a wrong guess');
+SELECT is((SELECT array_agg(substring(bucket_key from '[^:]+$') || '=' || count) FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:pin-fail:f:fac_s24r:%'), ARRAY['2=1'],
+  'C12: a wrong PIN for an instant under epoch 1 is counted against the facility''s CURRENT epoch (2), once');
+SELECT is((SELECT array_agg(pin_epoch ORDER BY pin_epoch) FROM app.facility_programme WHERE facility_id = 'fac_s24r'), ARRAY[2], 'fac_s24r is still at epoch 2');
+SELECT is((SELECT status::text FROM app.purchase_evidence WHERE id = 'ee240000-0000-0000-0000-00000000e405'), 'valid', 'C10 (m14): the pending purchase is completed');
+SELECT is((SELECT cosignal ->> 'fixId' FROM app.purchase_evidence WHERE id = 'ee240000-0000-0000-0000-00000000e405'), 'fixO1', 'C10: by the player''s fix');
+SELECT is((SELECT status::text FROM app.marker_credit WHERE id = 'ee240000-0000-0000-0000-00000000ec02'), 'void', 'C10 (m14): its REDUNDANT pending credit is VOIDED (the player already holds the shop''s credit)');
+SELECT is((SELECT status::text FROM app.marker_credit WHERE id = 'ee240000-0000-0000-0000-00000000ec03'), 'credited', 'C10: the player''s existing credit is untouched');
+SELECT is((SELECT count(*)::int FROM app.marker_credit WHERE user_id = 'ee240000-0000-0000-0000-000000000040' AND status <> 'void'), 1, 'C10: so the player holds exactly ONE live credit for the shop');
+SELECT is((SELECT array_agg(pin_epoch ORDER BY trail_id) FROM app.facility_programme WHERE facility_id = 'fac_s24m'), ARRAY[4, 4], 'C11 (m10): the 30th failure at fac_s24m, whose rows sat at epochs 0 and 3, rotates from the HIGHEST epoch: BOTH rows are at 4');
+SELECT is((SELECT array_agg(pin_epoch_before || '->' || pin_epoch_after || '/' || failures) FROM app.course_pin_alarm WHERE facility_id = 'fac_s24m'), ARRAY['3->4/30'], 'C11: and the alarm names epoch 3 -> 4 (the counter is keyed on the highest epoch)');
+SELECT is((SELECT array_agg(pin_epoch ORDER BY pin_epoch) FROM app.course_pin_epoch_log WHERE facility_id = 'fac_s24m'), ARRAY[4], 'C11: and the rotation is logged once (the trigger fired for two rows)');
+SELECT is((SELECT array_agg(pin_epoch || '<-' || previous_epoch) FROM app.course_pin_epoch_log WHERE facility_id = 'fac_s24h'), ARRAY['1<-0'], 'the alarm rotation at fac_s24h is logged with the epoch it replaced');
+SELECT is((SELECT array_agg(pin_epoch ORDER BY pin_epoch) FROM app.course_pin_epoch_log WHERE facility_id = 'fac_s24r'), ARRAY[1, 2], 'fac_s24r''s seeded history is intact');
 
 -- ----------------------------------------------------------------------------
 -- Export: the purchase and the credit are the subject's own data; the nonce hash is not
@@ -142,9 +168,9 @@ SELECT is((SELECT count(*)::int FROM app.course_qr_key), 3, 'delete: the PUBLIC 
 -- Cleanup
 -- ----------------------------------------------------------------------------
 SELECT lives_ok($$SELECT private.delete_my_data(u) FROM (VALUES ('ee240000-0000-0000-0000-0000000000b0'::uuid), ('ee240000-0000-0000-0000-0000000000c0'), ('ee240000-0000-0000-0000-0000000000d0'), ('ee240000-0000-0000-0000-0000000000e0'),
-  ('ee240000-0000-0000-0000-0000000000f0'), ('ee240000-0000-0000-0000-000000000010'), ('ee240000-0000-0000-0000-000000000020')) v(u)$$, 'cleanup: delete_my_data for the remaining ee240000- accounts');
+  ('ee240000-0000-0000-0000-0000000000f0'), ('ee240000-0000-0000-0000-000000000010'), ('ee240000-0000-0000-0000-000000000020'), ('ee240000-0000-0000-0000-000000000030'), ('ee240000-0000-0000-0000-000000000040')) v(u)$$, 'cleanup: delete_my_data for the remaining ee240000- accounts');
 DELETE FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:pin-fail:%';
-DELETE FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 22) n);
+DELETE FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 49) n);
 DELETE FROM app.facility_qr WHERE facility_id LIKE 'fac\_s24%';
 DELETE FROM app.facility_programme WHERE facility_id LIKE 'fac\_s24%';
 DELETE FROM app.trail_programme WHERE trail_id LIKE 'trl\_s24%';
@@ -153,17 +179,21 @@ RESET ROLE;
 -- tables, and `REVOKE DELETE ... FROM CURRENT_USER` strips the owner's own privilege (the Deno suite, which runs on a copy of this database, then cannot clean up its own keys).
 CREATE POLICY current_user_clean_course_qr_key_24 ON app.course_qr_key FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY current_user_clean_course_pin_alarm_24 ON app.course_pin_alarm FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY current_user_clean_epoch_log_24 ON app.course_pin_epoch_log FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 DELETE FROM app.course_qr_key WHERE kid IN ('rk1', 'rk0', 'pq1');
 DELETE FROM app.course_pin_alarm WHERE facility_id LIKE 'fac\_s24%';
+DELETE FROM app.course_pin_epoch_log WHERE facility_id LIKE 'fac\_s24%';
 DROP POLICY current_user_clean_course_qr_key_24 ON app.course_qr_key;
 DROP POLICY current_user_clean_course_pin_alarm_24 ON app.course_pin_alarm;
+DROP POLICY current_user_clean_epoch_log_24 ON app.course_pin_epoch_log;
 DELETE FROM vault.secrets WHERE name = 'course_pin_pepper';
 SET ROLE service_role;
+DELETE FROM app.catalog_course WHERE id LIKE 'crs\_s24%';
 DELETE FROM app.catalog_facility WHERE id LIKE 'fac\_s24%';
 DELETE FROM app.catalog_trail WHERE id LIKE 'trl\_s24%';
-DELETE FROM app.catalog_id_ledger WHERE id LIKE 'fac\_s24%' OR id LIKE 'trl\_s24%';
+DELETE FROM app.catalog_id_ledger WHERE id LIKE 'fac\_s24%' OR id LIKE 'trl\_s24%' OR id LIKE 'crs\_s24%';
 SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE user_id::text LIKE 'ee240000-%' OR facility_id LIKE 'fac\_s24%'), 0, 'cleanup: no purchase row of this file survives');
-SELECT is((SELECT count(*)::int FROM app.catalog_facility WHERE id LIKE 'fac\_s24%') + (SELECT count(*)::int FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 22) n)), 0, 'cleanup: no catalog facility and no token of this file survives');
+SELECT is((SELECT count(*)::int FROM app.catalog_facility WHERE id LIKE 'fac\_s24%') + (SELECT count(*)::int FROM app.course_qr_token WHERE nonce_hash IN (SELECT encode(sha256(convert_to('s24-tok-' || n, 'UTF8')), 'hex') FROM generate_series(1, 49) n)), 0, 'cleanup: no catalog facility and no token of this file survives');
 SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key LIKE 'marker-scan:%'), 0, 'cleanup: no counter survives');
 RESET ROLE;
 

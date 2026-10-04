@@ -35,8 +35,22 @@
 --   3. app.facility_programme.pin_epoch  gets a monotonic trigger (a lower epoch would revive a rotated-out PIN) and ONE column grant, UPDATE(pin_epoch), for private_definer.
 --   4. app.course_qr_token          write-once consumption (trigger) and the two policies / one column grant the consume needs. The staff lane's INSERT is S2b's.
 --   5. app.purchase_evidence        a UNIQUE partial index (user, trail, ref_id) for course_qr rows (a replayed printed-QR scan is a duplicate), and the definer grants / policies.
---   6. private.course_pin_derive, course_pin_attempt_for_actor, marker_scan_for_actor, marker_cosignal_attach_for_actor, course_qr_public_key_for_actor.
+--   6. private.course_pin_derive, course_pin_attempt_for_actor, marker_scan_for_actor, marker_cosignal_attach_for_actor, course_qr_public_key_for_actor, and the helpers
+--      course_pin_from_key, course_pin_matches, course_pin_epoch_at, course_pin_epoch_log_write, marker_cosignal_check (no EXECUTE for any role).
 --   7. The registries (function inventory, definer policy allow-list) and proofs.
+--   8. app.course_pin_epoch_log (+ its trigger on facility_programme.pin_epoch): WHEN each PIN epoch took effect, so the PIN of a fix is judged under the epoch live at the FIX'S
+--      instant. A rotation (the failure alarm, S2b's "Rotate PIN") must not turn the honest, queued, printed-QR scans of the last 7 days into wrong guesses.
+--   9. private.course_pin_proof: "the PIN gate passed in this transaction". The scan REFUSES a printed-QR scan without it, so it is never an uncounted PIN oracle.
+--  10. The co-signal is tied to its evidence row by the DATABASE (marker_cosignal_check), for the scan and for the intake: a grade, a fix id and an evidence id are claims until the
+--      bound actor's own row has been read back (source, fix id, facility, status, grade, local date, captured time, used by no other scan).
+--  11. The scan instant is the fix's ONLY when a co-signal backs it; without one the database refuses a time more than 5 minutes from now.
+
+-- THE PIN'S INSTANT, in one place (M1): the PIN for (facility, local date of p_at, the epoch live at p_at, the pepper in effect at p_at). A rotation changes the PIN of scans made AFTER it only.
+--   * epoch: app.course_pin_epoch_log, written by a trigger on any rise of facility_programme.pin_epoch. Two rotations on one day give three epochs for that date; each scan is judged under
+--     the epoch live when its fix was captured. A PIN of a rotated-out epoch tried for a LATER instant is a wrong guess and counts (a free oracle would let it be brute-forced).
+--   * pepper: Vault secret `course_pin_pepper` (current) and, optionally, `course_pin_pepper_previous` (the operator copies the old pepper there BEFORE replacing the current one, and deletes it after
+--     7 days). An instant before the current pepper took effect (the later of its created_at / updated_at) is judged under the previous one. WITHOUT a previous pepper a pepper rotation makes
+--     every back-dated PIN from before it a wrong guess: the honest consequence, documented rather than hidden.
 --
 -- RULES FOLLOWED (docs/security/p3-money-path-requirements.md, "HARD RULE"): every private_definer policy added here is keyed on the actor BINDING (private.actor_uid()), never on a
 -- settable GUC; every `_for_actor` definer filters by the bound uid in its own SQL, on every statement that touches a caller-visible row, and names the explicit check at the statement.
@@ -45,7 +59,7 @@
 --
 -- DEPLOY: apply this migration, THEN create the Vault secret (`select vault.create_secret('<random, >= 32 bytes>', 'course_pin_pepper')`), THEN register the Ed25519 public
 -- keys (S2b's key ceremony; until a key exists every QR is `invalid_qr`: fail closed), THEN deploy the Edge code. Until the pepper exists the PIN functions raise 55000
--- and the endpoint answers 503 `course_pin_unavailable`; nothing else is affected. ROTATING the pepper changes every facility's PIN at once (an incident response; plan §4.8's
+-- and the endpoint answers 503 `course_pin_unavailable`; nothing else is affected. ROTATING the pepper changes every facility's PIN at once (an incident response; see the previous-pepper rule above; plan §4.8's
 -- `pepper_kid` per local day is NOT built here: see docs/security/partner-auth-design.md "As built: S2a", departures).
 -- [unverified] on a real Supabase project: that Vault accepts the name `course_pin_pepper` and that pgcrypto's `hmac` is reachable as public.hmac (0029 and 0045 already rely on that).
 
@@ -129,6 +143,50 @@ CREATE POLICY pd_marker_scan_trail_programme_read ON app.trail_programme FOR SEL
 GRANT SELECT ON app.facility_qr TO private_definer;
 CREATE POLICY pd_marker_scan_facility_qr_read ON app.facility_qr FOR SELECT TO private_definer USING (private.actor_uid() IS NOT NULL);
 
+-- 3b. app.course_pin_epoch_log: WHEN each epoch took effect. The PIN of a past fix date is derived under the epoch that was LIVE when the fix was taken, not under the
+-- facility's current one: a scan queued offline (plan §7.6 G2-03) and uploaded after a rotation must still verify, and a rotation (an attack response) must not make honest
+-- back-dated PINs count as wrong guesses. Written ONLY by the trigger below (any rotation, by whichever definer, is logged); read by private.course_pin_epoch_at.
+CREATE TABLE app.course_pin_epoch_log (
+  facility_id text NOT NULL REFERENCES app.catalog_facility (id),
+  pin_epoch integer NOT NULL CHECK (pin_epoch > 0),
+  previous_epoch integer NOT NULL CHECK (previous_epoch >= 0 AND previous_epoch < pin_epoch),
+  effective_from timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (facility_id, pin_epoch)
+);
+COMMENT ON TABLE app.course_pin_epoch_log IS
+  '0046. One row per PIN rotation of a facility: the new epoch, the one it replaced and the instant it took effect. Holds no user id and no PIN. Written only by the trigger on app.facility_programme.pin_epoch (private.course_pin_epoch_log_write); read by private.course_pin_epoch_at. A facility with no row has never rotated since its programme rows were created. Retention (a purge step) is a follow-up.';
+ALTER TABLE app.course_pin_epoch_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app.course_pin_epoch_log FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON app.course_pin_epoch_log FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON app.course_pin_epoch_log TO service_role;
+GRANT INSERT, SELECT ON app.course_pin_epoch_log TO private_definer;
+-- SELECT: unconditional for private_definer too, because INSERT ... ON CONFLICT also evaluates the SELECT policy and an operator's rotation has no bound actor. The table holds no personal data.
+CREATE POLICY pd_marker_scan_epoch_log_select ON app.course_pin_epoch_log FOR SELECT TO private_definer USING (true);
+-- INSERT: the logging trigger runs as SECURITY DEFINER whoever rotates (a bound actor, or an operator with no actor bound), so the policy cannot require a binding. The only writer is
+-- that trigger function; no other definer inserts here (a pgTAP cell pins that no function names the table but the trigger function and the reader).
+CREATE POLICY pd_marker_scan_epoch_log_insert ON app.course_pin_epoch_log FOR INSERT TO private_definer WITH CHECK (true);
+
+-- 3c. private.course_pin_proof: "the PIN gate passed in THIS transaction". private.course_pin_attempt_for_actor writes a row when a PIN is right; private.marker_scan_for_actor
+-- REFUSES a printed-QR scan without one, so the scan can never be called as an uncounted PIN oracle (the lockout and the failure counters live in the attempt). Same lifetime as
+-- private.actor_binding (UNLOGGED, one transaction): a row is dead the moment its transaction ends, and a backend's next row replaces it.
+CREATE UNLOGGED TABLE private.course_pin_proof (
+  backend_pid int NOT NULL,
+  xact xid8 NOT NULL,
+  actor_uid uuid NOT NULL,
+  facility_id text NOT NULL,
+  local_date date NOT NULL,
+  PRIMARY KEY (backend_pid, xact, actor_uid, facility_id, local_date)
+);
+COMMENT ON TABLE private.course_pin_proof IS
+  '0046. A right PIN passed the failure counters for (actor, facility, local date) in the transaction whose id it stores. Written by course_pin_attempt_for_actor, required by marker_scan_for_actor for a printed-QR scan; dead when the transaction ends.';
+ALTER TABLE private.course_pin_proof ENABLE ROW LEVEL SECURITY;
+ALTER TABLE private.course_pin_proof FORCE ROW LEVEL SECURITY;
+REVOKE ALL ON private.course_pin_proof FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, DELETE ON private.course_pin_proof TO private_definer;
+CREATE POLICY pd_marker_scan_proof_select ON private.course_pin_proof FOR SELECT TO private_definer USING (backend_pid = pg_backend_pid() AND actor_uid = private.actor_uid());
+CREATE POLICY pd_marker_scan_proof_insert ON private.course_pin_proof FOR INSERT TO private_definer WITH CHECK (backend_pid = pg_backend_pid() AND actor_uid = private.actor_uid());
+CREATE POLICY pd_marker_scan_proof_delete ON private.course_pin_proof FOR DELETE TO private_definer USING (backend_pid = pg_backend_pid());
+
 -- ============================================================================
 -- 4. app.course_qr_token: consumption is write-once, and the definer may mark a token used BY THE BOUND ACTOR only
 -- ============================================================================
@@ -160,15 +218,23 @@ CREATE POLICY pd_marker_scan_token_update ON app.course_qr_token FOR UPDATE TO p
 -- ============================================================================
 -- 5. app.purchase_evidence / app.marker_credit: the rows a scan writes, ONLY the bound actor's own
 -- ============================================================================
--- A course_qr scan is unique per (user, trail, ref_id): a rotating token's ref is its nonce hash (single use anyway), a printed-QR scan's ref is 'pin:<facility>:<date>:<epoch>',
--- so the same player scanning the same shop twice on one local day under one epoch is a duplicate (409), not a second purchase.
+-- A course_qr scan is unique per (user, trail, ref_id): a rotating token's ref is its nonce hash (single use anyway), a printed-QR scan's ref is 'pin:<facility>:<date>' (no epoch: a rotation must not allow a second same-day purchase),
+-- so the same player scanning the same shop twice on one local day is a duplicate (409), not a second purchase.
 CREATE UNIQUE INDEX purchase_evidence_course_qr_ref_uniq ON app.purchase_evidence (user_id, trail_id, ref_id) WHERE method = 'course_qr' AND ref_id IS NOT NULL;
+
+-- A co-signal's evidence row is used by AT MOST ONE scan (per trail: one scan writes one row per eligible trail, all carrying the same evidence id). The race-proof backstop of the
+-- definers' own "already used" check.
+CREATE UNIQUE INDEX purchase_evidence_cosignal_evidence_uniq ON app.purchase_evidence (trail_id, (cosignal ->> 'evidenceId')) WHERE cosignal ? 'evidenceId';
 
 GRANT INSERT (user_id, facility_id, trail_id, method, qr_variant, ref_id, offline, cosignal, local_date, status) ON app.purchase_evidence TO private_definer;
 GRANT UPDATE (status, cosignal) ON app.purchase_evidence TO private_definer;
 CREATE POLICY pd_marker_scan_purchase_select ON app.purchase_evidence FOR SELECT TO private_definer USING (user_id = private.actor_uid());
 CREATE POLICY pd_marker_scan_purchase_insert ON app.purchase_evidence FOR INSERT TO private_definer WITH CHECK (user_id = private.actor_uid());
 CREATE POLICY pd_marker_scan_purchase_update ON app.purchase_evidence FOR UPDATE TO private_definer USING (user_id = private.actor_uid()) WITH CHECK (user_id = private.actor_uid());
+
+-- The co-signal's evidence row, read back by the DATABASE (the Edge wrote it; the database re-checks it, plan: "everything the database CAN check it checks again"): the bound actor's own
+-- rows only. app.evidence already grants private_definer SELECT (0016) behind GUC-keyed windows; this is the binding-keyed one a `_for_actor` definer needs.
+CREATE POLICY pd_marker_scan_evidence_select ON app.evidence FOR SELECT TO private_definer USING (user_id = private.actor_uid());
 
 GRANT INSERT (user_id, trail_id, facility_id, purchase_evidence_id, status) ON app.marker_credit TO private_definer;
 GRANT UPDATE (status) ON app.marker_credit TO private_definer;
@@ -179,27 +245,26 @@ CREATE POLICY pd_marker_scan_credit_update ON app.marker_credit FOR UPDATE TO pr
 -- ============================================================================
 -- 6. The definer functions (ownership bracket: 0020 / 0022 / 0030 / 0045)
 -- ============================================================================
+-- The previous-pepper rule reads WHEN the current pepper took effect: the later of created_at (0029 granted it) and updated_at (vault.update_secret), the two columns of the view this adds.
+GRANT SELECT (updated_at) ON vault.decrypted_secrets TO private_definer;
 GRANT CREATE ON SCHEMA private TO private_definer;
 SET ROLE private_definer;
 
--- 6a. THE derivation. The only place the pepper is read. No role is granted EXECUTE: it derives for ANY (facility, date, epoch) it is handed, so it must never be reachable
--- from a session (the staff lane's wrapper, S2b, checks the caller's scope first). The failure message names no key material.
-CREATE FUNCTION private.course_pin_derive(p_facility_id text, p_local_date date, p_pin_epoch integer)
+-- 6a. THE derivation. The pure core takes its key as an argument and reads nothing; the ONLY readers of the Vault pepper are private.course_pin_derive (the CURRENT pepper) and
+-- private.course_pin_matches (the current one, and the previous one for fix times before the current one took effect). No role is granted EXECUTE on any of them: they derive for ANY
+-- (facility, date, epoch) they are handed, so they must never be reachable from a session (the staff lane's wrapper, S2b, checks the caller's scope first). The failure message names
+-- no key material.
+CREATE FUNCTION private.course_pin_from_key(p_key text, p_facility_id text, p_local_date date, p_pin_epoch integer)
 RETURNS text
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_key text;
   v_mac bytea;
   v_n bigint;
 BEGIN
-  IF p_facility_id IS NULL OR pg_catalog.btrim(p_facility_id) = '' OR p_local_date IS NULL OR p_pin_epoch IS NULL OR p_pin_epoch < 0 THEN
-    RAISE EXCEPTION 'course_pin_derive: a facility, a date and an epoch of at least 0 are required' USING ERRCODE = '22023';
-  END IF;
-  SELECT s.decrypted_secret INTO v_key FROM vault.decrypted_secrets s WHERE s.name = 'course_pin_pepper';
-  IF v_key IS NULL OR pg_catalog.octet_length(pg_catalog.convert_to(v_key, 'UTF8')) < 32 THEN
-    RAISE EXCEPTION 'course_pin_derive: the course PIN pepper is not provisioned in Vault' USING ERRCODE = '55000';
+  IF p_key IS NULL OR p_facility_id IS NULL OR pg_catalog.btrim(p_facility_id) = '' OR p_local_date IS NULL OR p_pin_epoch IS NULL OR p_pin_epoch < 0 THEN
+    RAISE EXCEPTION 'course_pin_from_key: a key, a facility, a date and an epoch of at least 0 are required' USING ERRCODE = '22023';
   END IF;
   v_mac := public.hmac(
     pg_catalog.convert_to('golfraven/course-pin/v1', 'UTF8')
@@ -209,10 +274,93 @@ BEGIN
       || pg_catalog.convert_to(pg_catalog.to_char(p_local_date, 'YYYY-MM-DD'), 'UTF8')
       || pg_catalog.decode('00', 'hex')
       || pg_catalog.int4send(p_pin_epoch),
-    pg_catalog.convert_to(v_key, 'UTF8'),
+    pg_catalog.convert_to(p_key, 'UTF8'),
     'sha256');
   v_n := (pg_catalog.get_byte(v_mac, 0)::bigint * 16777216) + (pg_catalog.get_byte(v_mac, 1)::bigint * 65536) + (pg_catalog.get_byte(v_mac, 2)::bigint * 256) + pg_catalog.get_byte(v_mac, 3)::bigint;
   RETURN pg_catalog.lpad((v_n % 10000)::text, 4, '0');
+END;
+$$;
+
+CREATE FUNCTION private.course_pin_derive(p_facility_id text, p_local_date date, p_pin_epoch integer)
+RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_key text;
+BEGIN
+  IF p_facility_id IS NULL OR pg_catalog.btrim(p_facility_id) = '' OR p_local_date IS NULL OR p_pin_epoch IS NULL OR p_pin_epoch < 0 THEN
+    RAISE EXCEPTION 'course_pin_derive: a facility, a date and an epoch of at least 0 are required' USING ERRCODE = '22023';
+  END IF;
+  SELECT s.decrypted_secret INTO v_key FROM vault.decrypted_secrets s WHERE s.name = 'course_pin_pepper';
+  IF v_key IS NULL OR pg_catalog.octet_length(pg_catalog.convert_to(v_key, 'UTF8')) < 32 THEN
+    RAISE EXCEPTION 'course_pin_derive: the course PIN pepper is not provisioned in Vault' USING ERRCODE = '55000';
+  END IF;
+  RETURN private.course_pin_from_key(v_key, p_facility_id, p_local_date, p_pin_epoch);
+END;
+$$;
+
+-- Does p_pin equal the PIN that was DISPLAYED for (facility, local date, epoch) at the instant p_at? A pepper rotation (an incident response) would otherwise make every queued back-dated
+-- scan of the last 7 days a wrong guess: if a Vault secret `course_pin_pepper_previous` exists (>= 32 bytes; the operator copies the old pepper there BEFORE replacing the current one and
+-- deletes it after 7 days), an instant before the current pepper took effect (the later of its created_at / updated_at) is judged under the previous pepper. Without a previous pepper the
+-- consequence is plain: back-dated PINs from before the rotation no longer verify (and count as wrong guesses). The current pepper's absence is the 55000.
+CREATE FUNCTION private.course_pin_matches(p_facility_id text, p_local_date date, p_pin_epoch integer, p_pin text, p_at timestamptz)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_since timestamptz;
+  v_prev text;
+BEGIN
+  IF p_pin IS NULL OR p_pin !~ '^[0-9]{4}$' OR p_at IS NULL THEN
+    RETURN false;
+  END IF;
+  SELECT GREATEST(s.created_at, s.updated_at) INTO v_since FROM vault.decrypted_secrets s WHERE s.name = 'course_pin_pepper';
+  IF v_since IS NOT NULL AND p_at < v_since THEN
+    SELECT s.decrypted_secret INTO v_prev FROM vault.decrypted_secrets s WHERE s.name = 'course_pin_pepper_previous';
+    IF v_prev IS NOT NULL AND pg_catalog.octet_length(pg_catalog.convert_to(v_prev, 'UTF8')) >= 32 THEN
+      RETURN private.course_pin_from_key(v_prev, p_facility_id, p_local_date, p_pin_epoch) = p_pin;
+    END IF;
+  END IF;
+  RETURN private.course_pin_derive(p_facility_id, p_local_date, p_pin_epoch) = p_pin;
+END;
+$$;
+
+-- The epoch in effect at the facility at the instant p_at: the newest rotation at or before it; before the first logged rotation, the epoch that rotation replaced; with no rotation ever
+-- logged, the current epoch (the highest over the facility's programme rows: they are rotated together, and `max` is what a partial rotation must not lower).
+CREATE FUNCTION private.course_pin_epoch_at(p_facility_id text, p_at timestamptz)
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_epoch integer;
+BEGIN
+  SELECT l.pin_epoch INTO v_epoch FROM app.course_pin_epoch_log l WHERE l.facility_id = p_facility_id AND l.effective_from <= p_at ORDER BY l.effective_from DESC, l.pin_epoch DESC LIMIT 1;
+  IF v_epoch IS NOT NULL THEN
+    RETURN v_epoch;
+  END IF;
+  SELECT l.previous_epoch INTO v_epoch FROM app.course_pin_epoch_log l WHERE l.facility_id = p_facility_id ORDER BY l.effective_from ASC, l.pin_epoch ASC LIMIT 1;
+  IF v_epoch IS NOT NULL THEN
+    RETURN v_epoch;
+  END IF;
+  SELECT pg_catalog.max(fp.pin_epoch) INTO v_epoch FROM app.facility_programme fp WHERE fp.facility_id = p_facility_id;
+  RETURN COALESCE(v_epoch, 0);
+END;
+$$;
+
+-- The rotation log's only writer. SECURITY DEFINER because the rotation can come from a bound actor (the failure alarm, S2b's "Rotate PIN") or from an operator with none; it logs each
+-- (facility, new epoch) once however many programme rows the rotation updates.
+CREATE FUNCTION private.course_pin_epoch_log_write() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  INSERT INTO app.course_pin_epoch_log (facility_id, pin_epoch, previous_epoch, effective_from)
+  VALUES (NEW.facility_id, NEW.pin_epoch, OLD.pin_epoch, pg_catalog.now())
+  ON CONFLICT (facility_id, pin_epoch) DO NOTHING;
+  RETURN NEW;
 END;
 $$;
 
@@ -252,6 +400,12 @@ $$;
 --     guess after five wrong ones is exactly what the cap exists to stop). A correct PIN consumes nothing: only failures are counted.
 --   * per FACILITY per local date per epoch: the 30th wrong PIN rotates the facility's PIN (pin_epoch + 1 on every programme row of the facility) and writes
 --     app.course_pin_alarm for the operator. A user already locked out adds nothing to the facility's count (their attempts are refused before the PIN is looked at).
+--   * THE PIN IS JUDGED AT THE FIX'S INSTANT: the PIN for the facility-local date of p_at under the epoch that was live at p_at (private.course_pin_epoch_at), so a scan queued offline
+--     and uploaded after a rotation verifies and is NOT counted as a failure (a PIN that was displayed when the fix was taken is not a wrong guess). The Edge passes p_at = the fix's time only
+--     when the fix qualified as a co-signal, else now (the scan definer refuses a far-from-now p_at without a co-signal). A PIN of a rotated-out epoch, tried at a time after the rotation, IS
+--     a wrong guess and counts: making it free would be an uncounted oracle for brute-forcing a rotated-out PIN.
+--   * A RIGHT PIN WRITES A PROOF (private.course_pin_proof) for this transaction: marker_scan_for_actor refuses a printed-QR scan without one, so no caller can reach the PIN check
+--     in the scan without passing the lockout and the counters here (the scan is never an uncounted oracle).
 -- The counts are SUMS over private.rate_limit_bucket rows of the key (private.hit_rate_limit, the existing limiter, increments; its windows are UTC days, and a facility-local date
 -- can straddle two of them, so the sum over the key, which names the local date, is the exact per-local-date count). Each key is serialised by a transaction advisory lock, so
 -- the read-then-increment cannot be raced: 50 parallel guesses give exactly five 'wrong' and the rest 'locked'.
@@ -267,6 +421,7 @@ DECLARE
   v_tz text;
   v_date date;
   v_today date;
+  v_cur integer;
   v_epoch integer;
   v_now timestamptz := pg_catalog.now();
   v_user_key text;
@@ -303,7 +458,9 @@ BEGIN
     RETURN NEXT;
     RETURN;
   END IF;
-  SELECT pg_catalog.max(fp.pin_epoch) INTO v_epoch FROM app.facility_programme fp WHERE fp.facility_id = p_facility_id;
+  -- v_cur: the facility's CURRENT epoch (the failure counters and a rotation are relative to it); v_epoch: the epoch that was live at the fix's instant (the PIN is judged under it).
+  SELECT pg_catalog.max(fp.pin_epoch) INTO v_cur FROM app.facility_programme fp WHERE fp.facility_id = p_facility_id;
+  v_epoch := private.course_pin_epoch_at(p_facility_id, p_at);
 
   -- The PIN is the one for the date of the FIX (an offline purchase is uploaded days later), but the counters run on the facility-local date the ATTEMPT is made: otherwise a client
   -- could claim any of the last seven fix dates and have a fresh five tries for each. The 429 is "until the next local day" for the attempt, whatever fix date it names.
@@ -320,7 +477,12 @@ BEGIN
     RETURN;
   END IF;
 
-  IF private.course_pin_derive(p_facility_id, v_date, v_epoch) = p_pin THEN
+  IF private.course_pin_matches(p_facility_id, v_date, v_epoch, p_pin, p_at) THEN
+    -- the proof the scan requires: this transaction, this actor, this facility, this local date (a backend's older proofs are dead and are cleared)
+    DELETE FROM private.course_pin_proof pf WHERE pf.backend_pid = pg_catalog.pg_backend_pid() AND pf.xact <> pg_catalog.pg_current_xact_id();
+    INSERT INTO private.course_pin_proof (backend_pid, xact, actor_uid, facility_id, local_date)
+    VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), v_uid, p_facility_id, v_date)
+    ON CONFLICT DO NOTHING;
     o_result := 'ok';
     RETURN NEXT;
     RETURN;
@@ -328,19 +490,58 @@ BEGIN
 
   -- A wrong PIN: count it for the user, then for the facility.
   PERFORM private.hit_rate_limit(v_user_key, interval '1 day', 1000000);
-  v_fac_key := 'marker-scan:pin-fail:f:' || p_facility_id || ':' || pg_catalog.to_char(v_today, 'YYYY-MM-DD') || ':' || v_epoch::text;
+  v_fac_key := 'marker-scan:pin-fail:f:' || p_facility_id || ':' || pg_catalog.to_char(v_today, 'YYYY-MM-DD') || ':' || v_cur::text;
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(v_fac_key, 0));
   PERFORM private.hit_rate_limit(v_fac_key, interval '1 day', 1000000);
   SELECT coalesce(pg_catalog.sum(r.count), 0) INTO v_fac_fails FROM private.rate_limit_bucket r WHERE r.bucket_key = v_fac_key;
   IF v_fac_fails = 30 THEN
     -- the 30th wrong PIN of this epoch: rotate (every programme row of the facility, so the PIN stays one value) and alert the operator
-    UPDATE app.facility_programme fp SET pin_epoch = v_epoch + 1 WHERE fp.facility_id = p_facility_id AND fp.pin_epoch <= v_epoch;
+    UPDATE app.facility_programme fp SET pin_epoch = v_cur + 1 WHERE fp.facility_id = p_facility_id AND fp.pin_epoch <= v_cur;
     INSERT INTO app.course_pin_alarm (facility_id, local_date, pin_epoch_before, pin_epoch_after, failures)
-    VALUES (p_facility_id, v_today, v_epoch, v_epoch + 1, v_fac_fails::integer)
+    VALUES (p_facility_id, v_today, v_cur, v_cur + 1, v_fac_fails::integer)
     ON CONFLICT (facility_id, local_date, pin_epoch_before) DO NOTHING;
   END IF;
   o_result := 'wrong';
   RETURN NEXT;
+END;
+$$;
+
+-- 6c2. The DATABASE ties a co-signal to its evidence row. The Edge hands over a grade, a fix id and an evidence id; none of them is believed until this function has read the row back:
+-- the BOUND actor's own (p_uid is the binding's, passed by the two definers, never a caller argument) accepted, facility-level foreground_checkin row for `fix:<fix id>` at THIS facility, whose
+-- stored grade is the one claimed (and not `failed`), whose local date is the scan's, whose captured time (the derived fix in its summary) is p_at, and which no other scan has used.
+-- 'ok' | 'cosignal_invalid' | 'cosignal_used'. No EXECUTE for any role: reachable only from the two definers.
+CREATE FUNCTION private.marker_cosignal_check(p_uid uuid, p_facility_id text, p_local_date date, p_at timestamptz, p_grade text, p_fix_id text, p_evidence_id uuid)
+RETURNS text
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_row record;
+  v_captured text;
+BEGIN
+  IF p_uid IS NULL OR p_uid IS DISTINCT FROM private.actor_uid() THEN
+    RAISE EXCEPTION 'marker_cosignal_check: the checked actor is not the bound actor' USING ERRCODE = '42501';
+  END IF;
+  SELECT e.source::text AS source, e.source_ref, e.facility_id, e.course_id, e.status::text AS status, e.attestation_grade::text AS grade, e.local_date, e.summary
+  INTO v_row
+  FROM app.evidence e
+  WHERE e.id = p_evidence_id AND e.user_id = p_uid;
+  IF NOT FOUND THEN
+    RETURN 'cosignal_invalid';
+  END IF;
+  IF v_row.source <> 'foreground_checkin' OR v_row.source_ref <> 'fix:' || p_fix_id OR v_row.facility_id IS DISTINCT FROM p_facility_id OR v_row.course_id IS NOT NULL
+     OR v_row.status <> 'accepted' OR v_row.grade <> p_grade OR v_row.local_date <> p_local_date THEN
+    RETURN 'cosignal_invalid';
+  END IF;
+  v_captured := v_row.summary #>> '{fix,capturedAt}';
+  IF v_captured IS NULL OR v_captured !~ '^[0-9]{10,16}$'
+     OR pg_catalog.abs(v_captured::numeric - pg_catalog.date_part('epoch', p_at) * 1000) > 1000 THEN
+    RETURN 'cosignal_invalid';
+  END IF;
+  IF EXISTS (SELECT 1 FROM app.purchase_evidence p WHERE p.user_id = p_uid AND p.cosignal ->> 'evidenceId' = p_evidence_id::text) THEN
+    RETURN 'cosignal_used';
+  END IF;
+  RETURN 'ok';
 END;
 $$;
 
@@ -355,7 +556,11 @@ $$;
 -- they run earlier (course_pin_attempt_for_actor; the Edge's fraud signal).
 --   o_result:  accepted | no_facility | no_programme | variant_disabled | qr_unknown | qr_wrong_facility | qr_used | qr_expired | qr_revoked | pin_wrong | duplicate
 --   One row per eligible trail when accepted (a facility can sit on more than one trail's programme): the purchase and its credit.
--- p_at is the CLAIMED fix time (the 120 s rule is judged against the fix, plan §4.6(q)), or now() when the scan carries no fix.
+-- p_at is the fix's time (the 120 s rule is judged against the fix, plan §4.6(q)) when the scan carries a co-signal, else now(): WITHOUT a co-signal the database refuses a p_at more than
+-- 5 minutes from now (an unqualified, client-chosen time may not drive the 120 s rule, the PIN's date or `local_date`: a photographed token cannot be burned days later as `pending`).
+-- A co-signal is tied to its EVIDENCE ROW (private.marker_cosignal_check): the bound actor's own accepted facility-level foreground_checkin row for `fix:<fix id>` at this facility, whose
+-- grade is the one claimed, whose local date is the scan's and whose captured time is p_at, used by no other scan. A printed-QR scan also needs the PIN gate's proof in this
+-- transaction (private.course_pin_proof, written by course_pin_attempt_for_actor): the scan never checks a PIN the counters did not see.
 -- A qualifying co-signal is p_cosignal_grade 'attested' | 'unattestable' (with its fix id and its evidence row's id); NULL means none: the row is `pending`, and `cosignal.awaiting`
 -- records the window a later fix must fall in (Q1: within 120 s of issue; Q2: the same facility-local date) and the 7-day deadline (plan §4.6(q)).
 CREATE FUNCTION private.marker_scan_for_actor(
@@ -390,6 +595,8 @@ DECLARE
   v_qr_revoked timestamptz;
   v_tok_facility text;
   v_tok_used timestamptz;
+  v_tok_kid text;
+  v_check text;
   v_pstatus text;
   v_cstatus text;
   v_cosignal jsonb;
@@ -407,11 +614,12 @@ BEGIN
     RAISE EXCEPTION 'marker_scan_for_actor: a system delegate may not record a marker purchase' USING ERRCODE = '42501';
   END IF;
   IF p_facility_id IS NULL OR pg_catalog.btrim(p_facility_id) = '' OR p_variant IS NULL OR p_variant NOT IN ('rotating', 'static_pin') OR p_at IS NULL
-     OR (p_variant = 'rotating' AND (p_nonce_hash IS NULL OR p_nonce_hash !~ '^[0-9a-f]{64}$'))
+     OR (p_variant = 'rotating' AND (p_nonce_hash IS NULL OR p_nonce_hash !~ '^[0-9a-f]{64}$' OR p_qr_kid IS NULL OR pg_catalog.btrim(p_qr_kid) = ''))
      OR (p_variant = 'static_pin' AND (p_qr_kid IS NULL OR pg_catalog.btrim(p_qr_kid) = '' OR p_pin IS NULL OR p_pin !~ '^[0-9]{4}$'))
      OR (p_cosignal_grade IS NOT NULL AND (p_cosignal_grade NOT IN ('attested', 'unattestable') OR p_cosignal_fix_id IS NULL OR p_cosignal_evidence_id IS NULL))
-     OR p_at < v_now - interval '7 days' OR p_at > v_now + interval '5 minutes' THEN
-    RAISE EXCEPTION 'marker_scan_for_actor: invalid arguments (a facility, rotating+nonce hash or static_pin+kid+PIN, a time within 7 days, a complete co-signal or none)' USING ERRCODE = '22023';
+     OR p_at < v_now - interval '7 days' OR p_at > v_now + interval '5 minutes'
+     OR (p_cosignal_grade IS NULL AND pg_catalog.abs(pg_catalog.date_part('epoch', p_at - v_now)) > 300) THEN
+    RAISE EXCEPTION 'marker_scan_for_actor: invalid arguments (a facility, rotating+nonce hash+kid or static_pin+kid+PIN, a time within 7 days, a complete co-signal or none, and a time within 5 minutes of now without a co-signal)' USING ERRCODE = '22023';
   END IF;
 
   SELECT f.tz INTO v_tz FROM app.catalog_facility f WHERE f.id = p_facility_id;
@@ -442,8 +650,9 @@ BEGIN
   END IF;
 
   IF p_variant = 'rotating' THEN
-    SELECT t.facility_id, t.issued_at, t.used_at INTO v_tok_facility, v_issued, v_tok_used FROM app.course_qr_token t WHERE t.nonce_hash = p_nonce_hash;
-    IF v_tok_facility IS NULL THEN
+    SELECT t.facility_id, t.issued_at, t.used_at, t.kid INTO v_tok_facility, v_issued, v_tok_used, v_tok_kid FROM app.course_qr_token t WHERE t.nonce_hash = p_nonce_hash;
+    -- the token row names the kid it was minted under: a token presented under another kid is not that token (the Edge verified the signature under p_qr_kid)
+    IF v_tok_facility IS NULL OR v_tok_kid <> p_qr_kid THEN
       o_result := 'qr_unknown';
       RETURN NEXT;
       RETURN;
@@ -481,18 +690,34 @@ BEGIN
       RETURN NEXT;
       RETURN;
     END IF;
-    SELECT pg_catalog.max(fp.pin_epoch) INTO v_epoch FROM app.facility_programme fp WHERE fp.facility_id = p_facility_id;
-    IF private.course_pin_derive(p_facility_id, v_local, v_epoch) <> p_pin THEN
+    -- THE PIN GATE MUST HAVE PASSED IN THIS TRANSACTION (its lockout and failure counters): without its proof this definer is not a PIN oracle, it refuses before looking at the PIN.
+    IF NOT EXISTS (SELECT 1 FROM private.course_pin_proof pf
+                   WHERE pf.backend_pid = pg_catalog.pg_backend_pid() AND pf.xact = pg_catalog.pg_current_xact_id() AND pf.actor_uid = v_uid AND pf.facility_id = p_facility_id AND pf.local_date = v_local) THEN
+      RAISE EXCEPTION 'marker_scan_for_actor: a printed-QR scan needs course_pin_attempt_for_actor to have accepted the PIN in this transaction' USING ERRCODE = '42501';
+    END IF;
+    -- the PIN displayed at the fix's instant: the facility-local date of p_at under the epoch that was live then (a rotation after the fix does not invalidate a queued scan)
+    v_epoch := private.course_pin_epoch_at(p_facility_id, p_at);
+    IF NOT private.course_pin_matches(p_facility_id, v_local, v_epoch, p_pin, p_at) THEN
       o_result := 'pin_wrong';
       RETURN NEXT;
       RETURN;
     END IF;
-    v_ref := 'pin:' || p_facility_id || ':' || pg_catalog.to_char(v_local, 'YYYY-MM-DD') || ':' || v_epoch::text;
+    -- one purchase per player per shop per facility-local day: the epoch is NOT part of the key (a rotation must not allow a second same-day purchase)
+    v_ref := 'pin:' || p_facility_id || ':' || pg_catalog.to_char(v_local, 'YYYY-MM-DD');
     v_win_from := (v_local::timestamp) AT TIME ZONE v_tz;
     v_win_to := ((v_local + 1)::timestamp AT TIME ZONE v_tz) - interval '1 millisecond';
-    -- a repeat of the same scan by the same player (same shop, same local date, same epoch) is a duplicate
+    -- a repeat of the same scan by the same player (same shop, same local date) is a duplicate
     IF EXISTS (SELECT 1 FROM app.purchase_evidence p WHERE p.user_id = v_uid AND p.trail_id = ANY (v_trails) AND p.method = 'course_qr' AND p.ref_id = v_ref) THEN
       o_result := 'duplicate';
+      RETURN NEXT;
+      RETURN;
+    END IF;
+  END IF;
+
+  IF p_cosignal_grade IS NOT NULL THEN
+    v_check := private.marker_cosignal_check(v_uid, p_facility_id, v_local, p_at, p_cosignal_grade, p_cosignal_fix_id, p_cosignal_evidence_id);
+    IF v_check <> 'ok' THEN
+      o_result := v_check;
       RETURN NEXT;
       RETURN;
     END IF;
@@ -563,7 +788,8 @@ $$;
 -- reconnect"). THIS IS THE SEAM S3 PLUGS INTO: the join reads only the row (user, facility, status = 'pending', cosignal.awaiting = { from, to, until }), never its method, so an offline-code
 -- `staff_scan` row the staff lane inserts with that window (+-10 min of the code's step) is joined by the same call. One fix completes ONE scan: every programme row of that scan
 -- (rows sharing one ref_id) moves together; the earliest awaiting scan wins. A credit that cannot be `credited` because the player already holds one for that shop is voided.
--- o_result: attached | no_pending_purchase (and no row for any other account's purchase is ever visible: every statement filters by the bound uid).
+-- o_result: attached | no_pending_purchase | cosignal_invalid | cosignal_used (and no row for any other account's purchase is ever visible: every statement filters by the bound uid).
+-- The co-signal itself is verified first (private.marker_cosignal_check): a fix id and an evidence id the bound actor does not own, or that do not describe this fix here, complete nothing.
 CREATE FUNCTION private.marker_cosignal_attach_for_actor(
   p_facility_id text,
   p_at timestamptz,
@@ -589,6 +815,8 @@ DECLARE
   v_credit_status text;
   v_existing_credit uuid;
   v_any boolean := false;
+  v_tz text;
+  v_check text;
 BEGIN
   SELECT b.actor_uid, b.kind INTO v_uid, v_kind
   FROM private.actor_binding b
@@ -602,6 +830,20 @@ BEGIN
   IF p_facility_id IS NULL OR pg_catalog.btrim(p_facility_id) = '' OR p_at IS NULL OR p_cosignal_grade IS NULL OR p_cosignal_grade NOT IN ('attested', 'unattestable')
      OR p_cosignal_fix_id IS NULL OR p_cosignal_evidence_id IS NULL OR p_at < v_now - interval '7 days' OR p_at > v_now + interval '5 minutes' THEN
     RAISE EXCEPTION 'marker_cosignal_attach_for_actor: invalid arguments (a facility, a qualifying co-signal and a time within 7 days)' USING ERRCODE = '22023';
+  END IF;
+
+  -- The co-signal must be real: the bound actor's own evidence row for this fix, at this facility, with this grade and this captured time, used by no scan (private.marker_cosignal_check).
+  SELECT f.tz INTO v_tz FROM app.catalog_facility f WHERE f.id = p_facility_id;
+  IF v_tz IS NULL THEN
+    o_result := 'no_pending_purchase';
+    RETURN NEXT;
+    RETURN;
+  END IF;
+  v_check := private.marker_cosignal_check(v_uid, p_facility_id, (p_at AT TIME ZONE v_tz)::date, p_at, p_cosignal_grade, p_cosignal_fix_id, p_cosignal_evidence_id);
+  IF v_check <> 'ok' THEN
+    o_result := v_check;
+    RETURN NEXT;
+    RETURN;
   END IF;
 
   -- The earliest awaiting scan of THIS player at THIS facility whose window holds the fix. Explicit filters on the bound uid (the HARD RULE), and the row lock.
@@ -689,6 +931,11 @@ END;
 $$;
 
 -- 6f. EXECUTE grants. PUBLIC first (private_definer-created functions default to PUBLIC), then exactly the roles below. The derivation core: nobody.
+REVOKE EXECUTE ON FUNCTION private.course_pin_from_key(text, text, date, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.course_pin_matches(text, date, integer, text, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.course_pin_epoch_at(text, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.course_pin_epoch_log_write() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.course_pin_derive(text, date, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.course_qr_public_key_for_actor(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION private.course_pin_attempt_for_actor(text, text, timestamptz) FROM PUBLIC;
@@ -700,7 +947,13 @@ GRANT EXECUTE ON FUNCTION private.marker_scan_for_actor(text, text, text, text, 
 GRANT EXECUTE ON FUNCTION private.marker_cosignal_attach_for_actor(text, timestamptz, text, text, uuid) TO edge_actor;
 
 COMMENT ON FUNCTION private.course_pin_derive(text, date, integer) IS
-  '0046. The ONLY reader of Vault secret course_pin_pepper: pin = LPAD((first 4 bytes of HMAC-SHA256(pepper, ''golfraven/course-pin/v1'' || 0x00 || facility_id || 0x00 || YYYY-MM-DD || 0x00 || int4send(pin_epoch)) as an unsigned big-endian integer) MOD 10000, 4, ''0''). No role has EXECUTE; the staff lane (S2b) wraps it behind a scope check. The pepper is never returned.';
+  '0046. Reads Vault secret course_pin_pepper (with private.course_pin_matches, the only readers): pin = LPAD((first 4 bytes of HMAC-SHA256(pepper, ''golfraven/course-pin/v1'' || 0x00 || facility_id || 0x00 || YYYY-MM-DD || 0x00 || int4send(pin_epoch)) as an unsigned big-endian integer) MOD 10000, 4, ''0''). No role has EXECUTE; the staff lane (S2b) wraps it behind a scope check and shows the CURRENT pepper''s PIN. The pepper is never returned.';
+COMMENT ON FUNCTION private.course_pin_matches(text, date, integer, text, timestamptz) IS
+  '0046. Is this PIN the one displayed for (facility, local date, epoch) at the instant p_at? Uses the previous pepper (Vault secret course_pin_pepper_previous) for instants before the current pepper took effect. No role has EXECUTE.';
+COMMENT ON FUNCTION private.course_pin_epoch_at(text, timestamptz) IS
+  '0046. The PIN epoch in effect at a facility at an instant (app.course_pin_epoch_log; with no rotation logged, the current epoch). No role has EXECUTE.';
+COMMENT ON FUNCTION private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid) IS
+  '0046. Reads a co-signal''s evidence row back for the two definers: the bound actor''s own accepted facility-level foreground_checkin row for fix:<fix id> at this facility, with the claimed grade, the scan''s local date and captured time, used by no other scan. No role has EXECUTE.';
 COMMENT ON FUNCTION private.course_qr_public_key_for_actor(text, text) IS
   '0046. edge_actor only. The PUBLIC Ed25519 key of a kid for rotating_token | printed_qr (zero rows when unknown, a revoked flag when revoked). Public data; the bound actor is required so it cannot be read outside a request.';
 COMMENT ON FUNCTION private.course_pin_attempt_for_actor(text, text, timestamptz) IS
@@ -712,6 +965,20 @@ COMMENT ON FUNCTION private.marker_cosignal_attach_for_actor(text, timestamptz, 
 
 RESET ROLE;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- 6g. The rotation log's trigger (the table's only writer; see 3b). AFTER UPDATE OF pin_epoch, only when the epoch RISES.
+-- CREATE TRIGGER needs EXECUTE on the trigger function for the role running the migration (a trigger function is not checked again when it fires). The function's ACL is owner-only, so
+-- the owner lends EXECUTE to the migrating role for the one statement and takes it back: the end state is unchanged (no role but the owner holds EXECUTE; a pgTAP cell pins it).
+SET ROLE private_definer;
+DO $lend$ BEGIN EXECUTE pg_catalog.format('GRANT EXECUTE ON FUNCTION private.course_pin_epoch_log_write() TO %I', session_user); END $lend$;
+RESET ROLE;
+CREATE TRIGGER facility_programme_pin_epoch_log_trg
+AFTER UPDATE OF pin_epoch ON app.facility_programme
+FOR EACH ROW WHEN (NEW.pin_epoch > OLD.pin_epoch)
+EXECUTE FUNCTION private.course_pin_epoch_log_write();
+SET ROLE private_definer;
+DO $lend$ BEGIN EXECUTE pg_catalog.format('REVOKE EXECUTE ON FUNCTION private.course_pin_epoch_log_write() FROM %I', session_user); END $lend$;
+RESET ROLE;
 
 -- ============================================================================
 -- 7. Registries
@@ -735,6 +1002,12 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'purchase_evidence', 'pd_marker_scan_purchase_update', 'UPDATE', true, 'marker_cosignal_attach_for_actor completes the BOUND actor''s own pending purchase (UPDATE(status, cosignal) only)'),
   ('app', 'marker_credit', 'pd_marker_scan_credit_select', 'SELECT', true, 'the scan and the co-signal intake read the BOUND actor''s own credits only (user_id = private.actor_uid())'),
   ('app', 'marker_credit', 'pd_marker_scan_credit_insert', 'INSERT', true, 'marker_scan_for_actor writes the BOUND actor''s own credit (column-listed INSERT grant)'),
+  ('app', 'course_pin_epoch_log', 'pd_marker_scan_epoch_log_select', 'SELECT', true, 'private.course_pin_epoch_at and the logging trigger (INSERT ... ON CONFLICT also evaluates this policy): the epoch history of a facility; USING (true) because an operator rotation has no bound actor; no personal data'),
+  ('app', 'course_pin_epoch_log', 'pd_marker_scan_epoch_log_insert', 'INSERT', true, 'private.course_pin_epoch_log_write (the trigger on facility_programme.pin_epoch, SECURITY DEFINER, whoever rotates): the ONLY writer; WITH CHECK (true) because an operator rotation has no bound actor; no personal data'),
+  ('private', 'course_pin_proof', 'pd_marker_scan_proof_select', 'SELECT', true, 'marker_scan_for_actor: the PIN gate''s proof for THIS backend, THIS transaction and the BOUND actor only'),
+  ('private', 'course_pin_proof', 'pd_marker_scan_proof_insert', 'INSERT', true, 'course_pin_attempt_for_actor: writes the proof for THIS backend and the BOUND actor only'),
+  ('private', 'course_pin_proof', 'pd_marker_scan_proof_delete', 'DELETE', true, 'course_pin_attempt_for_actor: clears THIS backend''s dead proofs of earlier transactions'),
+  ('app', 'evidence', 'pd_marker_scan_evidence_select', 'SELECT', true, 'private.marker_cosignal_check: reads back the BOUND actor''s own co-signal evidence row (user_id = private.actor_uid()); the definer also filters user_id explicitly'),
   ('app', 'marker_credit', 'pd_marker_scan_credit_update', 'UPDATE', true, 'marker_cosignal_attach_for_actor completes / voids the BOUND actor''s own pending credit (UPDATE(status) only)');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
@@ -757,6 +1030,16 @@ VALUES
    '0046: trigger function (app.course_qr_token_single_use_trg, BEFORE UPDATE) -- a used token''s used_at / used_by_user never change (single use, plan §9.2); never EXECUTEd directly by any role'),
   ('private', 'course_pin_derive', 'p_facility_id text, p_local_date date, p_pin_epoch integer', false, false, false, false, false,
    '0046: the ONLY reader of Vault secret course_pin_pepper; derives the daily PIN for ANY (facility, date, epoch) it is handed, so NO role has EXECUTE: reachable only through the SECURITY DEFINER wrappers (the player-lane attempt and scan, and the staff-lane wrapper S2b adds)'),
+  ('private', 'course_pin_from_key', 'p_key text, p_facility_id text, p_local_date date, p_pin_epoch integer', false, false, false, false, false,
+   '0046: the pure PIN derivation over a key it is handed (reads no secret); no role has EXECUTE'),
+  ('private', 'course_pin_matches', 'p_facility_id text, p_local_date date, p_pin_epoch integer, p_pin text, p_at timestamp with time zone', false, false, false, false, false,
+   '0046: is this PIN the one displayed at the instant p_at (current pepper, or the previous one for instants before it took effect); reads the Vault peppers; no role has EXECUTE'),
+  ('private', 'course_pin_epoch_at', 'p_facility_id text, p_at timestamp with time zone', false, false, false, false, false,
+   '0046: the PIN epoch in effect at a facility at an instant (app.course_pin_epoch_log); no role has EXECUTE'),
+  ('private', 'course_pin_epoch_log_write', '', false, false, false, false, false,
+   '0046: trigger function (app.facility_programme_pin_epoch_log_trg) -- logs each PIN rotation once; the log''s only writer; never EXECUTEd directly by any role'),
+  ('private', 'marker_cosignal_check', 'p_uid uuid, p_facility_id text, p_local_date date, p_at timestamp with time zone, p_grade text, p_fix_id text, p_evidence_id uuid', false, false, false, false, false,
+   '0046: reads a co-signal''s evidence row back for the scan and the intake (own row, source, facility, grade, local date, captured time, unused); no role has EXECUTE'),
   ('private', 'course_qr_public_key_for_actor', 'p_kid text, p_purpose text', false, false, false, true, false,
    '0046: edge_actor only; the PUBLIC Ed25519 key of a kid (rotating_token | printed_qr); public data, a bound actor is required'),
   ('private', 'course_pin_attempt_for_actor', 'p_facility_id text, p_pin text, p_at timestamp with time zone', false, false, false, true, false,
@@ -784,9 +1067,21 @@ BEGIN
      OR NOT (SELECT relforcerowsecurity AND relrowsecurity FROM pg_class WHERE oid = 'app.course_pin_alarm'::regclass) THEN
     RAISE EXCEPTION '0046: the new tables must have ENABLE and FORCE ROW LEVEL SECURITY';
   END IF;
-  FOREACH v_fn IN ARRAY ARRAY['app.purchase_evidence', 'app.marker_credit', 'app.course_qr_token', 'app.facility_qr', 'app.facility_programme', 'app.trail_programme', 'app.catalog_facility'] LOOP
+  FOREACH v_fn IN ARRAY ARRAY['app.course_pin_epoch_log', 'private.course_pin_proof', 'app.purchase_evidence', 'app.marker_credit', 'app.course_qr_token', 'app.facility_qr', 'app.facility_programme', 'app.trail_programme', 'app.catalog_facility'] LOOP
     IF NOT (SELECT relforcerowsecurity FROM pg_class WHERE oid = v_fn::regclass) THEN
       RAISE EXCEPTION '0046: % must keep FORCE ROW LEVEL SECURITY', v_fn;
+    END IF;
+  END LOOP;
+  IF has_table_privilege('edge_actor', 'app.course_pin_epoch_log', 'SELECT') OR has_any_column_privilege('edge_actor', 'app.course_pin_epoch_log', 'SELECT,INSERT,UPDATE,REFERENCES')
+     OR has_any_column_privilege('edge_actor', 'private.course_pin_proof', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege('edge_system', 'private.course_pin_proof', 'SELECT')
+     OR has_table_privilege('authenticated', 'app.course_pin_epoch_log', 'SELECT') OR has_table_privilege('anon', 'app.course_pin_epoch_log', 'SELECT') THEN
+    RAISE EXCEPTION '0046: no edge or client role may hold any privilege on app.course_pin_epoch_log or private.course_pin_proof';
+  END IF;
+  FOREACH v_fn IN ARRAY ARRAY['private.course_pin_from_key(text, text, date, integer)', 'private.course_pin_matches(text, date, integer, text, timestamptz)', 'private.course_pin_epoch_at(text, timestamptz)',
+                              'private.course_pin_epoch_log_write()', 'private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)'] LOOP
+    IF has_function_privilege('edge_actor', v_fn, 'EXECUTE') OR has_function_privilege('edge_system', v_fn, 'EXECUTE') OR has_function_privilege('service_role', v_fn, 'EXECUTE')
+       OR has_function_privilege('authenticated', v_fn, 'EXECUTE') OR has_function_privilege('anon', v_fn, 'EXECUTE') THEN
+      RAISE EXCEPTION '0046: no role may EXECUTE %', v_fn;
     END IF;
   END LOOP;
   IF has_function_privilege('edge_actor', 'private.course_pin_derive(text, date, integer)', 'EXECUTE')

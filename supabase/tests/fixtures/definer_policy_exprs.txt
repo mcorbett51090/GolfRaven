@@ -190,3 +190,9 @@
 {"command": "SELECT", "table_name": "purchase_evidence", "using_expr": "(user_id = private.actor_uid())", "policy_name": "pd_marker_scan_purchase_select", "schema_name": "app", "with_check_expr": null}
 {"command": "UPDATE", "table_name": "purchase_evidence", "using_expr": "(user_id = private.actor_uid())", "policy_name": "pd_marker_scan_purchase_update", "schema_name": "app", "with_check_expr": "(user_id = private.actor_uid())"}
 {"command": "SELECT", "table_name": "trail_programme", "using_expr": "(private.actor_uid() IS NOT NULL)", "policy_name": "pd_marker_scan_trail_programme_read", "schema_name": "app", "with_check_expr": null}
+{"command": "INSERT", "table_name": "course_pin_epoch_log", "using_expr": null, "policy_name": "pd_marker_scan_epoch_log_insert", "schema_name": "app", "with_check_expr": "true"}
+{"command": "SELECT", "table_name": "course_pin_epoch_log", "using_expr": "true", "policy_name": "pd_marker_scan_epoch_log_select", "schema_name": "app", "with_check_expr": null}
+{"command": "SELECT", "table_name": "evidence", "using_expr": "(user_id = private.actor_uid())", "policy_name": "pd_marker_scan_evidence_select", "schema_name": "app", "with_check_expr": null}
+{"command": "DELETE", "table_name": "course_pin_proof", "using_expr": "(backend_pid = pg_backend_pid())", "policy_name": "pd_marker_scan_proof_delete", "schema_name": "private", "with_check_expr": null}
+{"command": "INSERT", "table_name": "course_pin_proof", "using_expr": null, "policy_name": "pd_marker_scan_proof_insert", "schema_name": "private", "with_check_expr": "((backend_pid = pg_backend_pid()) AND (actor_uid = private.actor_uid()))"}
+{"command": "SELECT", "table_name": "course_pin_proof", "using_expr": "((backend_pid = pg_backend_pid()) AND (actor_uid = private.actor_uid()))", "policy_name": "pd_marker_scan_proof_select", "schema_name": "private", "with_check_expr": null}
