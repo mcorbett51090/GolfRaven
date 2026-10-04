@@ -23,13 +23,16 @@ import { decodeAttestationObject, decodeCredentialPublicKey, isoBase64URL } from
 import {
   assertRpConfig,
   authenticationOptions,
+  MAX_TRANSPORTS,
   PARTNER_ALGORITHM_IDS,
   registrationOptions,
   RpConfigError,
+  sanitizeTransports,
   type RpConfig,
   type StoredCredential,
   verifyAssertion,
   verifyRegistration,
+  WEBAUTHN_TRANSPORTS,
   WebAuthnRefusal,
   type WebAuthnRefusalCode,
 } from "../../functions/_shared/partner/webauthn.ts";
@@ -324,6 +327,140 @@ Deno.test("register: a key whose shape is not the lane's is refused (RSA with e 
     const e = await assertRejects(() => verifyRegistration({ rp: RP, response, expectedChallenge: ch }), WebAuthnRefusal, undefined, name);
     assertEquals((e as WebAuthnRefusal).code, "key_shape", name);
   }
+});
+
+// ----- S0-L2: the key-shape survivors ----------------------------------------------------------------------------------------------------
+// The mutation pass over the S0 wrapper left the individual conjuncts of the key-shape rule unkilled (a P-384 key labelled -7, a coordinate one byte short or long, a
+// modulus with a leading zero byte). Each variant below changes exactly ONE field of a genuine key and is refused with `key_shape`, at registration (the key the
+// authenticator presents) and at sign-in (the key the database stored); the unmodified key is accepted in both places, so the refusal is about the one field.
+
+type CoseFields = Map<number, number | Uint8Array>;
+const coseOf = (auth: SoftwareAuthenticator): CoseFields => new Map((decodeCredentialPublicKey(auth.cosePublicKey as Uint8Array<ArrayBuffer>) as unknown as CoseFields).entries());
+const bytes = (n: number, fill = 0x42): Uint8Array => new Uint8Array(n).fill(fill);
+
+async function keyShapeVariants(): Promise<{ es: SoftwareAuthenticator; rs: SoftwareAuthenticator; variants: Array<[SoftwareAuthenticator, string, CoseFields]> }> {
+  const es = await SoftwareAuthenticator.create("ES256");
+  const rs = await SoftwareAuthenticator.create("RS256");
+  const e = coseOf(es);
+  const r = coseOf(rs);
+  const x = e.get(-2) as Uint8Array;
+  const y = e.get(-3) as Uint8Array;
+  const n = r.get(-1) as Uint8Array;
+  // a REAL P-384 key, labelled alg -7 with its curve id 2 and its 48-byte coordinates
+  const p384 = new Uint8Array(await crypto.subtle.exportKey("raw", (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-384" }, true, ["sign", "verify"])).publicKey));
+  const variants: Array<[SoftwareAuthenticator, string, CoseFields]> = [
+    [es, "a real P-384 key (crv 2, 48-byte coordinates) labelled alg -7", new Map([...e, [-1, 2], [-2, p384.slice(1, 49)], [-3, p384.slice(49, 97)]])],
+    [es, "crv 2 (P-384) with 32-byte coordinates: the curve id alone", new Map([...e, [-1, 2]])],
+    [es, "crv 3 (P-521) with 32-byte coordinates", new Map([...e, [-1, 3]])],
+    [es, "crv 6 (Ed25519's curve id) on an EC2 key", new Map([...e, [-1, 6]])],
+    [es, "no curve id", new Map([...e].filter(([k]) => k !== -1))],
+    [es, "x one byte short (31)", new Map([...e, [-2, x.slice(1)]])],
+    [es, "x one byte long (33)", new Map([...e, [-2, concat(Uint8Array.of(0), x)]])],
+    [es, "y one byte short (31)", new Map([...e, [-3, y.slice(1)]])],
+    [es, "y one byte long (33)", new Map([...e, [-3, concat(Uint8Array.of(0), y)]])],
+    [es, "x absent", new Map([...e].filter(([k]) => k !== -2))],
+    [es, "y absent", new Map([...e].filter(([k]) => k !== -3))],
+    [es, "x not a byte string", new Map([...e, [-2, 7]])],
+    [es, "y not a byte string", new Map([...e, [-3, 7]])],
+    [es, "kty OKP (1) with alg -7", new Map([...e, [1, 1]])],
+    [rs, "a modulus with a leading 0x00 byte (257 bytes)", new Map([...r, [-1, concat(Uint8Array.of(0), n)]])],
+    [rs, "a 256-byte modulus whose first byte is 0x00 (a 2040-bit number)", new Map([...r, [-1, concat(Uint8Array.of(0), n.slice(1))]])],
+    [rs, "a modulus one byte under 2048 bits (255 bytes)", new Map([...r, [-1, n.slice(1)]])],
+    [rs, "a 513-byte modulus (over 4096 bits)", new Map([...r, [-1, concat(Uint8Array.of(0x80), bytes(512))]])],
+    [rs, "e = 65537 written in four bytes (00 01 00 01)", new Map([...r, [-2, Uint8Array.of(0, 1, 0, 1)]])],
+    [rs, "e = 16777472 (01 00 01 00: the 65537 prefix with a byte appended)", new Map([...r, [-2, Uint8Array.of(1, 0, 1, 0)]])],
+    [rs, "e = 65538 (01 00 02)", new Map([...r, [-2, Uint8Array.of(1, 0, 2)]])],
+    [rs, "e = 65539 (01 00 03)", new Map([...r, [-2, Uint8Array.of(1, 0, 3)]])],
+    [rs, "e absent", new Map([...r].filter(([k]) => k !== -2))],
+    [rs, "modulus not a byte string", new Map([...r, [-1, 9]])],
+    [rs, "kty RSA (3) replaced by EC2 (2)", new Map([...r, [1, 2]])],
+  ];
+  return { es, rs, variants };
+}
+
+Deno.test("S0-L2 register: every single-field key-shape variant is refused with key_shape, and the unmodified keys are accepted", async () => {
+  const { es, rs, variants } = await keyShapeVariants();
+  for (const auth of [es, rs]) {
+    const ch = challenge();
+    const ok = await verifyRegistration({ rp: RP, response: await auth.register({ rpId: RP.rpId, origin: RP.origin, challenge: ch }), expectedChallenge: ch });
+    assertEquals(ok.credentialId, auth.id, "control: the genuine key registers");
+  }
+  for (const [auth, name, key] of variants) {
+    const ch = challenge();
+    const response = await auth.register({ rpId: RP.rpId, origin: RP.origin, challenge: ch, coseKeyOverride: cbor(key as never) });
+    const e = await assertRejects(() => verifyRegistration({ rp: RP, response, expectedChallenge: ch }), WebAuthnRefusal, undefined, name);
+    assertEquals((e as WebAuthnRefusal).code, "key_shape", name);
+  }
+});
+
+Deno.test("S0-L2 sign in: the same variants as a STORED key are refused with key_shape, and the unmodified stored keys verify", async () => {
+  const { es, rs, variants } = await keyShapeVariants();
+  for (const auth of [es, rs]) {
+    const ch = challenge();
+    const got = await verifyAssertion({ rp: RP, response: await auth.assert({ rpId: RP.rpId, origin: RP.origin, challenge: ch }), expectedChallenge: ch, credential: { id: auth.id, publicKey: auth.cosePublicKey, signCount: 0 }, expectedUserHandle: auth.userHandle });
+    assertEquals(got.credentialId, auth.id, "control: the genuine stored key verifies");
+  }
+  for (const [auth, name, key] of variants) {
+    const ch = challenge();
+    const response = await auth.assert({ rpId: RP.rpId, origin: RP.origin, challenge: ch });
+    const e = await assertRejects(
+      () => verifyAssertion({ rp: RP, response, expectedChallenge: ch, credential: { id: auth.id, publicKey: cbor(key as never), signCount: 0 }, expectedUserHandle: auth.userHandle }),
+      WebAuthnRefusal, undefined, name);
+    assertEquals((e as WebAuthnRefusal).code, "key_shape", name);
+  }
+});
+
+Deno.test("S0-L2: a key that decodes to a CBOR value other than a map is key_shape, and an unlisted alg is algorithm_not_allowed", async () => {
+  const auth = await SoftwareAuthenticator.create("ES256");
+  const e = coseOf(auth);
+  for (const [name, bytesIn] of [["a CBOR integer", cbor(5)], ["a CBOR byte string", cbor(Uint8Array.of(1, 2))]] as const) {
+    const ch = challenge();
+    const response = await auth.assert({ rpId: RP.rpId, origin: RP.origin, challenge: ch });
+    await refused(verifyAssertion({ rp: RP, response, expectedChallenge: ch, credential: { id: auth.id, publicKey: bytesIn, signCount: 0 }, expectedUserHandle: auth.userHandle }), "key_shape");
+    assert(name.length > 0);
+  }
+  const ch = challenge();
+  const response = await auth.assert({ rpId: RP.rpId, origin: RP.origin, challenge: ch });
+  await refused(verifyAssertion({ rp: RP, response, expectedChallenge: ch, credential: { id: auth.id, publicKey: cbor(new Map([...e, [3, -35]]) as never), signCount: 0 }, expectedUserHandle: auth.userHandle }), "algorithm_not_allowed");
+});
+
+// ----- S0-L4: transports -----------------------------------------------------------------------------------------------------------------
+
+Deno.test("S0-L4 sanitizeTransports: only the WebAuthn enum survives, once each, in first-seen order, at most MAX_TRANSPORTS", () => {
+  assertEquals(WEBAUTHN_TRANSPORTS.length, 7);
+  assertEquals(sanitizeTransports(["usb", "nfc", "ble", "internal", "hybrid"]), ["usb", "nfc", "ble", "internal", "hybrid"]);
+  assertEquals(sanitizeTransports(["internal"]), ["internal"]);
+  assertEquals(sanitizeTransports([]), []);
+  // every enum member is accepted on its own (so a typo in the constant fails here)
+  for (const t of WEBAUTHN_TRANSPORTS) assertEquals(sanitizeTransports([t]), [t]);
+  assertEquals(sanitizeTransports(["smart-card"]), ["smart-card"]);
+  assertEquals(sanitizeTransports(["cable"]), ["cable"]);
+  // unknown names, other case, padding, non-strings and path-like values are dropped
+  assertEquals(sanitizeTransports(["internal", "<script>", "USB", "usb ", "", "x".repeat(10_000), 1, null, undefined, {}, ["usb"], "../etc", "nfc"]), ["internal", "nfc"]);
+  // duplicates are dropped (the first one stays where it was)
+  assertEquals(sanitizeTransports(["nfc", "usb", "nfc", "usb", "nfc"]), ["nfc", "usb"]);
+  // the cap
+  assertEquals(MAX_TRANSPORTS, 5);
+  assertEquals(sanitizeTransports(["usb", "nfc", "ble", "internal", "hybrid", "cable", "smart-card"]), ["usb", "nfc", "ble", "internal", "hybrid"]);
+  // a hostile giant array is bounded, not iterated to the end
+  assertEquals(sanitizeTransports([...Array.from({ length: 100_000 }, () => "junk"), "usb"]), []);
+  assertEquals(sanitizeTransports([...Array.from({ length: 31 }, () => "junk"), "usb", "nfc"]), ["usb"], "only the first 32 entries are examined");
+  // not an array at all
+  for (const v of [undefined, null, "usb", 7, { 0: "usb", length: 1 }, new Set(["usb"])]) assertEquals(sanitizeTransports(v), []);
+});
+
+Deno.test("S0-L4 register: the transports the browser reports are filtered to the enum, deduplicated and capped before they are stored", async () => {
+  const auth = await SoftwareAuthenticator.create("ES256");
+  const ch = challenge();
+  const hostile = ["internal", "internal", "usb", "<img onerror=x>", "USB", "nfc", "ble", "hybrid", "cable", "smart-card", 42];
+  const reg = await verifyRegistration({ rp: RP, response: await auth.register({ rpId: RP.rpId, origin: RP.origin, challenge: ch, transports: hostile }), expectedChallenge: ch });
+  assertEquals(reg.transports, ["internal", "usb", "nfc", "ble", "hybrid"]);
+  const ch2 = challenge();
+  const none = await verifyRegistration({ rp: RP, response: await auth.register({ rpId: RP.rpId, origin: RP.origin, challenge: ch2, transports: "internal" }), expectedChallenge: ch2 });
+  assertEquals(none.transports, [], "a string where a list belongs is dropped, not iterated by character");
+  const ch3 = challenge();
+  const dflt = await verifyRegistration({ rp: RP, response: await auth.register({ rpId: RP.rpId, origin: RP.origin, challenge: ch3 }), expectedChallenge: ch3 });
+  assertEquals(dflt.transports, ["internal"], "control: the plain ceremony still reports its transport");
 });
 
 // ===== sign-in ==========================================================================================================================
