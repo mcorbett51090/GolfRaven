@@ -35,3 +35,6 @@ private.course_pin_attempt_for_actor(p_facility_id text, p_pin text, p_at timest
 private.course_qr_public_key_for_actor(p_kid text, p_purpose text)
 private.marker_cosignal_attach_for_actor(p_facility_id text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)
 private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash text, p_qr_kid text, p_pin text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)
+# 0048 (partner sign-in mint, S1.1b): the two MINT definers read the binding only to REFUSE any bound transaction (the 0041 rule: a minter binds nothing). Neither writes or reads a kind as authority.
+private.partner_challenge_issue_sign_in()
+private.partner_session_mint(p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)

@@ -14,7 +14,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(388);
+SELECT plan(389);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
@@ -96,14 +96,19 @@ SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_pr
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
           ARRAY['bind_partner_session', 'partner_binding', 'partner_binding_kind', 'zz24_authz_for_partner'],
   'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3) and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
-SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')), 0,
-  'PA-1: edge_partner_minter can EXECUTE nothing yet (S1.1b adds the mint definers)');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure, 'private.partner_session_policy(uuid)'::regprocedure,
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
+          ARRAY['partner_challenge_issue_sign_in', 'partner_session_mint'],
+  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure,
              'private.partner_session_guard()'::regprocedure, 'private.partner_member_role_invariant()'::regprocedure, 'private.partner_scope_invariant()'::regprocedure)
            AND (SELECT count(*) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
                                             ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
-                WHERE has_function_privilege(r.n, p.oid, 'EXECUTE')) = 0), 5,
-  'PA-1: partner_authorize, the policy helper and the three trigger functions are executable by NO role at all but their owner');
+                WHERE has_function_privilege(r.n, p.oid, 'EXECUTE')) = 0), 4,
+  'PA-1: partner_authorize and the three guard / invariant trigger functions are executable by NO role at all but their owner');
+SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
+                                            ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
+           WHERE has_function_privilege(r.n, 'private.partner_session_policy(uuid)'::regprocedure, 'EXECUTE')), ARRAY['partner_session_issuer'],
+  'PA-1: the policy helper is executable by its owner and, since 0048, by partner_session_issuer alone (the mint reads the absolute session ceiling from it)');
 SELECT is((SELECT p.provolatile::text FROM pg_proc p WHERE p.oid = 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure), 'v',
   'PA-1: partner_authorize is VOLATILE (it writes last_seen_at and consumes a PIN grant; a STABLE function could not, and its reads must see a concurrent revoke)');
 SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND p.proowner = 'private_definer'::regrole FROM pg_proc p WHERE p.oid = 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure), true,
