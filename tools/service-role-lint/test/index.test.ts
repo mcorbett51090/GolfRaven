@@ -489,3 +489,31 @@ describe("pinned import-target allow-list (M2)", () => {
     ).toBe(true);
   });
 });
+
+// Partner auth S1.1b (S0-L3), end to end through the directory walker: in a tree laid out like the real one (`<root>/supabase/functions/...`, so the wrapper's exact path
+// segments exist), the wrapper's own import of @simplewebauthn/* is clean and the same import from a sibling module and from a function is flagged. The import map is the real
+// shape (exact keys, exact pinned targets on the committed allow-list).
+describe("S0-L3: the WebAuthn library import site, through lintDirectory", () => {
+  const MAP = { imports: { "@simplewebauthn/server": "npm:@simplewebauthn/server@14.0.3", "@simplewebauthn/server/helpers": "npm:@simplewebauthn/server@14.0.3/helpers" } };
+  const IMPORTS = `import { verifyAuthenticationResponse } from "@simplewebauthn/server";\nimport { decodeClientDataJSON } from "@simplewebauthn/server/helpers";\nexport const f = [verifyAuthenticationResponse, decodeClientDataJSON];\n`;
+
+  it("flags every module but the wrapper, and only for the import site", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-webauthn-site-"));
+    const functionsRoot = join(tmpRoot, "supabase", "functions");
+    mkdirSync(join(functionsRoot, "_shared", "partner"), { recursive: true });
+    mkdirSync(join(functionsRoot, "partner-session"), { recursive: true });
+    writeFileSync(join(functionsRoot, "deno.json"), JSON.stringify(MAP));
+    writeFileSync(join(functionsRoot, "_shared", "partner", "webauthn.ts"), IMPORTS);
+    writeFileSync(join(functionsRoot, "_shared", "partner", "other.ts"), IMPORTS);
+    writeFileSync(join(functionsRoot, "partner-session", "index.ts"), IMPORTS);
+
+    const results = lintDirectory(functionsRoot, tmpRoot);
+    const sitesOf = (suffix: string) => results.find((r) => r.filePath.endsWith(suffix))?.findings.filter((f) => f.rule === "webauthn-library-import-site") ?? [];
+    expect(sitesOf("partner/webauthn.ts")).toEqual([]);
+    expect(sitesOf("partner/other.ts")).toHaveLength(2);
+    expect(sitesOf("partner-session/index.ts")).toHaveLength(2);
+    // nothing else is wrong with this tree: the wrapper has no result entry at all and the config is clean
+    expect(results.find((r) => r.filePath.endsWith("partner/webauthn.ts"))).toBeUndefined();
+    expect(results.find((r) => r.filePath.endsWith("deno.json"))).toBeUndefined();
+  });
+});
