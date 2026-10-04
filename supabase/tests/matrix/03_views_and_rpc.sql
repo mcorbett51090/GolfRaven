@@ -8,7 +8,7 @@
 -- removed, line 1303-1304, must-fail cell line 1363).
 
 BEGIN;
-SELECT plan(9);
+SELECT plan(11);
 
 -- Extension-owned views (postgis' geometry_columns/geography_columns,
 -- pgtap's tap_funky, etc.) are excluded: they live in `public` as a side
@@ -107,6 +107,21 @@ SELECT is(
   (SELECT eligibility FROM api.my_offers() WHERE id = '60000000-0000-0000-0000-000000000001'),
   NULL,
   'api.my_offers() masks eligibility for a player (B) with no facility/trail scope on that offer'
+);
+SELECT tests.clear_actor();
+
+-- 0047 (D12 / M1): the masking is now UNCONDITIONAL. A scoped member (staff@X, who passes has_facility_scope on offer 1's facility) gets NULL budget and eligibility through
+-- api.my_offers() and api.offer too: the partner read of offers moves to the Edge (S6), and a staff JWT must not read the operator's budget through PostgREST.
+SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
+SELECT is(
+  (SELECT row(eligibility, budget_cap, budget_used, budget_reserved, max_redemptions)::text FROM api.my_offers() WHERE id = '60000000-0000-0000-0000-000000000001'),
+  '(,,,,)',
+  'api.my_offers() returns NULL budget and eligibility to a SCOPED staff member too (0047, M1)'
+);
+SELECT is(
+  (SELECT row(eligibility, budget_cap, budget_used, budget_reserved, max_redemptions)::text FROM api.offer WHERE id = '60000000-0000-0000-0000-000000000001'),
+  '(,,,,)',
+  'api.offer returns NULL budget and eligibility to a SCOPED staff member too (0047, M1)'
 );
 SELECT tests.clear_actor();
 

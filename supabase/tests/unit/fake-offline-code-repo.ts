@@ -1,11 +1,11 @@
 // supabase/tests/unit/fake-offline-code-repo.ts
 //
-// An in-memory `Repo["offlineCode"]` (migration 0045): the same observable contract as private.offline_seed_for_actor and
-// private.offline_code_record_step_for_actor, so the handler and the P5-shaped composition can be unit-tested without a database. The seed comes from the
+// An in-memory `Repo["offlineCode"]` (migration 0045): the same observable contract as private.offline_seed_for_actor (and, as `makeFakeStaffRecorder`, the
+// private.offline_code_record_step_for_actor primitive), so the handler and the P5-shaped composition can be unit-tested without a database. The seed comes from the
 // independent reference derivation (offline-seed-reference.ts) with a test key held HERE, never in production code. The database-side truth (the real
 // function, the real Vault, FORCE RLS, concurrency) is the pgTAP matrix 23_* and the Deno integration suite.
 
-import type { Repo, OfflineStepRecordResult } from "../../functions/_shared/types.ts";
+import type { Repo, OfflineStepInput, OfflineStepRecordResult } from "../../functions/_shared/types.ts";
 import { HttpError } from "../../functions/_shared/http.ts";
 import { OFFLINE_CODE_DB_WINDOW_STEPS, OFFLINE_CODE_STEP_SECONDS } from "../../functions/_shared/offline-code/params.ts";
 import type { FakeState } from "./fake-repo.ts";
@@ -57,7 +57,16 @@ export function makeFakeOfflineCodeRepo(state: FakeState, uid: string): Repo["of
       o.versions.set(deviceId, version);
       return { seed: await deriveSeedReference(o.key, uid, deviceId, version), seedVersion: version, issuedAt: state.now.toISOString() };
     },
-    async recordStep(input): Promise<OfflineStepRecordResult> {
+  };
+}
+
+/** The staff lane's replay record: the in-memory model of the DATABASE primitive private.offline_code_record_step_for_actor, which since 0047 (X9) is not a Repo
+ * method (edge_actor cannot execute it). It stays here because the unit tests compose it with verifyOfflineCode the way S3's partner definer will; the real
+ * primitive's proofs are 23_offline_totp_seed_record.sql and the Deno integration suite. */
+export function makeFakeStaffRecorder(state: FakeState, uid: string): { recordStep(input: OfflineStepInput): Promise<OfflineStepRecordResult> } {
+  const o = offlineState(state);
+  return {
+    async recordStep(input: OfflineStepInput): Promise<OfflineStepRecordResult> {
       if (!o.scopes.get(uid)?.has(input.facilityId)) throw new HttpError(403, "forbidden", "you hold no staff scope at that facility");
       const row = state.devices.get(input.deviceId);
       if (!row) return "no_such_device";

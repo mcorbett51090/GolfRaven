@@ -59,7 +59,7 @@ REVOKE INSERT ON app.offline_code_step FROM CURRENT_USER;
 -- ============================================================================
 \c :"harness_db" edge_gateway
 \set QUIET 1
-SELECT plan(91);
+SELECT plan(47);
 SELECT floor(extract(epoch FROM clock_timestamp()) / 600)::bigint AS cur \gset
 CREATE FUNCTION pg_temp.cur() RETURNS bigint LANGUAGE sql AS $f$ SELECT floor(extract(epoch FROM clock_timestamp()) / 600)::bigint $f$;
 
@@ -71,7 +71,7 @@ SET LOCAL ROLE edge_actor;
 SELECT throws_ok($$SELECT * FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000a001', false)$$,
   '42501', 'offline_seed_for_actor: no actor is bound in this transaction', 'unbound: the provisioning definer refuses');
 SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, 1, 'fac_x')$$,
-  '42501', 'offline_code_record_step_for_actor: no actor is bound in this transaction', 'unbound: the replay-record definer refuses');
+  '42501', 'permission denied for function offline_code_record_step_for_actor', 'X9: edge_actor can no longer call the replay recorder (0047): staff authority is not an Edge capability (the proofs moved to 23_offline_totp_seed_record.sql, as the owner)');
 ROLLBACK;
 
 -- ============================================================================
@@ -148,7 +148,7 @@ SELECT set_config('app.delete_my_data.target_user_id', 'ee230000-0000-0000-0000-
 SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', false)), 0, 'GUC plant (BOTH windows, the delete_my_data user window = PB): still zero rows');
 SELECT is((SELECT count(*)::int FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000b001', true)), 0, 'GUC plant (both windows): the rotate path is zero rows');
 SELECT is((SELECT encode(o_seed, 'hex') FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000a001', false)), 'add40558091437161f58c7fad32608775b39e7f79910f980924d6f26a10ddc04', 'GUC plant: control, PA still gets PA''s own seed (derived with the BOUND uid, never the planted one)');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000b001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'GUC plant: a non-staff PA planting the windows still cannot record a step (the scope check is explicit)');
+SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000b001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'GUC plant: ... and the recorder is not callable by edge_actor at all (the explicit-scope version of this cell is in 23_offline_totp_seed_record.sql, as the owner)');
 ROLLBACK;
 BEGIN;
 SET LOCAL ROLE edge_actor;
@@ -167,111 +167,17 @@ SET LOCAL ROLE edge_actor;
 SELECT throws_ok($$SELECT * FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000a001', false)$$,
   '42501', 'offline_seed_for_actor: a system delegate may not read an offline seed', 'delegate: a system-delegate binding cannot read a seed');
 SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, 1, 'fac_x')$$,
-  '42501', 'offline_code_record_step_for_actor: a system delegate may not record an offline code step', 'delegate: nor record a step');
+  '42501', 'permission denied for function offline_code_record_step_for_actor', 'delegate: nor record a step (a delegate-bound transaction runs as edge_actor, which no longer holds EXECUTE; the function''s own delegate refusal is proved as the owner in 23_offline_totp_seed_record.sql)');
 ROLLBACK;
 
 -- ============================================================================
--- 5. The replay record, bound as STAFF-X (a staff member at fac_x)
+-- 8. COMMITTED writes, for phase 2 (rotation; the replay record's own commits are 23_offline_totp_seed_record.sql's)
 -- ============================================================================
-BEGIN;
-SET LOCAL ROLE edge_actor;
-SELECT lives_ok($$SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a1')$$, 'bind staff-x');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur, 'fac_x'), 'recorded', 'a code step is RECORDED');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur, 'fac_x'), 'replayed', 'the SAME step again is a replay: refused');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur, 'fac_x'), 'replayed', '... and again');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur + 1, 'fac_x'), 'recorded', 'the NEXT step is a different code: recorded');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur - 1, 'fac_x'), 'recorded', 'the PREVIOUS step too (the core accepts +-1)');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur() + 2, 'fac_x'), 'recorded', 'two steps ahead is still inside the database''s own (wider) bound');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur + 10, 'fac_x'), 'step_out_of_window', 'ten steps ahead: out of window');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur - 10, 'fac_x'), 'step_out_of_window', 'ten steps behind: out of window');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, 0, 'fac_x'), 'step_out_of_window', 'step 0 (the epoch): out of window');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 2, :cur, 'fac_x'), 'stale_seed_version', 'a seed version that is not the device''s CURRENT one is refused (the device is at 1)');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 99, :cur, 'fac_x'), 'stale_seed_version', 'a FUTURE version is refused the same way');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000dead', 1, :cur, 'fac_x'), 'no_such_device', 'a device that does not exist');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000b001', 1, :cur, 'fac_x'), 'recorded', 'a different device''s same step is independent (the key includes the device)');
--- argument shape
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor(NULL, 1, 1, 'fac_x')$$, '22023', NULL, 'a NULL device is refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', NULL, 1, 'fac_x')$$, '22023', NULL, 'a NULL version is refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 0, 1, 'fac_x')$$, '22023', NULL, 'version 0 is refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, NULL, 'fac_x')$$, '22023', NULL, 'a NULL step is refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, -1, 'fac_x')$$, '22023', NULL, 'a negative step is refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, 1, NULL)$$, '22023', NULL, 'a NULL facility is refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, 1, '  ')$$, '22023', NULL, 'a blank facility is refused');
--- staff-x holds no scope at fac_y
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_y')$$, '42501', 'offline_code_record_step_for_actor: the caller holds no staff scope at that facility', 'staff-x has no scope at fac_y: refused');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_nope')$$, '42501', NULL, 'nor at a facility that does not exist');
--- the scope check comes BEFORE any device lookup: no oracle for an out-of-scope caller (the same refusal for a real device and for a made-up one)
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000dead', 1, pg_temp.cur(), 'fac_y')$$, '42501', NULL, 'out of scope: the refusal is the same for a device that does not exist (no existence oracle)');
--- a staff member can never attest their OWN account (A2-21)
-SELECT throws_like($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000f001', 1, pg_temp.cur(), 'fac_x')$$, 'self_attestation_refused%', 'staff-x''s OWN device: refused (22023, A2-21)');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000f001', 1, pg_temp.cur(), 'fac_x')$$, '22023', NULL, '... with SQLSTATE 22023');
-SELECT throws_ok($$SELECT count(*) FROM app.offline_code_step$$, '42501', NULL, 'staff-x cannot read the replay table directly either');
-ROLLBACK;
-
--- ============================================================================
--- 6. Who holds a staff scope: staff and manager of THAT facility only
--- ============================================================================
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('00000000-0000-0000-0000-2000000000b1');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur, 'fac_x'), 'recorded', 'manager-x (a manager at fac_x) may record');
-ROLLBACK;
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a3');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'staff-y (staff at fac_y) may NOT record at fac_x');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur, 'fac_y'), 'recorded', 'control: staff-y may record at fac_y');
-ROLLBACK;
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a2');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'a REVOKED staff member may not record');
-ROLLBACK;
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('00000000-0000-0000-0000-2000000000b2');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'a REVOKED manager may not record');
-ROLLBACK;
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('00000000-0000-0000-0000-3000000000c1');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'an OPERATOR (not staff or manager) may not record');
-ROLLBACK;
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('ee230000-0000-0000-0000-0000000000a0');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000b001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'a plain PLAYER (PA, no partner membership) may not record');
-ROLLBACK;
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('ee230000-0000-0000-0000-0000000000b0');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000b001', 1, pg_temp.cur(), 'fac_x')$$, '42501', NULL, 'a player cannot record a step for their OWN device (no scope)');
-ROLLBACK;
-
-BEGIN; SET LOCAL ROLE edge_actor; SELECT private.bind_actor('00000000-0000-0000-0000-4000000000d0');
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_nope')$$, '23503', NULL, 'an ADMIN (whom the scope check passes for any facility string) naming a facility that does not exist: 23503 at the INSERT (an immediate FK), not an opaque failure at COMMIT');
-ROLLBACK;
-
--- ============================================================================
--- 7. A binding does not outlive its transaction
--- ============================================================================
-BEGIN;
-SET LOCAL ROLE edge_actor;
-SELECT lives_ok($$SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a1')$$, 'stale: bind staff-x in transaction 1 ...');
-COMMIT;
-BEGIN;
-SET LOCAL ROLE edge_actor;
-SELECT throws_ok($$SELECT private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, pg_temp.cur(), 'fac_x')$$, '42501',
-  'offline_code_record_step_for_actor: no actor is bound in this transaction', '... transaction 2 inherits NO actor (the binding is per transaction)');
-ROLLBACK;
-
--- ============================================================================
--- 8. COMMITTED writes, for phase 2 (the prune, the facility, the owner, rotation, export, deletion)
--- ============================================================================
--- 8a. staff-x records one step on PA's a001 (this also prunes a001's OLD row, which was seeded far behind the clock) and one on PB's b001's *other* step.
-BEGIN;
-SET LOCAL ROLE edge_actor;
-SELECT lives_ok($$SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a1')$$, 'bind staff-x for the committed writes');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a001', 1, :cur, 'fac_x'), 'recorded', 'committed: a001 step cur recorded at fac_x');
-COMMIT;
 -- 8b. PA rotates a002 (committed), then staff records at the OLD version (stale) and the NEW one (recorded): a rotation invalidates the old seed's steps.
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('ee230000-0000-0000-0000-0000000000a0')$$, 'bind PA for the committed rotation');
 SELECT is((SELECT o_seed_version FROM private.offline_seed_for_actor('ee230000-0000-0000-0000-00000000a002', true)), 2, 'committed: a002 rotated to version 2');
-COMMIT;
-BEGIN;
-SET LOCAL ROLE edge_actor;
-SELECT lives_ok($$SELECT private.bind_actor('00000000-0000-0000-0000-1000000000a1')$$, 'bind staff-x again');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a002', 1, :cur, 'fac_x'), 'stale_seed_version', 'after the rotation the OLD version''s step is refused ...');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a002', 2, :cur, 'fac_x'), 'recorded', '... and the NEW version''s same step is recorded (a different seed: a different code)');
-SELECT is(private.offline_code_record_step_for_actor('ee230000-0000-0000-0000-00000000a002', 2, :cur, 'fac_x'), 'replayed', '... once');
 COMMIT;
 
 SELECT * FROM finish();

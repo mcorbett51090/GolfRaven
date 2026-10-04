@@ -6,14 +6,15 @@
 //
 //   1. resolve the player (handle) and derive the seed in the database (a P5 definer over `private.offline_seed_derive`, migration 0045);
 //   2. `verifyOfflineCode({ seed, code, now })`  -> { ok: true, step } | { ok: false, reason };
-//   3. `repo.offlineCode.recordStep({ deviceId, seedVersion, step, facilityId })` -> the ATOMIC replay check ("recorded" | "replayed" | ...);
+//   3. `private.offline_code_record_step_for_actor(deviceId, seedVersion, step, facilityId)` -> the ATOMIC replay check ("recorded" | "replayed" | ...); since 0047
+//      (X9) this is a DATABASE primitive called from the partner lane's definer (S3), not a Repo method: it is no longer executable by edge_actor;
 //   4. only on "recorded": write the evidence, bound to the staff member's facility scope.
 //
 // WHAT THIS DOES NOT DO, deliberately: it holds no failure counter. "5 failures per staff per hour" (§7.6, SP13) is P5's to enforce around this
 // call (params.ts, OFFLINE_CODE_STAFF_FAILURE_BUCKET); a pure function cannot rate-limit.
 //
 // REPLAY. `usedSteps` lets a caller that already knows the used steps for this (device, seed version) get the specific verdict `replayed` without
-// a write. It is an ADVISORY pre-check only: two requests carrying the same code race past it. The AUTHORITY is `recordStep`'s atomic insert
+// a write. It is an ADVISORY pre-check only: two requests carrying the same code race past it. The AUTHORITY is the primitive's atomic insert
 // (a unique key on (device, seed version, step); a second insert of the same step reports "replayed"), which a caller must always make.
 //
 // CONSTANT TIME. The comparison of the typed code with each candidate is `constantTimeEqual` (no early exit on the first differing digit), every

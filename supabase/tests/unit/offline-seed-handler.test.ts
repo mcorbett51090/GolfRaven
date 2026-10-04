@@ -14,7 +14,7 @@ import { OFFLINE_CODE_STEP_SECONDS } from "../../functions/_shared/offline-code/
 import { base32Decode, hotp, stepOf } from "../../functions/_shared/offline-code/totp.ts";
 import { verifyOfflineCode } from "../../functions/_shared/offline-code/verify.ts";
 import { makeFakeRepo, makeFakeState } from "./fake-repo.ts";
-import { grantStaffScope, offlineState } from "./fake-offline-code-repo.ts";
+import { grantStaffScope, makeFakeStaffRecorder, offlineState } from "./fake-offline-code-repo.ts";
 import { SHIM_OFFLINE_SEED_KEY, deriveSeedReference, toHex } from "./offline-seed-reference.ts";
 
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
@@ -198,7 +198,7 @@ describe("the P5-shaped composition: provision -> verify -> record -> replay ref
     const seed = await deriveSeedReference(o.key!, ownerOf, deviceId, version);
     const verdict = await verifyOfflineCode({ seed, code: typed, now: state.now });
     if (!verdict.ok) return { ok: false as const, reason: verdict.reason };
-    const recorded = await repoOf(STAFF).offlineCode.recordStep({ deviceId, seedVersion: version, step: verdict.step, facilityId: facility });
+    const recorded = await makeFakeStaffRecorder(state, STAFF).recordStep({ deviceId, seedVersion: version, step: verdict.step, facilityId: facility });
     return recorded === "recorded" ? { ok: true as const, step: verdict.step } : { ok: false as const, reason: recorded };
   }
 
@@ -239,20 +239,20 @@ describe("the P5-shaped composition: provision -> verify -> record -> replay ref
     const verdict = await verifyOfflineCode({ seed: base32Decode(seed), code: typed, now: state.now });
     expect(verdict.ok).toBe(true);
     await handleOfflineSeedRequest({ deviceId: DEV_P1, rotate: true }, repoOf(PLAYER)); // the player rotates while staff is mid-verification
-    const recorded = await repoOf(STAFF).offlineCode.recordStep({ deviceId: DEV_P1, seedVersion: 1, step: stepOf(now), facilityId: "fac_x" });
+    const recorded = await makeFakeStaffRecorder(state, STAFF).recordStep({ deviceId: DEV_P1, seedVersion: 1, step: stepOf(now), facilityId: "fac_x" });
     expect(recorded).toBe("stale_seed_version");
   });
   it("a staff member cannot attest their own account (422), and a user with no scope at the facility gets 403", async () => {
     const { state, repoOf } = world();
     const step = stepOf(state.now.getTime() / 1000);
-    expect(await httpStatus(repoOf(STAFF).offlineCode.recordStep({ deviceId: DEV_S1, seedVersion: 1, step, facilityId: "fac_x" }))).toEqual({ status: 422, code: "self_attestation_refused" });
-    expect(await httpStatus(repoOf(OTHER).offlineCode.recordStep({ deviceId: DEV_P1, seedVersion: 1, step, facilityId: "fac_x" }))).toEqual({ status: 403, code: "forbidden" });
-    expect(await httpStatus(repoOf(STAFF).offlineCode.recordStep({ deviceId: DEV_P1, seedVersion: 1, step, facilityId: "fac_y" }))).toEqual({ status: 403, code: "forbidden" });
+    expect(await httpStatus(makeFakeStaffRecorder(state, STAFF).recordStep({ deviceId: DEV_S1, seedVersion: 1, step, facilityId: "fac_x" }))).toEqual({ status: 422, code: "self_attestation_refused" });
+    expect(await httpStatus(makeFakeStaffRecorder(state, OTHER).recordStep({ deviceId: DEV_P1, seedVersion: 1, step, facilityId: "fac_x" }))).toEqual({ status: 403, code: "forbidden" });
+    expect(await httpStatus(makeFakeStaffRecorder(state, STAFF).recordStep({ deviceId: DEV_P1, seedVersion: 1, step, facilityId: "fac_y" }))).toEqual({ status: 403, code: "forbidden" });
   });
   it("recordStep answers the other statuses", async () => {
     const { state, repoOf } = world();
     const step = stepOf(state.now.getTime() / 1000);
-    const staff = repoOf(STAFF).offlineCode;
+    const staff = makeFakeStaffRecorder(state, STAFF);
     expect(await staff.recordStep({ deviceId: "dddddddd-0000-4000-8000-00000000dead", seedVersion: 1, step, facilityId: "fac_x" })).toBe("no_such_device");
     expect(await staff.recordStep({ deviceId: DEV_P1, seedVersion: 1, step: step + 10, facilityId: "fac_x" })).toBe("step_out_of_window");
     expect(await staff.recordStep({ deviceId: DEV_P1, seedVersion: 7, step, facilityId: "fac_x" })).toBe("stale_seed_version");
@@ -296,7 +296,8 @@ describe("K never reaches the Edge runtime", () => {
     for (const f of files) expect(codeLines(readFileSync(f, "utf8")).join("\n"), f).not.toMatch(/offline_seed_derive/);
     const code = codeLines(readFileSync(join(FUNCTIONS, "_shared", "privileged.ts"), "utf8")).join("\n");
     expect(code).toMatch(/private\.offline_seed_for_actor\(/);
-    expect(code).toMatch(/private\.offline_code_record_step_for_actor\(/);
+    // X9 (0047): the replay record is not an Edge capability, so the Edge's privileged.ts must not name it at all
+    expect(code).not.toMatch(/offline_code_record_step_for_actor/);
   });
   it("no production file imports the test-only reference derivation", () => {
     for (const f of files) expect(readFileSync(f, "utf8"), f).not.toMatch(/offline-seed-reference/);
