@@ -285,6 +285,9 @@ run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAM
 echo "tools/db/test.sh: email-OTP link proof redemption concurrency check (edge role PR4a, 0039; two real edge_gateway sessions, run with $DBUSER as the seeding role)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-signin-proof-concurrency.sh'"
 
+echo "tools/db/test.sh: partner serialisation check (P5.1a S1.1a, 0047, PA-4 / PA-4c two-connection half; a real edge_gateway action session against a second connection, run with $DBUSER as the change role)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-partner-serialisation.sh'"
+
 # ⛔ FIX (P3c gate round 2, item 0 — required first): the CI blind spot.
 # Every HIGH/MEDIUM item in that gate round was found ONLY by running the
 # REAL privileged.ts (and the handlers built on it) under Deno against a
