@@ -56,4 +56,10 @@ describe("edge-role checks: the .mjs and the matrix 10 copies are one SQL", () =
     expect(entries).toEqual(["private.actor_uid()"]);
     expect(a.get(14)!).toContain("ARRAY['private.actor_uid()']");
   });
+  it("check 14: the .mjs's substitution constant IS that literal (a drifted constant would make the run-time replace a silent no-op, leaving the default list in force)", () => {
+    const m = mjs.match(/const PARTNER_KIND_DEFAULT = "([^"]*)";/);
+    expect(m, "PARTNER_KIND_DEFAULT is not declared as a plain string constant").not.toBeNull();
+    expect(m![1]).toBe("ARRAY['private.actor_uid()']");
+    expect(a.get(14)!.split(m![1]!).length - 1, "the constant must occur exactly once in check 14's SQL").toBe(1);
+  });
 });

@@ -14,7 +14,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(290);
+SELECT plan(291);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
@@ -192,6 +192,13 @@ BEGIN
 END
 $f$;
 GRANT EXECUTE ON FUNCTION pg_temp.denied_count(uuid) TO PUBLIC;
+SELECT is((SELECT array_agg(r ORDER BY r) FROM unnest(ARRAY[
+    'api.staff_shift_log', 'api.staff_activity', 'api.special_marker_stock', 'api.special_marker_stock_movement', 'api.facility_programme', 'api.marker_code_batch', 'api.facility_qr',
+    'api.sponsorship', 'api.operator_rollup', 'api.sponsor_rollup', 'api.my_partner_org', 'api.my_partner_member', 'api.my_partner_scope', 'api.my_partner_invite',
+    'app.partner_org', 'app.partner_member', 'app.partner_scope', 'app.partner_invite', 'app.facility_programme', 'app.attestation_shift_log', 'app.staff_activity', 'app.special_marker_stock',
+    'app.special_marker_stock_movement', 'app.sponsorship', 'app.operator_rollup', 'app.sponsor_rollup', 'app.marker_code_batch', 'app.facility_qr']) r
+  WHERE has_table_privilege('authenticated', r, 'SELECT') OR has_table_privilege('anon', r, 'SELECT')), NULL::text[],
+  'PA-6: none of the 28 relations holds SELECT for authenticated or anon at the PRIVILEGE level either (the views are security_invoker, so the base-table revoke would deny them anyway: the view-level revoke is the defence in depth a future non-invoker view would otherwise lose)');
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
 SELECT is(pg_temp.denied_count('00000000-0000-0000-0000-1000000000a1'), 28, 'PA-6: staff@X (valid JWT, IN scope) is DENIED on all 14 api views and all 14 base tables');
 SELECT tests.clear_actor();

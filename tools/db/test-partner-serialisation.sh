@@ -35,14 +35,16 @@ SVC_PSQL=(env PGAPPNAME=ser_b psql -v ON_ERROR_STOP=1 -A -t -q)
 FAILED=0
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/golfraven-partner-ser.XXXXXX")"
 
-ORG1="ee24f000-0000-0000-0000-0000000000a1"; ORG2="ee24f000-0000-0000-0000-0000000000a2"; ORG3="ee24f000-0000-0000-0000-0000000000a3"
-U1="ee24f000-0000-0000-0000-0000000000b1"; U2="ee24f000-0000-0000-0000-0000000000b2"; U3="ee24f000-0000-0000-0000-0000000000b3"; U4="ee24f000-0000-0000-0000-0000000000b4"
-C1="ee24f000-0000-0000-0000-0000000000c1"; C2="ee24f000-0000-0000-0000-0000000000c2"; C3="ee24f000-0000-0000-0000-0000000000c3"; C4="ee24f000-0000-0000-0000-0000000000c4"
-S1="ee24f000-0000-0000-0000-0000000000d1"; S2="ee24f000-0000-0000-0000-0000000000d2"; S3="ee24f000-0000-0000-0000-0000000000d3"; S4="ee24f000-0000-0000-0000-0000000000d4"
+ORG1="ee24f000-0000-0000-0000-0000000000a1"; ORG2="ee24f000-0000-0000-0000-0000000000a2"; ORG3="ee24f000-0000-0000-0000-0000000000a3"; ORG4="ee24f000-0000-0000-0000-0000000000a4"; ORG5="ee24f000-0000-0000-0000-0000000000a5"
+U1="ee24f000-0000-0000-0000-0000000000b1"; U2="ee24f000-0000-0000-0000-0000000000b2"; U3="ee24f000-0000-0000-0000-0000000000b3"; U4="ee24f000-0000-0000-0000-0000000000b4"; U5="ee24f000-0000-0000-0000-0000000000b5"; U6="ee24f000-0000-0000-0000-0000000000b6"
+C1="ee24f000-0000-0000-0000-0000000000c1"; C2="ee24f000-0000-0000-0000-0000000000c2"; C3="ee24f000-0000-0000-0000-0000000000c3"; C4="ee24f000-0000-0000-0000-0000000000c4"; C5="ee24f000-0000-0000-0000-0000000000c5"; C6="ee24f000-0000-0000-0000-0000000000c6"
+S1="ee24f000-0000-0000-0000-0000000000d1"; S2="ee24f000-0000-0000-0000-0000000000d2"; S3="ee24f000-0000-0000-0000-0000000000d3"; S4="ee24f000-0000-0000-0000-0000000000d4"; S5="ee24f000-0000-0000-0000-0000000000d5"; S6="ee24f000-0000-0000-0000-0000000000d6"
 H1="$(printf '%s' "ser1-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
 H2="$(printf '%s' "ser2-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
 H3="$(printf '%s' "ser3-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
 H4="$(printf '%s' "ser4-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
+H5="$(printf '%s' "ser5-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
+H6="$(printf '%s' "ser6-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
 
 hq() { "${HARNESS_PSQL[@]}" -c "$1" | tr -d '[:space:]'; }
 hx() { "${HARNESS_PSQL[@]}" -c "$1" >/dev/null; }
@@ -93,20 +95,21 @@ hx "
   RESET ROLE;
   REVOKE CREATE ON SCHEMA private FROM private_definer;
   SET ROLE service_role;
-  INSERT INTO auth.users (id, email) VALUES ('$U1', 'ser1@partner.test'), ('$U2', 'ser2@partner.test'), ('$U3', 'ser3@partner.test'), ('$U4', 'ser4@partner.test')
+  INSERT INTO auth.users (id, email) VALUES ('$U1', 'ser1@partner.test'), ('$U2', 'ser2@partner.test'), ('$U3', 'ser3@partner.test'), ('$U4', 'ser4@partner.test'), ('$U5', 'ser5@partner.test'), ('$U6', 'ser6@partner.test')
     ON CONFLICT (id) DO NOTHING;
-  INSERT INTO app.partner_org (id, kind, name) VALUES ('$ORG1', 'facility', 'ser org 1'), ('$ORG2', 'facility', 'ser org 2'), ('$ORG3', 'facility', 'ser org 3');
-  INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG1', 'fac_x'), ('$ORG2', 'fac_x'), ('$ORG3', 'fac_x');
-  INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$U1', '$ORG1', 'staff'), ('$U2', '$ORG2', 'staff'), ('$U3', '$ORG3', 'staff'), ('$U4', '$ORG1', 'staff');
+  INSERT INTO app.partner_org (id, kind, name) VALUES ('$ORG1', 'facility', 'ser org 1'), ('$ORG2', 'facility', 'ser org 2'), ('$ORG3', 'facility', 'ser org 3'), ('$ORG4', 'facility', 'ser org 4'), ('$ORG5', 'facility', 'ser org 5');
+  INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG1', 'fac_x'), ('$ORG2', 'fac_x'), ('$ORG3', 'fac_x'), ('$ORG4', 'fac_x'), ('$ORG5', 'fac_x');
+  INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$U1', '$ORG1', 'staff'), ('$U2', '$ORG2', 'staff'), ('$U3', '$ORG3', 'staff'), ('$U4', '$ORG1', 'staff'), ('$U5', '$ORG4', 'staff'), ('$U6', '$ORG5', 'staff');
   RESET ROLE;"
-for n in 1 2 3 4; do
+for n in 1 2 3 4 5 6; do
   eval "u=\$U$n; c=\$C$n; s=\$S$n; h=\$H$n"
+  seen="now()"; { [ "$n" = 5 ] || [ "$n" = 6 ]; } && seen="now() - interval '5 minutes'"  # S5's last_seen_at is old enough that the action WRITES it (FOR NO KEY UPDATE path)
   hx "
     INSERT INTO app.partner_credential (id, user_id, credential_id, public_key, alg)
     VALUES ('$c', '$u', decode(md5('ser-c$n') || md5('ser-cb$n'), 'hex'), decode(md5('ser-k$n') || md5('ser-kb$n'), 'hex'), -7);
     INSERT INTO app.partner_session (id, token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind, mint_nonce_hash,
                                      mint_authenticator_data, mint_client_data_json, mint_signature)
-    VALUES ('$s', '$h', '$u', '$c', 1, now() - interval '1 hour', now(), now() + interval '8 hours', 'sign_in', decode(md5('ser-n$n') || md5('ser-nb$n'), 'hex'),
+    VALUES ('$s', '$h', '$u', '$c', 1, now() - interval '1 hour', $seen, now() + interval '8 hours', 'sign_in', decode(md5('ser-n$n') || md5('ser-nb$n'), 'hex'),
             decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'));"
 done
 
@@ -188,24 +191,39 @@ if run_change_after_action "scope delete" "$H2" "DELETE FROM app.partner_scope W
 fi
 
 # ---------------------------------------------------------------------------
+# 2b. The WRITE path: an action whose session was last seen more than a minute ago updates last_seen_at, so it locks FOR NO KEY UPDATE (not FOR SHARE); a member revoke
+#     issued during it must wait just the same
+# ---------------------------------------------------------------------------
+echo "tools/db/test-partner-serialisation.sh: 2b. member revoke during an open WRITING action (FOR NO KEY UPDATE)"
+if run_change_after_action "member revoke (write path)" "$H5" "UPDATE app.partner_member SET revoked_at = now() WHERE user_id = '$U5'" "$S5"; then
+  if [ "$(session_revoked "$S5")" != "true" ]; then fail "member revoke (write path): the member's session was not revoked once the revoke committed"
+  else echo "PASS: member revoke during a writing action -> waited in pg_locks, completed only after the action committed, the session is revoked"; fi
+fi
+
+# ---------------------------------------------------------------------------
 # 3. The REVOKER holds the session lock first: the action waits, then sees the revoke
 # ---------------------------------------------------------------------------
+revoker_first() { # $1 label, $2 token hash, $3 user id
+  "${SVC_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE service_role; UPDATE app.partner_member SET revoked_at = now() WHERE user_id = '$3'; SELECT pg_sleep(3.5); SELECT 'revoke_end:' || extract(epoch FROM clock_timestamp()); COMMIT;" >"$OUT_DIR/b.out" 2>"$OUT_DIR/b.err" &
+  local pb=$!
+  sleep 1.0 # the revoke's trigger has updated the session row: the lock is held
+  action_sql "$2" 0 | edge ser_a >"$OUT_DIR/a.out" 2>"$OUT_DIR/a.err" &
+  local pa=$!
+  local w; w=$(waits ser_a)
+  set +e; wait "$pa"; local sa=$?; wait "$pb"; local sb=$?; set -e
+  if [ "$sb" -ne 0 ]; then fail "$1: the revoke transaction itself failed"; cat "$OUT_DIR/b.err" >&2 || true
+  elif [ "$w" != "yes" ]; then fail "$1: the action was never seen WAITING in pg_locks while the revoker held the session lock"
+  elif [ "$sa" -eq 0 ] || grep -q "^authorized:" "$OUT_DIR/a.out"; then fail "$1: the action was AUTHORIZED although the revoke committed first (stale authority)"
+  elif ! grep -q "partner_authorize: the session is not live" "$OUT_DIR/a.err" && ! grep -q "partner_authorize: no active membership" "$OUT_DIR/a.err" && ! grep -q "partner_session_refused" "$OUT_DIR/a.err"; then
+    fail "$1: the action was refused, but not for the revoke:"; cat "$OUT_DIR/a.err" >&2
+  else
+    echo "PASS: $1 -> the action waited in pg_locks and, once the revoke committed, was refused (it never acted on stale authority)"
+  fi
+}
 echo "tools/db/test-partner-serialisation.sh: 3. the revoker holds the session lock; the action waits and then sees the revoke"
-"${SVC_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE service_role; UPDATE app.partner_member SET revoked_at = now() WHERE user_id = '$U3'; SELECT pg_sleep(3.5); SELECT 'revoke_end:' || extract(epoch FROM clock_timestamp()); COMMIT;" >"$OUT_DIR/b.out" 2>"$OUT_DIR/b.err" &
-PB=$!
-sleep 1.0 # the revoke's trigger has updated the session row: the lock is held
-action_sql "$H3" 0 | edge ser_a >"$OUT_DIR/a.out" 2>"$OUT_DIR/a.err" &
-PA=$!
-W=$(waits ser_a)
-set +e; wait "$PA"; SA=$?; wait "$PB"; SB=$?; set -e
-if [ "$SB" -ne 0 ]; then fail "revoker first: the revoke transaction itself failed"; cat "$OUT_DIR/b.err" >&2 || true
-elif [ "$W" != "yes" ]; then fail "revoker first: the action was never seen WAITING in pg_locks while the revoker held the session lock"
-elif [ "$SA" -eq 0 ] || grep -q "^authorized:" "$OUT_DIR/a.out"; then fail "revoker first: the action was AUTHORIZED although the revoke committed first (stale authority)"
-elif ! grep -q "partner_authorize: the session is not live" "$OUT_DIR/a.err" && ! grep -q "partner_authorize: no active membership" "$OUT_DIR/a.err" && ! grep -q "partner_session_refused" "$OUT_DIR/a.err"; then
-  fail "revoker first: the action was refused, but not for the revoke:"; cat "$OUT_DIR/a.err" >&2
-else
-  echo "PASS: revoker first -> the action waited in pg_locks and, once the revoke committed, was refused (it never acted on stale authority)"
-fi
+revoker_first "revoker first (read path)" "$H3" "$U3"
+echo "tools/db/test-partner-serialisation.sh: 3b. the same, for an action that WRITES last_seen_at (the explicit FOR NO KEY UPDATE must be the first statement to wait)"
+revoker_first "revoker first (write path)" "$H6" "$U6"
 
 # ---------------------------------------------------------------------------
 # 4. The planted GUC: the change session's GUCs do not widen an open action's reach
