@@ -7,7 +7,10 @@
 -- those are left as TODOs, cited by line number, at the end of this file.
 -- What IS tested here: the `private.has_facility_scope` /
 -- `has_trail_scope` functions those Edge Functions are specified to call
--- (§4.7 item 4, line 1292-1294), and the api views/RLS built on them.
+-- (§4.7 item 4, line 1292-1294), and (until 0047) the api views/RLS built on
+-- them. Since 0047 (partner-auth-design D12) the partner-lane api views and
+-- their base tables are REVOKED from `authenticated`: the cells that read
+-- them are "denied" cells now, and 24_partner_auth_spine.sql sweeps the list.
 
 BEGIN;
 SELECT plan(27);
@@ -94,29 +97,35 @@ SELECT is(
 SELECT tests.clear_actor();
 
 -- staff_shift_log — "staff and managers of that facility" (line 842, 1366).
+-- ⛔ 0047 (partner-auth-design D12 / 5.5, S1.1a): THE POSTGREST PARTNER READ SURFACE IS REVOKED. Before it, a staff member's Supabase JWT (reachable by email OTP alone)
+-- read this view with NO passkey (G1). The two cells that asserted the old answers ("staff@X sees 1 row", "staff@Y sees 0 rows") are now "denied" cells: every actor,
+-- the in-scope staff member included, is refused at the grant (42501). The partner read moves to an Edge function (S3). 24_partner_auth_spine.sql (PA-6) sweeps the whole list.
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
-SELECT is(
-  (SELECT count(*)::int FROM api.staff_shift_log),
-  1,
-  'staff@X sees facility X''s shift-log row via api.staff_shift_log'
+SELECT throws_ok(
+  'SELECT count(*) FROM api.staff_shift_log',
+  '42501',
+  NULL,
+  'staff@X (IN scope at facility X) reads api.staff_shift_log -> DENIED (0047, D12: the PostgREST partner read surface is revoked)'
 );
 SELECT tests.clear_actor();
 
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a3'::uuid));
-SELECT is(
-  (SELECT count(*)::int FROM api.staff_shift_log),
-  0,
-  'staff@Y sees 0 rows via api.staff_shift_log (facility X is out of scope, line 1367)'
+SELECT throws_ok(
+  'SELECT count(*) FROM api.staff_shift_log',
+  '42501',
+  NULL,
+  'staff@Y (out of scope at X) reads api.staff_shift_log -> DENIED as well (0047, D12): the answer no longer depends on scope'
 );
 SELECT tests.clear_actor();
 
 -- staff_activity — "manager@X reads api.staff_activity | only facility X's
--- rows, no player id or handle" (line 843, 1368).
+-- rows, no player id or handle" (line 843, 1368). 0047 (D12): denied for every actor.
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-2000000000b1'::uuid));
-SELECT is(
-  (SELECT count(*)::int FROM api.staff_activity),
-  1,
-  'manager@X sees facility X''s staff_activity row'
+SELECT throws_ok(
+  'SELECT count(*) FROM api.staff_activity',
+  '42501',
+  NULL,
+  'manager@X reads api.staff_activity -> DENIED (0047, D12)'
 );
 SELECT tests.clear_actor();
 SELECT is(
@@ -207,18 +216,20 @@ SELECT is(
 -- B7 (gate round 2): the two must-fail cells the gate named explicitly.
 -- ---------------------------------------------------------------------------
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-3000000000c1'::uuid));
-SELECT is(
-  (SELECT count(*)::int FROM api.staff_shift_log),
-  0,
-  'operator@T reads api.staff_shift_log -> 0 rows (B7: it is player-identifying; operator must never see it)'
+SELECT throws_ok(
+  'SELECT count(*) FROM api.staff_shift_log',
+  '42501',
+  NULL,
+  'operator@T reads api.staff_shift_log -> DENIED (B7: it is player-identifying; operator must never see it; since 0047 nobody reads it through PostgREST)'
 );
 SELECT tests.clear_actor();
 
 SELECT tests.authenticate_as('authenticated', tests.claims('00000000-0000-0000-0000-1000000000a1'::uuid));
-SELECT is(
-  (SELECT count(*)::int FROM api.staff_activity),
-  0,
-  'staff@X reads api.staff_activity -> 0 rows (B7: reader is manager/operator only, not staff)'
+SELECT throws_ok(
+  'SELECT count(*) FROM api.staff_activity',
+  '42501',
+  NULL,
+  'staff@X reads api.staff_activity -> DENIED (B7: reader is manager/operator only, not staff; since 0047 nobody reads it through PostgREST)'
 );
 SELECT tests.clear_actor();
 

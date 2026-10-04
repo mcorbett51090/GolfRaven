@@ -252,6 +252,8 @@ INSERT INTO app.booking (id, user_id, provider, provider_ref, facility_id, tee_t
 VALUES ('f0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',
         'golfnow', 'ref-1', 'fac_x', now() + interval '1 day');
 
+-- (S1.1a, L4: partner_invite.token_hash is CHECKed to 64 lowercase hex characters since 0047, so the two fixture hashes below are sha256 digests of their old
+-- labels, not the labels themselves.)
 -- B3 gate-round-2 additions: partner_member / partner_invite / audit_log /
 -- storage.objects rows for player A, so delete_my_data's coverage of each
 -- is actually exercised, not merely asserted against nothing.
@@ -260,9 +262,9 @@ INSERT INTO app.partner_member (user_id, org_id, role, invited_by) VALUES
    '00000000-0000-0000-0000-1000000000a1');
 INSERT INTO app.partner_invite (id, org_id, role, invited_by, invitee_email, token_hash, expires_at) VALUES
   ('11100000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'staff',
-   '00000000-0000-0000-0000-00000000000a', 'staff-y@example.test', 'th-a-invites-y', now() + interval '7 days'),
+   '00000000-0000-0000-0000-00000000000a', 'staff-y@example.test', encode(digest('th-a-invites-y', 'sha256'), 'hex'), now() + interval '7 days'),
   ('11100000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', 'staff',
-   '00000000-0000-0000-0000-1000000000a3', 'player-a@example.test', 'th-y-invites-a', now() + interval '7 days');
+   '00000000-0000-0000-0000-1000000000a3', 'player-a@example.test', encode(digest('th-y-invites-a', 'sha256'), 'hex'), now() + interval '7 days');
 INSERT INTO app.audit_log (actor_user_id, action, subject_table, subject_id) VALUES
   ('00000000-0000-0000-0000-00000000000a', 'evidence.insert', 'app.evidence', '30000000-0000-0000-0000-000000000001');
 -- M5 (post-P3a gate): a fraud_signal row for player A, so

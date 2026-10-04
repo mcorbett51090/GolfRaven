@@ -1,0 +1,9 @@
+# supabase/tests/fixtures/partner_kind_readers.txt
+#
+# verify-function-inventory check 14 clause (c): the NAMED exceptions to "no function outside the *_for_partner family reads kind = 'partner'" (partner-auth-design 4.3). One
+# `schema.name(identity arguments)` per line, exactly as the check prints it. Adding a line is a security decision: a function that reads the binding kind is a function that can
+# make a partner binding behave as something else, so it belongs in the partner family (partner_*, bind_partner_*, hit_partner_*, *_for_partner) unless there is a reason it cannot.
+#
+# private.actor_uid(): redefined in 0047 to return NULL when kind = 'partner' (the defence in depth that makes every edge_actor policy and every user-lane definer blind to a partner
+# binding). It must stay outside the family: its NAME and signature are the identity every edge_actor policy is written against (0030), and the check refuses to let it change quietly.
+private.actor_uid()

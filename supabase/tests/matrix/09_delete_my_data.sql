@@ -164,6 +164,10 @@ BEGIN
     SELECT table_name, column_name, action
     FROM private.pii_retention_policy
     WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null')
+      -- 0047: the partner-auth tables hold credential material, so service_role (this test's identity) deliberately holds NO privilege on them; it cannot count their rows.
+      -- Their rows are proved gone by 24_partner_auth_spine.sql, which seeds a real account's rows in every one of them, deletes the account through delete_my_data and reads
+      -- each table back through a temporary harness-role policy (PA-1b).
+      AND has_any_column_privilege('service_role', format('app.%I', table_name), 'SELECT')
   LOOP
     EXECUTE format(
       'SELECT count(*) FROM app.%I WHERE %I = $1', v_pol.table_name, v_pol.column_name
