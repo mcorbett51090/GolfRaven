@@ -887,39 +887,43 @@ FOR EACH ROW EXECUTE FUNCTION private.partner_scope_authority_touch();
 CREATE TRIGGER partner_session_guard_trg BEFORE UPDATE ON app.partner_session
 FOR EACH ROW EXECUTE FUNCTION private.partner_session_guard();
 
--- 8a. private_definer's policies. partner_session: its OWN row only, keyed on the transaction's binding (the ONE lock-and-write policy of R3-M1 option a, and its row-visibility
+-- 8a. private_definer's policies. The delete_my_data window pairs on the four tables THIS migration creates carry one extra conjunct, `private.partner_binding_kind() IS DISTINCT FROM 'partner'`:
+-- under a partner binding the window is CLOSED, so a planted app.delete_my_data.target_user_id cannot make another person's session, credential, enrolment token or used challenge
+-- readable, deletable or redactable by a definer a partner transaction reaches (probed 2026-10-04: without it a partner-bound private_definer DELETEd another user's session). The
+-- delete_my_data pass itself runs under no partner binding, so it is unaffected. (The pre-existing 0016 tables keep the 0016 form; partner_invite's two new pairs follow it.)
+-- partner_session: its OWN row only, keyed on the transaction's binding (the ONE lock-and-write policy of R3-M1 option a, and its row-visibility
 -- companion: 0016 "_r companion" finding); the delete_my_data pairs follow the 0016 form (the registry pass requires them: check 8).
 CREATE POLICY pd_partner_session_action ON app.partner_session
   FOR UPDATE TO private_definer USING (id = private.partner_binding_session()) WITH CHECK (id = private.partner_binding_session());
 CREATE POLICY pd_partner_session_action_r ON app.partner_session
   FOR SELECT TO private_definer USING (id = private.partner_binding_session());
 CREATE POLICY pd_delete_partner_session_user_id ON app.partner_session
-  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_delete_partner_session_user_id_r ON app.partner_session
-  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_delete_partner_credential_user_id ON app.partner_credential
-  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_delete_partner_credential_user_id_r ON app.partner_credential
-  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_setnull_partner_credential_revoked_by ON app.partner_credential
-  FOR UPDATE TO private_definer USING (revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (revoked_by IS NULL);
+  FOR UPDATE TO private_definer USING (revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner') WITH CHECK (revoked_by IS NULL);
 CREATE POLICY pd_setnull_partner_credential_revoked_by_r ON app.partner_credential
-  FOR SELECT TO private_definer USING ((revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (revoked_by IS NULL));
+  FOR SELECT TO private_definer USING (((revoked_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (revoked_by IS NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_delete_partner_enrolment_token_user_id ON app.partner_enrolment_token
-  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_delete_partner_enrolment_token_user_id_r ON app.partner_enrolment_token
-  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_setnull_partner_enrolment_token_issued_by ON app.partner_enrolment_token
-  FOR UPDATE TO private_definer USING (issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (issued_by IS NULL);
+  FOR UPDATE TO private_definer USING (issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner') WITH CHECK (issued_by IS NULL);
 CREATE POLICY pd_setnull_partner_enrolment_token_issued_by_r ON app.partner_enrolment_token
-  FOR SELECT TO private_definer USING ((issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (issued_by IS NULL));
+  FOR SELECT TO private_definer USING (((issued_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) OR (issued_by IS NULL)) AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_delete_partner_auth_challenge_user_id ON app.partner_auth_challenge
-  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 CREATE POLICY pd_delete_partner_auth_challenge_user_id_r ON app.partner_auth_challenge
-  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid);
+  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 
 CREATE POLICY pd_setnull_partner_invite_accepted_by ON app.partner_invite
   FOR UPDATE TO private_definer USING (accepted_by = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid) WITH CHECK (accepted_by IS NULL);

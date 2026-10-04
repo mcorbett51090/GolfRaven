@@ -211,7 +211,7 @@ fi
 # 4. The planted GUC: the change session's GUCs do not widen an open action's reach
 # ---------------------------------------------------------------------------
 echo "tools/db/test-partner-serialisation.sh: 4. planted GUCs during an open action"
-# (the delete_my_data window is a DELETE / SELECT pair by design: the row can be seen, never updated.) The action is bound as U4 (live). S2 is ANOTHER user's LIVE session (the scope-delete case only touched it). The action plants every GUC at that user and session and
+# (the delete_my_data window pairs on the partner tables are closed under a partner binding, 0047.) The action is bound as U4 (live). S2 is ANOTHER user's LIVE session (the scope-delete case only touched it). The action plants every GUC at that user and session and
 # then, as a partner-bound private_definer, tries to revoke it: no policy admits it, so the row stays live.
 EXTRA="SELECT set_config('app.delete_my_data.target_user_id', '$U2', true), set_config('app.partner.session_id', '$S2', true), set_config('app.partner.authority_touch', 'on', true), set_config('app.signin.proof_purge', 'on', true), set_config('app.edge.purge_fix_coords', 'on', true);
 SELECT 'writer:' || private.zz24s_writer('$S2');"
@@ -222,12 +222,12 @@ SA=$?
 set -e
 if [ "$SA" -ne 0 ] || ! grep -q "^authorized:" "$OUT_DIR/a.out"; then
   fail "planted GUC: the action failed: $(cat "$OUT_DIR/a.err")"
-elif ! grep -q "^writer:rows=0 visible=" "$OUT_DIR/a.out"; then
+elif ! grep -q "^writer:rows=0 visible=0$" "$OUT_DIR/a.out"; then
   fail "planted GUC: a partner-bound private_definer writer with every GUC planted reached another user's session: $(grep '^writer:' "$OUT_DIR/a.out")"
 elif [ "$(session_revoked "$S2")" != "false" ]; then
   fail "planted GUC: another user's LIVE session was revoked by a partner-bound private_definer writer with every GUC planted"
 else
-  echo "PASS: planted GUCs -> a partner-bound private_definer writer with every GUC planted at another user's live session changed 0 rows (the session is still live; the delete_my_data SELECT window can make the row VISIBLE, as on every 0016-pattern table, and nothing more)"
+  echo "PASS: planted GUCs -> a partner-bound private_definer writer with every GUC planted at another user's live session changed 0 rows and could not see it (the delete_my_data window is closed under a partner binding); the session is still live"
 fi
 
 if [ "$FAILED" -ne 0 ]; then

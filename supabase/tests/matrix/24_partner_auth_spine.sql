@@ -14,7 +14,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(288);
+SELECT plan(290);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
@@ -791,6 +791,57 @@ SELECT is((SELECT array_agg(pol.polname::text ORDER BY pol.polname::text) FROM p
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid IN ('app.partner_member'::regclass, 'app.partner_scope'::regclass, 'app.admin_user'::regclass)
            AND pol.polname ~ '^(pst|psi|psf|ppv|ptv|prv)_(update|insert|lock)' ), 0, 'R3-M1: no lock policy of any role exists on partner_member, partner_scope or admin_user');
 ROLLBACK TO SAVEPOINT pa4c_ii;
+
+-- (iii) the delete_my_data WINDOW is closed under a partner binding: the DELETE / SELECT / set-null pairs on the four tables this migration creates carry
+-- `AND private.partner_binding_kind() IS DISTINCT FROM 'partner'`, so a planted app.delete_my_data.target_user_id cannot make ANOTHER person's session, credential,
+-- enrolment token or used challenge visible, deletable or redactable to a definer a partner transaction reaches (probed: without the conjunct a partner-bound
+-- private_definer DELETEd another user's session). The control is the same statements with the same GUC planted and NO partner binding: they reach every row (this is
+-- delete_my_data's own shape, and PA-1b proves the real pass end to end).
+CREATE FUNCTION pg_temp.win_probe(p_uid uuid, p_cred uuid) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE s int; c int; t int; ch int; sv int; cv int; sn int;
+BEGIN
+  PERFORM set_config('app.delete_my_data.target_user_id', p_uid::text, true);
+  SELECT count(*) INTO sv FROM app.partner_session WHERE user_id = p_uid;
+  SELECT count(*) INTO cv FROM app.partner_credential WHERE user_id = p_uid;
+  UPDATE app.partner_credential SET revoked_by = NULL WHERE revoked_by = p_uid;
+  GET DIAGNOSTICS sn = ROW_COUNT;
+  DELETE FROM app.partner_session WHERE user_id = p_uid;
+  GET DIAGNOSTICS s = ROW_COUNT;
+  DELETE FROM app.partner_enrolment_token WHERE user_id = p_uid;
+  GET DIAGNOSTICS t = ROW_COUNT;
+  DELETE FROM app.partner_auth_challenge WHERE user_id = p_uid;
+  GET DIAGNOSTICS ch = ROW_COUNT;
+  DELETE FROM app.partner_credential WHERE user_id = p_uid;
+  GET DIAGNOSTICS c = ROW_COUNT;
+  RETURN format('visible sessions=%s credentials=%s; setnull=%s; deleted sessions=%s tokens=%s challenges=%s credentials=%s', sv, cv, sn, s, t, ch, c);
+END
+$f$;
+GRANT EXECUTE ON FUNCTION pg_temp.win_probe(uuid, uuid) TO PUBLIC;
+SAVEPOINT pa4c_iii_bound;
+INSERT INTO app.partner_enrolment_token (user_id, purpose, issued_by, token_hash, expires_at)
+VALUES ('00000000-0000-0000-0000-2000000000b1', 'recover', NULL, repeat('7', 64), now() + interval '1 hour');
+INSERT INTO app.partner_auth_challenge (nonce_hash, purpose, user_id) VALUES (decode(repeat('7a', 32), 'hex'), 'sign_in', '00000000-0000-0000-0000-2000000000b1');
+INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, revoked_at, revoked_by)
+VALUES ('00000000-0000-0000-0000-1000000000a3', decode(repeat('7b', 32), 'hex'), decode(repeat('7c', 77), 'hex'), -7, now(), '00000000-0000-0000-0000-2000000000b1');
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT is(pg_temp.win_probe('00000000-0000-0000-0000-2000000000b1', :'c_mx'::uuid), 'visible sessions=0 credentials=0; setnull=0; deleted sessions=0 tokens=0 challenges=0 credentials=0',
+  'PA-4c (iii): a partner-bound private_definer with the delete_my_data GUC planted at another user sees none of their sessions or credentials and deletes / redacts nothing in the four tables');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT pa4c_iii_bound;
+SAVEPOINT pa4c_iii_unbound;
+INSERT INTO app.partner_enrolment_token (user_id, purpose, issued_by, token_hash, expires_at)
+VALUES ('00000000-0000-0000-0000-2000000000b1', 'recover', NULL, repeat('7', 64), now() + interval '1 hour');
+INSERT INTO app.partner_auth_challenge (nonce_hash, purpose, user_id) VALUES (decode(repeat('7a', 32), 'hex'), 'sign_in', '00000000-0000-0000-0000-2000000000b1');
+INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, revoked_at, revoked_by)
+VALUES ('00000000-0000-0000-0000-1000000000a3', decode(repeat('7b', 32), 'hex'), decode(repeat('7c', 77), 'hex'), -7, now(), '00000000-0000-0000-0000-2000000000b1');
+SET LOCAL ROLE private_definer;
+SELECT matches(pg_temp.win_probe('00000000-0000-0000-0000-2000000000b1', :'c_mx'::uuid), '^visible sessions=[1-9][0-9]* credentials=[1-9][0-9]*; setnull=1; deleted sessions=[1-9][0-9]* tokens=1 challenges=1 credentials=[1-9][0-9]*$',
+  'PA-4c (iii) control: the same statements with the same GUC and NO partner binding reach every row (the window is open: it is delete_my_data''s own shape), so the cell above is not vacuous');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT pa4c_iii_unbound;
 
 -- ============================================================================
 -- PA-4d: the guard trigger, one cell per row of its table (R4-L1, R5-L1), driven as the harness role (a role with every column privilege: the guard is what is under test)
