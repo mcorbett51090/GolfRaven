@@ -950,6 +950,8 @@ BEGIN
     END LOOP;
     EXECUTE format('ALTER TABLE %s DISABLE TRIGGER USER', t.rel);
     EXECUTE format('CREATE POLICY zz_sweep ON %s FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)', t.rel);
+    -- an earlier file may have revoked a privilege from the harness role for good (23_offline_totp_seed_edge.sql revokes INSERT on app.offline_code_step and commits): the owner gives it back to itself, inside this rolled-back savepoint
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO CURRENT_USER', t.rel);
     EXECUTE pg_temp.sweep_insert_stmt(t.relid, t.rel, p_user) || ' ON CONFLICT DO NOTHING';
     GET DIAGNOSTICS v_got = ROW_COUNT;
     v_n := v_n + v_got;
