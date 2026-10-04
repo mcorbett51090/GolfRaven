@@ -797,6 +797,17 @@ Open items that a design document cannot resolve (for the gate and the build):
 - **U2: the re-verifier's host, login and runbook** (S1.6). Specified in 4.4: login `partner_audit`, two definers, a second runtime that is neither the Edge nor CI. **Belongs to the S1.6 gate.** Not needed if the S0 spike makes the database the verifier.
 - **U3: the S0 spike results** (database-side signature verification, shop-iPad passkey sync, browser PBKDF2 time) can change sections 3.2, 4.4 and 11. **Per gate round 2 they come back as a delta gate on sections 3.2, 4.4 and 11 only**, not a re-gate of the document.
 
+Gate round 5 (PASS) items carried to the build. Each lands with its slice, and that slice's gate checks it:
+
+| ID | Item | Lands in |
+|---|---|---|
+| R5-L1 | Replace the `xmin` artefact check. `xmin` proves the row changed in this transaction, not that verification succeeded: a failed attempt's `failed_count` update passes it, and a write inside an `EXCEPTION` block or savepoint fails it. Make the PIN, TOTP and reauth verifiers `SECURITY DEFINER` functions owned by dedicated NOLOGIN roles (e.g. `partner_pin_verifier`, `partner_totp_verifier`). Only those roles hold column-level `UPDATE` on `pin_grant_until`, `aal`/`mfa_until` and `reauth_until`, and `private_definer` loses those columns. The guard keeps the immutability, monotonicity and now + N caps. Add a `UNIQUE` index on `otp_proof_gotrue_session_id`, as in 0041 | S1.3, S1.4 |
+| R5-L2 | `partner_sessions_revoke` takes a subject `(kind, id)` (user, org or credential), not a list. It derives the sessions inside the function and writes one `audit_log` row per call carrying the caller's binding. Specify the credential-revoke helper the same way: subject-based, callable only from the reach-checked definers, and keeping `partner_flag_enforce`'s two-flag rule | S1.1 |
+| R5-L3 | Check 9 for `partner_session_toucher` / `_issuer` / `_flagger` follows 0041's form. The migrating role may hold membership **without** SET or INHERIT, because a PG16+ non-superuser CREATEROLE role keeps ADMIN on the roles it creates `[unverified — training knowledge]` | S1.1 |
+| R5-L4 | The owner roles need their own `TO <role>` SELECT policies under FORCE RLS: `toucher` on `partner_member`, `partner_scope` and `partner_credential`; `flagger` on `partner_session`. They also need USAGE on `app` and `private`. Each policy gets an allow-list row and a fixture line, and all of these go in the 4.3 privilege table | S1.1 |
+| R5-N1 | `partner_session_guard` is `SECURITY DEFINER` with `search_path = ''`. It is owned by a role that cannot `ALTER TABLE … DISABLE TRIGGER`. The owner of `partner_session` is none of the writer roles | S1.1 |
+| R5-N2 | The 32-bit `xmin` versus `xid8` comparison wraps mod 2^32. This is moot once R5-L1 removes the `xmin` check | S1.3, S1.4 |
+
 ## 14. What was verified in the authoring session, and how
 
 | Claim | How it was checked | Result |
