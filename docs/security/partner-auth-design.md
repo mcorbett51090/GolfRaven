@@ -1,0 +1,833 @@
+# Partner (staff) authentication and authorization: design, P5.1a-0
+
+Design only. No code and no migration is part of this change. It is the document the P5.1a security gate reads before anyone builds the staff path, and it settles the item the build plan leaves open: the staff-auth **mechanism** (plan §3.4 row "Staff auth", line 398; assumption A46, line 3247; FM-20, G-P1-05).
+
+- Revision 5 (gate round 4 response, section 1.2). Revision 4 was `ba6d5d9` (gate round 3), revision 3 was `d59c425` (gate round 2), revision 2 was `c657a56` (gate round 1); revision 1 was `568f483`. Base: `main` at `eb92ee9`. Every `path:line` below is at that commit unless it says otherwise.
+- "Plan" is the RavenGolf repo's `docs/golf-trails/02-build-plan.md` (linked from the root `README.md`). Plan line numbers are the ones read when this was written.
+- Related, read first: `docs/security/edge-role-design.md` (the Edge database role model; "edge doc" below) and `docs/security/p3-money-path-requirements.md` ("money doc"; in particular "What P5 must do (the staff verification endpoint)", line 3831).
+
+**How claims are marked.** Anything about a third party (Supabase, GoTrue, WebAuthn, iOS, SimpleWebAuthn, Deno) is `[unverified - training knowledge]` unless it carries `[verified 2026-10-04: <how>]`. Section 14 lists everything that was checked in the authoring session, and how. `[proposed]` marks a number or a name chosen here for the gate or the owner to challenge; it is not a fact about the repo.
+
+## 1. Decisions at a glance
+
+| # | Decision | Choice | Detail |
+|---|---|---|---|
+| D1 | Mechanism | `@simplewebauthn/server` in an Edge Function verifies passkeys; **opaque** random sessions live in Postgres. No JWT is minted, no new signing secret exists. Supabase Auth's own passkeys are rejected **for now** (revisit triggers in 3.3) | 3 |
+| D2 | Staff identity | A staff member is a normal Supabase Auth user (the FKs and `bind_actor` need `auth.users`). Email OTP is used only to prove the mailbox (invite, recovery, PIN or TOTP set-up), verified **server-side**, and its GoTrue session is closed after use. Partner authority never comes from a JWT claim or `user_metadata` | 6.1 |
+| D3 | Relying party | RP ID `partners.golfraven.<tld>` (the narrow host, not the parent domain), one exact origin, `userVerification: required`, `residentKey: required`, `attestation: none`. RP ID and origin are deploy-time configuration, fixed before the first enrolment. Needs **no outbound host** | 4.5, 5.1, 7 |
+| D4 | Sessions | 256-bit random token, SHA-256 at rest, bound to member + credential, idle and absolute timeouts per role, at most 3 live per member, revocable instantly | 4.1, 5.1 |
+| D5 | Lane | The partner lane is a **separate database role** `edge_partner` with no table privilege, its own binding kind `partner`, and `private.actor_uid()` returning NULL for it. Every partner definer begins with one shared `private.partner_authorize(...)`, which re-reads session, role, scope and assurance **on every call** | 4.2, 4.3 |
+| D6 | Minting | Sessions, challenges, enrolment and invite acceptance are written only by a dedicated role `edge_partner_minter` (the `edge_signin_minter` precedent, migration 0041), never by `edge_actor` or `edge_partner` | 4.4 |
+| D7 | Transport | `Authorization: Bearer gr_ps_...` header, token held **in memory only**. No cookie. Exact-origin CORS, a server-side Origin refusal, strict CSP | 4.6 |
+| D8 | Step-up PIN | 4 digits, per person, **one PIN per attest-class action** (plan §9.2). PBKDF2-SHA256 runs in the **browser**, the **pepper and the comparison run in the database**, with lockout and backoff | 6.3 |
+| D9 | Admin and operator | Passkey + TOTP. TOTP is our own, verified in the database; enrolment is gated and a confirmed TOTP can only be reset by a higher role | 6.4 |
+| D10 | Invites | Hashed token in a URL fragment, email compared **in the database**, 72 h, single use, explicit role arrays, one facility org = one facility scope | 6.1, 5.2 |
+| D11 | Revocation | Authority is re-read per call under row locks; triggers also kill sessions on update, delete and insert, so nothing can be revived | 6.5 |
+| D12 | PostgREST read surface | **The existing PostgREST read surface over partner data is revoked** from `authenticated` (views, `api.my_offers()`, the offer policy and the base tables) and replaced by Edge reads. Without this the passkey is bypassable by email OTP alone | 5.5 |
+| D13 | Credentials and recovery | A credential belongs to the **person**, not to an org. A second credential needs A2 and a fresh passkey assertion; a member who already has a credential never gets one from an invite or an email OTP. Recovery is its own manager action and its cross-org effect is stated | 6.1, 6.5 |
+| D14 | Offline | The design keeps the hooks (challenge purpose, TTL, voucher binding, no local PIN verifier) but builds nothing offline. WebAuthn assertions offline in an installed PWA stay `[unverified]` (A60) | 6.7 |
+
+### 1.1 Where this departs from the proposed direction
+
+| # | Departure | Why |
+|---|---|---|
+| X1 | The partner lane is a **new role plus a new binding kind** (`partner`), not "resolve, then `bind_actor(uid)`" and not a kind on `edge_actor` | `edge_actor` holds the whole player write surface and ~84 policy references to `private.actor_uid()` that ignore `kind` (section 2, E3). Only a separate role with no table privilege keeps a partner transaction out of it |
+| X2 | A dedicated **minter role** `edge_partner_minter` | A handler bug in any partner function must not be able to mint a session. Same shape and reasoning as 0041 |
+| X3 | PIN: PBKDF2 runs **in the browser** (not the Edge); the stored verifier is `HMAC(pepper, PBKDF2 output)` and the **compare runs in the database** | For a 4-digit secret a slow KDF buys almost nothing against a leaked verifier: 10,000 candidates at 600,000 rounds is about 54 minutes on one core (measured, section 14). What protects it is that the table is unreadable, the pepper is not in the table, and online guesses are capped in the database. Deriving in the browser also keeps the PIN itself out of the Edge |
+| X4 | **Revoke the PostgREST partner-lane read surface** (D12) | "The PWA never talks to PostgREST" is necessary but not sufficient: the same person's Supabase JWT still reads partner data today. The largest finding of the design |
+| X5 | Operator/admin TOTP is **ours, in the database**, not Supabase MFA | The partner session is not a GoTrue session, so GoTrue's `aal` cannot be attached to it |
+| X6 | Slice plan: slice 1 is split in five and re-ordered (PIN, TOTP, then invites and enrolment); the player-lane half of the course QR (`marker-scan`) can run in parallel; the PWA is its own track | Section 12 |
+| X7 | The `facility org = one facility scope` invariant, a role-to-org-kind invariant and `partner_invite` additions | `partner_scope` is per **org**, not per member (G2); without the invariant "grant is a subset of the inviter's scope" has no precise meaning |
+| X8 | **FM-20 as written**: the PIN is asked **per attest-class action**, not per window (plan line 2181: "asked before each attest") | Revision 1 proposed a 90 s window and did not list it as a departure. Revision 2 follows the plan; a window is an owner decision (Q2) |
+| X9 | `offline_code_record_step_for_actor` loses its `edge_actor` EXECUTE in S1.1, not in S3. **The function and its atomic-replay proofs stay**; only the Edge wrapper and the cells that assert `edge_actor` can call it change | It is staff authority under a plain user binding (G7). The money doc depends on the replay property (12 parallel calls give exactly one `recorded`) |
+
+### 1.2 Gate round responses
+
+**Gate round 1 response**
+
+Round 1 (against `568f483`): 4 HIGH, 6 MEDIUM, 12 LOW, 7 NIT. The NITs are numbered N1 to N7 in the order the gate listed them. Claims in the findings that touch the repository were re-read before acting (section 14).
+
+| ID | Finding | Fixed in |
+|---|---|---|
+| H1 | Partner binding is accepted by the user lane (`actor_uid()` ignores `kind`) | D5; 2 (E3, G7); 4.2; 4.3; 5.3; 5.4; PA-3; PA-3b |
+| H2 | Adding a credential has no step-up class; shared-iPad persistence | 6.3 (A2 and `reauth`); 6.5; 5.1 (server-derived label); PA-21; PA-22 |
+| H3 | An invite to a second org mints a credential on an existing member; recovery contradicts the 409 | 6.1 (branches N and E); 6.5 (recovery); 5.1 (`partner_enrolment_token`); PA-23 |
+| H4 | TOTP reduces to the passkey (deterministic seed, repeatable enrol) | 6.4; 5.1 (`partner_totp`); PA-20, PA-24 |
+| M1 | D12 list incomplete (`api.my_offers()`, `api.offer` drafts) | 5.5; PA-6; S1.1 |
+| M2 | `aal` not enforced for A0 | 4.1; 6.3 (class table); PA-20 |
+| M3 | Staff authority already exists under a `user` binding | 5.4 item 11; check 14 (clause b); X9; S1.1 |
+| M4 | The minter has no equivalent of 0041's half (b); missing minter definers; admin bootstrap | 4.4; 5.1 (`partner_rp_config`, `partner_enrolment_token`); 6.4 (admin bootstrap); S0 spike; S1.1; S1.6 |
+| M5 | Undeclared FM-20 departure; shared-device PIN statement overstated | X8; 6.3; 4.1 |
+| M6 | Global pre-auth bucket is a lockout lever | 8 |
+| L1 | Failure counters roll back on RAISE | 5.3; 5.4 item 12; 6.3; PA-18; PA-14 |
+| L2 | Accept-flow order closes the GoTrue session too early | 6.1 step 2 |
+| L3 | Revocation gaps (DELETE, re-INSERT, TOCTOU) | 5.2 (triggers); 4.3 (locks, VOLATILE); PA-4 |
+| L4 | The `token_hash` CHECK breaks fixtures in `helpers.sql` | 5.2; 5.5; S1.1 |
+| L5 | Slice order: invites need A2 and A3 first | 12 (re-ordered); `partner_authorize` fails closed |
+| L6 | CSRF and CORS: loose content-type, no Origin refusal, methods | 4.6; PA-10 |
+| L7 | SimpleWebAuthn 14.0.3 behaviours | 7; 6.1; 6.2; PA-0a |
+| L8 | Synced passkeys on a shared iPad | 11 (R-P3); S0 |
+| L9 | Self-attest is per account, not per person | 6.5 |
+| L10 | Revoke base-table SELECT too | 5.5 |
+| L11 | PIN deny-list; offline PIN; voucher binding | 6.3; 6.7 |
+| L12 | The 30 s token refresh defeats idle | 4.2 (keep-alive exemption) |
+| N1 | `{derived}` sent by client vs Edge derives | 6.3 (browser derives); R-P2 |
+| N2 | Role lists from `partner_role_rank` include `sponsor` | 5.2 (role-to-org-kind); 6.1 (explicit arrays) |
+| N3 | Check 14 satisfiable by a comment; S3's `offline_code_bound_staff` extension | 4.3; 5.4 item 5 |
+| N4 | A3 satisfying A2 for PIN-less members | 6.3 (class table) |
+| N5 | `getActorFromRequest` rejects `gr_ps_` before GoTrue | 4.2; PA-11 |
+| N6 | "Same HOTP primitive" needs parameters | 6.4 |
+| N7 | Proof of possession in the S1.2 contract or deferred | 4.6 (deferred, reserved) |
+
+**Gate round 2 response**
+
+Round 2 (against `c657a56`): PASS with conditions, all round-1 items verified fixed; 2 required MEDIUM (before S1.1), 8 LOW, 3 NIT, three rulings on open items. Every LOW is fixed in this revision; none is deferred to its slice.
+
+| ID | Finding | Fixed in |
+|---|---|---|
+| R2-M1 | The reach rule is vacuously true for a target with no membership (an admin) | 6.5 (reach rule, conditions 1, 3, 4); PA-25 |
+| R2-M2 | `FOR SHARE` under FORCE RLS locks nothing for `private_definer` | 4.3 (revised by R3-M1: session row only, `FOR NO KEY UPDATE`); 5.3; 5.4 item 2; PA-4; 14 (reproduced on PG 17.11) |
+| R2-L1 | Branch N bypasses the reach rule | 6.1 (cases a, b, c and the `register_first` rule); 4.4; PA-23 |
+| R2-L2 | Credential self-revoke has no class | 4.5; 6.3 (A2); 6.5; PA-22 |
+| R2-L3 | The post-bind assertion lacks grants | 4.2; 4.3 (EXECUTE list); 5.3; PA-13b |
+| R2-L4 | A new operator or admin can never enrol TOTP at `aal` 1 | 4.1; PA-28 |
+| R2-L5 | Branch N contradicts itself (membership written before the credential check) | 6.1 steps 2 and 3; PA-23 |
+| R2-L6 | Unbounded challenge inserts | 5.1 (stateless challenges); 4.4; 8; 9; PA-7 |
+| R2-L7 | S1.6 re-verifier spec inconsistent | 4.4 (what it reads and writes, who may call, where it runs); 12 (S1.6); PA in S1.6 |
+| R2-L8 | X9 over-deletes the recorder and its proofs | 1.1 (X9); 5.2 |
+| R2-N1 | `session/reauth` must assert the credential's owner is the session's user | 4.5; PA-27 |
+| R2-N2 | `bind_partner_session` must refuse when any binding exists | 4.2; PA-13b; PA-27 |
+| R2-N3 | The last-membership trigger must not delete an admin's TOTP | 5.2; PA-29 |
+| U1 | In-portal notice acceptable under three conditions, tracked | 13 (U1, Q7) |
+| U2 | Belongs to the S1.6 gate | 4.4; 13 (U2) |
+| U3 | S0 spike changes return as a delta gate on 3.2, 4.4, 11 | 13 (U3) |
+
+**Gate round 3 response**
+
+Round 3 (against `d59c425`): PASS with conditions, all round-2 items confirmed, the stateless-challenge design judged sound on replay, purpose and key custody. 2 MEDIUM, 3 LOW, 2 NIT, all fixed in this revision.
+
+| ID | Finding | Fixed in |
+|---|---|---|
+| R3-M1 | The `WITH CHECK (false)` lock policy on `partner_member` does not prevent updates (permissive policies are OR-ed with table-wide UPDATE and `pd_setnull_...`) | 4.3 (lock design replaced: session row only, authority-touch triggers); 5.2 (triggers, `partner_scope`); 5.4 item 2; PA-4; PA-4c; 14 (both repros) |
+| R3-M2 | Registration challenges are not bound to an OTP-proven acceptance | 4.4 (issuers, `register_first`); 4.5; 5.1 (HMAC binding); 5.2; 6.1 steps 2 and 4; PA-7b |
+| R3-L1 | Admin recovery is impossible (condition (1) applied to admins) | 6.5 (reach rule); PA-25 |
+| R3-L2 | `partner_reverify_flag` is a mass-lockout lever; `partner_audit` needs `USAGE` | 4.4 (what it writes, who may call); 12 (S1.6) |
+| R3-L3 | The first session after registration | 4.4 (`register_first`); 5.1 (`mint_kind`); 6.1 step 4; PA-7b |
+| R3-N1 | HMAC message encoding | 5.1 (the HMAC message, constant-time comparison); PA-7 |
+| R3-N2 | `facility_programme` changes take effect from the next call | 4.3 |
+
+**Gate round 4 response**
+
+Round 4 (against `ba6d5d9`): PASS with one condition; R3-M1, R3-M2 and every R3 LOW and NIT confirmed fixed, the register-mint gap accepted. 1 MEDIUM, 2 LOW, all fixed in this revision.
+
+| ID | Finding | Fixed in |
+|---|---|---|
+| R4-M1 | The cross-session window policy breaks the HARD RULE: a planted GUC persists into a later definer call | 4.3 ("Who may write `partner_session`": three dedicated roles, no GUC window, the eight writers, the S1.6 flag and enforcement without a GUC); 5.2; 5.3; 5.4 item 5; PA-4c (planted GUC, re-run on every S1.5 policy); 14 (repro) |
+| R4-L1 | A partner-bound definer can change any column of its own session row | 4.3 (guard trigger, narrowed column grants, artefact mechanism, column table); 5.1 (`last_ok_at`, `otp_proof_gotrue_session_id`); PA-4d |
+| R4-L2 | `register_first` must make every DB-side check a create ceremony allows | 4.4 (`register_first` checks, re-verifier skip); 11 (R-P1 states there is no cryptographic check); PA-7c |
+
+## 2. What the repository already gives us, and what it does not
+
+Facts the design leans on. Each was read at `eb92ee9`.
+
+| # | Fact | Where |
+|---|---|---|
+| E1 | Every Edge transaction is `SET LOCAL ROLE edge_actor`, `edge_system` or `edge_signin_minter` over one `edge_gateway` pool. Kinds are `actor`, `system`, `delegate`, `signin_mint`. The actor kind binds `private.bind_actor(uid)` and asserts `private.actor_uid()` equals the expected uid | `supabase/functions/_shared/privileged.ts:292-377`; edge doc sections 2-3 |
+| E2 | Player identity is GoTrue `auth.getUser(token)` with the anon key. Nothing else is an identity source | `privileged.ts:422-441` |
+| E3 | **`private.actor_uid()` returns the bound uid whatever the binding `kind`** (it selects on pid and transaction only). The `edge_actor` policies of 0031 and 0032 reference it 84 times, and several user-lane definers check only `actor_uid()` and never the kind (`hit_actor_rate_limit`, `device_link_signals_for_actor`, `hold_play_rewards_for_actor`, `lock_own_reward_for_actor`). Only some definers refuse a non-`user` kind (`IF v_kind <> 'user'`). `actor_binding.kind` is `CHECK (kind IN ('user','system_delegate'))` | `supabase/migrations/0030_edge_role_core.sql:122,252-259,326,375,397,432`; `0031_edge_role_policies.sql`, `0032_edge_role_hardening.sql`; `0033_edge_role_pr2.sql:90,156`; `0045_offline_totp_seed.sql:214,266` |
+| E4 | A fully compromised runtime can `bind_actor(<any uid>)` (residual R6). This design keeps the partner lane narrower than R6 where it can, and says where it cannot | edge doc section 3 "Honest limit", section 8 R6 |
+| E5 | `partner_member(user_id, org_id, role, revoked_at, invited_by)` has PK `(user_id, org_id)`. `partner_scope(org_id, facility_id?, trail_id?, sponsorship_id?)` hangs off the **org**, not the member | `0004_partner_programme.sql:20-46` |
+| E6 | `private.has_facility_scope(uid, facility, roles)` reads non-revoked member + scope, lets admin through, and lets an `operator` reach a facility through **any** `facility_programme` row of its trail (no filter on `participation`). `partner_role_rank`: staff 1, manager 2, operator 3, **sponsor 3** | `0007_private_helpers.sql:75-105,194` |
+| E7 | Self-attestation has a database twin: a CHECK on `attestation`, and `22023 self_attestation_refused` in the offline-code recorder. Both compare **accounts** | `0004_partner_programme.sql:154`; `0045_offline_totp_seed.sql:283` |
+| E8 | Every `api.` view is granted SELECT to `authenticated`, and the partner-lane ones filter on `auth.uid()`; `api.my_offers()` is EXECUTE-able by `authenticated` and unmasks offer columns for scoped callers; the base policy `offer_read` shows non-live offers to scoped members | `0010_api_views.sql:44-60,130-200`, grant loop `:213`; `0009_grants_revokes.sql:15-31`; `0011_rpc_functions.sql:59-94`; `0008_rls_policies.sql:303-309` |
+| E9 | Registries fail closed. `delete_my_data` raises on an unclassified FK to `auth.users`; `export_my_data` needs a `pii_export_policy` row; every function needs a `function_inventory` row; every `private_definer` policy needs an allow-list row and a fixture line | `0014_hardening.sql:37-96`; `0045:380-396,573-640`; edge doc section 6 |
+| E10 | Precedent for a narrow mint role | `0041_signin_proof_hardening.sql:61-103`; edge doc section 12.1.1 |
+| E11 | `private.hit_actor_rate_limit` never raises over the cap and builds `<uid>:<key>` in the database; `hit_system_rate_limit` builds `system:<key>`; the failure-counter pattern is `reserve_signin_otp_attempt` / `release_signin_otp_attempt`. A definer that RAISEs rolls back its own counter writes (the lesson of 0020) | `0030:320`; `privileged.ts:398`; `0035:561,585`; `0020_rate_limit_no_raise.sql` |
+| E12 | The staff offline-code requirement: verify **inside the database**, no seed reaches the staff runtime; and the HARD RULE that a GUC-keyed policy is not an ownership boundary against `edge_actor` | money doc lines 3831-3845 |
+| E13 | `retention-purge` runs bounded definers, one try-lock per step, with `EXECUTE` granted to `edge_system` by owner decision | `privileged.ts:2395`; `0040_retention_hygiene_purges.sql`; edge doc sections 14.4, 14.8 |
+| E14 | `app.audit_log` is insert-only (a trigger blocks update/delete except one redaction exception); nothing purges it | `0006_offers_booking_misc.sql:142-153` |
+| E15 | An `npm:` import must be an exact entry in `supabase/functions/deno.json`, in `tools/service-role-lint/pinned-import-targets.json`, and in `supabase/tests/deno.lock` with a sha512 integrity; CI re-checks with `deno cache --frozen` | `tools/service-role-lint/src/config.ts:337-380`; `.github/workflows/ci.yml:395,451,509` |
+| E16 | `_shared/http.ts` has **no CORS handling**, and `readJsonBody` accepts any content type that merely *contains* `application/json` | `supabase/functions/_shared/http.ts:103-106` |
+| E17 | Admin and demo status are tables read by definers (`app.admin_user`, `app.app_review_demo_account`; `private.is_admin`, `is_demo_account`) | `0007_private_helpers.sql:18-47` |
+| E18 | `partner_invite` has `token_hash text NOT NULL UNIQUE`, `invitee_email`, `expires_at`, `accepted_at`. It has no `revoked_at`, no `accepted_by`, no attempt counter. Test fixtures insert non-hex token hashes (`'th-a-invites-y'`) | `0004_partner_programme.sql:48-60`; `supabase/tests/helpers.sql:261-265` |
+| E19 | OTP verification already runs server-side with the anon key, and the session it creates is closed **after** the mint on every path | `privileged.ts:3160-3215` |
+| E20 | The held-review resolvers exist, are `service_role`-only, and say "the caller must authenticate the admin" | `0027_rewards_activation.sql:485-499`; money doc line 2132; edge doc line 163 |
+| E21 | `offline_code_record_step_for_actor` is EXECUTE-able by `edge_actor` and wrapped by `Repo#offlineCode.recordStep`; `offline_code_bound_staff()` evaluates partner membership | `0045:171-191,310`; `privileged.ts:3268-3280` |
+| E22 | The mobile app uses only the Auth client (`@supabase/auth-js`); it makes no PostgREST read | `apps/mobile/src/auth/supabase-auth.ts:1-4` and a repo-wide search `[verified 2026-10-04: git grep for rest/v1, .from(", my_offers, api/my_ in apps and packages: no PostgREST use]` |
+
+### 2.1 Gaps found while reading (each is closed in this design)
+
+| # | Gap | Consequence | Closed by |
+|---|---|---|---|
+| G1 | **A person's Supabase JWT reads partner data directly through PostgREST** (E8): `api.staff_shift_log` (player handles), `api.staff_activity`, `api.facility_programme`, `api.facility_qr`, `api.marker_code_batch`, `api.special_marker_stock[_movement]`, `api.sponsorship`, `api.operator_rollup`, `api.sponsor_rollup`, `api.my_partner_{org,member,scope,invite}`, the unmasked columns of `api.offer` and `api.my_offers()`, and draft offers through `offer_read` | Whoever can obtain a Supabase session for a staff member's email (email OTP, or the player app on the same account) reads these with **no passkey**. The plan's "Staff / manager: passkey session" row (line 445) names "RLS helper `private.has_facility_scope()`" as the enforcement, which only works on a JWT; that reads as assuming the minted-JWT variant (an inference) | D12, 5.5 |
+| G2 | `partner_scope` is per org. A member of an org holds **every** scope row of the org, whatever the invite's `facility_id` says | "Grant is a subset of the inviter's own scope" (plan line 839) is under-defined | The one-facility-per-facility-org invariant, 5.2 |
+| G3 | The operator's reach to a facility is "any `facility_programme` row for its trail", including `declined` and `left` | An operator can invite staff into a facility that has left the programme | Raised for the gate in 6.1; a `participation` filter is a one-line change |
+| G4 | `partner_invite` rows are never purged (they carry `invitee_email`) | Unbounded retention of staff email addresses | Section 9 |
+| G5 | No CORS handling; a content-type check that a simple cross-site request can satisfy | A browser PWA cannot call any function; and without a server-side Origin refusal, pre-auth endpoints are reachable by simple requests | S1.2, 4.6 |
+| G6 | `api.my_partner_invite` returns `token_hash` and `invitee_email` of every pending invite to **every member of the org, staff included** | Mild, but staff-visible PII | Revoked with G1 |
+| G7 | **Staff authority exists under a plain `user` binding** (E21) and, more generally, the lane boundary does not exist: a transaction bound under any kind has the player lane's whole write surface (E3) | A partner design that adds a binding kind on `edge_actor` ships green and separates nothing | D5 (new role), 4.3, X9 |
+
+## 3. The mechanism decision
+
+The plan's two options, plus the hybrid it hints at (SimpleWebAuthn that mints a project JWT), against the proposed direction (C).
+
+### 3.1 Comparison
+
+| Criterion | A: Supabase Auth passkeys | B: SimpleWebAuthn, mints a project JWT | C (proposed): SimpleWebAuthn, opaque DB sessions |
+|---|---|---|---|
+| Status | The Supabase docs page says "Passkey support is experimental ... may change without notice" and needs an opt-in in the client `[verified 2026-10-04: docs page read from the supabase/supabase repo, master]` | Library mature (v14.0.3 on the registry `[verified: registry query]`); the minting is custom | Same library; the session layer is custom |
+| User verification **required** | The handlers call `BeginDiscoverableLogin()` and `BeginRegistration(user, WithExclusions(...))` with no UV or resident-key option, and the docs show no setting `[verified: three handler files read from supabase/auth master; whether the hosted product differs is unverified]` | Ours: `required` (library output and a software-authenticator test, section 14) | Same as B |
+| Proof that a session came from a passkey | A passkey login ends in the ordinary `issueRefreshToken(... PasskeyLogin ...)` `[verified: source]`. Whether the JWT's `amr` records it is `[unverified - training knowledge]` | The token exists only after verification | The session row exists only after verification |
+| New secret in an Edge function | None | **The project JWT signing secret**: a function holding it can mint a token for any uid and any `role` claim, contradicting the repo's lint posture (the service key appears in exactly two places, `privileged.ts:445-448`). Asymmetric signing keys that a function cannot use are `[unverified]` | None. The token is random; the database stores a hash |
+| Revocation | GoTrue session and JWT lifetimes | A minted JWT is valid until `exp` unless every function also checks the database | Instant: checked in the database on every call |
+| Clone detection | The handler stores the sign count; `CloneWarning` is referenced in none of the three files read `[verified: grep]` | Ours | Ours |
+| Per-role session length (admin short) | Global GoTrue settings `[unverified]` | Ours via `exp` | Ours |
+| Offline countersign (plan §7.6 case 2, A60) | No such API | Ours | Ours |
+| Passkey-gated reads through PostgREST | No (the JWT is reachable by email OTP) | Yes, if the JWT is only ever minted after a passkey | **No, by design**: partner reads move to Edge reads and the PostgREST surface is revoked (D12) |
+| Supply chain | None | 25 npm packages + the signing secret | 25 npm packages |
+| Build cost | Lowest | Highest | Middle |
+
+### 3.2 Reading the table honestly
+
+- **B's one real advantage is the read path.** A passkey-minted Supabase JWT is the only variant under which the plan's `has_facility_scope(auth.uid())` views stay usable by the portal. C gives that up on purpose and pays for it with Edge reads (5.5). The price of B is a secret that can mint anything, in the same process as the handlers, and an authority that outlives revocation by the JWT lifetime. This repo has spent three PRs moving the other way (edge doc sections 12-14).
+- **A is the cheapest and probably the right end state**, and it is not available for P5.1a: it is experimental, it cannot be shown to enforce UV, and it cannot show a downstream function that a session came from a passkey. Credentials cannot be migrated later (private keys do not move), but a re-enrolment under the same RP ID is one passkey tap per person.
+- **C's weak point is that the Edge runtime is the verifier.** Whether the database can check an ECDSA or RSA signature itself is `[unverified]`: no extension on a hosted Postgres does it, but RS256 is a modular exponentiation and ES256 is scalar multiplication on P-256, both expressible in PL/pgSQL `numeric` arithmetic with unmeasured performance. That is an S0 spike (4.4). If it works, the passkey half of R-P1 closes; if not, the database checks everything except the signature and a separate re-verifier checks that (4.4, S1.6).
+
+### 3.3 Verdict and revisit triggers
+
+C, as the owner proposed. Revisit A when **all** hold: Supabase passkeys are GA; the project can force UV required; a function can prove the method of a session (an `amr` entry or an `auth.sessions` column) and a short admin session can be enforced; and the player app wants passkeys anyway. The migration then re-enrols every staff member once; the tables in section 5 stay (sessions, PIN, TOTP are independent of where the passkey is verified).
+
+## 4. Architecture
+
+### 4.1 Principals, factors and session policy
+
+| Principal | Enrolment | Sign-in | Step-up | Session idle / absolute `[proposed]` | Concurrent |
+|---|---|---|---|---|---|
+| Staff | invite, email OTP, passkey, PIN | passkey (UV) | PIN per action (A1) | 30 min / 8 h | 3 |
+| Manager | same | same | PIN per action (A1); PIN **and** a passkey assertion at most 5 min old (A2) | 30 min / 8 h | 3 |
+| Operator | invite from an admin, OTP, passkey, TOTP | passkey, then TOTP (`aal` 2) | TOTP at most 5 min old (A3) | 15 min / 4 h | 3 |
+| Admin | a row in `app.admin_user` written by ops (E17), then a single-use enrolment token (6.4), passkey, TOTP | `aal` 2 | TOTP at most 5 min old for every A3 action | 10 min / 1 h | 2 |
+| Sponsor | none before P6. The binder refuses a member whose only active role is `sponsor` | - | - | - | - |
+| App-review demo account | refused by the binder (plan §4.7.7: any partner route is 403) | - | - | - | - |
+
+**The assurance a session needs is the highest role the person holds** (admin > operator > manager or staff), recomputed on every call, and it gates **every class including A0** (6.3). An `aal` 1 session of an operator or admin is refused every call except sign-out, lock, `GET session` (which reports the required assurance), `session/step-up/totp`, **and, only while the person has no confirmed TOTP**, `totp/enrol`, `totp/confirm`, `session/otp-proof/*` and `session/reauth` (without these a new operator or admin could never enrol, because enrolment itself needs the OTP proof or the enrolment window, 6.4). The enrolment gates of 6.4 still apply to them, so a passkey alone never reads another facility's shift log (plan §3.6 lines 446-448). A person promoted to operator keeps an old session, but it is usable for nothing except the TOTP step-up that raises it to `aal` 2.
+
+**What the factors prove on a shared device.** On a shared shop iPad the user verification of a passkey is the **device passcode** (or a biometric enrolled on that device), so a session for *any* member whose passkey is on the iPad needs only the passcode. The passkey therefore proves the device, not the person. **The PIN is the only per-person factor** (plan §9.2, FM-20), which is why every evidence-minting action asks for it (A1) and why adding a credential asks for it (A2).
+
+Why these numbers (all `[proposed]`): a pro-shop shift is about 8 hours; re-authentication is one passkey tap; staff sessions must outlast a quiet hour at the till. Admin and operator sessions run on personal laptops. The owner should tune them from pilot telemetry (Q2).
+
+### 4.2 The request path
+
+```
+PWA --Authorization: Bearer gr_ps_<43 chars>--> Edge function (verify_jwt = false)
+  1. Origin check, CORS, strict media type, strict zod body, 64 KB cap (4.6)
+  2. sha256(token) in the Edge. The raw token is never logged, never stored, never sent to the database
+  3. openScopedTx("partner", partnerBind(hash))
+       SET LOCAL ROLE edge_partner; timeouts;
+       select private.bind_partner_session(hash)   -- refuses if ANY binding already exists in this
+                                                   -- transaction; binds kind='partner', session_id
+       assertion: current_user = 'edge_partner', not SUPERUSER or BYPASSRLS,
+                  private.partner_binding_kind() = 'partner'
+  4. handler op -> private.<action>_for_partner(...)    (a named definer, never a table statement)
+       first statement: private.partner_authorize(facility, trail, roles[], class)
+  5. write + audit in the same transaction; response `cache-control: no-store`
+```
+
+**What the post-bind assertion is worth.** Revision 1 compared two values the database itself returned, which can never fail. The Edge assertion now checks that the transaction runs as `edge_partner` (so no `edge_actor` privilege exists) and that `private.partner_binding_kind()` is `'partner'` (an `edge_partner`-executable helper, 4.3). It does **not** call `private.actor_uid()`: that function is granted to `edge_actor` only (`0030:568`) and is not granted here. The property "the user lane sees no actor" is enforced where it can be: `bind_partner_session` itself checks, from the binding row it just wrote, that the row's kind is `partner` (which is exactly the condition under which `actor_uid()` returns NULL), and PA-3 proves `actor_uid()` is NULL under a partner binding by calling it as `edge_actor`. `bind_partner_session` also **refuses when any binding already exists in the transaction**, as `bind_actor_internal` does (0030, `42501`), so a transaction cannot be re-bound.
+
+`bind_partner_session` accepts a session only if **all** hold: the hash exists; `revoked_at` is null; idle and absolute expiry have not passed; the bound credential exists and is not revoked; the user is not a demo account; the user holds at least one non-revoked membership whose role is not `sponsor`, or is in `app.admin_user`. Every failure raises the **same** SQLSTATE and message and the handler answers one constant `401` body, so there is no oracle between unknown, expired and revoked.
+
+**Idle is extended only by user-initiated calls.** `last_seen_at` advances at most once a minute and **only on routes the server classifies as interactive**. Routes the server marks keep-alive-exempt (the course-QR token refresh that runs every 30 s while a sale screen is shown, `GET session` polling) never advance it. The classification is server-side, by route, never a client flag. The refresh route is class A0, bound to a nonce that an A1 mint created, and cannot create new authority (S2b specifies it).
+
+`openScopedTx` needs a small extension (S1.2): today an actor kind must know the expected uid before it binds (`privileged.ts:349`). The partner bind returns no uid to the handler's authority: the handler never supplies one. `getActorFromRequest` (`privileged.ts:422`) must **reject** a bearer that starts `gr_ps_` or `gr_inv_` before sending it to GoTrue, so a partner token is never forwarded to a third party (PA-11).
+
+### 4.3 The lane, the binding and the one authorization seam
+
+**The lane is a role.** A new role `edge_partner`: `NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION`, a member of nothing, `edge_gateway` its only member `WITH INHERIT FALSE, SET TRUE` (the 0030/0041 shape), `USAGE` on schema `private`, **no privilege on any table, sequence or schema `app`**, and `EXECUTE` on exactly: `bind_partner_session`, the read-only helpers `partner_binding_kind()` and `partner_binding()`, the `_for_partner` definers and the partner rate-limit twin `hit_partner_rate_limit` (the same list as 5.3, and what check 12 asserts, no more). It has no `EXECUTE` on `bind_actor`, on `private.actor_uid()`, on any user-lane definer, or on any `edge_actor` function. Because every `edge_actor` policy is `TO edge_actor`, a transaction running as `edge_partner` meets none of them.
+
+**Defence in depth, because `edge_gateway` can `SET ROLE` to any edge role** (the "KNOWN LIMIT" of 0041): `private.actor_uid()` is redefined (same owner, ACL and signature) to return NULL when the binding's `kind = 'partner'`. A partner binding is therefore invisible to every `edge_actor` policy and every user-lane definer, including the four that check only `actor_uid()` (E3). Partner definers read the binding through a new `private.partner_binding()`, not `actor_uid()`.
+
+**The binding.** `private.actor_binding.kind` gains `'partner'`, and the table gains a nullable `session_id`. Only `bind_partner_session` can write a `partner` row (it is not reachable through `bind_actor_internal`'s existing callers). Both directions are tested (PA-3): a `partner` binding is refused or invisible everywhere in the user lane, and a `user` binding is refused by every `_for_partner` definer.
+
+**`private.partner_authorize(p_facility_id, p_trail_id, p_roles, p_class)`** is `SECURITY DEFINER`, **VOLATILE**, `search_path = ''`, EXECUTE for **nobody** (called only from sibling definers, the `offline_seed_derive` shape). In order it:
+
+1. requires a `partner` binding in this transaction;
+2. **locks the session row first** (`FOR SHARE`; `FOR NO KEY UPDATE` when this call will write the row, which is every call that consumes a PIN grant or advances `last_seen_at`, because two `FOR SHARE` holders that both then UPDATE the row deadlock) and checks it is live now (idle, absolute, not revoked, credential not revoked);
+3. re-reads role and scope through `has_facility_scope` / `has_trail_scope` with an **explicit role array** (never `partner_role_rank`, whose `sponsor` ties `operator` at 3), with the session row already locked, so a concurrent revoke, scope change or admin change either waits for this transaction (its trigger cannot touch the locked session) or is seen by it (no check-then-act gap; the mechanism is below);
+4. requires the session's `aal` to meet the person's required assurance **for every class** (4.1), and then the class prerequisite (6.3), consuming any single-use PIN grant in this same transaction;
+5. fails **closed** on a class whose prerequisite is not implemented yet (S1.1 ships `partner_authorize` with A2 and A3 refusing everything until S1.3 and S1.4 enable them; no interim relaxation is allowed, PA-4b);
+6. returns the member's uid.
+
+Every refusal is `42501`, which the handler maps to `403` (or `404` where the plan's matrix says a foreign id must not be probeable).
+
+**How the locks work (gate rounds 2 and 3).** Row locks (`FOR SHARE`, `FOR NO KEY UPDATE`) need UPDATE privilege on the table and apply the **UPDATE policy's USING clause** under FORCE RLS, so with no matching policy `SELECT ... FOR SHARE` returns **zero rows without an error** and `EXISTS (... FOR SHARE)` is false `[verified 2026-10-04: reproduced by the author on PostgreSQL 17.11, section 14]`.
+
+Revision 3 answered that with `WITH CHECK (false)` lock policies on `partner_member` and `partner_scope`. **That was wrong (gate round 3).** Permissive policies are OR-ed, and `private_definer` already holds table-wide UPDATE (`0016:341`) and the permissive `pd_setnull_partner_member_invited_by` policy, `USING (invited_by = <GUC>) WITH CHECK (invited_by IS NULL)` (`0016:255`). The lock policy's `USING` makes a row visible to UPDATE, and the *other* policy's `WITH CHECK` then passes any update that leaves `invited_by` NULL, so `UPDATE ... SET revoked_at = NULL, role = 'manager', invited_by = NULL` **succeeded** and un-revoked and promoted a member. `[verified 2026-10-04: reproduced by the author on PG 17.11 with both policies present, section 14]` A policy added to make a lock possible must therefore never be a policy on a table that carries authority.
+
+**Adopted design: serialise through the session row only.** No lock policy exists on `partner_member`, `partner_scope` or `admin_user`.
+
+- `partner_authorize` locks **only the actor's session row** (`FOR SHARE`; `FOR NO KEY UPDATE` when the call writes it), **before** it reads membership or scope. The policy this needs is on `partner_session`: `pd_partner_session_action`, `USING (id = private.partner_binding_session())` and the same `WITH CHECK`, which also lets the action write `last_seen_at`, consume a PIN grant and record its own verification results. **That policy lets a partner-bound definer UPDATE any column of its own session row, so a trigger and column grants narrow it (R4-L1, below).**
+- **Every change to authority already touches that user's sessions**, in the same transaction as the change, by trigger (5.2): any `partner_member` update of `revoked_at` or `role`, delete (an org-delete cascade included) or insert; any `admin_user` insert or delete; and, new in this revision, any `partner_scope` update or delete, which **touches** (does not revoke) the sessions of the org's members by setting `authority_touched_at`. That session UPDATE **waits** for an in-flight action's lock on the session row. So a revoker's transaction cannot commit while an action that relied on the old authority is still open, and an action that starts after the revoker holds the session lock waits and then re-reads (READ COMMITTED, a fresh snapshot per statement) and sees the change. The membership, scope and `admin_user` tables are never locked by a partner call, so no policy on them is needed.
+- The triggers' UPDATE of other users' sessions runs as a **dedicated role, not as `private_definer`, and there is no GUC window anywhere** (gate round 4, R4-M1; the full account of who writes `partner_session` is below).
+- **`facility_programme` changes take effect from the next call (R3-N2).** The operator leg of `has_facility_scope` reads `facility_programme` (E6); a change there (a facility leaving a trail) is **not** serialised against an in-flight action, because it is not authority held by a member. An action already inside its transaction finishes; the next call sees it. The same is true of a role *rank* change that is not a `partner_member` write.
+- **The OR rule is a standing review item (R3-M1).** Every `private_definer` policy on `partner_member`, `partner_scope`, `partner_session` and `admin_user` is evaluated **OR-ed with every other policy and with the table-wide grants** (`0016:341`). S1.5's revoke and accept definers add their own policies on these tables; each must be reviewed against the **union**, not alone, and the pgTAP cell below is run with **all** existing `private_definer` policies installed.
+
+**Who may write `partner_session`, and why no GUC window (gate round 4, R4-M1).** Revision 4 let the triggers' cross-session UPDATE through a transaction-local GUC window. That breaks the money doc's HARD RULE (line 3833): `set_config` is open to every session, `edge_partner` included, and a transaction-local GUC **persists into a later `SECURITY DEFINER` call**, because the definer's `SET` pins only `search_path`. `[verified 2026-10-04: reproduced by the author on PG 17.11, section 14]` With an own-session policy `USING (id = own)` and a window policy `USING (window = 'on')` on `private_definer`, a definer `revoke_session(2)` returned 0 rows without the window and **1 row** (another user's session revoked) after the caller planted it; and an own-session `UPDATE ... SET user_id = 200, aal = 2` returned 1 row. Policies are **per role**, so the rule is: **`private_definer` never gets a wide `partner_session` policy; each wide writer is a different, dedicated role that nobody can become.**
+
+Three new roles, each `NOLOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS`, **a member of nothing and with no member** (the migrating role holds membership only for the length of the migration, to `ALTER FUNCTION ... OWNER`, then loses it; check 9 asserts no role is a member of them and none is reachable by `SET ROLE`), a policy `TO` that role keyed on **nothing settable** (`USING (true)`), and column-level grants that are the real limit:
+
+| Role (function owner) | Privileges on `partner_session` (and others) | Functions it owns |
+|---|---|---|
+| `partner_session_toucher` | `SELECT`, and `UPDATE (revoked_at, revoke_reason, authority_touched_at)`; `SELECT` on `partner_member`, `partner_scope`, `partner_credential`; `UPDATE (revoked_at, revoked_by, revoke_reason)` on `partner_credential` | the authority triggers (5.2); `private.partner_sessions_revoke(user_ids, reason)` (EXECUTE for `private_definer` only, called by the member-revoke, recover, revoke-all, credential-revoke and TOTP-reset definers **after** their own reach-rule and scope checks); `private.partner_flag_enforce(max)` (EXECUTE for `edge_system`) |
+| `partner_session_issuer` | `INSERT` and `SELECT` on `partner_session` (and on `partner_credential` for `register_first`) | the mint definers and `register_first`'s insert path; evicting the oldest session goes through `partner_sessions_revoke` |
+| `partner_session_flagger` | `UPDATE (flagged_at, flag_reason)` on `partner_session`, policy `USING (revoked_at IS NULL)` | `private.partner_reverify_flag` only |
+
+Every writer, so none is a surprise: (1) the **action** writes (own session, `private_definer`, `pd_partner_session_action`); (2) **mint and `register_first`** insert (`issuer`); (3) the **PIN, TOTP, reauth and OTP-proof definers** record their verification on the bound session (`private_definer`, own-session policy, plus the guard trigger below); (4) **sign-out** and own revoke (`private_definer`, own session, revoke direction only); (5) **member revoke, recover, org revoke-all, credential revoke and TOTP reset** (`toucher` helper); (6) the **authority triggers** (`toucher`); (7) the **S1.6 flag** (`flagger`); (8) the **system-lane enforcement** (`toucher`, below). None of the eight is keyed on a GUC.
+
+**R4-L1: the own-session policy must not let a definer rewrite its own row.** A BEFORE UPDATE guard trigger `partner_session_guard` on `partner_session` (SECURITY DEFINER, so it can read the artefacts) plus narrowed column grants (`private_definer` may UPDATE only `last_seen_at`, `aal`, `mfa_until`, `pin_grant_until`, `reauth_until`, `otp_proof_until`, `otp_proof_gotrue_session_id`, `revoked_at`, `revoke_reason`; the three roles above only their own columns) enforce the table below. The mechanism for the verification-gated columns is **a fact derived from rows the verifying definer must have written in the same transaction**, not a role per definer and **never a GUC**: the trigger checks the artefact row's `xmin` against the current transaction id `[unverified: the exact comparison, `xmin` against `pg_current_xact_id()`, is an implementation detail the PA cells prove]`. A definer that skips the verification cannot produce the artefact, so cannot set the column.
+
+| Column(s) | May change only when |
+|---|---|
+| `id`, `user_id`, `credential_id`, `token_hash`, `created_at`, `mint_*`, `mint_kind`, `enrolment_until` | **never** after insert (`enrolment_until` is set at insert by `register_first`) |
+| `expires_at` | it may **not increase** |
+| `revoked_at`, `revoke_reason` | null to non-null only; **never back to null** |
+| `aal` (1 to 2 only) and `mfa_until` | the user's `partner_totp` row is confirmed and its `last_step` was written **in this transaction**; `mfa_until` at most now + 5 min |
+| `pin_grant_until` (set) | the user's `partner_pin` row's `last_ok_at` was written in this transaction by a verified-correct PIN; at most now + 60 s. **Clearing to NULL** (consumption) is always allowed |
+| `reauth_until` | a `partner_auth_challenge` row with purpose `reauth` and `session_id` = this id was **inserted in this transaction**; at most now + 5 min |
+| `otp_proof_until` with `otp_proof_gotrue_session_id` | both change together, and that GoTrue session id exists in `auth.sessions` for this user and is fresh (the 0041 check); at most now + 10 min |
+| `last_seen_at` | monotone (never decreases) |
+| `authority_touched_at`, `flagged_at`, `flag_reason` | only by the owning role's column grant |
+
+**The S1.6 flag and enforcement, specified without a GUC.** The flag definer is owned by `partner_session_flagger` (above) and writes only `flagged_at` and `flag_reason`. `partner_flag_enforce(max)`, owned by `toucher` and executable by `edge_system`, revokes (via its own grants) only sessions where `flagged_at IS NOT NULL AND revoked_at IS NULL`, at most `max` (k per hour) per run; it revokes a credential only when **two sessions of that credential carry independent flags**; it writes `audit_log` and the operator alert. Its UPDATE is covered by the `toucher` policy and column grants, and the guard trigger still refuses an un-revoke.
+
+PA-4 asserts the serialisation is **effective**: with an action transaction open, a member revoke and a scope DELETE each issued from a second connection **wait** (seen in `pg_locks`) and complete only after the action commits. PA-4c is the must-fail cell for the OR rule: with every existing `private_definer` policy installed, an UPDATE of the bound user's `partner_member` row under a partner binding (including `SET revoked_at = NULL, role = 'manager', invited_by = NULL`) is refused or affects 0 rows.
+
+**Check 14: making "forgot to call it" fail the build** (`tools/db/verify-function-inventory.mjs` and its matrix twin), three clauses:
+
+- (a) every function named `*_for_partner` has `private.partner_authorize(` as its **first executable statement** (the body is parsed with comments and whitespace stripped, so a comment cannot satisfy it), **and** has one behavioural pgTAP cell: called under a partner binding with no scope it raises `42501`;
+- (b) **no `edge_actor`-executable definer outside that family evaluates partner scope**: its body must not call `has_facility_scope`, `has_trail_scope`, `has_sponsorship_scope`, `is_staff_or_manager_of_facility`, `is_manager_or_operator_of_facility`, `is_operator_of_facility`, `is_org_member`, `is_admin`, nor read `partner_member` or `partner_scope`. This is what finds `offline_code_record_step_for_actor` today (E21);
+- (c) no function outside the family reads `kind = 'partner'`, **except a named exception list in the checked-in fixture**. S3 needs a predicate like `offline_code_bound_staff()` for a partner-bound verify-and-record; it is added as a `partner_bound_*` function inside the family, or listed, never silently allowed.
+
+Each clause has a must-fail fixture (a planted function).
+
+### 4.4 The minter role
+
+A role `edge_partner_minter`, shaped exactly like `edge_signin_minter` (`0041:61-103`): `NOLOGIN NOINHERIT NOBYPASSRLS`, a member of nothing, `edge_gateway` its only member `WITH INHERIT FALSE, SET TRUE`, `USAGE` on schema `private`, `EXECUTE` on exactly the mint definers and nothing else (checked by check 12). `openScopedTx` gains a kind `"partner_mint"` that runs as that role and binds nothing; the privileged lint's `privileged-mint-scope` rule is generalised to allow that kind only inside `openScopedTx` and one named caller module.
+
+| Mint definer (EXECUTE: `edge_partner_minter` only) | What it does |
+|---|---|
+| `partner_challenge_issue_sign_in()` | **the only externally callable issuer**, and it accepts **only** `sign_in` (R3-M2): stateless, no row written (5.1): returns 32 random bytes plus a token `exp || HMAC` over the encoding of 5.1. There is no purpose or binding argument to choose |
+| *(register challenges)* | issued **only inside** `partner_invite_accept` and `partner_enrolment_token_accept`, after all their checks pass, and returned in the `accept/verify` response; the HMAC binds uid, invite-or-token id and acceptance time (5.1) |
+| *(reauth challenges)* | issued by a `_for_partner` definer (`partner_session_reauth_options_for_partner`) that takes the **session id from `partner_binding()`**, not from an argument |
+| *(no separate consume step)* | single use is enforced **at mint**: `partner_session_mint` (and the register and reauth definers) recompute the HMAC, check `exp`, and `INSERT` the used challenge's `sha256(nonce)` as a primary key, so a replay is a unique violation (5.1) |
+| `partner_credential_lookup(credential_id)` | public key, sign count, user id, algorithm; one uniform "not found" for unknown or revoked |
+| `partner_session_mint(...)` | see below |
+| `partner_invite_email_for_token(token_hash)` | returns the `invitee_email` of a live invite (or nothing) to `accept/start`; the Edge never returns it to the client (the response is constant) |
+| `partner_invite_accept(token_hash, verified_uid, gotrue_session_id)` | 6.1: checks credential and membership status **before** writing |
+| `partner_enrolment_token_*` (`email_for_token`, `accept`) | recovery and admin enrolment tokens (6.1, 6.4) |
+| `partner_credential_register_first(...)` | first credential of a person with **no** active credential **and, for an invite-bound enrolment, no active membership in any other org** (6.1, R2-L1); refuses otherwise. It **re-verifies** that the bound invite or token was accepted by that uid **less than 15 minutes ago**, and records on that invite or token that it has produced its credential (`registered_credential_id`): **one registration per acceptance**. **DB-side checks it must make (R4-L2)**, every one a create ceremony allows: `clientDataJSON` parses with `type = 'webauthn.create'` and `crossOrigin` not true; `origin` equals `partner_rp_config.origin` and `challenge` equals the nonce of the bound HMAC challenge; the attestation object's `fmt` is `'none'`; `authenticatorData` has `rpIdHash = sha256(partner_rp_config.rp_id)` and the **UP, UV and AT** flags set; the credential id and the COSE key **parse**, the key's algorithm is `-7` or `-257`, and the key and credential id equal the columns being stored. It **mints the first session in the same transaction** (R3-L3): the session row stores the create ceremony's evidence, `mint_kind = 'register'`, and the nonce is recorded once, so a later `partner_session_mint` on the same challenge would fail on the used nonce and is never needed |
+| `partner_session_otp_proof(token_hash, verified_uid, gotrue_session_id)` | sets `otp_proof_until` (10 min) on a live session of that uid, if the GoTrue session for that uid is fresh (the 0041 mechanism); needed for first PIN set, `must_change` and first TOTP enrolment (6.3, 6.4) |
+
+**`partner_session_mint` checks what the database can check.** The Edge verifies the signature (the database cannot, section 3.2); the definer additionally verifies, from the raw bytes it receives: that `clientDataJSON` parses, has `type = 'webauthn.get'`, `crossOrigin` not true, `origin` equal to the configured origin and `challenge` equal to the consumed challenge; that `authenticatorData` has `rpIdHash = sha256(configured rp_id)`, the UP and UV flags set, and a counter equal to the `new_sign_count` argument; that the challenge's HMAC verifies for this purpose and binding, `exp` has not passed and its `sha256(nonce)` is not already recorded; and that the credential's sign count advances by compare-and-set. The configured `rp_id` and origin come from `app.partner_rp_config` (5.1), a one-row table written by ops at deploy, so staging and production differ. A forged mint therefore has to fabricate consistent client data and authenticator data bound to a real, just-consumed challenge; the only thing it can still forge is the signature itself.
+
+**What the signature gap costs, and what is scheduled.** The raw assertion (authenticator data, client data JSON, signature; about 400 bytes) is kept on the session row for 30 days. Slice **S1.6** adds the **re-verifier**, specified as follows (R2-L7).
+
+- **What it reads.** The database already checked everything except the signature (4.4), so the job needs only, per mint: `mint_authenticator_data`, `mint_client_data_json`, `mint_signature`, and the credential's `public_key` and `alg`. (It needs neither the challenge bytes nor `partner_rp_config`: those were checked at mint.) It **deliberately skips `register`-kind sessions**: an `attestation: none` create ceremony carries no signature, so there is nothing to re-verify (R-P1). One definer, `private.partner_reverify_batch(after_id, limit)`, returns exactly those columns for sessions not yet re-verified, bounded.
+- **What it writes.** One narrow definer, `private.partner_reverify_flag(session_id, reason)`, **owned by `partner_session_flagger`** (4.3; not `private_definer`, and no GUC), sets `flagged_at` and `flag_reason` on a session. It revokes nothing itself. A **system lane step** (`private.partner_flag_enforce(max)`, owned by `partner_session_toucher`, executable by `edge_system`; specified in 4.3) in the existing hourly Edge scheduler (the `retention-purge` pattern, `edge_system`) acts on flags: it **revokes only the flagged session**, writes `audit_log` and raises the operator alert. **Revoking the credential needs a second independent flag** (a flag on a different session of the same credential, from a separate re-verification run) **or an operator's decision**, because `partner_reverify_flag` is otherwise a mass-lockout lever: a compromised or buggy job (or a flood of bad rows) could revoke every credential. The alert fires when flags exceed **k per hour** (`k = 3` `[proposed]`), and an automatic session revoke is capped at the same k per hour so a flood degrades to alerts, not an outage. Revoking from the Edge is the safe direction: a compromised runtime that refuses to revoke is the case the re-verifier exists to *detect*, and the flag and the alert still exist.
+- **Who may call them.** A new login `partner_audit` (LOGIN, NOINHERIT, no table or sequence privilege) with **`USAGE` on schema `private`** (it cannot call a function there without it) and `EXECUTE` on those **two** definers and **nothing else**; check 12 asserts exactly that pair of privileges (USAGE on `private`, EXECUTE on the two) and no other, the 0041 shape.
+- **Where it runs.** **Not in the Edge runtime** (a compromised runtime would otherwise vouch for itself) **and not in GitHub Actions**: a database credential in a CI workflow sits badly with P3 acceptance test (7) ("no `service_role` secret in any CI workflow"). The login is not `service_role` and can read only signature material, so it is arguably outside that test's letter, but the safe reading is to avoid it. Default: a scheduled job on a **second runtime that holds only that login** (any scheduler the owner already operates for the site; the repository chooses none). The choice of host and the reading of AT(7) go to the S1.6 gate (U2).
+- The S0 spike on database-side signature verification (3.2) may replace it for the passkey half.
+
+| Attacker | Result |
+|---|---|
+| A handler bug or injected statement in a partner (`edge_partner`) transaction | cannot mint (`42501`); cannot bind another member; has no table privilege; the user lane is invisible to it |
+| The same in an `edge_actor` or `edge_system` transaction | cannot mint; a `partner` binding is invisible to it (`actor_uid()` NULL) |
+| A statement that can also `SET ROLE` (`edge_gateway` holds SET on every edge role) | **can reach the minter role**, as it can reach `edge_actor` today (0041's "KNOWN LIMIT (R6)"). It can mint a session for any member with consistent fabricated assertion data, until the re-verifier flags it |
+| A fully compromised runtime (R6) | unchanged: it can already `bind_actor(<any uid>)` and act through every **user**-lane definer. For the **partner** lane it can mint a session for any member (above), and it sees each real token and PIN-equivalent that passes through it |
+
+### 4.5 API surface
+
+All under `/v1/partner/`. Three functions (one directory each, so the derived function inventory and the matrix stay small, plan §4.7.1a): `partner-session`, `partner-invites`, `partner-members`. Later slices add the plan's `partner-attest`, `partner-offers-redeem`, `course-qr`, `partner-entitlements-redeem`, `stock-admin`, `offers-admin`, `programme-config` and friends; each must carry matrix cells for every id it accepts.
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `POST session/options` | none (minter) | sign-in challenge (usernameless: `allowCredentials` empty, UV required) |
+| `POST session` | none (minter) | `{challengeId, assertion}` to `{token, expiresAt, aal}` |
+| `GET session` | session | who am I: roles, facility and trail scopes, required assurance, step-up state (all re-read) |
+| `DELETE session` | session | sign out (revokes this session) |
+| `POST session/reauth/options`, `POST session/reauth` | session | a fresh passkey assertion for this session: sets `reauth_until` (5 min). Challenge purpose `reauth`, bound to the session; the definer **asserts the assertion's credential belongs to the session's user** (a coworker's own passkey cannot satisfy it) |
+| `GET session/pin`, `POST session/step-up/pin` | session | salt and iteration count; `{derived}` (derived **in the browser**) sets a single-use `pin_grant_until` (60 s, or 30 s for A2) |
+| `POST session/step-up/totp` | session | `{code}` sets `aal` 2 and `mfa_until` |
+| `POST session/otp-proof/start`, `.../verify` | session | email OTP to the member's own address; sets `otp_proof_until` |
+| `POST session/lock` | session | clears every step-up grant now |
+| `POST invites` | session, A2 | create a `join` invite |
+| `GET invites`, `DELETE invites/{id}` | session | list / revoke, by definer, scoped |
+| `POST invites/accept/start` | none | `{token}`: sends the OTP to the address on the invite (server-side, anon key) |
+| `POST invites/accept/verify` | none (minter) | `{token, code}`: branch N (6.1) |
+| `POST invites/accept` | session, A2 | branch E: an existing member joins another org |
+| `POST enrolments/accept/start`, `.../verify` | none (minter) | recovery and admin enrolment tokens (6.1, 6.4) |
+| `POST credentials/options` | session, **A2 + `reauth`** | options for **adding a second credential**. There is **no enrolment-mode `credentials/options`**: an enrolling person's `register` challenge comes back in the `accept/verify` response (6.1) |
+| `POST credentials` | enrolment (minter, challenge from `accept/verify`) or session, **A2 + `reauth`** | register; the first one of a person mints their first session in the same transaction |
+| `GET`, `PATCH`, `DELETE credentials[/{id}]` | session | list (A0), edit the **display note** only (A0), **revoke: A2 for every revoke, one's own included** (a coworker with the passcode must not be able to revoke all of someone's credentials), another member's under the 6.5 reach rule |
+| `POST pin` | session | set or change own PIN (6.3) |
+| `POST members/{id}/pin-reset`, `POST members/{id}/recover`, `POST members/{id}/revoke` | session, A2 | 6.5 |
+| `POST orgs/{id}/sessions/revoke-all` | session, A2 | the "panic button" |
+| `POST totp/enrol`, `POST totp/confirm`, `POST members/{id}/totp-reset`, `POST admin/enrolments` | session | operator and admin (6.4) |
+
+Errors follow `_shared/http.ts` (`errorResponse(status, code, message)`); a bad session is always the same `401 unauthenticated`.
+
+### 4.6 Transport: header in memory, not a cookie
+
+Chosen: the session token lives in a JS variable in the PWA and travels as `Authorization: Bearer gr_ps_<43 base64url chars>` (the prefix makes it greppable by secret scanners). It is never written to `localStorage`, `sessionStorage` or IndexedDB.
+
+| Concern | HttpOnly Secure SameSite=Strict cookie | Header in memory (chosen) |
+|---|---|---|
+| Needs a same-site API | **Yes.** The functions are served from the Supabase project host, a different registrable domain from `golfraven.<tld>` `[unverified - training knowledge: default function URL shape]`. A Strict cookie is not sent on a cross-site fetch at all. The ways round it are a same-site proxy (a new component that sees every token) or `SameSite=None`, which loses Strict and meets Safari's third-party cookie blocking on the iPad `[unverified - training knowledge]` | No |
+| CSRF | Ambient authority: needs SameSite or a CSRF token | **No ambient credential**: a cross-site page cannot attach the token. A custom `Authorization` header forces a CORS preflight |
+| XSS, token theft | The page cannot read the token | A script on the page can read it. **Mitigated, not removed**: strict CSP, no third-party script, no inline script |
+| XSS, token *use* | Same page can still call the API with the cookie | Same. Neither option stops riding a live session; the per-action PIN, caps and the idle timeout bound it |
+| Reload or iOS memory eviction | Survives | Lost: one passkey tap to sign in again. Accepted |
+| Log exposure | Cookie headers are often redacted | `Authorization` is the header log tools redact by default `[unverified]`; our code never logs it (a source scan, as for the offline seed, money doc line 3817) |
+
+**Pre-auth endpoints are reachable without a token**, so CSRF-by-simple-request matters for them (sign-in options, `accept/start`, which sends email). `readJsonBody` accepts a content type that merely contains `application/json` (E16), so `text/plain; x=application/json` is a CORS "simple" request that needs no preflight. Therefore, for every partner function (a new `readPartnerJsonBody`, the existing reader is left alone):
+
+- the **media type must be exactly `application/json`** (a `charset` parameter allowed), anything else `415`, **before** the body is read;
+- a request with an `Origin` header that is not the one allowed origin is refused `403` **by the server**, before routing, for every method, whatever CORS does in the browser; a request with no `Origin` (a non-browser client) is allowed, because no ambient credential exists to abuse;
+- CORS itself is a new `_shared` helper: the allowed origin is one exact string from an environment variable, `Vary: Origin`, `Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS`, `Access-Control-Allow-Headers: authorization, content-type`, `Access-Control-Max-Age` short, no `*`, no credentials mode, `OPTIONS` answered without touching the database. Any other origin gets no CORS headers.
+
+Other hardening that goes with the choice (S1.2 and S7a):
+
+- **`verify_jwt = false`** on the three partner functions, so the gateway does not demand a Supabase JWT in the header the partner token occupies `[unverified - training knowledge: per-function setting in config.toml; edge doc section 15 item 7 already treats the gateway check as not-the-authentication]`. A mistakenly enabled gateway check fails closed. The cost is losing the gateway's free filter of header-less floods.
+- **CSP** for `apps/partners` (served with `_headers` on the static host `[unverified: host features]`): `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' <functions origin>; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, plus `Referrer-Policy: no-referrer`, `Permissions-Policy: publickey-credentials-get=(self), publickey-credentials-create=(self)`, `Cross-Origin-Opener-Policy: same-origin`. `require-trusted-types-for 'script'` is desirable and `[unverified]` on the iPad's Safari.
+- **Proof of possession is deferred, with a reserved slot (N7).** A session could be bound to a non-extractable WebCrypto key generated at sign-in, each request carrying a signature, which turns the in-memory token from "stealable" into "rideable only from the page". It is **not built in P5.1a**. The S1.2 contract reserves it: `partner_session.pop_jkt` (nullable JWK thumbprint, set at mint when the client sends one) and a header name `X-GR-PoP`; a server that does not verify it ignores it, and turning it on later needs no schema change. The gate may require it before P5.2 go-live.
+
+## 5. Data model
+
+### 5.1 New tables (all in `app`)
+
+Every one: `ENABLE` and `FORCE ROW LEVEL SECURITY`; `REVOKE ALL ... FROM PUBLIC, anon, authenticated`; **no** grant to `edge_actor`, `edge_system`, `edge_partner`, `edge_partner_minter` or `service_role` (these hold credential material; 0045 gave `service_role` SELECT on its replay table, these get nothing). Access is only through the definers in 5.3, and `private_definer` policies are keyed on the **binding** (`private.partner_binding()`), never on a settable GUC (the HARD RULE, E12).
+
+| Table | Key columns | Notes |
+|---|---|---|
+| `partner_credential` | `id uuid pk`, `user_id` (FK `auth.users` cascade), `credential_id bytea unique` (at most 1,023 bytes), `public_key bytea` (COSE), `alg smallint` (-7 or -257), `sign_count bigint`, `transports text[]`, `backup_eligible bool`, `backup_state bool`, `aaguid uuid`, `label text` (**derived by the database**: creation date, the AAGUID or "unknown", and the creating credential's id prefix; never client-supplied), `note text` (at most 40, member-chosen, **display only, never used by a security decision**), `created_via_credential_id` (null for the first), `created_at`, `last_used_at`, `revoked_at`, `revoked_by` (FK, set null), `revoke_reason` | at most 5 active per user, checked in the register definers; the WebAuthn user handle is the uuid's 16 bytes `[proposed]` |
+| `partner_auth_challenge` | `nonce_hash bytea pk` (`sha256` of the challenge nonce), `purpose` in (`sign_in`, `register`, `reauth`; `countersign` reserved for 6.7), `user_id`, `session_id`, `used_at`, `minted_session_id` | **rows exist only for challenges that were used.** Challenges themselves are stateless (below) |
+| `partner_session` | `id uuid pk`, `token_hash text unique` (64 hex, CHECK), `user_id`, `credential_id`, `aal smallint` in (1, 2), `created_at`, `last_seen_at`, `expires_at` (absolute, fixed at mint), `pin_grant_until`, `reauth_until`, `otp_proof_until`, `enrolment_until` (15 min after `register_first`), `mfa_until`, `pop_jkt`, `revoked_at`, `revoke_reason`, `authority_touched_at`, `otp_proof_gotrue_session_id`, `mint_kind` (`sign_in` or `register`), `mint_nonce_hash`, `mint_authenticator_data`, `mint_client_data_json`, `mint_signature` (null for a `register` mint: an `attestation: none` create ceremony carries no signature), `flagged_at`, `flag_reason` | the assertion columns are the 4.4 evidence; the flag is the S1.6 re-verifier's (4.4) |
+| `partner_pin` | `user_id pk`, `last_ok_at`, `salt bytea`, `iterations int`, `pepper_kid text`, `verifier bytea`, `failed_count smallint`, `failed_today smallint`, `last_failed_at`, `next_attempt_at`, `locked_at`, `must_change bool`, `set_at` | verifier is `HMAC-SHA256(pepper, PBKDF2-SHA256(pin, salt, iterations))` |
+| `partner_totp` | `user_id pk`, `seed_version int`, `enrolled_at`, `enrol_session_id`, `confirmed_at`, `last_step bigint`, `failed_count`, `locked_until`, `revoked_at` | the seed is **derived** (below), never stored; 6.4 |
+| `partner_enrolment_token` | `id uuid pk`, `user_id` (FK), `purpose` in (`recover`, `admin`), `issued_by` (FK, null for the ops bootstrap), `token_hash text unique` (64 hex), `expires_at` (at most 24 h), `consumed_at`, `registered_credential_id` (FK, set null), `revoked_at`, `attempts smallint` | no org: recovery and admin enrolment are about a person (6.1, 6.4, 6.5) |
+| `partner_rp_config` | one row: `rp_id text`, `origin text` | written by ops at deploy; the mint refuses if the row is absent |
+
+**Stateless challenges (R2-L6, R3-M2, R3-N1).** Revision 2 inserted a row per `session/options` call while the only limiter was alert-only (M6): an unauthenticated caller could grow the table without bound. Two ways out; the choice is the first. (1) **Stateless:** the challenge is 32 random bytes plus a token carrying `exp` and an HMAC with a Vault key `partner_challenge_key` (the pepper pattern, below); nothing is persisted when it is issued, and single use is enforced by inserting `sha256(nonce)` **at mint**, where the primary key refuses a replay. (2) A hard global insert ceiling: it bounds growth, but one attacker could exhaust it and lock every staff member out of sign-in, which is exactly the lever M6 removed. **Trade-off accepted:** a failed verification no longer burns the challenge; it can be presented again within its 120 s, but each attempt needs a real signature, the per-credential cooldown applies, and a success records the nonce.
+
+**The HMAC message, fixed width like 0045.** `label || 0x00 || purpose || exp || nonce || binding [|| ref_kind || ref_id || accepted_at]`, with the label `golfraven/partner-challenge/v1` (UTF-8), `purpose` one byte (1 sign_in, 2 register, 3 reauth), `exp` an 8-byte big-endian integer (epoch seconds), `nonce` 32 bytes, `binding` a 16-byte uuid (zeros for `sign_in`; the enrolling uid for `register`; the **session id** for `reauth`). A `register` challenge appends `ref_kind` (1 invite, 2 enrolment token; one byte), `ref_id` (the invite's or token's 16-byte uuid) and `accepted_at` (8-byte big-endian epoch microseconds). Everything after the label is fixed length, so no two different tuples produce the same message. Verification recomputes the HMAC and compares **the HMACs of the two values** (`HMAC(K, presented) = HMAC(K, expected)`), so the comparison does not depend on a byte-by-byte equality of a secret-derived value.
+
+**Why `register` challenges are issued only inside the accept definers.** Registration with `attestation: none` carries **no signature**, so the challenge is the only proof that an enrolment followed an OTP-verified acceptance. If the minter exposed an issuer for `register` with a caller-chosen binding, a handler bug could register an attacker's passkey for any uid in an enrolment gap. So the only code that can produce a `register` challenge is the code that has just verified the OTP, the email, the freshness and the credential and membership state, for **that** uid and **that** invite or token, and `register_first` re-verifies the acceptance (4.4). A challenge bound to invite X cannot enrol for invite Y because the invite id is inside the HMAC and `register_first` checks the acceptance row.
+
+**PIN pepper and TOTP seed** use the offline-seed pattern (`0045:129-160`): a Vault secret (`partner_pin_key`, `partner_totp_key`, `partner_challenge_key`; at least 32 bytes), read in **one** `SECURITY DEFINER` core with `EXECUTE` for nobody, `public.hmac` in Postgres, a labelled fixed-length message (`'golfraven/partner-totp/v1' || 0x00 || user_id || seed_version`). Staging and production keys differ. The Vault call and `public.hmac` are `[unverified]` on a real project, exactly as 0045 records.
+
+### 5.2 Changes to existing objects
+
+| Object | Change | Why |
+|---|---|---|
+| `private.actor_binding` | `kind` CHECK adds `'partner'`; new nullable `session_id uuid` | D5 |
+| `private.actor_uid()` | returns NULL when `kind = 'partner'` (same owner, ACL and signature) | 4.3 defence in depth |
+| `app.partner_invite` | add `accepted_by` (FK `auth.users`, set null), `registered_credential_id` (FK, set null; one registration per acceptance), `revoked_at`, `revoked_by`, `attempts smallint default 0`; CHECK `token_hash ~ '^[0-9a-f]{64}$'`; CHECK `expires_at <= created_at + interval '7 days'` | E18. **The hex CHECK breaks the fixtures** at `supabase/tests/helpers.sql:261-265` (`'th-a-invites-y'`, `'th-y-invites-a'`) as well as the partner matrix; S1.1 updates them to 64-hex values. The 72 h default is the writer's, the CHECK is the ceiling |
+| `app.partner_scope` | a trigger: an org of kind `facility` may hold **at most one** scope row, and it is a `facility_id`; plus `UNIQUE (org_id, facility_id)` | G2. A chain is one org per facility with the person a member of several; the portal shows a switcher (Q4). The request names the facility, and `partner_authorize` checks it per call, so there is no "current org" in the session |
+| `app.partner_member` | a trigger tying `role` to the org's kind: `staff` and `manager` only in a `facility` org, `operator` only in an `operator` org, `sponsor` only in a `sponsor` org | N2, so role arrays can never be confused with `partner_role_rank` |
+| `app.partner_member` | triggers that revoke the user's sessions on **`AFTER UPDATE OF revoked_at, role`, `AFTER DELETE` (including an org-delete cascade) and `AFTER INSERT`**, the accepting session itself exempt; revoking the **last** active membership deletes the user's `partner_pin` rows and, **unless the user is in `app.admin_user`**, their `partner_totp` rows (an admin holds no membership and needs the TOTP regardless). These UPDATEs of `partner_session` are also what serialises a revoke behind an in-flight action (4.3) | L3, R3-M1: a delete or re-insert by ops, or a cascade, must not revive an old session |
+| `app.admin_user` | the same trigger on `INSERT` and `DELETE` | L3, R3-M1 |
+| `app.partner_scope` | an `AFTER UPDATE` and `AFTER DELETE` trigger, owned by `partner_session_toucher` (4.3), that **touches** (sets `authority_touched_at` on) the sessions of every member of the org; it revokes nothing | R3-M1: scope loss is serialised behind an in-flight action like a revoke, without killing sessions |
+| `private.function_inventory` | new columns `expected_edge_partner` and `expected_edge_partner_minter` (0041 added the same shape for the signin minter) | E9 |
+| `api.offer`, `api.my_offers()`, policy `offer_read` | `offer_read` becomes `status = 'live'` (the scope legs are removed); `api.offer` and `api.my_offers()` return constant NULL for the five scope-conditional columns (`CREATE OR REPLACE VIEW` can append but not drop columns, `0024_evidence_queued_claims.sql:73-76`; the function is replaced the same way). The partner read moves to Edge | G1, M1 |
+| `private.offline_code_record_step_for_actor` | `REVOKE EXECUTE ... FROM edge_actor`. **Kept, not deleted.** Only the Edge wrapper `Repo#offlineCode.recordStep` (`privileged.ts:3268-3280`) goes. Of the ~55 test references, the atomic-replay proofs (12 parallel calls give exactly one `recorded`; 12 across two facilities) are **kept** by calling the primitive as its owner: the harness writes the binding with `bind_actor` and then `SET LOCAL ROLE private_definer` in the same transaction. Only the cells that assert `edge_actor` can call it flip to "refused" | M3, X9. S3's verify-and-record definer supersedes the function, and the money doc's replay property stays proven meanwhile |
+
+### 5.3 Functions
+
+| Function | EXECUTE | Notes |
+|---|---|---|
+| `private.bind_partner_session(token_hash)` | `edge_partner` | the only producer of a `partner` binding; 4.2 |
+| `private.partner_binding()`, `partner_binding_kind()` | `edge_partner` (read-only helpers) | return the binding row's kind and session id for the current transaction only. `partner_binding_kind()` is what the Edge's post-bind assertion calls (4.2) |
+| `private.partner_binding_session()` | `private_definer` only | the predicate inside `pd_partner_session_action` (4.3); no edge role needs it |
+| `private.partner_authorize(...)` | nobody | 4.3 |
+| the mint definers of 4.4 | `edge_partner_minter` | refuse inside any bound transaction (the 0041 rule) |
+| `private.hit_partner_rate_limit(key, window, max)` | `edge_partner` | the `hit_actor_rate_limit` body keyed on the session's user |
+| `private.partner_whoami_for_partner()`, `partner_session_revoke_for_partner(...)`, `partner_session_lock_for_partner()`, `partner_session_reauth_for_partner(...)` | `edge_partner` | |
+| `private.partner_pin_params_for_partner()`, `partner_pin_set_for_partner(...)`, `partner_pin_verify_for_partner(derived)`, `partner_pin_reset_for_partner(member)` | `edge_partner` | 6.3 |
+| `private.partner_totp_enrol_for_partner()`, `partner_totp_confirm_for_partner(code)`, `partner_totp_verify_for_partner(code)`, `partner_totp_reset_for_partner(member)` | `edge_partner` | 6.4 |
+| `private.partner_invite_create_for_partner(...)`, `..._revoke_...`, `..._list_...`, `partner_invite_accept_for_partner(...)`; `partner_member_revoke_for_partner`, `partner_member_recover_for_partner`, `partner_credential_register_for_partner`, `partner_credential_revoke_for_partner`, `partner_org_sessions_revoke_for_partner`, `partner_admin_enrolment_issue_for_partner` | `edge_partner` | |
+| `private.partner_sessions_revoke(user_ids, reason)` | `private_definer` only | owned by `partner_session_toucher` (4.3); called by the revoke, recover, revoke-all, credential-revoke and TOTP-reset definers after their own checks |
+| `private.partner_flag_enforce(max)` | `edge_system` | owned by `partner_session_toucher` (4.3, 4.4) |
+| `private.purge_partner_challenges()`, `purge_partner_sessions()`, `purge_partner_credentials()`, `purge_partner_invites()`, `purge_partner_enrolment_tokens()` | `edge_system` | section 9; each `EXECUTE` grant is the same owner-approved shape as 0040 and needs the same sign-off |
+
+**Failure paths return a status; they do not RAISE.** Every definer that updates a failure counter or an attempt count (`partner_pin_verify_for_partner`, `partner_totp_verify_for_partner`, `partner_invite_accept` and `partner_enrolment_token` accept, including the **email-mismatch refusal**, and the sign-in credential cooldown) returns a status row (`ok`, `wrong`, `locked`, `retry_after`, `refused`) and the handler commits. A RAISE would roll back the counter write, which is the defect 0020 fixed for the rate limiter (E11). Only malformed arguments and missing authority raise (`22023`, `42501`), and neither writes a counter. Tests assert the counter **after a real commit** (PA-18).
+
+Every function: `SECURITY DEFINER`, owned by `private_definer`, `search_path = ''`, inside the ownership bracket (`SET ROLE private_definer` ... `RESET ROLE`, `0045:129-132,344`), `REVOKE ... FROM PUBLIC` then the grants above, a row in `private.function_inventory`, and must-fail cells.
+
+### 5.4 The invariants checklist (what the gate should find in the migrations)
+
+1. Every new table has FORCE RLS and no grant to `anon`, `authenticated`, any edge role or `service_role`. `private.edge_policy_allowlist` and its fixture are **unchanged** (no edge role holds a table privilege on them).
+2. Every `private_definer` policy is narrow, keyed on the binding, and has a `private.definer_policy_allowlist` row plus a line in `supabase/tests/fixtures/definer_policy_exprs.txt`. This includes the two `partner_session` policies of 4.3, and **no policy is added on `partner_member`, `partner_scope` or `admin_user` for locking** (R3-M1); policies S1.5 adds there are reviewed against the OR-ed union.
+3. Every FK to `auth.users` is classified in `private.pii_retention_policy` (`delete_row`, or `set_null` for `revoked_by`, `accepted_by`, `issued_by`) **and** has a `private.pii_export_policy` row (credentials: `export` of metadata without the public key; sessions, PIN, TOTP, challenges, enrolment tokens: `exclude` with a reason). Without them `delete_my_data` raises (E9). `delete_my_data` and `export_my_data` were last rebuilt in 0045 and 0044: the next change starts from those copies.
+4. Every function has a `function_inventory` row, including both new role columns.
+5. Checks 9-13 in `tools/db/verify-function-inventory.mjs` and `supabase/tests/matrix/10_function_inventory.sql` extend to **both** new roles (the 0041 edits are the template: attributes, membership closure, `NOLOGIN`, who can `SET ROLE`; for `edge_partner` and the minter, **no privilege on any relation** and no CREATE). The three session-writer roles of 4.3 (`partner_session_toucher`, `partner_session_issuer`, `partner_session_flagger`) are covered the same way: `NOLOGIN`, a member of nothing, no member, not reachable by `SET ROLE`, and holding exactly the privileges tabulated there and no other. Check 14 is new (4.3, three clauses). Each has a must-fail fixture.
+6. `tools/db/check-migrations-immutable.sh` passes (no earlier migration is edited).
+7. The privileged-file lint keeps its rules: no `service_role`, no new `Deno.env` read outside the allow-listed shapes, the new kinds only through `openScopedTx`. New env reads are limited to the exact CORS origin string; nothing secret is added to the environment (the pepper and TOTP key live in Vault, RP configuration in `partner_rp_config`).
+8. Each new function directory is added to the three CI lists (`supabase/tests/unit/ci-function-lists.test.ts` fails the build until it is).
+9. A matrix cell exists for every partner function times every id it accepts, including a foreign id (plan §4.7.1a).
+10. A generated test enumerates, from the catalog, **every function EXECUTE-able by `edge_actor` and every policy `TO edge_actor`**, and proves each yields nothing or refuses under a planted `partner` binding (PA-3b). A future user-lane object is covered without anyone remembering.
+11. After S1.1 no `edge_actor`-executable definer outside the `_for_partner` family evaluates partner scope (check 14 clause b).
+12. Counter-writing definers return a status (5.3).
+
+### 5.5 Revoking the PostgREST partner-lane read surface (D12)
+
+One migration in S1.1. **Mobile is unaffected**: the app uses only the Auth client and no PostgREST read (E22). The views have no other consumer, so nothing breaks except `supabase/tests/matrix/06_partner_scope_matrix.sql`, whose cells are rewritten into "denied" cells, and `03_views_and_rpc.sql:100-110`, whose `api.my_offers()` masking cell for player B stays true and gains a cell for a scoped staff member (now also NULL).
+
+`REVOKE SELECT ... FROM authenticated` on:
+
+| Surface | Replaced by | Slice |
+|---|---|---|
+| `api.staff_shift_log` | `GET /v1/partner/shift-log` (A0, staff and manager of the facility) | S3 |
+| `api.staff_activity` | `GET /v1/partner/staff-activity` (manager, operator) | S3 |
+| `api.special_marker_stock`, `..._stock_movement` | stock read in `stock-admin` | S5 |
+| `api.facility_programme`, `api.marker_code_batch`, `api.facility_qr`, `api.sponsorship`, `api.operator_rollup`, `api.sponsor_rollup` | `programme-config`, `qr-print`, `sponsorships-admin`, rollup reads | S2b, S6 |
+| `api.my_partner_org`, `..._member`, `..._scope`, `..._invite` | `GET session` and `GET invites` | S1.5 |
+| the **base tables** `app.partner_org`, `partner_member`, `partner_scope`, `partner_invite`, `facility_programme`, `attestation_shift_log`, `staff_activity`, `special_marker_stock`, `special_marker_stock_movement`, `sponsorship`, `operator_rollup`, `sponsor_rollup`, `marker_code_batch`, `facility_qr` (`0009_grants_revokes.sql:15-31`) | defence in depth: the views above are dead, so the table grants have no consumer and a future view must not inherit them | with the views |
+
+**Redefined, not revoked** (players need them): `api.offer`, `api.my_offers()` and the `offer_read` policy (5.2). They answer players live offers only, with the five budget and eligibility columns NULL for everyone; the partner read of offers moves to `offers-admin` (S6). Left alone on purpose: `api.trail_programme`, `api.special_marker_availability` (readable by all authenticated players by design, plan §4.7.3) and the player-own `my_*` views.
+
+## 6. Flows
+
+### 6.1 Invite, accept, enrol
+
+The invite rule, in the database (`partner_invite_create_for_partner`, class A2 or A3):
+
+- **Role strictly below the inviter's own, by explicit array** (not `partner_role_rank`, whose `sponsor` ties `operator`, E6): a manager invites `{staff}`; an operator invites `{staff, manager}`; only an admin invites `{operator}`; `sponsor` invites stay disabled until P6.
+- **Grant is a subset of the inviter's reach.** With the one-facility-per-org invariant (5.2) an invite names an org, and the inviter must pass `has_facility_scope(inviter, <that org's facility>, <the explicit above-roles array>)`: `{manager, operator}` for a staff invite, `{operator}` for a manager invite. That covers both "member of that org with a higher role" and "operator of a trail that includes the facility" (E6). Cells: manager invites at another facility: `403`; manager invites a manager or operator: `403`; operator invites at a facility not on its trail: `403` (plan §4.7.7).
+- *For the gate (G3):* that operator reach ignores `participation`. Filtering `declined` and `left` out of `has_facility_scope`'s operator leg is a one-line change and is recommended.
+- An invite to an org where the invitee already has an **active** membership **in that org** is refused (`409`). A **revoked** membership is reactivated with the invite's role: old sessions stay dead (6.5), the PIN is reset (`must_change`), and **no credential is created** if the person still has one (branch E below).
+- The token is 32 random bytes, `gr_inv_` + base64url, generated in the Edge; **only its SHA-256** reaches the database (`token_hash`, 64 hex). The link is `https://partners.golfraven.<tld>/invite#<token>`: a fragment is never sent to a server, so no CDN or access log holds it, and a mail scanner that prefetches the link cannot consume it. Expiry 72 h `[proposed]`, hard ceiling 7 days (CHECK).
+
+**Credentials belong to the person, so acceptance has two branches** (H3). The invite is org-scoped; a credential authenticates *every* membership the person holds. If an invite could create a credential for a person who already has one, any manager anywhere could mint a second credential on an existing member by inviting their mailbox to a second org.
+
+- **Branch N: the person has no active credential.**
+  1. `POST invites/accept/start {token}`. Rate-limited (section 8). The Edge asks the database (`partner_invite_email_for_token`) for the `invitee_email` of an unexpired, unaccepted, unrevoked invite with `token_hash = sha256(token)`; if there is one it **sends an OTP to that address** (no email is typed, so a token holder cannot redirect the code), and either way answers a constant body, so the endpoint is neither an invite-existence nor an email oracle.
+  2. `POST invites/accept/verify {token, code}`. The Edge calls `verifyOtp` with the anon key (the E19 verifier) and takes the user id and the GoTrue `session_id`. **Then** `partner_invite_accept(token_hash, uid, gotrue_session_id)` runs, in one transaction, **in this order**: locks the invite; refuses unless it is live and `lower(btrim(auth.users.email)) = lower(btrim(invitee_email))` **in SQL** (one implementation of the normalisation, the lesson of 0041 L2), the email is confirmed, and **the GoTrue session row for that uid is still fresh**; increments `attempts` (an invite locks after 10); **then checks the person's state, before writing anything**: (a) an **active credential** exists: status `existing_member_sign_in`, nothing written; (b) **no active credential but an active membership in any org** (a person who self-revoked or was panic-revoked): status `recover_required`, nothing written, because the reach rule of 6.5 must apply to anyone who already works somewhere and an invite must not become a way round it (R2-L1); (c) otherwise inserts or reactivates `partner_member`, sets `accepted_at` and `accepted_by`, and issues a `register` challenge (stateless, bound to uid, invite id and the acceptance time, 5.1) **inside this definer, only now**, which the Edge returns in the `accept/verify` response (R3-M2; there is no separate options call in enrolment mode). **Only after the definer returns** does the Edge close the GoTrue session (`closeSession`, in a `finally`), exactly the order E19 uses; revision 1 closed it first, which would have made the freshness check unsatisfiable.
+  3. In case (a) the response is `409 existing_member_sign_in` (the mailbox owner is the only person who gets here, because the OTP was just proved), the membership is **not** activated, **and the invite is not consumed** (`accepted_at` stays null, only `attempts` moves), so it stays usable for branch E. In case (b) the response is `409 recover_required` and the person asks a manager for recovery (6.5); the invite likewise stays unconsumed.
+  4. WebAuthn create in the PWA (`residentKey: required`, UV required, `attestation: none`, exclude the person's credential ids). `POST credentials` verifies in the Edge (wrapper rules below), then `partner_credential_register_first` stores it, re-verifying that this invite was accepted by this uid under 15 minutes ago and has produced no credential yet (**one registration per acceptance**), **refusing if an active credential exists** (a race with another enrolment) **or, for an invite-bound enrolment, if the person holds an active membership in any org other than the one this invite just activated** (the same R2-L1 rule, enforced again at the point of creation), and **mints the first session in the same transaction** (R3-L3), storing the create ceremony's evidence. That session carries `enrolment_until` (15 min): inside it the first PIN may be set and, for operator or admin, the first TOTP enrolled, without a further OTP proof.
+  5. The PWA forces setting the PIN (6.3) before it shows anything, and TOTP enrolment (6.4) for operator or admin.
+- **Branch E: the person already has an active credential.** They sign in with it (6.2) and `POST invites/accept` with the invite token, class A2 (their PIN and a fresh passkey assertion). `partner_invite_accept_for_partner` checks, in SQL, that the **session user's confirmed email equals `invitee_email`**, then activates the membership. No credential is registered and no OTP is needed; a forwarded link fails because the forwardee's session user has a different email (`403`).
+
+A forwarded link fails in both branches: in N the OTP goes to the invited mailbox, which the forwardee cannot read, and `partner_invite_accept` refuses any uid whose verified email is not the invite's; in E the session user's email must match. The email-mismatch cell calls the definer directly with a different account, because the HTTP path cannot reach that state (plan §4.7.7, AT 16). An invite for an address that signs in with an Apple private-relay address fails closed (the relay address is a different email); the player-account linking rules do not apply here (plan §3.4 rule 3).
+
+**The WebAuthn wrapper must (L7).** `[verified 2026-10-04: read in the 14.0.3 source]` SimpleWebAuthn 14.0.3 (a) accepts `crossOrigin: true` when the response carries no `topOrigin`; (b) processes **any attestation format** it recognises even though `none` was requested, which puts its X.509 and ASN.1 parsers on client-supplied data; (c) never compares `response.id` with the credential it was verifying against; and (d) defaults the accepted algorithms to EdDSA, ES256 and RS256. So `_shared/partner/webauthn.ts` **must**: reject `clientDataJSON.crossOrigin` outright; decode the attestation object with the library's `decodeAttestationObject` helper (`npm:@simplewebauthn/server@14.0.3/helpers`, an exact entry of its own in the import map and allow-list) and **refuse any `fmt` other than `none` before calling `verifyRegistrationResponse`**; pass `supportedAlgorithmIDs: [-7, -257]` to both `generateRegistrationOptions` and `verifyRegistrationResponse`; assert `response.id` equals the credential id the database returned and, at sign-in, that the stored `userHandle` matches the response's. Each is a must-fail cell (PA-0a).
+
+### 6.2 Sign-in
+
+1. `POST session/options` returns a 32-byte challenge, `userVerification: required`, empty `allowCredentials`, `timeout: 120000` (verified to be what `generateAuthenticationOptions` emits when asked).
+2. The PWA calls `navigator.credentials.get`. On a shared iPad the operating system's chooser is expected to list every staff passkey registered for this RP ID on that device and the person picks theirs `[unverified - training knowledge; S0 checks it on a real iPad]`. No email or username is typed, so there is no username oracle.
+3. `POST session`: the Edge verifies the challenge token's shape and expiry, looks the credential up, and runs `verifyAuthenticationResponse` with the stored key and counter, exact origin, exact RP ID, `requireUserVerification: true`, through the wrapper rules above. It then calls `partner_session_mint`, which recomputes the challenge HMAC, records the nonce (single use), and repeats the checks the database can make (4.4).
+4. Counter policy `[verified: software-authenticator test]`: a non-zero counter that does not strictly increase is **refused** (equal and lower both), and a `0` against a stored `0` is **accepted**. A refused regression writes an `audit_log` row and raises an operator alert (the plan §8.3 alert path), and blocks that assertion; the credential is not auto-revoked (a flaky authenticator would lock a person out), a manager decides. Synced passkeys report `0`, so **clone detection does not exist for them**: R-P3.
+5. `aal` is 1; an operator or admin must continue with TOTP before any call except those in 4.1.
+
+Replay of an assertion fails because the nonce is recorded at mint and the primary key refuses a second use; replay of a token needs the token.
+
+### 6.3 Step-up PIN and the action classes
+
+The passkey proves the credential (and, on a shared iPad, the device); the PIN picks the **person** (plan §9.2, FM-20). It is not authentication by itself: it is useless without a live session of the same member.
+
+**PIN rules.** Exactly four digits. Refused at set: repeated digits, ascending and descending runs, years `1900`-`2099`, valid `MMDD` dates, and a deny-list of the most common 4-digit PINs (the top 100 of a published breach list `[unverified - training knowledge; the list is chosen and committed in S1.4]`). Set or changed only when the session shows **one** of: `enrolment_until` (the session minted by `register_first`, 15 min), or `otp_proof_until` (a fresh email OTP to the member's address, 10 min, via `session/otp-proof`); **and**, for a change of an existing PIN, the current PIN. A `must_change` PIN (after a reset) needs the OTP proof. A passkey assertion alone is **not** enough, because on a shared iPad anyone with the passcode holds one (H2).
+
+**Where the secret goes.** The **browser** fetches the member's salt and iteration count (`GET session/pin`, refused while locked), runs PBKDF2-HMAC-SHA256 with WebCrypto (`[proposed]` 600,000 iterations, the OWASP-style figure `[unverified - training knowledge]`; the value is stored per row so it can rise on the next set) and sends only the **derived** bytes. The Edge never sees the PIN; it sees a PIN-equivalent, which is useful only against this member's verifier (so R-P2 shrinks from "the PIN" to "a value that works only here"). In Postgres `partner_pin_verify_for_partner` locks the row, applies lock and backoff, computes `HMAC-SHA256(pepper, derived)` with the Vault pepper (E12 pattern), compares, and records the outcome, returning a status (5.3). The stored verifier is useless without the Vault pepper. `[unverified]`: PBKDF2 time on a low-end iPad (S0 measures it; the floor is 210,000 rounds, 115 ms measured on this host).
+
+**Honest arithmetic.** With the pepper unknown, a stolen table gives an attacker nothing to test against. With the pepper also known, 10^4 PINs at 600,000 rounds is about 3,230 s (about 54 minutes) on one core as measured (section 14). The KDF therefore protects little; the pepper and the online cap do the work, and this document does not claim otherwise.
+
+**Lockout.** Counters live in the `partner_pin` row: after the 3rd consecutive failure the next attempt is refused for 30 s, after the 4th for 5 min, after the 5th the member is **locked** (`locked_at`). 20 failures in a day lock regardless of successes between them. A lock survives new sessions. Unlock: a manager (or operator, or admin) under the 6.5 reach rule, class A2, never for themselves; it sets `must_change`, so the person chooses a new PIN under an OTP proof and nobody else ever learns it. A lone manager is reset by an operator; an operator by an admin. Every failure, lock and reset writes `audit_log`.
+
+**Action classes.** `partner_authorize` takes the class; the table is the policy. **Every class first requires the session's `aal` to meet the person's required assurance (4.1).**
+
+| Class | Needs | Examples |
+|---|---|---|
+| **A0** | a live session at the required `aal` | reads (`GET session`, shift log, own stock), sign-out, lock, list own credentials |
+| **A1** | A0 and a **single-use PIN grant**: a PIN verified at most 60 s ago and not yet used, **consumed by the action in its own transaction**. One PIN, one action | `partner-attest`, "Marker sold" token mint (`course-qr`), offer redeem, special-marker hand-over (R1 scan and R2 token), stock movements by staff, the offline-voucher countersign |
+| **A2** | A0, a single-use PIN grant at most **30 s** old, **and** `reauth_until > now()` (a passkey assertion at most 5 min old) | **adding a credential**, **any credential revoke (own included)**, invite create or revoke, member revoke, recover, PIN reset, "Rotate PIN" for the course QR, revoke-all, branch-E invite accept |
+| **A3** | `aal` 2 and `mfa_until > now()` (a TOTP at most **5 min** old) | operator and admin actions: programme and sponsor config, offer approve, `qr-print`, `codes-generate`, `settlement-export`, held-review resolve, stock reconciliation overrides |
+
+**A3 as the substitute for PIN-less members.** An operator or admin who holds no staff or manager role has no PIN. For such a member the A1 prerequisite is met by A3, and the A2 prerequisite by A3 plus `reauth_until > now()`. A member who holds both (a manager who is also an operator) uses the PIN for A1 and A2 and TOTP for A3. The rule is in `partner_authorize`, tested per combination (PA-19).
+
+**Adding a credential is A2 plus notice (H2).** On a shared iPad a coworker with the device passcode can pick someone else's passkey and obtain a session. Without this rule they could register a passkey of their own on their phone for that member, lock the member's PIN with five guesses, and set a new PIN after the manager's reset. Now: A2 needs **that member's PIN**; the credential's `label` is derived by the database (5.1), so an attacker cannot choose a label that hides it; the member receives an **out-of-band notice** of every credential add (the transport is open item U1: the repository has no mail egress other than GoTrue's OTP mail; until it is decided the notice is an in-portal item for the member and their manager plus an `audit_log` row and an operator alert); and the 6.5 panic button revokes by **creation time** ("every credential created after T"), not by label.
+
+**One PIN per attest follows the plan (X8).** Revision 1 proposed a 90 s window; a window lets a second person who walks to the iPad act as the first. If pilot telemetry shows a PIN per sale is too slow, a window of N actions inside S seconds is an owner decision (Q2), recorded as a deliberate departure.
+
+### 6.4 TOTP for operator and admin
+
+TOTP is **our own**, verified in the database. The seed is derived (5.1) and shown once as an `otpauth://` QR (SHA-1, 6 digits, 30 s, which authenticator apps support reliably `[unverified - training knowledge]`).
+
+- **Enrolment is gated (H4).** Because the seed is a function of `(user, seed_version)`, a second `enrol` under the same version would return the **live** seed, which would let an `aal` 1 session (a passkey that may be synced) reach `aal` 2. So: `partner_totp_enrol_for_partner` **refuses once `confirmed_at` is set**; it needs `enrolment_until` or `otp_proof_until` on the session the first time; **every enrol call (an unconfirmed re-enrol too) bumps `seed_version`**, so an earlier shown seed is dead; and `confirm` must run in the **same session** that called `enrol` (`enrol_session_id`).
+- **Reset** of a confirmed TOTP is its own action, `members/{id}/totp-reset`, by a **higher role** (an admin for an operator, another admin for an admin), class A3, which bumps `seed_version`, clears `confirmed_at` and revokes the member's sessions; the member then re-enrols under an OTP proof.
+- **Verification** is `partner_totp_verify_for_partner(code)`: HOTP computed in SQL with the Vault-derived seed, window plus or minus 1 step, replay refused by `UPDATE ... SET last_step = $s WHERE last_step < $s`, 5 failures in an hour lock for 15 minutes (a status, not a RAISE), a success sets `aal` 2 and `mfa_until`.
+- **Parameters, so the shared primitive is not mistaken for a shared configuration (N6).** The SQL core is `hotp(seed, counter, digits, algo)` (RFC 4226 dynamic truncation over `public.hmac`). The partner TOTP uses **SHA-1, 30 s, 6 digits**; the money doc's staff offline code uses **SHA-256, 600 s, 6 digits** (`_shared/offline-code/params.ts`). Only the core is shared; each parameter set has its own test vectors, proven against `_shared/offline-code/totp.ts` and the RFC 6238 appendix vectors for the matching algorithm.
+- **Admin bootstrap (M4).** There is no invite for an admin (no org). The first admin: the project owner, with database admin access, inserts the `app.admin_user` row and runs a SQL-only function `private.partner_admin_bootstrap_token(user_id, token_hash)` (EXECUTE for nobody; run from a SQL session); the token is generated off-line (for example `openssl rand`) and only its hash is passed. Thereafter an admin issues enrolment tokens with `partner_admin_enrolment_issue_for_partner` (A3, 24 h). Both write `partner_enrolment_token(purpose = 'admin')`. Acceptance is the branch-N flow against that table: an OTP to the user's auth email, `register_first`, then TOTP enrolment, the person having no active credential. An admin with no `confirmed` TOTP is refused every class, so an enrolled-but-unconfirmed admin has no power.
+
+### 6.5 Revocation, recovery, self-attest
+
+- **Authority is per call.** Revoking a member or deleting a scope row takes effect on the **next call** because `partner_authorize` re-reads under row locks that bind (4.3); a concurrent revoke waits for an in-flight action or is seen by it. The session-killing triggers (5.2) cover update, delete (including an org-delete cascade) and insert, so a later re-insert or a re-added `admin_user` row cannot revive an old session.
+- **Membership revoke versus credential revoke.** Revoking a *membership* (one org) kills the user's sessions, so they sign in again, and other memberships continue. A *credential* belongs to the person, so revoking one affects **every** org the person works in; that is why the manager rule below exists.
+- **Who may act on a person's credentials, PIN or recovery: the reach rule.** An actor `A` may revoke another person's credential, reset their PIN or recover them only if **all** hold: (1) **if the target is not in `app.admin_user`**, the target holds **at least one active membership** (a universal check over zero memberships is vacuously true, which is how revision 2 let any facility manager act on an admin, who normally holds none; (1) is stated on its own and is not implied by (2). It is **not** applied to an admin target: admin targets are governed by (3) and (5), otherwise nobody could act on a zero-membership admin, and admin recovery would be impossible); (2) for **every** active membership of the target, `A` passes `has_*_scope` with a role strictly above the target's role in that org (explicit arrays, 6.1); (3) **if the target is in `app.admin_user`, `A` is an admin**, whatever memberships the target also holds (a staff member who is also an admin is an admin target); (4) **if the target holds an operator membership, `A` is an admin**: an operator's credentials, PIN and recovery are an admin matter, never a manager's or another operator's; (5) `A` is not the target. An admin may act on any non-admin target, **including one with no active membership** (a zero-membership non-admin is an admin-only matter); an admin target needs a **different** admin, so another admin can recover a zero-membership admin, and facility staff can never reach the admin plane. A manager at facility A therefore **cannot** lock out a person who also works at facility B, nor an admin, nor an operator; that needs an operator whose trail covers every membership, or an admin.
+- **Recovery is its own manager action** (`members/{id}/recover`, A2, under the reach rule), not an invite. It **revokes all of the person's credentials and sessions across every org** (credentials are per person), sets `must_change` on the PIN, and issues a `recover` row in `partner_enrolment_token` (24 h, bound to the person's own auth email, no org). The person then runs the branch-N flow against it. The cross-org effect is stated plainly: until they re-enrol, the person cannot work at any org. Recovery does **not** use `partner_invite`, so it cannot collide with the "invite to an active member is `409`" rule, and `register_first` still refuses while an active credential exists (there is none after recovery).
+- **Self-revoke is A2 too.** Revoking one's own credential is class A2 (the person's PIN and a fresh passkey assertion): on a shared iPad a coworker with the passcode would otherwise revoke every credential of the member and force a recovery.
+- **Sole credential.** A person adds a second passkey while signed in (A2, strongly encouraged at enrolment). Email OTP alone **never** adds a credential to a person who has an active one, whatever invite or token is presented: that would make the email account the real credential.
+- **Stolen-iPad button.** `orgs/{id}/sessions/revoke-all` (A2) and "revoke every credential created after T" for the affected members, under the reach rule. The `label` is database-derived, so a manager can trust it; the member's `note` is display only.
+- **Self-attest** (plan AT 16, A2-21), **per account, not per person**. The partner definers compare the target player's uid with the bound actor (`22023`, mapped to `422`); the CHECK on `attestation` and the 0045 recorder compare accounts too (E7). A staff member with a work email and a separate personal player account is **not** caught by any of them; the plan's same-device rule (a manager invites an account on the same device: the first attest goes to `held_review` plus `fraud_signal`) and the fraud signals in S3 are the compensating control, and the gate should not read AT 16 as person-level.
+
+### 6.6 Admin actions and the audited surface
+
+Admin passes every `has_*_scope` (E6). An admin session is short (4.1), always `aal` 2, and every A3 action writes `audit_log` with the actor, the action, the subject and no secret. This design adds no new admin power; it only makes the existing one reachable solely through a passkey, a TOTP and a short session.
+
+### 6.7 Offline (plan §7.6)
+
+- **Online staff, offline player** (the expected case): staff enter the player's handle and 6 digits on an online device. This needs the session and the money-doc verify-and-record definer; it is slice S3 and is **independent of WebAuthn offline**.
+- **Both offline (conditional build):** the PWA holds up to 20 prefetched staff challenges and countersigns a voucher with the member's passkey. Two things stay `[unverified]`: that `navigator.credentials.get` against a stored challenge works in an installed PWA with no network (A60, S7e), and the storage lifetime of the challenge cache on iOS `[unverified - training knowledge]`. The plan's prefetched challenges live in `app.checkin_challenge(staff_user_id, facility_id)` (plan §4.4), whose `edge_actor` insert policy forces `staff_user_id IS NULL` (edge doc section 4); issuing them needs a new partner definer.
+- **No local PIN verifier (L11).** Offline, nothing on the device can check a PIN: a local verifier would be a 4-digit secret with no lockout. The design therefore reserves: the PWA derives the PIN value as usual and sends it **at sync time**; the database verifies it then and counts failures then. The number of offline guesses is bounded by the number of prefetched challenges (20 per member per prefetch), each also needing a user-verified passkey assertion. That residual is accepted for the conditional build and stated in 11.
+- **Voucher binding (L11).** The countersign challenge is `H(voucher hash || kind || facility)` bound at issue time, so a captured countersignature cannot be replayed against another voucher; purpose `countersign` with a 24 h TTL (the plan's figure). An assertion verified later must belong to the same member as the session that uploads it.
+- **Reserved now so it need not be redone:** `offline_code_bound_staff()` (`0045:181`) is keyed on `kind = 'user'`; S3's verify-and-record definer runs under a `partner` binding, so it adds its own predicate inside the family (check 14 clause c), not an edit to the old one.
+
+## 7. Supply chain and outbound hosts
+
+| Item | Entry | State |
+|---|---|---|
+| Import map | `"@simplewebauthn/server": "npm:@simplewebauthn/server@14.0.3"` and `"@simplewebauthn/server/helpers": "npm:@simplewebauthn/server@14.0.3/helpers"` in `supabase/functions/deno.json` (the latest at authoring time `[verified: registry]`; pin the version current at S0) | to add |
+| Allow-list | the same two strings in `tools/service-role-lint/pinned-import-targets.json` | to add |
+| Lockfile | `supabase/tests/deno.lock`: **25 `npm` entries** for the Deno graph (the library, `@hexagon/base64`, `@levischuck/tiny-cbor`, fifteen `@peculiar/*`, `asn1js`, `pvtsutils`, `pvutils`, `reflect-metadata`, `tsyringe`, two `tslib` versions) `[verified 2026-10-04: deno info --json on a scratch import, Deno 2.5.2]`. Today the lock has 5 npm entries. Each needs a `sha512` integrity (`NPM_INTEGRITY`, `config.ts:337`) and a `specifiers` row | to add; the three CI function lists (`ci.yml:395,451,509`) need the new entrypoints |
+| Outbound host | **none.** Registration with `attestation: none` and assertion verification ran with `--deny-net` after the packages were cached `[verified: 13 cases, section 14]`. The library also exports a `MetadataService` (`[verified: export list]`); that it downloads the FIDO metadata blob is `[unverified - training knowledge]`, and it is **not used**. Attestation formats other than `none` are refused by the wrapper (6.1) | no allow-list entry |
+| Email OTP | through GoTrue with the anon key, as the player flow already does (E19) | none |
+| **Security notices by email** | **not available today**: the repo's only outbound mail is GoTrue's OTP mail. A notice sender needs a mail host and a sender domain | **open item U1**; a new outbound host would need an allow-list entry (the pull-request checklist) |
+
+The graph is five times the size of today's. That is the cost of the library (its X.509 and ASN.1 stack is there for attestation formats this design does not use, and the wrapper now refuses them). Options for the gate, in order of preference: accept it with the lock, the integrity check and a quarterly bump discipline; or replace the library with a small in-tree verifier for the two ceremonies used (attestation `none`, ES256 and RS256 assertions: about 150 lines of CBOR, authenticator-data parsing and WebCrypto verification). The second removes 24 packages and creates the "own WebAuthn code" risk; this design recommends the first.
+
+## 8. Rate limits
+
+Reuses `private.hit_actor_rate_limit` and `hit_system_rate_limit` (E11). Pre-authentication buckets cannot use an actor limiter (nothing is bound), so they use system buckets. A per-IP key depends on a client IP the Edge reads from a forwarded-for header, **which is `[unverified]` as trustworthy behind the gateway**, and a shop's staff share one NAT address. Therefore **an IP-keyed or global bucket is alert-only, or set far above expected traffic; it is never the only thing standing between a person and a login.** Hard limits are keyed on objects the attacker cannot choose or share: the credential, the invite token, the member, the target mailbox. A `partner` twin of `hitRateLimitForActor` (`hit_partner_rate_limit`, same body, partner binding) serves authenticated calls. Every number is `[proposed]`. The plan's existing caps (staff attest 60/staff/h, hand-over 5 failures/staff/h, `course-qr` token issue 60/staff/h, the §8.3 cold-start caps) are unchanged.
+
+| Endpoint | Key | Limit |
+|---|---|---|
+| `session/options` | IP hash; global | **alert at** 600/h per IP hash and 20,000/h global; no block. It **writes nothing** (stateless challenge, 5.1), so there is no growth to bound |
+| `session` (verify) | credential | 5 failures per credential per hour, then a 15 min credential cooldown (a status, not a RAISE) |
+| `session` (verify) | IP hash | alert at 100 failures/h; no block |
+| any partner call | member | 1,200/h (alert, not block) |
+| PIN verify | member | the in-row rules of 6.3 (3 / 4 / 5 consecutive; 20 a day) |
+| TOTP verify | member | 5 failures/h, 15 min lock; a step cannot be reused |
+| `invites` create | inviter; invitee email hash | 20/day; 3 per email per day |
+| `invites/accept/start` | token hash; invitee email hash | 3 sends per token per hour; 5 failed OTP proofs per target per hour (the `reserve_signin_otp_attempt` / `release_signin_otp_attempt` pair, 0035) |
+| `invites/accept/verify`, `enrolments/accept/*` | token | 10 attempts per token, then locked (counted by status, not RAISE) |
+| `session/otp-proof/*` | member; target mailbox | 3 sends/h; the same 5-per-target counter |
+| credential add / revoke, `reauth` | member | 10/h |
+
+Concurrency is tested in pgTAP as for the existing limits (plan §4.7.8).
+
+## 9. Retention and purge
+
+Follows `retention-purge` (E13): bounded definers (a constant `LIMIT 5000` inside each, never a parameter), `EXECUTE` for `edge_system`, a try-lock per step, run from the hourly scheduler already specified in edge doc section 15.
+
+| Data | Kept | Mechanism |
+|---|---|---|
+| `partner_auth_challenge` (used nonces only) | 1 h after `used_at` (long past the 120 s validity; the HMAC `exp` also refuses it) | `purge_partner_challenges` |
+| `partner_session` (including the assertion evidence) | 30 days after `expires_at` or `revoked_at` `[proposed]` | `purge_partner_sessions` |
+| `partner_credential`, active | until the member's account is deleted (`delete_my_data`, the registry-driven pass) | - |
+| `partner_credential`, revoked | 180 days after `revoked_at` `[proposed; counsel]` | `purge_partner_credentials` |
+| `partner_pin`, `partner_totp` | until the last membership is revoked (trigger, 5.2) or the account is deleted | trigger / `delete_my_data` |
+| `partner_invite` | 90 days after accepted, expired or revoked | `purge_partner_invites` (closes G4) |
+| `partner_enrolment_token` | 90 days after consumed, expired or revoked | `purge_partner_enrolment_tokens` |
+| `audit_log` auth events | **permanent** (insert-only, E14); credential and session ids and uids, never a secret | open question Q5 |
+| rate-limit buckets | 2 days | existing `purge_rate_limit_buckets` |
+
+Account deletion: the staff member's own `delete_my_data` removes credentials, sessions, PIN, TOTP, challenges and enrolment tokens through the registry (5.4 item 3); `audit_log.actor_user_id` is redacted by the existing narrow exception (E14).
+
+## 10. Threat table
+
+| Threat | Attack | Controls | Residual |
+|---|---|---|---|
+| Phishing, credential | A look-alike site asks for the passkey | WebAuthn is origin-bound; wrong origin and wrong RP ID are refused `[verified: both cases in the test]`; RP ID is the narrow host | none beyond browser bugs |
+| Phishing, invite | An attacker relays the invite link **and** the emailed OTP and enrols their own passkey | the invite is single use, 72 h, email-bound; the inviter sees the acceptance and the new credential in the portal; cold-start caps apply to a new member (plan §8.3); branch E means a person who already has a credential never gets another this way | a relayed OTP at a **first** enrolment succeeds (any email-OTP bootstrap has this); mitigated by in-person onboarding at pilot sites |
+| Coworker on a shared iPad | Someone with the device passcode picks another member's passkey | the PIN is the only per-person factor: A1 per action; adding a credential, invites and resets need A2; PIN set needs an OTP proof, not a passkey; database-derived credential labels; out-of-band notice (U1); revoke by creation time | reads (A0) as another member until idle or lock; collusion is a policy problem |
+| Invite to a second org | A manager invites a known member's mailbox to a new org to mint a credential on them | branch E: an existing credential holder must sign in and pass A2; `register_first` refuses with an active credential (PA-23) | none |
+| TOTP bypass | An `aal` 1 operator session re-enrols TOTP to read the live seed | enrol refused once confirmed; first enrol needs the enrolment window or an OTP proof; re-enrol bumps the seed; confirm only in the enrolling session; reset needs a higher role (PA-24) | an attacker who holds the mailbox **and** a first-enrolment window |
+| Stolen shop iPad | Thief has the device | UV (the iPad passcode or biometrics) for every assertion; idle 30 min; A1 per action; manager revokes credentials and runs `revoke-all` | thief with passcode, an open session and the PIN acts until revoked |
+| PIN shoulder-surfing | Watcher learns a PIN | masked entry; useless without the member's credential and a session; 5-failure lock; single-use grant; per-member only | a watcher who also holds the unlocked iPad |
+| Session theft by XSS | Script reads the in-memory token | strict CSP, no third-party or inline script, `frame-ancestors 'none'`; not persisted; A1 and A2 need a PIN the script would have to capture; per-staff caps and anomaly alerts; proof of possession reserved (4.6) | a script on the page rides the live session and can read keystrokes; same for a cookie |
+| Session theft in transit or logs | Token captured on the wire or in a log | TLS; our code does not log it; header redaction `[unverified]`; hashed at rest | an observer inside the Edge runtime sees tokens (R-P1) |
+| CSRF | A third-party page triggers a call | no ambient credential; custom header forces preflight; **server-side Origin refusal and exact media type for pre-auth endpoints**; exact-origin CORS | none |
+| Invite forwarding | Link sent to a colleague | OTP goes to the invited mailbox; SQL email comparison; `403` otherwise (AT 16) | the colleague **is** the mailbox owner |
+| Replay | Assertion, challenge, session token, invite | stateless HMAC challenge, nonce recorded at mint so a replay is a primary-key violation; token needs the live session; invite single use under lock; sign count | a replayed *token* inside its lifetime (needs theft first) |
+| Counter regression, cloned authenticator | Two copies of one key | a non-zero counter must strictly rise; regression refused, audited, alerted | synced passkeys report 0: no clone detection (R-P3) |
+| Staff collusion | A staff member sells scans, or hands a friend their PIN | co-signal required for hard evidence (plan §4.5); per-staff and per-facility caps and the anomaly rule (§8.3); attribution to a person and a credential | collusion is a policy problem, not an authentication one |
+| Manager abuse | A manager floods invites | rank and scope rule in the database; 20 invites/day; audited; the operator sees `staff_activity` | an honest-looking manager can still invite real people |
+| Enumeration | Probe members, invites, credentials | usernameless sign-in; constant `401`; constant invite-start body; foreign id `404` where the plan says so | timing differences are not measured |
+| Brute force | PIN, TOTP, OTP, invite token, sign-in | PIN and TOTP lock in the database (status, not RAISE); OTP reuses the 0035 counters; invite tokens are 256-bit and attempt-capped; credential and token keyed limits | an attacker with a live session can lock the member's PIN (a lock lever) |
+| Privilege confusion | A Supabase JWT used as partner authority, or the reverse | partner functions never call `getActorFromRequest`; `gr_ps_` bearers are rejected before GoTrue; **D12 removes the PostgREST reads**; the partner role has no table privilege | none after D12 |
+| Lane crossing | A partner transaction used as a player | separate role `edge_partner`; `actor_uid()` NULL for a partner binding; catalog-driven test (PA-3b) | `SET ROLE` is judged by the session user (R6) |
+| Stale authority | Revoked member keeps working | per-call re-read after locking the session row, which every authority change must touch (4.3); triggers on update, delete, insert; reactivation cannot resurrect | none inside a committed revoke |
+| Compromised Edge runtime | Runtime or a dependency is malicious | minter role, partner role, DB-side assertion checks, re-verifier (S1.6), locked and integrity-checked dependencies | R-P1: it can mint sessions until the re-verifier flags them, and sees tokens and PIN-equivalents in flight |
+| Compromised dependency | A malicious `@simplewebauthn/server` release | exact pin, sha512 lock, `--frozen` CI, tamper test (E15); the wrapper refuses non-`none` attestation | a malicious *pinned* version |
+| Mailbox takeover | Attacker owns a staff mailbox | email never adds a credential to a person who has one (D13); invites need an inviter | takeover at first enrolment |
+| Admin takeover | Attacker targets an admin | passkey + TOTP, 10 min idle, 1 h absolute, every A3 action needs a TOTP within 5 min, audited, TOTP reset only by another admin | a device-bound hardware key is not required (R-P4) |
+| Lock-out DoS | Lock a person out, or an admin | PIN lock needs a live session; recovery and credential revoke only under the reach rule, which excludes admin and operator targets and zero-membership targets | a pro shop with one person and no manager waits for the operator (Q3) |
+| Clock skew | Device or server clock off | all windows use the database clock; a TOTP step is plus or minus 1 | a badly wrong device clock fails closed |
+
+## 11. Residual risks and honest limits
+
+- **R-P1: the Edge runtime is the WebAuthn signature verifier.** A compromised runtime can ask the minter for a session for any member, with fabricated but consistent assertion data (4.4), and sees every token and PIN-equivalent that passes through it. The partner lane is narrower than R6 (a separate role with no table privilege; a compromised runtime cannot act as a partner who is not signing in without minting; the user lane cannot see a partner binding), but it is not closed. The scheduled out-of-runtime re-verifier (S1.6) makes a forged mint detectable; the S0 spike may make the database the verifier. Closing R6 itself is the "PR5" the edge doc already names.
+- **Registration has no cryptographic check at all (R4-L2).** With `attestation: none` the create ceremony carries **no signature**: nothing proves the public key belongs to a live authenticator. The only protections are the structural DB-side checks of 4.4 (type, origin, challenge, `rpIdHash`, UP/UV/AT, `fmt`, key parse and algorithm) and the fact that a `register` challenge exists only inside a just-verified accept (5.1). A compromised runtime that gets a valid register challenge can register a key it generated. The re-verifier **deliberately skips `register`-kind sessions** (no signature exists to re-verify), so a forged enrolment is detected only by the first-credential notice and the manager's view of new credentials (6.3), not by S1.6.
+- **R-P2: the Edge sees a PIN-equivalent.** The PIN is derived in the browser (6.3); the Edge handles a value that works only against that member's verifier.
+- **R-P3: synced passkeys, and shared Apple IDs on shared iPads.** A passkey synced through a platform account (backup eligible) can be used from any device in that account, and reports a counter of `0`. On a shared shop iPad, **every staff passkey may sync into whatever Apple ID the iPad is signed in to, often the owner's personal account**, so a second device, and the account holder, hold every staff passkey. "The passkey proves the device" is true only for device-bound credentials. `backup_eligible` and `backup_state` are stored; nothing is enforced on them in P5.1a. S0 checks, on a real iPad, whether a passkey registered on a shop iPad syncs to other devices of its Apple ID and what the onboarding checklist must say (a dedicated shop Apple ID with iCloud Keychain off is the likely rule; whether Keychain-off passkeys remain usable is `[unverified]`).
+- **R-P4: admin without a hardware key.** The design asks for passkey + TOTP (plan line 448); it does not require a device-bound key. Requiring `backup_eligible = false` for admin is a later hardening if the platform's authenticators make it practical `[unverified]`.
+- **R-P5: A0 reads as another member.** On a shared iPad, a coworker with the passcode has A0 as any member whose passkey is on it, until idle or lock. Reads are scoped to that member's facilities.
+- **R-P6: the stray Supabase JWT.** After D12 a staff member's Supabase JWT reads no partner data and authorizes no partner function. It still authorizes the **player** lane for that account, which is correct.
+- **R-P7: offline PIN guesses.** In the conditional offline build the PIN is verified only at sync (6.7); offline guesses are bounded by the prefetched challenges.
+- **Unverified in the hosted environment** (S0 resolves them on a real project): npm resolution of the 25-package graph; CPU time for assertion verification; `verify_jwt = false` per function; function CORS preflight; Vault and `public.hmac`; `auth.sessions` columns for the freshness checks; the S0 database-side signature spike; an installed-PWA passkey ceremony, the shared-iPad chooser, passkey sync on a shop iPad, and PBKDF2 time on a low-end iPad; A60.
+
+## 12. Slice plan for P5.1a
+
+Each slice is one or more PRs, each independently gateable and each with an "as built" section appended to this document (the repo's convention). Database halves ship before their TypeScript halves (the edge doc's PR1 / PR2 split). **The order of slice 1 changed (L5):** invites need class A2 (a PIN) and the operator and admin invites need A3 (TOTP), so PIN and TOTP come before invites. Until a class is implemented `partner_authorize` **fails closed** on it, and no interim relaxation is allowed; a cell proves A2 and A3 refuse before S1.3 and S1.4 (PA-4b). Credentials for the S1.2 sign-in are seeded in staging by a test-only fixture, never by a production path.
+
+| Slice | Content | Needs |
+|---|---|---|
+| **S0** | Supply chain and spike: the npm pins (two entries), allow-list, lock and CI list changes; the `_shared/partner/webauthn.ts` wrapper with the L7 rules; the software-authenticator fixture as unit tests; **the database-side signature spike** (RS256 modexp and ES256 in PL/pgSQL `numeric`: pass criterion, verification under 200 ms and no extension); the real-project checks of section 11; the shop-iPad passkey-sync check (R-P3); browser PBKDF2 timing on a low-end iPad | this design signed off |
+| **S1.1** | **DB spine.** Roles `edge_partner` and `edge_partner_minter`; binding kind `partner` and `actor_uid()` change; tables `partner_credential`, `partner_auth_challenge`, `partner_session`, `partner_enrolment_token`, `partner_rp_config`; `bind_partner_session`, `partner_authorize` (A2 and A3 fail closed), the mint definers with the DB-side assertion checks; revoke triggers; the scope and role-to-org-kind invariants; `partner_invite` additions and **fixture updates** (`helpers.sql`); **the PostgREST revocation (D12, 5.5)**; **`REVOKE EXECUTE` on `offline_code_record_step_for_actor` and removal of its Edge wrapper only (X9); the session policy and guard trigger, the three session-writer roles and the authority triggers of 4.3 (no GUC window)**; registries; checks 9-14; pgTAP | S0 |
+| **S1.2** | **Edge core.** `openScopedTx` kinds `partner` and `partner_mint`; lint rule; the CORS helper, Origin refusal and `readPartnerJsonBody`; `getActorFromRequest` prefix rejection; function `partner-session` (options, verify, get, sign-out, lock, reauth); the partner rate-limit twin; the reserved `pop_jkt`/`X-GR-PoP` slot; Deno integration suite | S1.1 |
+| **S1.3** | **PIN and step-up.** `partner_pin`, Vault pepper, definers, browser derivation contract, `session/step-up/pin`, lockout, reset, OTP proof, A1 and A2 enabled | S1.2 |
+| **S1.4** | **TOTP and `aal` 2.** `partner_totp`, the SQL `hotp` core (shared with S3), gated enrolment and reset, operator and admin session policy, the admin bootstrap function, A3 enabled and `aal` enforced for every class | S1.3 |
+| **S1.5** | **Invites, enrolment, members.** `partner-invites` (create, list, revoke, branches N and E), `partner-members` (list, revoke, credential add and revoke, recover, revoke-all), `enrolments/*`, server-side OTP, first-credential registration; purge definers for challenges, sessions, invites, enrolment tokens | S1.4 |
+| **S1.6** | **Assertion re-verifier.** Definers `partner_reverify_batch` and `partner_reverify_flag`, the login `partner_audit`, the system-lane enforcement step, and the out-of-runtime job with its runbook (4.4; open item U2, decided at the S1.6 gate); skipped if the S0 spike shows database-side verification is practical | S1.1 |
+| **S2a** | **Player lane** (parallel; no staff dependency). `marker-scan` and the player's co-signal intake: accept `{facilityId, fix, jti}` and tie it to the purchase evidence row (plan §7.6 G2-03, §4.6(q)): `pending` without a qualifying fix, `valid` within 7 days of one, the 120 s rule judged against the fix's time | P3 |
+| **S2b** | **Staff lane.** `course-qr` (rotating token on "Marker sold", today's PIN and "Rotate PIN", hand-over token, the A0 refresh route), `qr-print`, the Ed25519 signing key in Vault, `facility_qr` and `course_qr_token` writers; their reads | S1.3, S1.5, S2a |
+| **S3** | **Attest and redeem.** `partner-attest` (online token and the offline code with the money doc's verify-and-record definer, superseding the recorder), `partner-offers-redeem`, self-attest, same-device rule, cold-start caps, `staff_activity`, `attestation_shift_log`, their Edge reads | S1.3, S1.5 |
+| **S4** | **Receipts and review.** `receipts`, the review and `held_review` queue (wrapping `resolve_held_*`, E20), SLA alerts | S1.4, S3 |
+| **S5** | **Hand-over and stock.** `partner-entitlements-redeem`, `entitlements-collect`, `stock-admin`, vouchers, the availability projection, the stock reads | S3 |
+| **S6** | **Programme and sponsors.** `programme-config`, `offers-admin` (including the offer read that D12 removed), `sponsorships-admin`, settlement (P5.1b), rollup reads | S1.4 |
+| **S7** | **`apps/partners` PWA.** 7a shell, CSP, enrolment, sign-in, PIN (with browser derivation), lock (against fixtures, from S1.2); 7b attest and course-QR screens; 7c hand-over and stock; 7d manager, operator, admin; 7e offline (the A60 spike, then the voucher if built) | S1.2 onward |
+
+### 12.1 Acceptance tests per slice
+
+`PA-n` are new for this design. `AT(n)` are the build plan's P5 acceptance tests (plan line 2807 onward). pgTAP files continue the existing numbering (`supabase/tests/matrix/24_...`).
+
+**S0**
+- PA-0a: the software authenticator registers and signs in against the wrapper; wrong origin, wrong RP ID, missing UV, equal and lower counters and a wrong challenge are each refused; `0` against `0` passes; **and** `crossOrigin: true` is refused, a non-`none` `fmt` is refused before verification, an algorithm outside `[-7, -257]` is refused, a `response.id` different from the looked-up credential is refused (the section 14 cases plus the L7 rules, as a committed test).
+- PA-0b: `deno cache --frozen` passes; the tamper step still fails on a changed hash; the verification suite passes with network denied.
+- PA-0c: the real-project checks, the shop-iPad passkey-sync check, the iPad PBKDF2 timing and the signature spike are recorded, with pass or fail.
+
+**S1.1**
+- PA-1: no privilege for `anon`, `authenticated`, any edge role or `service_role` on the new tables; FORCE RLS on; `edge_partner` and the minter hold **no privilege on any relation**; checks 9-14 pass and each has a must-fail fixture.
+- PA-2: `bind_partner_session` refuses an unknown hash, an idle-expired session, an absolute-expired one, a revoked one, a revoked credential, a demo account, a sponsor-only member and a member with no active membership, with an **identical** SQLSTATE and message.
+- PA-3: **lane separation.** (i) a `partner` binding is invisible to the user lane: under a binding planted through the binder and then `SET ROLE edge_actor`, `private.actor_uid()` is NULL, every `edge_actor` policy yields 0 rows or fails its WITH CHECK, and the four definers that check only `actor_uid()` (`hit_actor_rate_limit`, `device_link_signals_for_actor`, `hold_play_rewards_for_actor`, `lock_own_reward_for_actor`) refuse; (ii) a `user` binding is refused by every `_for_partner` definer; (iii) as `edge_partner`, every table in `app`, `private` and `auth` denies, and `bind_actor` is not executable.
+- PA-3b: a **catalog-driven** test enumerates every function EXECUTE-able by `edge_actor` and every policy `TO edge_actor` and runs each under the planted partner binding, so a future user-lane object is covered without a hand list.
+- PA-4: **serialisation binds**: with an action transaction open, a member revoke and a **scope DELETE** issued from a second connection each **wait** (seen in `pg_locks`) and complete only after the action commits; a revoke issued while the revoker already holds the session lock makes the action wait and then see the revoke. Staff at A acting at B is `403`; a revoked member's next call is `403` on a live session; **reactivation, a membership DELETE then re-INSERT, an org-delete cascade and an `admin_user` delete then insert do not revive old sessions**; deleting the scope row refuses the next call (AT 1, authentication half).
+- PA-4c: **the OR rule and the planted GUC.** (i) With **all** existing `private_definer` policies and grants installed (the `0016:255` and `0016:341` pair included), an UPDATE of the bound user's `partner_member` row under a partner binding, `SET revoked_at = NULL, role = 'manager', invited_by = NULL` in particular, is refused or affects 0 rows. (ii) **As `edge_partner`, plant every GUC the repository uses** (the retired `app.partner.authority_touch`, `app.delete_my_data.target_user_id`, `app.offline_code.target_device_id`, the sign-in proof purge window and the fix-coordinate purge window), then call **each partner definer that writes `partner_session`** (the eight writers above) against **another user's session**: expect **0 rows** every time. (iii) Re-run (i) and (ii) **on every policy S1.5 adds** on `partner_member`, `partner_scope`, `partner_session`, `admin_user` or `partner_credential`; a failing planted-GUC case is a gate failure.
+- PA-4d: **the guard trigger (R4-L1), one cell per row of its table.** Each of `user_id`, `credential_id`, `token_hash`, `created_at`, each `mint_*` column, `mint_kind` and `enrolment_until` cannot be changed by a partner-bound definer on its own session (including `SET user_id = <other>, aal = 2`, which the author showed succeeds under the bare policy); `expires_at` cannot increase; `revoked_at` cannot go back to NULL; `aal` 2 and `mfa_until` are refused without a same-transaction TOTP verification and accepted with one; `pin_grant_until` is refused without a same-transaction correct PIN verification, refused above now + 60 s, and clearing is accepted; `reauth_until` is refused without a same-transaction `reauth` challenge row for this session; `otp_proof_until` is refused without a fresh GoTrue session for this user; `last_seen_at` cannot decrease.
+- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included.
+- PA-5: a facility org with a second scope row, or a non-facility scope, is refused by the trigger; a `sponsor` role in a facility org, or `staff` in an operator org, is refused.
+- PA-6: every view and table in 5.5 answers "denied" to `authenticated` for every actor, including `staff@X` with a valid JWT; `api.offer` and `api.my_offers()` return only live offers with NULL budget and eligibility columns **to a scoped member too**; a draft offer is invisible to a scoped member through every PostgREST path.
+- PA-7: the same signed challenge presented to 12 concurrent mints succeeds once (primary-key refusal); an expired, wrong-purpose, wrong-binding or tampered-HMAC challenge is refused; the HMAC encoding is pinned by a vector computed outside the database (as 0045's derivation is); `session/options` called 10,000 times leaves the `partner_auth_challenge` row count unchanged.
+- PA-7b: **registration challenges (R3-M2).** (i) a `register` challenge requested through the external issuer is refused (the issuer takes no purpose and issues only `sign_in`); (ii) a challenge bound to invite X cannot enrol for invite Y, nor for a different uid; (iii) a **second registration from one acceptance** is refused, and a registration more than 15 minutes after the acceptance is refused; (iv) `register_first` creates the first session in the same transaction (the session row exists with `mint_kind = 'register'`, the nonce is recorded once, and a `partner_session_mint` on that challenge fails on the used nonce); (v) a `reauth` challenge cannot be issued for a session id other than the bound session's.
+- PA-7c: **`register_first` DB-side checks (R4-L2)**: each of the following is refused: `clientDataJSON.type` other than `webauthn.create`; `crossOrigin: true`; a wrong origin; a challenge that does not match the bound HMAC; an attestation `fmt` other than `none`; a wrong `rpIdHash`; any of UP, UV or AT missing; a credential id or COSE key that does not parse; an algorithm other than `-7` or `-257`; a key or credential id that differs from the columns being stored.
+- PA-8: only `edge_partner_minter` can mint; it executes nothing else; `edge_actor` and `edge_partner` cannot.
+- PA-9: the sign count never decreases except `0`-to-`0`; the compare-and-set loses cleanly under concurrency.
+- PA-9b: the mint refuses client data with a wrong `type`, `crossOrigin`, a wrong origin or a different challenge, and authenticator data with a wrong `rpIdHash`, a missing UP or UV flag, or a counter that differs from the argument.
+- PA-9c: `offline_code_record_step_for_actor` is **not** executable by `edge_actor`; check 14 clause (b) finds a planted `edge_actor` function that calls `has_facility_scope`.
+
+**S1.2**
+- PA-10: CORS allows exactly one origin; any other gets none; `OPTIONS` never opens a connection; a request with a foreign `Origin` is `403` before routing; `Content-Type: text/plain; x=application/json` is `415`; `PATCH` and `DELETE` preflights succeed for the allowed origin.
+- PA-11: a Supabase JWT sent to a partner function is `401`; a partner token sent to a player function is `401` **and is never forwarded to GoTrue** (a recording fake proves it); a source scan finds no `console.*` in the partner modules.
+- PA-12: valid assertion mints; wrong origin, wrong RP ID, no UV, regression, replayed challenge, `userHandle` mismatch: one uniform `401`; a regression writes `audit_log` and raises the operator alert.
+- PA-13: the lint fails on a fixture that uses a mint kind outside its caller.
+- PA-13b: the post-bind assertion fails when the transaction runs as `edge_actor`, and when `partner_binding_kind()` is not `'partner'`; `edge_partner` can execute exactly the 4.3 list and **not** `actor_uid()`; `bind_partner_session` refuses a second bind in one transaction, and refuses when any binding (user or delegate) already exists.
+
+**S1.3**
+- PA-18: the stored verifier is not a function of the PIN alone (a dump without the Vault pepper verifies nothing); 5 consecutive failures lock, and the 6th correct attempt is still refused; 20 concurrent wrong attempts evaluate at most 5; **the failure counters are still there after a real commit** (no RAISE rollback); the lock survives a new session; reset sets `must_change`; deny-list PINs are refused at set.
+- PA-19: a PIN grant is single-use and session-bound: a second action needs a second PIN; a second session of the same member does not inherit it; A1, A2 and A3 refuse outside their prerequisites; the A3-for-PIN-less-member substitution works per role combination and **not** for a member who has a PIN.
+- PA-21: PIN set or change needs `enrolment_until` or `otp_proof_until`; **a passkey assertion alone is refused**; a coworker session (a valid passkey session of the member, no PIN) cannot set a PIN after a reset.
+
+**S1.4**
+- PA-20: SQL HOTP equals the TypeScript oracle and the RFC 6238 vectors for **each** parameter set (SHA-1/30 s here, SHA-256/600 s for the offline code); replay of a step is refused; plus or minus 1 step; lockout is a status; **an `aal` 1 session of an operator or admin is refused every call except sign-out, lock, `GET session` and `step-up/totp`** (an A0 read of the shift log included); promotion does not upgrade an old session.
+- PA-24: `totp/enrol` after `confirmed_at` is refused; the first enrol needs an enrolment window or an OTP proof; an unconfirmed re-enrol returns a **different** seed; `confirm` from another session is refused; a reset by a non-higher role is refused; an unconfirmed-TOTP operator or admin is refused every class.
+
+**S1.5**
+- PA-14: AT(16) part two: a forwarded invite fails for a non-matching verified email (`403`, direct definer cell); single use under concurrency; expired, revoked and unknown are one `404`; only the hash is stored (no plaintext column, none in logs); the **email-mismatch attempt count survives commit**.
+- PA-15: grant-subset and rank cells of plan §4.7.7 with the explicit role arrays (manager invites at Y, or a manager or operator: `403`; operator at a facility not on its trail: `403`); a staff member cannot invite; a `sponsor` invite is refused.
+- PA-16: email OTP alone cannot add a credential to a person with an active one; revoked members' credentials and sessions are dead.
+- PA-17: `accept/start` answers identically for a valid and an invalid token; the OTP goes only to the invited address; the GoTrue session is closed **after** the definer on every path (a recording fake).
+- PA-22: **adding a credential and revoking any credential, one's own included,** need A2 with a fresh passkey assertion (a session without PIN grant or `reauth` is refused); the label is database-derived (a client-supplied label is ignored); the note is never read by any decision; revoke-by-creation-time works.
+- PA-23: an invite to a second org for a person with an active credential returns `409 existing_member_sign_in`, creates no credential, writes no membership and **leaves the invite unconsumed** (it then works for branch E); a person with an active membership but **no** active credential gets `409 recover_required` and no credential, with the invite unconsumed (R2-L1); `register_first` refuses with an active credential (a race cell); branch E activates the membership only for a session whose confirmed email equals the invite's.
+- PA-25: **recovery** revokes every credential and session across all orgs, sets `must_change`, issues a `recover` token, and works only under the reach rule: a manager at A cannot recover or credential-revoke a person who also works at B; an operator covering both can; an admin can act on any non-admin. **Cells for R2-M1:** a manager acting on a **zero-membership admin** gets `403`; a manager acting on a **staff member who is also an admin** gets `403`; a manager or another operator acting on an **operator** gets `403`; an admin acting on an admin succeeds only for a **different** admin, **including a zero-membership admin (admin recovery works)**; an admin acting on themselves is refused; a target with no active membership and not an admin is refused for any non-admin actor and **allowed for an admin**.
+
+- PA-27: `session/reauth` with an assertion from a credential that does not belong to the session's user is refused; a second `bind_partner_session` in one transaction is refused.
+- PA-28: a freshly invited operator or admin at `aal` 1 with no confirmed TOTP can reach `totp/enrol`, `totp/confirm`, `session/otp-proof/*` and `session/reauth` and **nothing else**; once TOTP is confirmed the same calls are refused at `aal` 1.
+- PA-29: revoking the last active membership of a user who is in `app.admin_user` deletes their PIN but **not** their TOTP; for a non-admin both go.
+
+**S1.6**: the re-verifier detects a planted session row whose signature is invalid or whose credential key differs, `partner_reverify_flag` marks the session, the system-lane step revokes the session and credential and alerts; `partner_audit` holds `USAGE` on `private` and `EXECUTE` on exactly the two definers and nothing else (check 12); the automatic credential revoke needs a second independent flag; flags above k per hour alert and cap the automatic session revoke; a `register`-kind session is not re-verified (no signature exists).
+
+**S2a/S2b**: AT(19) in full (token replay `409`; more than 120 s from the fix `422 qr_expired`; no fix gives `pending`; the PIN rules and the 429 and rotation alarm; forged printed QR `422` plus `fraud_signal`; `staff@X` cannot mint or read the PIN for Y; an `unattestable` fix goes to `held_review`; the fix is counted once). Also AT(3), AT(4); the token refresh route does not extend idle (PA-26).
+
+**S3**: AT(1) (attestation half), AT(2), AT(12), AT(13), AT(15), AT(16) part one (self-attest `422`, with the per-account limit stated); the shift-log read is exactly the old view's contents and no more; the verify-and-record definer never returns a seed or an expected code (money doc step 3); a partner-bound predicate replaces `offline_code_bound_staff` for the new definer and passes check 14 clause (c).
+
+**S4**: AT(11), AT(18), AT(7) (handle escaping in exports); `resolve_held_*` reachable only through an A3 definer.
+
+**S5**: AT(8) and AT(21) entire, including the race for the last unit and the voucher path.
+
+**S6**: AT(10), AT(14), AT(17), AT(20); operator and admin A3 cells; `programme-config` and `offers-admin` foreign-id cells; the offer read formerly served by PostgREST.
+
+**S7**: a browser test that the app works under the section 4.6 CSP (no inline script, no eval); the token is absent from every storage API after sign-in; a reload requires a passkey tap; the PIN prompt appears for every A1 action and the PIN is derived in the browser (the request body never contains it); and, for 7e only, A60.
+
+## 13. Open questions and open items
+
+Product calls (for the owner). The defaults below are what this document is written against until answered.
+
+| # | Question | Default used |
+|---|---|---|
+| Q1 | **The partners domain.** Confirm the exact host before anyone enrols. The RP ID is baked into every credential; changing it re-enrols every staff member | placeholder `partners.golfraven.<tld>`; RP ID and origin are a deploy-time value (`partner_rp_config`) fixed before the first enrolment |
+| Q2 | **Session and step-up ergonomics.** Idle 30 min and absolute 8 h for staff; a PIN per attest-class action; a fresh PIN per A2 action. Is a PIN per sale acceptable at a busy till, or is a window of N actions in S seconds acceptable? | the proposed values, **PIN per action** (X8) |
+| Q3 | **Recovery ownership.** Manager, then trail operator, then admin | as written (6.5) |
+| Q4 | **Chains and groups.** One login across several courses is a person who is a member of several facility orgs, with a switcher | multi-org membership |
+| Q5 | **Retention of auth audit.** `audit_log` is permanent and insert-only; 180 days for revoked credentials; 30 days for session evidence. Counsel and the privacy officer (Law 25) | as proposed, flagged for counsel |
+| Q6 | **PIN length** | 4 digits |
+| Q7 | **Security notices by email.** Which mail provider and sender domain send "a credential was added to your account", and is a new outbound host acceptable? **Must be answered in time to ship before GA beyond the pilot sites or before P5.2, whichever is earlier (U1 condition 3)** | blocking in-portal interstitial plus manager notice until then |
+
+Open items that a design document cannot resolve (for the gate and the build):
+
+- **U1: the out-of-band notice transport** (H2). The repository has no mail egress except GoTrue's OTP mail. **Gate round 2 ruled this acceptable, and credential add is not blocked in production, on three conditions, tracked here:** (1) the in-portal notice is a **blocking interstitial at the member's next sign-in on any device**; it names the database-derived label and offers revoke; (2) the notice also goes to **every manager whose reach covers the member**, and the operator alert fires; (3) **email notice (Q7) ships before general availability beyond the pilot sites, or before P5.2, whichever is earlier.** Condition 3 is a tracked release condition, not an open question.
+- **U2: the re-verifier's host, login and runbook** (S1.6). Specified in 4.4: login `partner_audit`, two definers, a second runtime that is neither the Edge nor CI. **Belongs to the S1.6 gate.** Not needed if the S0 spike makes the database the verifier.
+- **U3: the S0 spike results** (database-side signature verification, shop-iPad passkey sync, browser PBKDF2 time) can change sections 3.2, 4.4 and 11. **Per gate round 2 they come back as a delta gate on sections 3.2, 4.4 and 11 only**, not a re-gate of the document.
+
+Gate round 5 (PASS) items carried to the build. Each lands with its slice, and that slice's gate checks it:
+
+| ID | Item | Lands in |
+|---|---|---|
+| R5-L1 | Replace the `xmin` artefact check. `xmin` proves the row changed in this transaction, not that verification succeeded: a failed attempt's `failed_count` update passes it, and a write inside an `EXCEPTION` block or savepoint fails it. Make the PIN, TOTP and reauth verifiers `SECURITY DEFINER` functions owned by dedicated NOLOGIN roles (e.g. `partner_pin_verifier`, `partner_totp_verifier`). Only those roles hold column-level `UPDATE` on `pin_grant_until`, `aal`/`mfa_until` and `reauth_until`, and `private_definer` loses those columns. The guard keeps the immutability, monotonicity and now + N caps. Add a `UNIQUE` index on `otp_proof_gotrue_session_id`, as in 0041 | S1.3, S1.4 |
+| R5-L2 | `partner_sessions_revoke` takes a subject `(kind, id)` (user, org or credential), not a list. It derives the sessions inside the function and writes one `audit_log` row per call carrying the caller's binding. Specify the credential-revoke helper the same way: subject-based, callable only from the reach-checked definers, and keeping `partner_flag_enforce`'s two-flag rule | S1.1 |
+| R5-L3 | Check 9 for `partner_session_toucher` / `_issuer` / `_flagger` follows 0041's form. The migrating role may hold membership **without** SET or INHERIT, because a PG16+ non-superuser CREATEROLE role keeps ADMIN on the roles it creates `[unverified — training knowledge]` | S1.1 |
+| R5-L4 | The owner roles need their own `TO <role>` SELECT policies under FORCE RLS: `toucher` on `partner_member`, `partner_scope` and `partner_credential`; `flagger` on `partner_session`. They also need USAGE on `app` and `private`. Each policy gets an allow-list row and a fixture line, and all of these go in the 4.3 privilege table | S1.1 |
+| R5-N1 | `partner_session_guard` is `SECURITY DEFINER` with `search_path = ''`. It is owned by a role that cannot `ALTER TABLE … DISABLE TRIGGER`. The owner of `partner_session` is none of the writer roles | S1.1 |
+| R5-N2 | The 32-bit `xmin` versus `xid8` comparison wraps mod 2^32. This is moot once R5-L1 removes the `xmin` check | S1.3, S1.4 |
+
+## 14. What was verified in the authoring session, and how
+
+| Claim | How it was checked | Result |
+|---|---|---|
+| `@simplewebauthn/server` current version, license, dependencies | `curl https://registry.npmjs.org/@simplewebauthn/server/latest` and `/14.0.3` | 14.0.3, MIT, `engines.node >= 20`, ten direct dependencies |
+| It imports and runs under Deno | `deno run` of a scratch file (Deno 2.5.2) with `npm:@simplewebauthn/server@14.0.3` | exports `generateRegistrationOptions`, `verifyRegistrationResponse`, `generateAuthenticationOptions`, `verifyAuthenticationResponse`, `MetadataService` and others |
+| Size of the dependency graph | `deno info --json` on that file | 25 npm packages |
+| UV and resident-key options | `generateRegistrationOptions(... residentKey: "required", userVerification: "required", attestationType: "none", timeout: 120000)` and `generateAuthenticationOptions(... userVerification: "required")` | `requireResidentKey: true`, UV required, attestation `none`, challenge 32 bytes (43 base64url chars), default timeout 60,000 ms |
+| Registration and assertion semantics | A software authenticator (WebCrypto ES256, hand-built authenticator data and CBOR attestation object) driven against the real library, 13 cases | registration with UP+UV+AT verifies; without UV refused; with BE+BS reports `multiDevice`, backed up; wrong origin refused; assertion counter 1 verifies; counter 1 again refused; counter 0 after 1 refused; no UV refused; wrong origin refused; wrong RP ID hash refused; counter 5 verifies; counter 0 against stored 0 **verifies**; a different expected challenge refused |
+| No outbound host needed | the same 13 cases re-run with `deno run --cached-only --deny-net` | all 13 produced the same results with network denied |
+| PBKDF2 cost | `crypto.subtle.deriveBits` PBKDF2-SHA256, 3-run mean, 4-core container, Deno 2.5.2 | 100,000: 57 ms; 210,000: 115 ms; 600,000: 323 ms; 1,000,000: 555 ms. 10,000 PINs at 600,000 = about 3,230 s |
+| SimpleWebAuthn 14.0.3 behaviours (gate L7) | the cached package source, `esm/authentication/verifyAuthenticationResponse.js` and `esm/registration/verifyRegistrationResponse.js`, read in revision 2 | `crossOrigin` is checked only against `topOrigin` **when `topOrigin` is present**; the registration path branches on `fmt` (`fido-u2f`, `packed`, `android-safetynet`, `android-key`, `tpm`, `apple`, `none`) regardless of the requested attestation; no comparison of `response.id` appears in either file; the default algorithm list is EdDSA, ES256, RS256; registration `requireUserVerification` defaults to true; `decodeAttestationObject` and `decodeClientDataJSON` are exported from the `./helpers` entry |
+| Supabase passkeys are experimental | the passkeys guide, `apps/docs/content/guides/auth/passkeys.mdx` in the `supabase/supabase` repo, master, fetched with `curl` from the raw file host | "Passkey support is experimental ... may change without notice", opt-in client flag, `supabase-js` 2.105.0 or later, discoverable credentials, up to 5 origins |
+| GoTrue passkey handlers | `internal/api/passkey_authentication.go`, `passkey_registration.go`, `passkey_manage.go`, `api.go` and `go.mod` in `supabase/auth`, master, fetched the same way | routes under `/passkeys`; `BeginDiscoverableLogin()` and `BeginRegistration(user, WithExclusions(...))` take no UV, resident-key or attestation option; the challenge is consumed before verification; success calls `issueRefreshToken(... PasskeyLogin ...)`; `go-webauthn/webauthn` is a dependency; no `CloneWarning` reference in the three handler files |
+| Gate claims about the repository (revision 2) | re-read at `eb92ee9`: `0030:252-259` (`actor_uid()` selects on pid and transaction only), the `v_uid := private.actor_uid()` pattern in `hit_actor_rate_limit`, `device_link_signals_for_actor`, `0033` `hold_play_rewards_for_actor` and `lock_own_reward_for_actor`, 51 + 33 `actor_uid()` references in `0031`/`0032`; `http.ts:103-106`; `helpers.sql:261-265`; `0011:59-94`; `0008:303-309`; `0045:310` and `privileged.ts:3268-3280` | all as the gate stated |
+| Row locks under FORCE RLS (gate round 2, R2-M2) | The author reproduced it on a scratch PostgreSQL 17.11 cluster: a role with SELECT and a column UPDATE grant, FORCE RLS, an UPDATE policy that does not match the row | `SELECT ... FOR SHARE` returned **0 rows** and `EXISTS (... FOR SHARE)` was **false**, with no error; after adding `CREATE POLICY ... FOR UPDATE USING (user_id = 1) WITH CHECK (false)` the same lock returned the row, and an UPDATE through that policy was refused (WITH CHECK). The gate's finding is confirmed, **but this repro tested the lock policy alone and the fix built on it was wrong (next row)** |
+| The `WITH CHECK (false)` lock policy does not prevent updates (gate round 3, R3-M1) | The author re-ran it on PG 17.11 with the real policy set present: table-wide `UPDATE` granted to the role (as `0016:341`), the permissive `pd_setnull_partner_member_invited_by` shape `USING (invited_by = <GUC>) WITH CHECK (invited_by IS NULL)`, and the lock policy `USING (user_id = 1) WITH CHECK (false)` | `UPDATE m SET revoked_at = NULL, role = 'manager', invited_by = NULL WHERE user_id = 1` returned **`UPDATE 1`** and the row came back un-revoked and promoted (the same statement succeeded even with the GUC unset, because the lock policy's USING exposes the row and the other policy's WITH CHECK passes); an update that left `invited_by` non-NULL was refused. The gate's finding is confirmed, and design (a), no lock policy on authority tables, replaces it |
+| Serialising through the session row (the adopted design) | Two sessions on PG 17.11: the first held `SELECT ... FOR SHARE` on a session row for about 3 s as a role with a matching UPDATE policy; the second ran `UPDATE` on the same row | the second connection **waited about 2 s** (until the first committed) before completing, so a trigger that UPDATEs the user's sessions does wait behind an in-flight action's lock |
+| A GUC window policy is plantable by `edge_partner` (gate round 4, R4-M1) | The author reproduced it on PG 17.11: policies on a definer role `USING/WITH CHECK (id = <binding GUC>)` and `USING/WITH CHECK (window GUC = 'on')`; a `SECURITY DEFINER` function `revoke_session(id)` owned by that role, `EXECUTE` granted to an unprivileged role | as the unprivileged role, `revoke_session(2)` (another user's session) returned **0** without the window and **1** after `set_config('app.win', 'on', true)` in the same transaction: the GUC persisted into the definer call. Separately, under the own-session policy alone, `UPDATE ... SET user_id = 200, aal = 2 WHERE id = <own>` returned **1 row** (R4-L1). Both findings confirmed; per-role policies and a guard trigger replace the window |
+| The mobile app makes no PostgREST read | `git grep` for `rest/v1`, `.from("`, `my_offers`, `api/my_` in `apps` and `packages` (non-markdown) | no match; the app imports only the Auth client |
+| Repository facts | every `path:line` in section 2, read in the worktree at `eb92ee9` | as cited |
+
+Not verified (and marked `[unverified]` where used): whether the hosted Supabase platform runs the `master` handlers read above; the hosted Edge runtime's Deno version, CPU limit, `npm:` resolution and `verify_jwt` setting; Vault and `public.hmac`; `auth.sessions` columns; whether a database can verify ES256 or RS256 acceptably in PL/pgSQL; any iOS or Safari behaviour (passkey ceremony in an installed PWA, shared-iPad chooser, passkey sync on a shop iPad, cookie blocking, storage lifetime, Trusted Types, low-end PBKDF2 time); the OWASP iteration figure; the common-PIN list; whether a function receives a trustworthy client IP; GoTrue's `amr` content; authenticator-app TOTP algorithm support.
