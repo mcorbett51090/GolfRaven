@@ -1252,7 +1252,7 @@ ALTER TABLE app.partner_credential ENABLE TRIGGER partner_credential_insert_guar
 CREATE FUNCTION pg_temp.try_ins_session(p_user uuid, p_cred uuid, p_over jsonb) RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE
   j jsonb := jsonb_build_object('id', gen_random_uuid(), 'token_hash', md5(random()::text) || md5(random()::text), 'user_id', p_user, 'credential_id', p_cred, 'aal', 1,
-                                'created_at', clock_timestamp(), 'last_seen_at', clock_timestamp(), 'expires_at', clock_timestamp() + interval '8 hours', 'mint_kind', 'sign_in',
+                                'created_at', clock_timestamp(), 'last_seen_at', clock_timestamp(), 'expires_at', clock_timestamp() + interval '7 hours 59 minutes', 'mint_kind', 'sign_in',
                                 'mint_nonce_hash', '\x' || md5(random()::text) || md5(random()::text), 'mint_authenticator_data', '\x' || repeat('04', 40),
                                 'mint_client_data_json', '\x7b7d', 'mint_signature', '\x' || repeat('05', 70));
 BEGIN
@@ -1283,7 +1283,7 @@ SET LOCAL ROLE service_role;
 INSERT INTO auth.sessions (id, user_id, created_at) VALUES (:'g_gosess', '00000000-0000-0000-0000-1000000000a1', clock_timestamp());
 RESET ROLE;
 SET LOCAL ROLE partner_session_issuer;
-SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', '{}'::jsonb), 'ok', 'M2 control: the issuer inserts a well-formed sign_in session (aal 1, nothing verified, the database clock, 8 hours)');
+SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', '{}'::jsonb), 'ok', 'M2 control: the issuer inserts a well-formed sign_in session (aal 1, nothing verified, the database clock, just under the 8 hour ceiling: created_at and expires_at are read at different microseconds, so the base row keeps a minute of margin)');
 SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', '{"aal": 2}'::jsonb), '23514', 'M2: a session is born at aal 1: aal 2 is refused');
 SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('pin_grant_until', clock_timestamp() + interval '1 day')), '23514', 'M2: ... with a PIN grant: refused');
 SELECT is(pg_temp.try_ins_session('00000000-0000-0000-0000-1000000000a1', :'c_sx', jsonb_build_object('reauth_until', clock_timestamp() + interval '1 day')), '23514', 'M2: ... with a reauth window: refused');
