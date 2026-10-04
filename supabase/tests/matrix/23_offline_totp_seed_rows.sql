@@ -1,8 +1,8 @@
 -- 23_offline_totp_seed_rows.sql
--- 0045: the rows 23_offline_totp_seed_edge.sql COMMITTED (pg_prove runs it first, in file order), read back as service_role, then exported and deleted.
+-- 0045: the rows 23_offline_totp_seed_edge.sql and 23_offline_totp_seed_record.sql COMMITTED (pg_prove runs them first, in file order: edge, record, rows), read back as service_role, then exported and deleted.
 -- ⛔ WATCH (the silent class edge_actor introduces): under RLS an UPDATE or DELETE with no matching policy affects ZERO rows and raises nothing, so every "it
 -- was written / it was pruned" claim in the edge file is proven HERE by reading the row back.
--- The edge file recorded step `cur` (the 10-minute step of ITS clock) on PA's a001 at fac_x by staff-x, rotated a002 to version 2 and recorded a version-2 step
+-- The record file (0047, X9: the recorder is an owner-only primitive now; it was the edge file in 0045) recorded step `cur` (the 10-minute step of ITS clock) on PA's a001 at fac_x by staff-x, rotated a002 to version 2 and recorded a version-2 step
 -- on it, and seeded one OLD row (step cur - 50) on a001 and one on PB's b001; steps are therefore matched within +-1 of this file's own clock.
 -- This file also CLEANS UP everything the edge file left (the ee230000- accounts, staff-x's own device).
 

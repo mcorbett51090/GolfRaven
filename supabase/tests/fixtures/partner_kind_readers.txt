@@ -1,0 +1,37 @@
+# supabase/tests/fixtures/partner_kind_readers.txt
+#
+# verify-function-inventory check 14 (c): the functions OUTSIDE the *_for_partner family that are allowed to read the actor binding (the table private.actor_binding or the helpers
+# partner_binding*) or the literal 'partner'. One `schema.name(identity args)` per line; '#' lines are comments. A NEW reader is added here only after review of what it does with the
+# kind, or it belongs inside the *_for_partner family (whose first statement is private.partner_authorize). This is a TRIPWIRE, not a proof: a body that assembles the names at run time
+# evades it (see the comment in tools/db/verify-function-inventory.mjs). supabase/tests/unit/function-inventory-check-parity.test.ts holds this file equal to the list embedded in
+# 10_function_inventory.sql's twin of the check.
+#
+# The producers and readers of the binding itself:
+private.actor_uid()
+private.bind_actor_internal(p_uid uuid, p_kind text)
+private.bind_partner_session(p_token_hash text)
+private.partner_binding()
+private.partner_binding_kind()
+private.partner_binding_session()
+private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)
+private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)
+private.partner_authority_revoke_sessions()
+private.partner_pin_grant_consume()
+# The user-lane definers that read the binding only to REFUSE a non-user kind (a system delegate, a partner) or to read the bound user; each is edge_actor / edge_system lane and
+# is blind to a partner binding by construction (actor_uid() is NULL for it):
+private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)
+private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)
+private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)
+private.delete_my_data_for_actor()
+private.export_my_data_for_actor()
+private.offline_code_bound_staff()
+private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)
+private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)
+private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)
+private.signin_bound_user(p_who text)
+private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)
+# S2a (0046): the player-lane marker-scan definers, same shape (they read the binding to take the bound user and REFUSE any kind but 'user', so a partner binding cannot scan):
+private.course_pin_attempt_for_actor(p_facility_id text, p_pin text, p_at timestamp with time zone)
+private.course_qr_public_key_for_actor(p_kid text, p_purpose text)
+private.marker_cosignal_attach_for_actor(p_facility_id text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)
+private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash text, p_qr_kid text, p_pin text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)

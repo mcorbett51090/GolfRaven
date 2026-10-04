@@ -1,0 +1,79 @@
+# supabase/tests/fixtures/partner_owner_privileges.txt
+#
+# A checked-in fixture of EXACTLY the privileges the five partner owner roles (supabase/migrations/0047_partner_auth_spine.sql) may hold: partner_session_toucher, _issuer and
+# partner_pin_verifier, _totp_verifier, _reauth_verifier. It is the twin of private.partner_owner_privilege, the same way definer_policy_exprs.txt is the twin of
+# private.definer_policy_allowlist: tools/db/verify-function-inventory.mjs check 12 re-derives the real privileges from the catalog and compares them with the TABLE, and compares the table
+# with THIS FILE, so widening a role's privilege together with its registry row (self-consistent for the catalog check) still shows as a diff in review. Regenerate it, and review the
+# diff by hand, whenever a migration changes what one of these roles holds. The comparison lives in the node check: a pgTAP file cannot read a file.
+#
+# Format: one JSON object per line (JSONL): {role_name, object_kind (schema | relation | column | function), object_name, privilege, column_name (columns only, else null)},
+# ordered by (role_name, object_kind, object_name, privilege, column_name). Lines starting with '#' are comments, skipped by the reader.
+#
+# Regenerate from a freshly-migrated database:
+#   psql -At -c "SELECT jsonb_build_object('role_name',role_name,'object_kind',object_kind,'object_name',object_name,'privilege',privilege,'column_name',column_name)::text
+#     FROM private.partner_owner_privilege ORDER BY role_name,object_kind,object_name,privilege,column_name;"
+{"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": "pin_grant_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_pin_verifier", "column_name": "pin_grant_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "EXECUTE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "USAGE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "schema", "object_name": "app"}
+{"privilege": "USAGE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "schema", "object_name": "private"}
+{"privilege": "SELECT", "role_name": "partner_reauth_verifier", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_reauth_verifier", "column_name": "reauth_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_reauth_verifier", "column_name": "reauth_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "EXECUTE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "USAGE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "schema", "object_name": "app"}
+{"privilege": "USAGE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "schema", "object_name": "private"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "credential_id", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "id", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "created_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "token_hash", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_credential"}
+{"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_session"}
+{"privilege": "USAGE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "schema", "object_name": "app"}
+{"privilege": "USAGE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "schema", "object_name": "private"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "id", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "UPDATE", "role_name": "partner_session_toucher", "column_name": "revoke_reason", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "UPDATE", "role_name": "partner_session_toucher", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "UPDATE", "role_name": "partner_session_toucher", "column_name": "revoked_by", "object_kind": "column", "object_name": "app.partner_credential"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "org_id", "object_kind": "column", "object_name": "app.partner_member"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_member"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "role", "object_kind": "column", "object_name": "app.partner_member"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_member"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "facility_id", "object_kind": "column", "object_name": "app.partner_scope"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "id", "object_kind": "column", "object_name": "app.partner_scope"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "org_id", "object_kind": "column", "object_name": "app.partner_scope"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "trail_id", "object_kind": "column", "object_name": "app.partner_scope"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "aal", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "authority_touched_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "created_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "credential_id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "expires_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "last_seen_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "revoke_reason", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "token_hash", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_session_toucher", "column_name": "authority_touched_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_session_toucher", "column_name": "revoke_reason", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_session_toucher", "column_name": "revoked_at", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "EXECUTE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "function", "object_name": "private.partner_audit_write(text,text,text,jsonb)"}
+{"privilege": "EXECUTE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "USAGE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "schema", "object_name": "app"}
+{"privilege": "USAGE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "schema", "object_name": "private"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "aal", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "mfa_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_totp_verifier", "column_name": "aal", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "UPDATE", "role_name": "partner_totp_verifier", "column_name": "mfa_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "EXECUTE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "USAGE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "schema", "object_name": "app"}
+{"privilege": "USAGE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "schema", "object_name": "private"}

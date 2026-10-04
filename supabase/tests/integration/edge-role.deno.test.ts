@@ -104,7 +104,7 @@ Deno.test("self-check: the harness role's own flags are reported (a SUPERUSER / 
 edgeTest("self-check (0041): edge_signin_minter is part of edge_gateway's membership closure and the check ACCEPTS it; the minter made BYPASSRLS is refused by the self-check AND by the signin_mint transaction's own role assertion (needs a superuser harness; reverted afterwards)", async () => {
   const raw = rawHarness();
   try {
-    // the closure the self-check walks (the same recursive query), read as the harness role: exactly the four roles of the model
+    // the closure the self-check walks (the same recursive query), read as the harness role: exactly the six roles of the model (edge_gateway and the five it may SET into)
     const closure = (await raw`
       with recursive clo(oid) as (
         select oid from pg_catalog.pg_roles where rolname = 'edge_gateway'
@@ -112,7 +112,11 @@ edgeTest("self-check (0041): edge_signin_minter is part of edge_gateway's member
         select m.roleid from pg_catalog.pg_auth_members m join clo c on m.member = c.oid
       )
       select array_agg(r.rolname::text order by r.rolname::text) as names from clo join pg_catalog.pg_roles r on r.oid = clo.oid`)[0]!.names as string[];
-    assertEquals(closure, ["edge_actor", "edge_gateway", "edge_signin_minter", "edge_system"], "edge_gateway reaches exactly the three roles it may SET into (and nothing a membership could smuggle in)");
+    assertEquals(
+      closure,
+      ["edge_actor", "edge_gateway", "edge_partner", "edge_partner_minter", "edge_signin_minter", "edge_system"],
+      "edge_gateway reaches exactly the five roles it may SET into (0047 added edge_partner and edge_partner_minter; nothing a membership could smuggle in)",
+    );
     // accepted: a transaction of the new kind opens and runs as the minter, behind the same self-check gate
     await withEdgeUrl(GOOD_EDGE_URL, async () => {
       assertEquals(await openScopedTx("signin_mint", { expectedUid: null }, async (trx) => (await trx`select current_user::text as u`)[0]!.u), "edge_signin_minter");

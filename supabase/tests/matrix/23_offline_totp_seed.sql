@@ -57,7 +57,7 @@ SELECT is((SELECT p.proacl::text !~ '(^\{|,)=' FROM pg_proc p WHERE p.oid = 'pri
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)
            WHERE has_function_privilege(r.n, 'private.offline_seed_for_actor(uuid, boolean)', 'EXECUTE')), ARRAY['edge_actor'], 'only edge_actor may EXECUTE offline_seed_for_actor');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)
-           WHERE has_function_privilege(r.n, 'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)', 'EXECUTE')), ARRAY['edge_actor'], 'only edge_actor may EXECUTE offline_code_record_step_for_actor');
+           WHERE has_function_privilege(r.n, 'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)', 'EXECUTE')), NULL, 'NO listed role may EXECUTE offline_code_record_step_for_actor (0047, X9: owner-only primitive; its proofs call it as private_definer: 23_offline_totp_seed_record.sql)');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.offline_seed_derive(uuid, uuid, integer)'::regprocedure, 'private.offline_seed_for_actor(uuid, boolean)'::regprocedure,
              'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)'::regprocedure)
            AND p.prosecdef AND p.proowner = 'private_definer'::regrole AND p.proconfig = ARRAY['search_path=""']), 3,
@@ -130,7 +130,7 @@ SELECT is((SELECT action::text FROM private.pii_export_policy WHERE schema_name 
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('offline_seed_derive', 'offline_seed_for_actor', 'offline_code_record_step_for_actor', 'device_offline_seed_version_monotonic', 'offline_code_bound_staff')), 5,
   'registry: all five new functions are in private.function_inventory');
 SELECT is((SELECT array_agg(function_name ORDER BY function_name) FROM private.function_inventory
-           WHERE function_name LIKE 'offline_%' AND expected_edge_actor), ARRAY['offline_code_record_step_for_actor', 'offline_seed_for_actor'], 'registry: edge_actor is expected on exactly the two wrappers');
+           WHERE function_name LIKE 'offline_%' AND expected_edge_actor), ARRAY['offline_seed_for_actor'], 'registry: edge_actor is expected on exactly ONE wrapper since 0047 (X9 revoked the recorder)');
 SELECT is((SELECT count(*)::int FROM private.function_inventory
            WHERE function_name LIKE 'offline_%' AND (expected_anon OR expected_authenticated OR expected_service_role OR expected_edge_system)), 0, 'registry: no other role is expected on any of them');
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE '%offline_code%' AND scoped), 6, 'registry: all six private_definer policies are in the allow-list, each scoped');
@@ -144,7 +144,7 @@ SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.offline
 -- 5. The registered inventory still matches the live grants (the standalone check is tools/db/verify-function-inventory.mjs)
 -- ----------------------------------------------------------------------------
 SELECT is((SELECT has_function_privilege('edge_actor', 'private.offline_seed_for_actor(uuid, boolean)', 'EXECUTE')
-             AND has_function_privilege('edge_actor', 'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)', 'EXECUTE')), true, 'edge_actor holds EXECUTE on both wrappers');
+             AND NOT has_function_privilege('edge_actor', 'private.offline_code_record_step_for_actor(uuid, integer, bigint, text)', 'EXECUTE')), true, 'edge_actor holds EXECUTE on the provisioning wrapper and (0047, X9) NOT on the replay recorder');
 SELECT is((SELECT count(*)::int FROM pg_trigger t WHERE t.tgrelid = 'app.device'::regclass AND t.tgname = 'device_offline_seed_version_monotonic_trg' AND NOT t.tgisinternal), 1, 'the monotonic trigger exists on app.device');
 
 -- ----------------------------------------------------------------------------

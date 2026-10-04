@@ -1,7 +1,7 @@
 // supabase/tests/integration/offline-code.deno.test.ts
 //
 // P4.2b-3a: the offline staff code against the REAL database. The REAL handler (_shared/me/offline-seed-handler.ts), the REAL Repo built by privileged.ts
-// (every call is `SET LOCAL ROLE edge_actor` + a bound actor), the REAL Vault-keyed derivation (private.offline_seed_derive, which no TypeScript can reach)
+// (every Repo call is `SET LOCAL ROLE edge_actor` + a bound actor; the replay record is the exception since 0047: see `record` below), the REAL Vault-keyed derivation (private.offline_seed_derive, which no TypeScript can reach)
 // and the REAL replay table, in the harness cluster tools/db/test.sh builds. The derivation is checked against an INDEPENDENT reference
 // (../unit/offline-seed-reference.ts: the shim's K, written without the database function).
 //
@@ -19,6 +19,7 @@ import { verifyOfflineCode } from "../../functions/_shared/offline-code/verify.t
 import { HttpError } from "../../functions/_shared/http.ts";
 import type { Repo } from "../../functions/_shared/types.ts";
 import type postgres from "postgres";
+import postgresjs from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
 import { SHIM_OFFLINE_SEED_KEY, deriveSeedReference, toHex } from "../unit/offline-seed-reference.ts";
 
 type TxSql = postgres.TransactionSql;
@@ -41,8 +42,30 @@ type Player = Awaited<ReturnType<typeof freshPlayer>>;
 
 const provision = (p: Player, rotate = false, deviceId = p.deviceId) => withOwnership(p.actor, (repo: Repo) => handleOfflineSeedRequest({ deviceId, rotate }, repo));
 const nowStep = () => stepOf(Date.now() / 1000);
-const record = (staffUid: string, deviceId: string, seedVersion: number, step: number, facilityId = FAC_X) =>
-  withOwnership(makeActor(staffUid), (repo: Repo) => repo.offlineCode.recordStep({ deviceId, seedVersion, step, facilityId }));
+// X9 (0047): the replay record is no longer an Edge capability (edge_actor cannot EXECUTE it), so there is no Repo method to call. What is proven here is the
+// PRIMITIVE, called the way S3's partner definer will call it: as its owner, private_definer, after a bind_actor (this is the shape the pgTAP file
+// 23_offline_totp_seed_record.sql uses). A pool of real connections, so the concurrency cases below really race.
+const recorderPool = postgresjs({ host: Deno.env.get("PGHOST"), port: Number(Deno.env.get("PGPORT")), username: Deno.env.get("PGUSER"), database: Deno.env.get("PGDATABASE"), max: 12, prepare: false });
+const OFFLINE_STEP_RESULTS = new Set(["recorded", "replayed", "stale_seed_version", "step_out_of_window", "no_such_device"]);
+const record = async (staffUid: string, deviceId: string, seedVersion: number, step: number, facilityId = FAC_X): Promise<string> => {
+  try {
+    return await recorderPool.begin(async (trx) => {
+      await trx`set local role private_definer`;
+      await trx`select private.bind_actor(${staffUid}::uuid)`;
+      const rows = await trx`select private.offline_code_record_step_for_actor(${deviceId}::uuid, ${seedVersion}::integer, ${step}::bigint, ${facilityId}::text) as result`;
+      const result = rows[0]?.result;
+      if (typeof result !== "string" || !OFFLINE_STEP_RESULTS.has(result)) throw new Error("the primitive returned an unexpected result");
+      return result;
+    });
+  } catch (e) {
+    const code = (e as { code?: unknown } | null)?.code;
+    const message = String((e as { message?: unknown } | null)?.message ?? "");
+    if (code === "42501") throw new HttpError(403, "forbidden", "you hold no staff scope at that facility");
+    if (code === "22023" && message.startsWith("self_attestation_refused")) throw new HttpError(422, "self_attestation_refused", "a staff member cannot attest their own account");
+    if (code === "23503") throw new HttpError(422, "unknown_facility", "no such facility");
+    throw e;
+  }
+};
 async function httpError(p: Promise<unknown>): Promise<HttpError | null> {
   try {
     await p;
@@ -101,7 +124,7 @@ Deno.test("provisioning never creates a device row", DT, async () => {
   assertEquals(await rawCount(`select count(*)::int as n from app.device where id = '${ghost}'`), 0);
 });
 
-Deno.test("K: as the real edge_actor, the Vault, the derivation core and the replay table are out of reach; only the two wrappers answer", DT, async () => {
+Deno.test("K: as the real edge_actor, the Vault, the derivation core, the replay table and the replay recorder (X9) are out of reach; only the provisioning wrapper answers", DT, async () => {
   const p = await freshPlayer("k");
   const refusedWith = async (run: (trx: TxSql) => Promise<unknown>): Promise<string> => {
     try {
@@ -115,6 +138,11 @@ Deno.test("K: as the real edge_actor, the Vault, the derivation core and the rep
   assertEquals(await refusedWith((trx) => trx`select private.offline_seed_derive(${p.uid}::uuid, ${p.deviceId}::uuid, 1)`), "42501", "the derivation core is not callable");
   assertEquals(await refusedWith((trx) => trx`select count(*) from app.offline_code_step`), "42501", "the replay table is not readable");
   assertEquals(await refusedWith((trx) => trx`update app.device set offline_seed_version = 9 where id = ${p.deviceId}`), "42501", "the version is not writable");
+  assertEquals(
+    await refusedWith((trx) => trx`select private.offline_code_record_step_for_actor(${p.deviceId}::uuid, 1, 1, 'fac_x')`),
+    "42501",
+    "X9: the replay recorder is not callable by edge_actor (staff authority is not an Edge capability)",
+  );
   // control: the wrapper answers, and the seed is a function RESULT whose derivation the caller cannot see or redo
   const ok = await openScopedTx("actor", userBind(p.uid), (trx) => trx`select octet_length(o_seed) as n from private.offline_seed_for_actor(${p.deviceId}::uuid, false)`);
   assertEquals(ok[0]!.n, 32);
@@ -122,7 +150,7 @@ Deno.test("K: as the real edge_actor, the Vault, the derivation core and the rep
   assert(!JSON.stringify(await provision(p)).includes(SHIM_OFFLINE_SEED_KEY));
 });
 
-Deno.test("recordStep: atomic under concurrency: N parallel staff requests for ONE step give exactly one `recorded`, the rest `replayed`, one row", DT, async () => {
+Deno.test("replay record: atomic under concurrency: N parallel staff requests for ONE step give exactly one `recorded`, the rest `replayed`, one row", DT, async () => {
   const p = await freshPlayer("race");
   const { seedVersion } = await provision(p);
   const step = nowStep();
@@ -137,7 +165,7 @@ Deno.test("recordStep: atomic under concurrency: N parallel staff requests for O
   assertEquals(more, ["recorded", "recorded", "recorded"]);
 });
 
-Deno.test("recordStep: concurrent staff at TWO facilities racing on one step still produce exactly one winner", DT, async () => {
+Deno.test("replay record: concurrent staff at TWO facilities racing on one step still produce exactly one winner", DT, async () => {
   const p = await freshPlayer("race2");
   const step = nowStep();
   const results = await Promise.all([
@@ -148,7 +176,7 @@ Deno.test("recordStep: concurrent staff at TWO facilities racing on one step sti
   assertEquals(await rawCount(`select count(*)::int as n from app.offline_code_step where device_id = '${p.deviceId}'`), 1);
 });
 
-Deno.test("recordStep: statuses, scope and self-attestation through the real Repo", DT, async () => {
+Deno.test("replay record: statuses, scope and self-attestation through the primitive (as private_definer, after bind_actor)", DT, async () => {
   const p = await freshPlayer("status");
   const step = nowStep();
   assertEquals(await record(STAFF_X, p.deviceId, 1, step), "recorded");
