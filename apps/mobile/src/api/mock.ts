@@ -17,6 +17,8 @@ import type {
   ApiClient,
   DeleteAccountResult,
   EarnedReward,
+  MarkerScanRequest,
+  MarkerScanResult,
   OfflineSeedRequest,
   OfflineSeedResult,
   ExportResult,
@@ -52,6 +54,7 @@ export type MockCall =
   | { op: "export" }
   | { op: "push"; req: PushTokenRequest }
   | { op: "offline_seed"; req: OfflineSeedRequest }
+  | { op: "marker_scan"; req: MarkerScanRequest }
   | { op: "activate"; req: ActivateRewardInput }
   | { op: "list" };
 
@@ -156,6 +159,12 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
       maybeFail();
       if (req.rotate === true) demoSeedVersion += 1;
       return Promise.resolve({ seed: base32Encode(Uint8Array.from({ length: 32 }, (_, i) => (i * 7 + demoSeedVersion) & 255)), stepSeconds: 600, digits: 6, algorithm: "SHA256", seedVersion: demoSeedVersion, issuedAt: new Date().toISOString() });
+    },
+    // The demo has no marker programme: a scan answers an obviously fake `pending` purchase (no co-signal credited without a server to judge it).
+    scanMarker(req: MarkerScanRequest): Promise<MarkerScanResult> {
+      calls.push({ op: "marker_scan", req });
+      maybeFail();
+      return Promise.resolve({ outcome: "pending", facilityId: req.facilityId, localDate: "2026-01-01", cosignal: "none", purchases: [{ purchaseId: "demo-purchase", trailId: "demo-trail", status: "pending", credit: { id: "demo-credit", status: "pending" } }] });
     },
     listEarnedRewards: (): Promise<EarnedReward[]> => Promise.resolve([]),
     activateReward(req: ActivateRewardInput): Promise<ActivationAnswer> {

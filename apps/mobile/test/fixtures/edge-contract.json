@@ -1529,6 +1529,361 @@
           }
         ]
       }
+    },
+    "markerscan_201_rotating_credited": {
+      "status": 201,
+      "body": "{\"data\":{\"outcome\":\"credited\",\"facilityId\":\"fac_x\",\"localDate\":\"2026-06-01\",\"cosignal\":\"counted\",\"purchases\":[{\"purchaseId\":\"pe-user-a-1-1\",\"trailId\":\"trl_t\",\"status\":\"valid\",\"credit\":{\"id\":\"mc-user-a-1-2\",\"status\":\"credited\"}}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IkVSWWJJQ1VxTHpRNVBrTklUVkpYWEEifQ.X2_ETHqLU6viSVrW7SAS4sxkXStr5DMcTTDUg9GUKVHqzlVfeY8ZE0yMxr0Af0k5msMVN1g0jVcZ6-7PylVEDw"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid1",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti1"
+      }
+    },
+    "markerscan_409_fix_already_used": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"fix_already_used\",\"message\":\"this location fix has already been recorded\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IkVSWWJJQ1VxTHpRNVBrTklUVkpYWEEifQ.X2_ETHqLU6viSVrW7SAS4sxkXStr5DMcTTDUg9GUKVHqzlVfeY8ZE0yMxr0Af0k5msMVN1g0jVcZ6-7PylVEDw"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid1",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti1"
+      }
+    },
+    "markerscan_409_qr_used": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"qr_used\",\"message\":\"this QR code has already been scanned\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IkVSWWJJQ1VxTHpRNVBrTklUVkpYWEEifQ.X2_ETHqLU6viSVrW7SAS4sxkXStr5DMcTTDUg9GUKVHqzlVfeY8ZE0yMxr0Af0k5msMVN1g0jVcZ6-7PylVEDw"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid2",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti2"
+      }
+    },
+    "markerscan_409_qr_used_retry": {
+      "status": 409,
+      "body": "{\"error\":{\"code\":\"qr_used\",\"message\":\"this QR code has already been scanned\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IkVSWWJJQ1VxTHpRNVBrTklUVkpYWEEifQ.X2_ETHqLU6viSVrW7SAS4sxkXStr5DMcTTDUg9GUKVHqzlVfeY8ZE0yMxr0Af0k5msMVN1g0jVcZ6-7PylVEDw"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid2",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti2"
+      }
+    },
+    "markerscan_201_rotating_pending_no_fix": {
+      "status": 201,
+      "body": "{\"data\":{\"outcome\":\"pending\",\"facilityId\":\"fac_x\",\"localDate\":\"2026-06-01\",\"cosignal\":\"none\",\"purchases\":[{\"purchaseId\":\"pe-user-a-1-1\",\"trailId\":\"trl_a\",\"status\":\"pending\",\"credit\":{\"id\":\"mc-user-a-1-2\",\"status\":\"pending\"}},{\"purchaseId\":\"pe-user-a-2-3\",\"trailId\":\"trl_b\",\"status\":\"pending\",\"credit\":{\"id\":\"mc-user-a-2-4\",\"status\":\"pending\"}}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IklpY3NNVFk3UUVWS1QxUlpYbU5vYlEifQ.VcF5wi6zQAy9trRhBbSbbTf0i0-MGa34S9In3TiMMmttPg9KzWYf6mSEL4hwICVPLRCcDzBZBJF8mG516012BA"
+        }
+      }
+    },
+    "markerscan_200_cosignal_credited": {
+      "status": 200,
+      "body": "{\"data\":{\"outcome\":\"credited\",\"facilityId\":\"fac_x\",\"localDate\":null,\"cosignal\":\"counted\",\"purchases\":[{\"purchaseId\":\"pe-user-a-1-1\",\"trailId\":\"trl_a\",\"status\":\"valid\",\"credit\":{\"id\":\"mc-user-a-1-2\",\"status\":\"credited\"}},{\"purchaseId\":\"pe-user-a-2-3\",\"trailId\":\"trl_b\",\"status\":\"valid\",\"credit\":{\"id\":\"mc-user-a-2-4\",\"status\":\"credited\"}}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid3",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti3"
+      }
+    },
+    "markerscan_422_no_pending_purchase": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"no_pending_purchase\",\"message\":\"no pending marker purchase at this facility is waiting for this location fix\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid4",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti4"
+      }
+    },
+    "markerscan_201_held_review_unattestable": {
+      "status": 201,
+      "body": "{\"data\":{\"outcome\":\"held_review\",\"facilityId\":\"fac_x\",\"localDate\":\"2026-06-01\",\"cosignal\":\"counted\",\"purchases\":[{\"purchaseId\":\"pe-user-a-1-1\",\"trailId\":\"trl_t\",\"status\":\"held_review\",\"credit\":{\"id\":\"mc-user-a-1-2\",\"status\":\"held_review\"}}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6Ik16ZzlRa2RNVVZaYllHVnFiM1I1ZmcifQ.GsXc3E4yIVWKRSEp8MXzghY1bFW1gM0pjFFsA73pdBx1i8bFgezq5dwg_AFTqqQpJio7QPDC3FcKj6R8xD0YBg"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid5",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti5"
+      }
+    },
+    "markerscan_201_static_pin_credited": {
+      "status": 201,
+      "body": "{\"data\":{\"outcome\":\"credited\",\"facilityId\":\"fac_x\",\"localDate\":\"2026-06-01\",\"cosignal\":\"counted\",\"purchases\":[{\"purchaseId\":\"pe-user-a-1-1\",\"trailId\":\"trl_t\",\"status\":\"valid\",\"credit\":{\"id\":\"mc-user-a-1-2\",\"status\":\"credited\"}}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "static_pin",
+          "kid": "pq1",
+          "sig": "xy92Yv82sgOJpOVOHtMqhQRZxvnnwaAjm0C7MsT3i-Yk2ElgNT6ECZ00gkPuPELMNILQdyCwCUsHDP8pBZj0AA",
+          "pin": "4321"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid6",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti6"
+      }
+    },
+    "markerscan_422_invalid_pin": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"invalid_pin\",\"message\":\"that PIN is not today's PIN for this facility\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "static_pin",
+          "kid": "pq1",
+          "sig": "xy92Yv82sgOJpOVOHtMqhQRZxvnnwaAjm0C7MsT3i-Yk2ElgNT6ECZ00gkPuPELMNILQdyCwCUsHDP8pBZj0AA",
+          "pin": "0000"
+        }
+      }
+    },
+    "markerscan_429_pin_locked": {
+      "status": 429,
+      "body": "{\"error\":{\"code\":\"rate_limited\",\"message\":\"too many wrong PINs at this facility today; try again tomorrow\",\"details\":{\"retryAfterSeconds\":3600}}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "static_pin",
+          "kid": "pq1",
+          "sig": "xy92Yv82sgOJpOVOHtMqhQRZxvnnwaAjm0C7MsT3i-Yk2ElgNT6ECZ00gkPuPELMNILQdyCwCUsHDP8pBZj0AA",
+          "pin": "4321"
+        }
+      }
+    },
+    "markerscan_422_qr_expired": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"qr_expired\",\"message\":\"this QR code had expired when your location was captured\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTQ3MjAsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE0NjAwLCJraWQiOiJyazEiLCJub25jZSI6IlJFbE9VMWhkWW1kc2NYWjdnSVdLancifQ.HCdpyWXtvD-8UpxUEd-g4iz9otGdyYaNRwhk_JtcN80Ld7TiXm1uug9HHsLfJi1BXhrCHKQLGNUCVArYrrSaCQ"
+        },
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid7",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti7"
+      }
+    },
+    "markerscan_422_invalid_qr_forged": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"invalid_qr\",\"message\":\"this QR code is not valid for this facility\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IkFRSURCQVVHQndnSkNnc01EUTRQRUEifQ.zkhEADyc7ojEMSU7ClV1QRqQVbXiuaW3l49DXIJSr3i-vH_JK0GuSr-A3oLAAgxFV6S8UsgPIQzQvBEQwM3vCQ"
+        }
+      }
+    },
+    "markerscan_422_not_a_cosignal": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"not_a_cosignal\",\"message\":\"this location fix does not qualify as a presence co-signal\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid8",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": true,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti8"
+      }
+    },
+    "markerscan_422_fix_out_of_window": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"fix_out_of_window\",\"message\":\"the location fix is older than 7 days or dated in the future\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "deviceId": "11111111-1111-4111-8111-111111111111",
+        "fix": {
+          "fixId": "fixid9",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1779624000000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        },
+        "jti": "jti9"
+      }
+    },
+    "markerscan_400_unknown_key": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid marker-scan request\",\"details\":{\"issues\":[{\"path\":\"extra\",\"message\":\"unrecognised field\"}]}}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTQ3MjAsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE0NjAwLCJraWQiOiJyazEiLCJub25jZSI6IlJFbE9VMWhkWW1kc2NYWjdnSVdLancifQ.HCdpyWXtvD-8UpxUEd-g4iz9otGdyYaNRwhk_JtcN80Ld7TiXm1uug9HHsLfJi1BXhrCHKQLGNUCVArYrrSaCQ"
+        },
+        "extra": 1
+      }
+    },
+    "markerscan_400_fix_without_device": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid marker-scan request\",\"details\":{\"issues\":[{\"path\":\"deviceId\",\"message\":\"is required with a fix (the check-in token is bound to the device)\"}]}}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTQ3MjAsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE0NjAwLCJraWQiOiJyazEiLCJub25jZSI6IlJFbE9VMWhkWW1kc2NYWjdnSVdLancifQ.HCdpyWXtvD-8UpxUEd-g4iz9otGdyYaNRwhk_JtcN80Ld7TiXm1uug9HHsLfJi1BXhrCHKQLGNUCVArYrrSaCQ"
+        },
+        "fix": {
+          "fixId": "fixid10",
+          "lat": 36.1,
+          "lng": -86.8,
+          "accuracyMeters": 8,
+          "capturedAt": 1780315190000,
+          "simulated": false,
+          "foreground": true,
+          "fromApp": true
+        }
+      }
+    },
+    "markerscan_422_programme_inactive": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"marker_programme_inactive\",\"message\":\"this facility is not running a marker programme right now\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "eyJhbGciOiJFZERTQSIsImtpZCI6InJrMSIsInR5cCI6ImdvbGZyYXZlbi1jb3Vyc2UtcXIrand0In0.eyJleHAiOjE3ODAzMTUzMTUsImZhYyI6ImZhY194IiwiaWF0IjoxNzgwMzE1MTk1LCJraWQiOiJyazEiLCJub25jZSI6IlZWcGZaR2x1YzNoOWdvZU1rWmFib0EifQ.eXwmBrajyLGQ2zWD1zrOOJZKYU3vy6L9RWIppSd767mXlvn5wU3i70-OvnBWTf18m7MQB7ANfuVaHmHHGBaXBg"
+        }
+      }
+    },
+    "markerscan_503_pin_unavailable": {
+      "status": 503,
+      "body": "{\"error\":{\"code\":\"course_pin_unavailable\",\"message\":\"marker purchases by printed QR are not available right now\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "static_pin",
+          "kid": "pq1",
+          "sig": "xy92Yv82sgOJpOVOHtMqhQRZxvnnwaAjm0C7MsT3i-Yk2ElgNT6ECZ00gkPuPELMNILQdyCwCUsHDP8pBZj0AA",
+          "pin": "4321"
+        }
+      }
+    },
+    "markerscan_429_rate_limited": {
+      "status": 429,
+      "body": "{\"error\":{\"code\":\"rate_limited\",\"message\":\"marker-scan rate limit exceeded\",\"details\":{\"retryAfterSeconds\":86400}}}",
+      "request": {
+        "facilityId": "fac_x",
+        "qr": {
+          "variant": "rotating",
+          "token": "not.a.token"
+        }
+      }
     }
   },
   "_provenance_p42b1": "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_, attestkey_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token, devices-attest-key) and the real binding / source-ref code over the server's own fakes; the Apple / Google verification PORTS are scripted (accept exactly the base64url of the binding the real code computed; see the script's header), behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
@@ -1951,5 +2306,6 @@
     }
   },
   "_provenance_p42b3b": "Entries starting offlineseed_ and activate_ (and `vectors.offlineCode`) were recorded by the same script (P4.2b-3b) from the REAL handlers: me-offline-seed (handleOfflineSeedRequest, over the server's in-memory offline-code repo; the seed is the server test suite's independent reference derivation under its TEST key, not a production secret) and rewards-activate (handleActivation, parseActivationBody, extractRewardId, enforceActivationRateLimits, over the in-memory rewards repo) with the scripted Apple / Google ports described above. Only privileged.ts is replaced (in-memory rate limits) and, as for checkin-token, the rollback of the handler's transaction on a thrown error is emulated. `vectors.offlineCode` holds codes the server's totp.ts computed.",
-  "_provenance_p42c": "Entries starting checkin_ and `vectors.checkinWindow` / `vectors.localDate` were recorded by the same script (P4.2c) from the REAL evidence, checkin-challenge and checkin-token handlers: the request the check-in screen builds (device-shaped fix, facility-local date from the fix's own time), and how the server's challenge window (`issued_at <= capturedAt <= expires_at`) treats a prefetched challenge, a live challenge taken before the fix and a live challenge taken after it. `consumed` flags are read from the server fake's token row after the real handler ran; `localDate` samples are the server's own `localDateInTz`."
+  "_provenance_p42c": "Entries starting checkin_ and `vectors.checkinWindow` / `vectors.localDate` were recorded by the same script (P4.2c) from the REAL evidence, checkin-challenge and checkin-token handlers: the request the check-in screen builds (device-shaped fix, facility-local date from the fix's own time), and how the server's challenge window (`issued_at <= capturedAt <= expires_at`) treats a prefetched challenge, a live challenge taken before the fix and a live challenge taken after it. `consumed` flags are read from the server fake's token row after the real handler ran; `localDate` samples are the server's own `localDateInTz`.",
+  "_provenance_p5s2a": "Entries starting markerscan_ were recorded by the same script (P5.1a S2a) from the REAL marker-scan handler (handleMarkerScan, parseMarkerScanBody, the 20-a-day limit, the envelope) over the server's in-memory marker-scan repo (supabase/tests/unit/fake-marker-scan-repo.ts), with two FIXED Ed25519 verification keys from obviously fake seeds, so the recorded rotating token and printed-QR signature are byte-stable. The database's own checks (the 120 s rule, single use, the PIN derivation and counters) are proven by the pgTAP matrix 24_* and the Deno integration suite, not here; as for checkin-token, the rollback of a thrown refusal is emulated. Each entry carries the request that produced it."
 }

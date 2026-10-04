@@ -15,6 +15,7 @@
  * | `requestCheckinChallenges` | `POST { deviceId, facilityId?, prefetchCount? }`  | `checkin-challenge` |
  * | `redeemCheckinChallenge`| `POST { challengeId, nonce, hardwareSupportsAttestation, attestation? }` (`attest/redeemer.ts` builds it) | `checkin-token` |
  * | `provisionOfflineSeed`  | `POST { deviceId, rotate? }` (strict; the answer carries a SECRET seed, never logged)  | `me-offline-seed`  |
+ * | `scanMarker`            | `POST { facilityId, qr?, deviceId?, fix?, jti? }` (strict; a scan, or a co-signal intake with only the fix; 201 / 200) | `marker-scan` |
  * | `activateReward`        | `POST { deviceId, platform, challengeId?, nonce?, installLinkId?, attestation }` (`attest/activator.ts` builds it), the reward id in the PATH | `rewards-activate/<id>` |
  *
  * Auth: `Authorization: Bearer <Supabase access token>` from `getAccessToken()` (the auth service refreshes an expired token itself); a `401`
@@ -52,6 +53,7 @@ import {
   exportResultSchema,
   linkResultSchema,
   listMethodsSchema,
+  markerScanResultSchema,
   offlineSeedResultSchema,
   pushTokenResultSchema,
   successEnvelopeSchema,
@@ -361,6 +363,25 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         body: { deviceId: req.deviceId, ...(req.rotate === true ? { rotate: true } : {}) },
         schema: offlineSeedResultSchema,
         idempotent: false,
+        accessToken: credentials.accessToken,
+      });
+    },
+
+    /** `POST marker-scan` (P5.1a S2a): ONE request as the owner, never retried here (a scan is single-use and a repeat is a 409; the retry policy of a queued co-signal is the sender's, not built yet). 201 for a scan, 200 for a co-signal intake. */
+    scanMarker(req, credentials) {
+      return call({
+        fn: "marker-scan",
+        method: "POST",
+        body: {
+          facilityId: req.facilityId,
+          ...(req.qr !== undefined ? { qr: req.qr } : {}),
+          ...(req.deviceId !== undefined ? { deviceId: req.deviceId } : {}),
+          ...(req.fix !== undefined ? { fix: req.fix } : {}),
+          ...(req.jti !== undefined ? { jti: req.jti } : {}),
+        },
+        schema: markerScanResultSchema,
+        idempotent: false,
+        okStatus: [200, 201],
         accessToken: credentials.accessToken,
       });
     },

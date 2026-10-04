@@ -87,9 +87,15 @@ import { Errors, errorResponse, handleRequest, MAX_BODY_BYTES, okResponse } from
 import { boundBodyBytes, canonicalJson, computeRequestBinding, toBase64Url, toHex } from "../../../supabase/functions/_shared/rewards/binding.ts";
 import { computeAttestKeyBinding, attestKeyChallengeString } from "../../../supabase/functions/_shared/rewards/app-attest-registration.ts";
 import { computeIosActivationBinding, iosActivationChallengeString } from "../../../supabase/functions/_shared/rewards/string-binding.ts";
+import { handleMarkerScan } from "../../../supabase/functions/_shared/course-qr/scan-handler.ts";
+import { parseMarkerScanBody } from "../../../supabase/functions/_shared/course-qr/request-shape.ts";
+import { MARKER_SCAN_BUCKET, MARKER_SCAN_PER_USER_DAY, MARKER_SCAN_WINDOW_SECONDS } from "../../../supabase/functions/_shared/course-qr/params.ts";
+import { markerScanState } from "../../../supabase/tests/unit/fake-marker-scan-repo.ts";
+import { mintPrintedQrSig, mintRotatingToken, type TestSigningKey } from "../../../supabase/tests/unit/course-qr-test-keys.ts";
+import { FAC as MARKER_FAC, fixAt as markerFixAt, seedRotating as markerSeedRotating, seedToken as markerSeedToken, world as markerWorld, type World as MarkerWorld } from "../../../supabase/tests/unit/marker-scan-world.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/edge-contract.json", import.meta.url));
-const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_", "offlineseed_", "activate_", "checkin_"];
+const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_", "offlineseed_", "activate_", "checkin_", "markerscan_"];
 const UID = "user-a";
 /** The account the offline-seed entries are recorded for: the seed derivation names the account by UUID (as every real account id is). */
 const OFFLINE_UID = "11111111-aaaa-4aaa-8aaa-111111111111";
@@ -257,6 +263,55 @@ async function batchEndpoint(body: unknown): Promise<Entry> {
   });
   // The 101-item request is not stored (it is only the loop count); every other request is.
   return toEntry(res, (body as { items?: unknown[] })?.items && (body as { items: unknown[] }).items.length > 20 ? undefined : body);
+}
+
+/** marker-scan/index.ts, replicated: the strict body parse, the 20-a-day limit BEFORE the transaction, then `handleMarkerScan`. A `refused` outcome (a counted wrong PIN, a recorded forgery) COMMITS and is answered after;
+ * every other refusal is a thrown error, which rolls the request transaction back: the in-memory fake has no transaction, so what the handler touched (the check-in token it consumed, the evidence row, the
+ * course token's used flag, the purchases, the PIN counters) is restored here. The same emulation as `tokenEndpoint` / `activateEndpoint`. */
+async function markerScanEndpoint(w: MarkerWorld, body: unknown, uid: string = UID): Promise<Entry> {
+  hoisted.current.state = w.state;
+  const ms = markerScanState(w.state);
+  const snap = {
+    tokens: structuredClone([...w.state.checkinTokens]),
+    evidence: structuredClone([...w.state.evidence]),
+    courseTokens: structuredClone([...ms.tokens]),
+    purchases: structuredClone(ms.purchases),
+    pinFailures: new Map(ms.pinFailures),
+  };
+  let committed = false;
+  const res = await handleRequest(async () => {
+    const parsed = parseMarkerScanBody(body);
+    if (!parsed.ok) throw Errors.badRequest("invalid marker-scan request", { issues: parsed.issues });
+    const limit = await fakeHitRateLimitForActor(w.state, uid, MARKER_SCAN_BUCKET, MARKER_SCAN_WINDOW_SECONDS, MARKER_SCAN_PER_USER_DAY);
+    if (!limit.ok) return Errors.tooManyRequests("marker-scan rate limit exceeded", limit.retryAfterSeconds).toResponse();
+    const outcome = await handleMarkerScan(parsed.value, w.repo, { sha256Hex: digestHex });
+    if (outcome.kind === "refused") {
+      committed = true;
+      return outcome.error.toResponse();
+    }
+    committed = true;
+    return okResponse(outcome.status, outcome.body, { "cache-control": "no-store" });
+  });
+  if (!committed) {
+    w.state.checkinTokens.clear();
+    for (const [k, v] of snap.tokens) w.state.checkinTokens.set(k, v);
+    w.state.evidence.clear();
+    for (const [k, v] of snap.evidence) w.state.evidence.set(k, v);
+    ms.tokens.clear();
+    for (const [k, v] of snap.courseTokens) ms.tokens.set(k, v);
+    ms.purchases.splice(0, ms.purchases.length, ...snap.purchases);
+    ms.pinFailures.clear();
+    for (const [k, v] of snap.pinFailures) ms.pinFailures.set(k, v);
+  }
+  return toEntry(res, body);
+}
+
+/** Two FIXED Ed25519 verification keys (rotating-token and printed-QR) from obviously fake seeds, so the recorded tokens are byte-stable. */
+async function fixedMarkerKey(seedByte: number): Promise<TestSigningKey> {
+  const der = Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), Buffer.alloc(32, seedByte)]);
+  const privateKey = await crypto.subtle.importKey("pkcs8", der, { name: "Ed25519" }, true, ["sign"]);
+  const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+  return { publicKeyB64Url: jwk.x as string, privateKey };
 }
 
 // --- bodies -----------------------------------------------------------------------------------------------------------------------------------
@@ -826,6 +881,94 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
     r.batch_200_rate_limited_item = await batchEndpoint({ items: [{ ...selfReport, localDate: "2026-05-14" }, { ...selfReport, localDate: "2026-05-15" }] });
   }
 
+  // ---------------- marker-scan (P5.1a S2a): the player's half of a course-QR marker purchase ----------------
+  // The REAL `handleMarkerScan` (Ed25519 verification of the QR, the PIN gate, the check-in token's consumption, the fix grading, the evidence row, the HTTP mapping) over the server's in-memory marker-scan
+  // repo. The two Ed25519 verification keys are FIXED (obviously fake seeds), so the recorded tokens are byte-stable. What this does NOT prove: the database's own checks (the 120 s rule, single use,
+  // the PIN derivation, the counters), which are pgTAP matrix 24_* and the Deno integration suite; the fake implements the same observable contract.
+  {
+    const rot = await fixedMarkerKey(9);
+    const prt = await fixedMarkerKey(10);
+    const attacker = await fixedMarkerKey(11);
+    const mk = (over: Parameters<typeof markerWorld>[0] = {}) => markerWorld({ rotKey: rot, prtKey: prt, ...over });
+    // a deterministic 16-byte token nonce per call (the real one is random; the recording must be byte-stable)
+    let nonceN = 0;
+    const seedRot = (w: MarkerWorld, o: { iatOffsetSec?: number } = {}) => {
+      nonceN += 1;
+      return markerSeedRotating(w, { ...o, nonce: Uint8Array.from({ length: 16 }, (_, i) => (nonceN * 17 + i * 5) & 255) });
+    };
+    const scanBody = (w: MarkerWorld, qr: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ facilityId: MARKER_FAC, qr, ...extra });
+    const withFix = (w: MarkerWorld, over: Record<string, unknown> = {}, tokenOver: Parameters<typeof markerSeedToken>[1] = {}): Record<string, unknown> => ({ deviceId: FAKE_DEVICE_ID, fix: markerFixAt(w, -10_000, over), jti: markerSeedToken(w, tokenOver) });
+    const printed = async (pin: string, key: TestSigningKey = prt): Promise<Record<string, unknown>> => ({ variant: "static_pin", kid: "pq1", sig: await mintPrintedQrSig(key, MARKER_FAC, "pq1"), pin });
+
+    {
+      const w = await mk({ programme: ["trl_t"] });
+      const t = await seedRot(w);
+      const req = scanBody(w, { variant: "rotating", token: t.token }, withFix(w));
+      r.markerscan_201_rotating_credited = await markerScanEndpoint(w, req);
+      // the SAME request again: the fix is already counted (the outbox treats a 409 as accepted)
+      r.markerscan_409_fix_already_used = await markerScanEndpoint(w, req);
+      // the same TOKEN with a fresh fix: single use
+      const reused = scanBody(w, { variant: "rotating", token: t.token }, withFix(w));
+      r.markerscan_409_qr_used = await markerScanEndpoint(w, reused);
+      // the refused request ROLLED BACK (its fix and check-in token are not spent): the SAME request again is still `qr_used`, not `fix_already_used`
+      r.markerscan_409_qr_used_retry = await markerScanEndpoint(w, reused);
+    }
+    {
+      const w = await mk({ programme: ["trl_a", "trl_b"] });
+      const t = await seedRot(w);
+      // no fix: a pending purchase and a pending credit, one per eligible trail; credited only if a qualifying fix arrives
+      r.markerscan_201_rotating_pending_no_fix = await markerScanEndpoint(w, scanBody(w, { variant: "rotating", token: t.token }));
+      // the co-signal intake: only the fix completes the player's own pending purchase (200)
+      r.markerscan_200_cosignal_credited = await markerScanEndpoint(w, { facilityId: MARKER_FAC, ...withFix(w) });
+      r.markerscan_422_no_pending_purchase = await markerScanEndpoint(w, { facilityId: MARKER_FAC, ...withFix(w) });
+    }
+    {
+      const w = await mk();
+      const t = await seedRot(w);
+      r.markerscan_201_held_review_unattestable = await markerScanEndpoint(w, scanBody(w, { variant: "rotating", token: t.token }, withFix(w, {}, { grade: "unattestable" })));
+    }
+    {
+      const w = await mk();
+      r.markerscan_201_static_pin_credited = await markerScanEndpoint(w, scanBody(w, await printed("4321"), withFix(w)));
+    }
+    {
+      const w = await mk();
+      // a wrong PIN is a refusal that COMMITS (the failure counts); the sixth attempt of the day is 429 even with the right PIN
+      r.markerscan_422_invalid_pin = await markerScanEndpoint(w, scanBody(w, await printed("0000")));
+      for (let i = 0; i < 4; i += 1) await markerScanEndpoint(w, scanBody(w, await printed("0000")));
+      r.markerscan_429_pin_locked = await markerScanEndpoint(w, scanBody(w, await printed("4321")));
+    }
+    {
+      const w = await mk();
+      const old = await seedRot(w, { iatOffsetSec: -600 });
+      r.markerscan_422_qr_expired = await markerScanEndpoint(w, scanBody(w, { variant: "rotating", token: old.token }, withFix(w)));
+      // a forged QR (valid shape, signed by another key): refused AND a fraud signal is recorded (commits)
+      const forged = (await mintRotatingToken({ key: attacker, kid: "rk1", facilityId: MARKER_FAC, iat: Math.floor(w.nowMs / 1000) - 5, nonce: Uint8Array.from({ length: 16 }, (_, i) => i + 1) })).token;
+      r.markerscan_422_invalid_qr_forged = await markerScanEndpoint(w, scanBody(w, { variant: "rotating", token: forged }));
+      r.markerscan_422_not_a_cosignal = await markerScanEndpoint(w, { facilityId: MARKER_FAC, ...withFix(w, { simulated: true }) });
+      r.markerscan_422_fix_out_of_window = await markerScanEndpoint(w, { facilityId: MARKER_FAC, deviceId: FAKE_DEVICE_ID, fix: markerFixAt(w, -8 * 86_400_000), jti: markerSeedToken(w) });
+      r.markerscan_400_unknown_key = await markerScanEndpoint(w, { facilityId: MARKER_FAC, qr: { variant: "rotating", token: old.token }, extra: 1 });
+      r.markerscan_400_fix_without_device = await markerScanEndpoint(w, { facilityId: MARKER_FAC, qr: { variant: "rotating", token: old.token }, fix: markerFixAt(w) });
+    }
+    {
+      const w = await mk({ programme: null });
+      const t = await seedRot(w);
+      r.markerscan_422_programme_inactive = await markerScanEndpoint(w, scanBody(w, { variant: "rotating", token: t.token }));
+    }
+    {
+      const w = await mk();
+      markerScanState(w.state).pepperProvisioned = false;
+      r.markerscan_503_pin_unavailable = await markerScanEndpoint(w, scanBody(w, await printed("4321")));
+    }
+    {
+      const w = await mk();
+      let last: Entry | null = null;
+      // every request counts against 20 a day, a refused one included
+      for (let i = 0; i <= MARKER_SCAN_PER_USER_DAY; i += 1) last = await markerScanEndpoint(w, { facilityId: MARKER_FAC, qr: { variant: "rotating", token: "not.a.token" } });
+      r.markerscan_429_rate_limited = last!;
+    }
+  }
+
   // ---------------- vectors ----------------
   const samples: Record<string, Record<string, unknown>> = {
     checkin: checkin("fixV1", { checkinTokenJti: "jti_1" }) as Record<string, unknown>,
@@ -913,6 +1056,8 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
         "Entries starting offlineseed_ and activate_ (and `vectors.offlineCode`) were recorded by the same script (P4.2b-3b) from the REAL handlers: me-offline-seed (handleOfflineSeedRequest, over the server's in-memory offline-code repo; the seed is the server test suite's independent reference derivation under its TEST key, not a production secret) and rewards-activate (handleActivation, parseActivationBody, extractRewardId, enforceActivationRateLimits, over the in-memory rewards repo) with the scripted Apple / Google ports described above. Only privileged.ts is replaced (in-memory rate limits) and, as for checkin-token, the rollback of the handler's transaction on a thrown error is emulated. `vectors.offlineCode` holds codes the server's totp.ts computed.",
       _provenance_p42c:
         "Entries starting checkin_ and `vectors.checkinWindow` / `vectors.localDate` were recorded by the same script (P4.2c) from the REAL evidence, checkin-challenge and checkin-token handlers: the request the check-in screen builds (device-shaped fix, facility-local date from the fix's own time), and how the server's challenge window (`issued_at <= capturedAt <= expires_at`) treats a prefetched challenge, a live challenge taken before the fix and a live challenge taken after it. `consumed` flags are read from the server fake's token row after the real handler ran; `localDate` samples are the server's own `localDateInTz`.",
+      _provenance_p5s2a:
+        "Entries starting markerscan_ were recorded by the same script (P5.1a S2a) from the REAL marker-scan handler (handleMarkerScan, parseMarkerScanBody, the 20-a-day limit, the envelope) over the server's in-memory marker-scan repo (supabase/tests/unit/fake-marker-scan-repo.ts), with two FIXED Ed25519 verification keys from obviously fake seeds, so the recorded rotating token and printed-QR signature are byte-stable. The database's own checks (the 120 s rule, single use, the PIN derivation and counters) are proven by the pgTAP matrix 24_* and the Deno integration suite, not here; as for checkin-token, the rollback of a thrown refusal is emulated. Each entry carries the request that produced it.",
       responses: { ...kept, ...responses },
       vectors: JSON.parse(JSON.stringify(vectors)),
     };
@@ -958,6 +1103,17 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     const cw = (vectors as unknown as { checkinWindow: { prefetchedCovered: { consumed: boolean }; liveFirst: { consumed: boolean }; liveAfterFix: { consumed: boolean }; edges: Array<{ consumed: boolean }> } }).checkinWindow;
     expect([cw.prefetchedCovered.consumed, cw.liveFirst.consumed, cw.liveAfterFix.consumed]).toEqual([true, true, false]);
     expect(cw.edges.map((x) => x.consumed)).toEqual([false, true, true, false, false, true, true, false]);
+    // P5.1a S2a: what the marker-scan recording must have seen
+    const ms = (k: string) => responses[k]!;
+    expect([ms("markerscan_201_rotating_credited").status, ms("markerscan_201_rotating_pending_no_fix").status, ms("markerscan_200_cosignal_credited").status, ms("markerscan_201_held_review_unattestable").status, ms("markerscan_201_static_pin_credited").status]).toEqual([201, 201, 200, 201, 201]);
+    expect(JSON.parse(ms("markerscan_201_rotating_credited").body).data).toMatchObject({ outcome: "credited", cosignal: "counted" });
+    expect(JSON.parse(ms("markerscan_201_rotating_pending_no_fix").body).data).toMatchObject({ outcome: "pending", cosignal: "none" });
+    expect(JSON.parse(ms("markerscan_200_cosignal_credited").body).data).toMatchObject({ outcome: "credited", localDate: null });
+    expect(JSON.parse(ms("markerscan_201_held_review_unattestable").body).data).toMatchObject({ outcome: "held_review" });
+    expect([ms("markerscan_409_fix_already_used").status, ms("markerscan_409_qr_used").status]).toEqual([409, 409]);
+    expect([ms("markerscan_409_fix_already_used").body, ms("markerscan_409_qr_used").body, ms("markerscan_409_qr_used_retry").body].map((b) => JSON.parse(b).error.code)).toEqual(["fix_already_used", "qr_used", "qr_used"]);
+    expect([ms("markerscan_422_invalid_pin").status, ms("markerscan_429_pin_locked").status, ms("markerscan_422_qr_expired").status, ms("markerscan_422_invalid_qr_forged").status, ms("markerscan_422_no_pending_purchase").status, ms("markerscan_422_not_a_cosignal").status, ms("markerscan_422_fix_out_of_window").status, ms("markerscan_422_programme_inactive").status]).toEqual([422, 429, 422, 422, 422, 422, 422, 422]);
+    expect([ms("markerscan_400_unknown_key").status, ms("markerscan_400_fix_without_device").status, ms("markerscan_503_pin_unavailable").status, ms("markerscan_429_rate_limited").status]).toEqual([400, 400, 503, 429]);
     void errorResponse;
   });
 });

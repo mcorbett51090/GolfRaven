@@ -176,6 +176,49 @@ export interface OfflineCodeApi {
   provisionOfflineSeed(req: OfflineSeedRequest, credentials: EvidenceCredentials): Promise<OfflineSeedResult>;
 }
 
+/** The presence fix of a marker scan, the evidence endpoint's own fix fields (`_shared/course-qr/request-shape.ts` `MarkerScanFix`: STRICT, these eight keys and no others). */
+export interface MarkerScanFix {
+  fixId: string;
+  lat: number;
+  lng: number;
+  accuracyMeters: number;
+  /** Epoch milliseconds. */
+  capturedAt: number;
+  simulated: boolean;
+  foreground: boolean;
+  fromApp: boolean;
+}
+
+/** What the player scanned: the shop's rotating token (Q1), or the printed facility QR (its `kid` and `sig` from the link's fragment) plus today's four-digit PIN (Q2). */
+export type MarkerScanQr = { variant: "rotating"; token: string } | { variant: "static_pin"; kid: string; sig: string; pin: string };
+
+/** `POST marker-scan` request (`parseMarkerScanBody`, `_shared/course-qr/request-shape.ts`): STRICT. A scan carries `qr` (and, to be credited, a challenge-bound `fix` with its `deviceId` and
+ * the redeemed check-in token's `jti`); a CO-SIGNAL intake carries only the `fix` (completing the player's own pending purchase at that facility). */
+export interface MarkerScanRequest {
+  facilityId: string;
+  qr?: MarkerScanQr;
+  deviceId?: string;
+  fix?: MarkerScanFix;
+  jti?: string;
+}
+
+/** `POST marker-scan` answer. `outcome` is the WORST state across the purchases: `credited` only when every credit is, `held_review` when a reviewer must look, else `pending` (no qualifying co-signal yet).
+ * 201 for a scan, 200 for a co-signal intake. No secret and no trust fact (no grade, no nonce) is ever returned. */
+export interface MarkerScanResult {
+  outcome: "credited" | "pending" | "held_review";
+  facilityId: string;
+  /** The facility-local date of the purchase; `null` for a co-signal intake that completed an earlier scan. */
+  localDate: string | null;
+  cosignal: "counted" | "none";
+  purchases: { purchaseId: string; trailId: string; status: "valid" | "pending" | "held_review"; credit: { id: string | null; status: "credited" | "pending" | "held_review" | "void" } }[];
+}
+
+/** The player's half of a marker purchase (P5.1a S2a). The bearer is `credentials.accessToken` (the owner's); NOT retried here (a scan is single-use: a repeat answers 409). Behind `MARKER_COSIGNAL_UI_ENABLED`, which stays false:
+ * nothing in the app calls it yet. Refusals the UI must tell apart: 409 `qr_used` / `fix_already_used` / `duplicate_scan`, 422 `qr_expired` / `invalid_qr` / `invalid_pin` / `no_pending_purchase`, 429 (a rate limit or `locked` PINs, with Retry-After). */
+export interface MarkerScanApi {
+  scanMarker(req: MarkerScanRequest, credentials: EvidenceCredentials): Promise<MarkerScanResult>;
+}
+
 /** The server's `RewardKind` (`_shared/rewards/types.ts`): an offer code, or an `entitlement` (the special marker; the table's own `kind` column calls it `special_marker`, the activation answer says `entitlement`). */
 export type RewardKind = "offer_code" | "entitlement";
 
@@ -227,7 +270,7 @@ export interface RewardsApi {
   listEarnedRewards(): Promise<EarnedReward[]>;
 }
 
-export interface ApiClient extends EvidenceSubmitter, CheckinApi, OfflineCodeApi, RewardsApi {
+export interface ApiClient extends EvidenceSubmitter, CheckinApi, OfflineCodeApi, MarkerScanApi, RewardsApi {
   /** Server policy constants the app must not hard-code (`MIN_AGE`, §7.8). `[no server endpoint exists yet: the real client answers the
    * compiled default (16) — see `http-client.ts`]` */
   getPolicy(): Promise<{ minAge: number }>;

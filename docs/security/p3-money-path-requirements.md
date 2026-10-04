@@ -3882,3 +3882,62 @@ A 6-digit TOTP (RFC 6238, 10-minute step) is computed **on the device** from a p
 - **NIT-1.** `private.validate_and_register_pseudonym_hmac_id` (0018) accepted any Vault secret of at least 32 bytes by id, with no check of its name, so a writer allowed to set a pseudonym key id could have registered `offline_seed_key`'s id as a pseudonym key. 0045 now replaces it with the same body plus `AND name LIKE 'pseudonym_hmac%'` (the predicate `account_pseudonyms` already uses). Verified by a live body diff (a cluster at 0044 against a cluster at 0045): `prosrc` differs in exactly that one line; owner (`private_definer`), ACL (`private_definer`, `service_role`, `edge_actor`), `search_path = ''`, SECURITY DEFINER and volatility are identical. pgTAP: registering `offline_seed_key`'s id is refused (`23514`); a real `pseudonym_hmac_v1` id still registers; the posture cell.
 - **NIT-3.** The staff-lane design that keeps seeds in Postgres is now the REQUIRED P5 design (step 3 above), and the recorder must be superseded by a verify-and-record definer that takes proof of the code. **NIT-2.** Brute-force guidance with numbers is in step 2 above (60 candidates a guess; 5 most recent devices; per-target cap of 10 an hour and 30 a day across all staff).
 - **Mutation proofs for this commit** (one world-readable `/tmp` copy, the migration edited in turn, the 23 matrix files run on a fresh cluster each time, an unmutated control passing; **2 of 2 caught**): the explicit `d.user_id = v_uid` filters removed from `offline_seed_for_actor` (caught by the `delete_my_data`-window cells, tests 37 and 42: 0016's policy still leaks it, exactly as the gate found; the offline-code window no longer leaks because that policy is gone); the validator's name check dropped (caught by the refusal cell and the posture cell). The copy was deleted and a search of the repository for the mutation marker prints nothing.
+
+## Marker purchase by course QR: the player lane (P5.1a S2a, 2026-10-04; migration `0046_course_qr_marker_scan.sql`)
+
+The prose of what was built and the wire contract is `docs/security/partner-auth-design.md`, "As built: S2a". This section is what the money path needs from it: which rows a scan writes and in which states, the new definers and their trust argument, the seam S3 must use, and what is and is not proven.
+
+### What a scan writes (purchase evidence and the credit)
+
+`private.marker_scan_for_actor` (the bound actor is the buyer; no user argument) writes, per **eligible trail** of the facility (an accepted `any_purchase` programme row whose `qr_mode` allows the variant), one `app.purchase_evidence` row (`method = 'course_qr'`, `qr_variant`, `ref_id`, `local_date` in the facility's tz) and one `app.marker_credit` row:
+
+| Co-signal | `purchase_evidence.status` | `marker_credit.status` | `cosignal` |
+|---|---|---|---|
+| attested fix | `valid` | `credited` | `{fixId, grade, capturedAt, evidenceId}` |
+| unattestable fix | `held_review` | `held_review` | the same |
+| none | `pending` | `pending` | `{awaiting: {from, to, until}}` |
+
+A marker purchase **alone never creates or raises a play** (AT(4)): the scan writes no `app.play` row, and its one evidence row is the fix's facility-level `foreground_checkin`. **`credited` needs an attested co-signal** (AT(3)): the Edge cannot assert one the database does not receive with a fix id and an evidence row id, and the Edge only passes a grade for a fix it consumed a check-in token for. `ref_id` is the nonce hash (Q1) or `pin:<facility>:<local date>:<epoch>` (Q2); a unique partial index `(user_id, trail_id, ref_id) WHERE method = 'course_qr'` makes a replayed printed-QR scan a duplicate even under a race. The credit rule is unchanged: one credited marker per player per shop (a credit that cannot be `credited` because the player already holds one is voided by the intake).
+
+### The definers (all `_for_actor`: SECURITY DEFINER, owner `private_definer`, `search_path = ''`, EXECUTE for `edge_actor` only)
+
+| Definer | Returns | Trust argument |
+|---|---|---|
+| `course_qr_public_key_for_actor(kid, purpose)` | the public key and its revoked flag | public data; requires a bound actor so it cannot be called outside a request |
+| `course_pin_attempt_for_actor(facility, pin, at)` | `ok / wrong / locked / no_facility / no_programme` | never raises (a refusal must commit so the counter counts); counters are sums over `private.rate_limit_bucket` under transaction advisory locks (50 parallel guesses: exactly five `wrong`); returns no PIN |
+| `marker_scan_for_actor(...)` | a status, and the purchase and credit rows of the **bound** actor | every refusal is a returned status written before any write; every statement on a caller-visible row filters `user_id = <bound uid>`; the token's `used_by_user` is never returned (only that it was used) |
+| `marker_cosignal_attach_for_actor(...)` | `attached / no_pending_purchase` and the caller's own rows | filters by the bound uid, takes the row lock; method-agnostic |
+| `course_pin_derive(facility, date, epoch)` | the PIN | **EXECUTE for nobody**; the only reader of the Vault secret `course_pin_pepper`; called by exactly the two definers above |
+
+New policies (15, `pd_marker_scan_*`) are keyed on the actor binding, never a settable GUC (the HARD RULE above): the wide visibility the token, QR and programme READ policies give the definer is not an ownership boundary, the definers' own predicates are. Column grants are narrow (`UPDATE (pin_epoch)` on `facility_programme`, `UPDATE (used_by_user, used_at)` on `course_qr_token`, `SELECT (id, tz)` on `catalog_facility`, ...). No existing grant or policy is broadened, FORCE ROW LEVEL SECURITY is kept on every table touched, and `edge_actor` has **no** privilege on `course_qr_key`, `course_pin_alarm`, `course_qr_token`, `facility_qr`, `purchase_evidence` or `marker_credit` (a pgTAP cell and the Deno suite both prove it as the real role).
+
+### Threat table
+
+| Threat | Control | Proven by |
+|---|---|---|
+| Replay of a rotating token | single-use `UPDATE ... WHERE used_at IS NULL` plus a write-once trigger | pgTAP; Deno: 6 parallel scans of one token give exactly one purchase |
+| Token scanned long after issue | 120 s judged against the **fix** time, both directions; a fix older than 7 days is refused | pgTAP, unit, Deno |
+| Forged or foreign QR | Ed25519 verification against a registered, unrevoked `kid` before anything is consumed; the facility id is bound into the printed-QR signature; a forgery commits a `fraud_signal` | unit, Deno |
+| PIN guessing | 5 wrong per user per facility per local date (the 6th is `locked` even if right); 30 per facility per date rotates the PIN and alarms | pgTAP, Deno (parallel guesses; the 30-failure rotation) |
+| PIN read by an Edge compromise | the pepper is read in one function nobody can EXECUTE; the player lane returns no PIN | pgTAP (one function names the pepper; no role may execute it), Deno (as `edge_actor`) |
+| A purchase credited with no presence | `credited` only with an attested, challenge-bound fix inside a `play-verified` polygon plus 50 m | unit (drift test against the scorer's own predicate), Deno (a far fix, a simulated fix) |
+| Another account's pending purchase completed | the intake filters by the bound uid | pgTAP (PA's fix joins nothing of PB's) |
+| A refused scan spending a check-in token | refusals after the token's consumption are thrown (rolled back) | Deno (the second token is unspent) |
+
+### What S3 and S2b must do
+
+S3 (offline-code staff scan) writes its purchase as `pending` with `cosignal.awaiting` exactly as the design doc's seam paragraph states; the player's reconnect completes it through the existing intake with no change here. S3's verify-and-record definer still supersedes 0045's recorder (section "Offline TOTP seed provisioning", "What P5 must do"). S2b's PIN display must call `private.course_pin_derive` through a wrapper that checks the staff scope for the facility (the money doc's rule: no wrapper derives for an unchecked facility), and S2b writes `course_qr_token` / `facility_qr` rows and the public keys.
+
+### Not verified (`[unverified]`)
+
+Vault accepting `course_pin_pepper` and `public.hmac` on a hosted project; the hosted Edge runtime's Ed25519 WebCrypto; the retention of `course_qr_token`, `course_pin_alarm` and abandoned `pending` rows (no purge yet).
+
+### Tests and verification
+
+Nothing from before the last edit is counted; each line is a command run on the final tree.
+
+- **pgTAP, both harness modes** (`HARNESS_MODE=superuser tools/db/test.sh` and `HARNESS_MODE=restricted tools/db/test.sh`, each a full initdb, migrate, seed, pgTAP, teardown): `Files=33, Tests=2779, Result: PASS` in both (S2a's three files are `24_course_qr_marker_scan.sql` 71 cells, `..._edge.sql` 196, `..._rows.sql` 71). The same runs: the Deno integration suite `307 passed | 0 failed` (14 of them `marker-scan.deno.test.ts`), `verify-function-inventory` OK, `service-role-lint` clean. These are the commands the CI job "player-plane DB" runs.
+- `supabase/tests` vitest (`pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts`): 59 files, 1180 tests passed (S2a: `marker-scan-handler`, `marker-scan-entrypoint`, `course-qr-format`, `course-qr-cosignal`, `course-qr-pin-vector`: 73 tests). `apps/mobile` vitest: 65 files, 1965 passed, 6 skipped. The recorder (`record-edge-contract.vitest.config.ts`): passes; the fixture diff against the base is **additions only** (20 `markerscan_*` responses and one `_provenance` key; every existing response and `vectors` byte-identical, checked by loading both files).
+- `pnpm -r typecheck` exit 0; `deno check --frozen` and `deno cache --frozen` over every Edge entrypoint exit 0 and **`supabase/tests/deno.lock` is unchanged** (WebCrypto only, no new dependency); `tools/db/check-migrations-immutable.sh --base origin/main`: all 45 existing migrations byte-identical, `0046` added.
+- **Mutation proofs** (each on a world-readable `/tmp` copy, deleted afterwards; the test target run; an unmutated control passing; a search of the repository for the mutation marker prints nothing). Database: 36 mutants of 0046 (the window widened or judged against now, used-token unchecked, a pending purchase credited, an unattestable fix `valid`, the PIN unchecked, a broadened token-UPDATE `WITH CHECK`, a dropped explicit uid filter, and so on): **36 of 36 killed**; the mutant that broadened the token UPDATE policy survived at first and was killed by an exact all-15-policy-expression cell. Edge, mobile and recorder: 45 mutants (forgery accepted, no `fraud_signal`, a committed refusal thrown or a rolled-back one returned, the PIN gate skipped or run after the consume, the fix replay unchecked, the 120 s rule judged against now, the evidence row given a course or another `source_ref`, a foreign facility's token counted, the outcome `some` instead of `every`, each co-signal condition removed, the limit or window constants changed, the entrypoint's order and no-store header and a log line, the PostGIS buffer 50 m changed to 0 and to 50 km, the 55000 and 23505 mappings, the client schema and status set and retry flag and bearer, the recorder's rollback emulation): **44 of 45 killed, the one survivor equivalent** (dropping the `signature.length !== 64` guard in `verifyEd25519` changes nothing observable: WebCrypto answers `false` for a wrong-length signature itself). Four first survived (`outcome`, the 20-a-day constant, the `23505` mapping, the recorder's rollback emulation) and each is now pinned by a test written for it.
+- The two harness-owner defects found on the way are written up in `docs/security/partner-auth-design.md`, "As built: S2a".

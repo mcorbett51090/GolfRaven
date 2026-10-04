@@ -348,6 +348,10 @@ export interface Repo {
      * see privileged.ts's implementation. Returns null if the course id
      * doesn't exist. */
     matchFix(courseId: string, lat: number, lng: number): Promise<MatchResult | null>;
+    /** P5.1a S2a (the course-QR scan): containment of a fix against the FACILITY as a whole, which has no geometry of its own: inside the polygon + 50 m of any of its
+     * `play-verified` polygon courses is `{ "play-verified", "polygon", true }`; anything else is the conservative default (`unverified` / `radius` / false: never a co-signal).
+     * Same `ST_DWithin` and the same 50 m as `matchFix`. */
+    matchFacilityFix(facilityId: string, lat: number, lng: number): Promise<MatchResult>;
     signingKey(kid: string): Promise<SigningKeyRow | null>;
   };
 
@@ -613,7 +617,82 @@ export interface Repo {
      * 422 `self_attestation_refused` (A2-21). Concurrent callers racing on the same step get exactly one `"recorded"`; the rest `"replayed"`. */
     recordStep(input: OfflineStepInput): Promise<OfflineStepRecordResult>;
   };
+
+  /** P5.1a S2a: the PLAYER lane of the course QR (build plan §4.6(q), §9.2; migration 0046). Four `_for_actor` definers, no user argument: the buyer is the bound actor. Every
+   * database decision (the token row, single use, the 120 s rule against the fix, the PIN, the programme, the credit) is Postgres'; see `_shared/course-qr/scan-handler.ts`. */
+  markerScan: {
+    /** The PUBLIC Ed25519 key of a kid (`app.course_qr_key`), or `null` for an unknown kid; a revoked kid is returned flagged. */
+    publicKey(kid: string, purpose: "rotating_token" | "printed_qr"): Promise<CourseQrPublicKey | null>;
+    /** Q2's wrong-PIN gate with its counters. RETURNS (never throws) for a wrong PIN or a lockout, so the transaction commits and the failure counts. A missing PIN pepper is a
+     * 503 `course_pin_unavailable`. `at` is the fix's time (the PIN is the one for the facility-local date of the FIX); the counters run on the date of the attempt. */
+    attemptPin(input: { facilityId: string; pin: string; at: Date }): Promise<PinAttemptResult>;
+    /** The scan: validates the QR in the database and writes the purchase + credit rows (one per eligible trail). A refusal is a RETURNED status. */
+    record(input: MarkerScanRecordInput): Promise<MarkerScanRecordResult>;
+    /** The co-signal intake: ties a qualifying fix to the player's own pending purchase at that facility whose window holds it (the seam S3's offline-code row plugs into). */
+    attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult>;
+  };
 }
+
+export interface CourseQrPublicKey {
+  publicKeyB64Url: string;
+  revoked: boolean;
+}
+
+export type PinAttemptResult =
+  | { result: "ok" | "wrong" | "no_facility" | "no_programme"; retryAfterSeconds: null }
+  /** The 6th attempt of a user at a facility on a facility-local date, whatever its PIN (a 429 until the next local day). */
+  | { result: "locked"; retryAfterSeconds: number | null };
+
+/** A qualifying co-signal as the Edge graded it (`course-qr/cosignal.ts`) and counted it (the `foreground_checkin` evidence row). */
+export interface MarkerCosignalInput {
+  grade: "attested" | "unattestable";
+  fixId: string;
+  evidenceId: string;
+}
+
+export interface MarkerScanRecordInput {
+  facilityId: string;
+  variant: "rotating" | "static_pin";
+  /** Q1: lower-case hex SHA-256 of the 16 raw nonce bytes (`course-qr/format.ts#nonceHashHex`). */
+  nonceHash: string | null;
+  /** Q2: the printed QR's kid (the signature was verified in the Edge). */
+  qrKid: string | null;
+  /** Q2: the PIN (the database re-derives it: the counters ran in `attemptPin`, this is the gate). */
+  pin: string | null;
+  /** The CLAIMED fix time (the 120 s rule and the PIN's date are judged against it), or now when there is no fix. */
+  at: Date;
+  cosignal: MarkerCosignalInput | null;
+}
+
+export interface MarkerPurchaseView {
+  purchaseId: string;
+  trailId: string;
+  purchaseStatus: "valid" | "pending" | "held_review";
+  creditId: string | null;
+  creditStatus: "credited" | "pending" | "held_review" | "void";
+}
+
+export type MarkerScanRefusal =
+  | "no_facility"
+  | "no_programme"
+  | "variant_disabled"
+  | "qr_unknown"
+  | "qr_wrong_facility"
+  | "qr_used"
+  | "qr_expired"
+  | "qr_revoked"
+  | "pin_wrong"
+  | "duplicate";
+
+export type MarkerScanRecordResult = { status: "accepted"; localDate: string; purchases: MarkerPurchaseView[] } | { status: MarkerScanRefusal };
+
+export interface MarkerCosignalAttachInput {
+  facilityId: string;
+  at: Date;
+  cosignal: MarkerCosignalInput;
+}
+
+export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" };
 
 /** What `Repo#offlineCode.provisionSeed` returns: the raw 32-byte seed, its version, and the database clock at issue (ISO-8601). */
 export interface OfflineSeedProvision {
