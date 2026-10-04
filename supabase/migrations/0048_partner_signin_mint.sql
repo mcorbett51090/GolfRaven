@@ -55,8 +55,8 @@ REVOKE ALL ON app.partner_auth_alarm FROM PUBLIC, anon, authenticated, service_r
 -- 3a. private_definer owns the alarm writer. INSERT (+ SELECT on the arbiter columns: INSERT ... ON CONFLICT reads them, 0046) only; the policies are keyed on the transaction's own binding, never a GUC, and
 -- admit the write only when NO binding exists (the mint transaction binds nothing): a partner- or user-bound definer cannot use the alarm writer as a noise lever.
 GRANT INSERT, SELECT (kind, credential_id, minute_bucket) ON app.partner_auth_alarm TO private_definer;
-CREATE POLICY pd_partner_auth_alarm_insert ON app.partner_auth_alarm FOR INSERT TO private_definer WITH CHECK (private.partner_binding_kind() IS NULL);
-CREATE POLICY pd_partner_auth_alarm_select ON app.partner_auth_alarm FOR SELECT TO private_definer USING (private.partner_binding_kind() IS NULL);
+CREATE POLICY pd_partner_auth_alarm_insert ON app.partner_auth_alarm FOR INSERT TO private_definer WITH CHECK ((SELECT private.partner_binding_kind()) IS NULL);
+CREATE POLICY pd_partner_auth_alarm_select ON app.partner_auth_alarm FOR SELECT TO private_definer USING ((SELECT private.partner_binding_kind()) IS NULL);
 
 -- 3b. partner_session_issuer (the mint's owner): every privilege is COLUMN-level wherever a whole-row grant would reach more than the mint reads or writes, and is registered in
 -- private.partner_owner_privilege (section 8) and its checked-in fixture.
@@ -818,6 +818,51 @@ RESET ROLE;
 REVOKE partner_session_issuer FROM CURRENT_USER;
 
 -- ============================================================================
+-- 7b. S1.1a gate NIT: the partner conjunct becomes an INITPLAN. Every private_definer policy 0047 closed under a partner binding reads
+-- `private.partner_binding_kind() IS DISTINCT FROM 'partner'`: a VOLATILE-free but per-ROW function call. Written as `(SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'` the planner
+-- evaluates it ONCE per statement (an InitPlan) instead of once per candidate row. The meaning is identical (the binding is a fact of the transaction, not of the row), so this is a pure
+-- ALTER POLICY of the exact deparsed text; the allowlist snapshots and the checked-in fixture are regenerated from the live policies (8b below, definer_policy_exprs.txt).
+-- ============================================================================
+DO $initplan_0048$
+DECLARE
+  v_pd oid := (SELECT oid FROM pg_roles WHERE rolname = 'private_definer');
+  v_old constant text := 'private.partner_binding_kind() IS DISTINCT FROM ''partner''::text';
+  v_new constant text := '(SELECT private.partner_binding_kind()) IS DISTINCT FROM ''partner''::text';
+  v_pol record;
+  v_sql text;
+  v_n integer := 0;
+BEGIN
+  FOR v_pol IN
+    SELECT n.nspname, c.relname, pol.polname,
+           pg_get_expr(pol.polqual, pol.polrelid) AS qual, pg_get_expr(pol.polwithcheck, pol.polrelid) AS wcheck
+    FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polroles = ARRAY[v_pd]
+      AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%' || v_old || '%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%' || v_old || '%')
+    ORDER BY n.nspname, c.relname, pol.polname
+  LOOP
+    v_sql := format('ALTER POLICY %I ON %I.%I', v_pol.polname, v_pol.nspname, v_pol.relname);
+    IF v_pol.qual IS NOT NULL THEN
+      v_sql := v_sql || format(' USING (%s)', replace(v_pol.qual, v_old, v_new));
+    END IF;
+    IF v_pol.wcheck IS NOT NULL THEN
+      v_sql := v_sql || format(' WITH CHECK (%s)', replace(v_pol.wcheck, v_old, v_new));
+    END IF;
+    EXECUTE v_sql;
+    v_n := v_n + 1;
+  END LOOP;
+  -- fail loudly: none may keep the per-row form, and the count must be what 0047 closed (102 windows + the 16 written closed) or more
+  IF EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.polroles = ARRAY[v_pd]
+             AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%' || v_old || '%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%' || v_old || '%')) THEN
+    RAISE EXCEPTION '0048: a private_definer policy still carries the per-row partner conjunct';
+  END IF;
+  IF v_n < 118 THEN
+    RAISE EXCEPTION '0048: expected to convert at least the 118 policies of 0047, converted %', v_n;
+  END IF;
+  RAISE NOTICE '0048: converted % partner conjunct(s) to an InitPlan', v_n;
+END
+$initplan_0048$;
+
+-- ============================================================================
 -- 8. Registries
 -- ============================================================================
 -- 8a. private.function_inventory: every function above, with the minter column true for exactly the two it may execute
@@ -870,7 +915,9 @@ FROM pg_policy pol
 JOIN pg_class cl ON cl.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = cl.relnamespace
 WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
-  AND pol.polname IN ('pd_partner_auth_alarm_insert', 'pd_partner_auth_alarm_select', 'psi_update_partner_credential', 'psi_read_partner_rp_config', 'psi_insert_partner_auth_challenge', 'psi_read_partner_auth_challenge');
+  -- the six new policies, and EVERY policy 7b converted (its stored snapshot is the live text; checks 5 / 6 compare the two)
+  AND (pol.polname IN ('pd_partner_auth_alarm_insert', 'pd_partner_auth_alarm_select', 'psi_update_partner_credential', 'psi_read_partner_rp_config', 'psi_insert_partner_auth_challenge', 'psi_read_partner_auth_challenge')
+       OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%partner_binding_kind()%');
 DO $assert_0048_allowlist$
 BEGIN
   IF (SELECT count(*) FROM private.definer_policy_allowlist WHERE policy_name IN ('pd_partner_auth_alarm_insert', 'pd_partner_auth_alarm_select', 'psi_update_partner_credential', 'psi_read_partner_rp_config', 'psi_insert_partner_auth_challenge', 'psi_read_partner_auth_challenge')

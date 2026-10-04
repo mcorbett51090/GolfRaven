@@ -747,7 +747,7 @@ WHERE NOT EXISTS (
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 CROSS JOIN LATERAL regexp_matches(regexp_replace(p.prosrc, '--[^\\n]*', '', 'g'), '(?:\\m(?:from|join|update|into|table|using)\\s+|,\\s*)(pg_[a-z_]+)\\M(?!\\.|\\s*\\()', 'gi') AS m
 WHERE p.prosecdef AND n.nspname IN ('app', 'api', 'private')`],
-  [14, "partner family: first-statement rule, lexing limits, no EXCEPTION, class literal, no user-lane partner scope, no stray kind reader, lane-only EXECUTE", `WITH RECURSIVE fam AS (
+  [14, "partner family: first-statement rule, lexing limits, no EXCEPTION, class literal, no user-lane partner scope, no stray kind reader, lane-only EXECUTE, the edge_partner EXECUTE set", `WITH RECURSIVE fam AS (
   SELECT p.oid, n.nspname, p.proname, l.lanname, p.prosrc AS raw,
          n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' AS ident,
          regexp_replace(p.prosrc, '((?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*))|(''(?:[^'']|'''')*'')', ' \\2', 'g') AS kept
@@ -808,14 +808,41 @@ FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname LIKE '%\\_for\\_partner'
   AND (has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_system', p.oid, 'EXECUTE')
        OR EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))
+UNION ALL
+SELECT '(e) edge_partner holds an EXECUTE grant outside its allowed set (bind_partner_session, partner_binding, partner_binding_kind, hit_partner_rate_limit and the *_for_partner family): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')
+  AND p.proname NOT IN ('bind_partner_session', 'partner_binding', 'partner_binding_kind', 'hit_partner_rate_limit')
+  AND p.proname NOT LIKE '%\\_for\\_partner'
 `],
-  [15, "every GUC-keyed private_definer policy is closed under a partner binding", `SELECT '(15) a GUC-keyed private_definer policy is OPEN under a partner binding (add AND private.partner_binding_kind() IS DISTINCT FROM ''partner'' to the USING / WITH CHECK that reads the setting): ' || n.nspname || '.' || c.relname || '.' || pol.polname
-FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
-  AND ((coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%'
-        AND pg_get_expr(pol.polqual, pol.polrelid) NOT LIKE '%partner_binding_kind() IS DISTINCT FROM ''partner''%')
-       OR (coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%'
-           AND pg_get_expr(pol.polwithcheck, pol.polrelid) NOT LIKE '%partner_binding_kind() IS DISTINCT FROM ''partner''%'))`],
+  [15, "every GUC-keyed private_definer policy ends its window with the top-level partner conjunct", `WITH tails(tail) AS (
+  VALUES (' AND (private.partner_binding_kind() IS DISTINCT FROM ''partner''::text))'),
+         (' AND (( SELECT private.partner_binding_kind() AS partner_binding_kind) IS DISTINCT FROM ''partner''::text))')
+), exprs AS (
+  SELECT n.nspname, c.relname, pol.polname, 'USING' AS part, pg_get_expr(pol.polqual, pol.polrelid) AS e
+  FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
+  UNION ALL
+  SELECT n.nspname, c.relname, pol.polname, 'WITH CHECK', pg_get_expr(pol.polwithcheck, pol.polrelid)
+  FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
+), win AS (
+  SELECT * FROM exprs WHERE e LIKE '%current_setting(%'
+), trail AS (
+  SELECT w.nspname, w.relname, w.polname, w.part, left(w.e, length(w.e) - length(t.tail)) AS prefix
+  FROM win w JOIN tails t ON right(w.e, length(t.tail)) = t.tail
+), depth AS (
+  SELECT tr.nspname, tr.relname, tr.polname, tr.part, min(x.d) AS lo, (array_agg(x.d ORDER BY x.i DESC))[1] AS hi
+  FROM trail tr
+  CROSS JOIN LATERAL (
+    SELECT s.i, sum(CASE s.ch WHEN '(' THEN 1 WHEN ')' THEN -1 ELSE 0 END) OVER (ORDER BY s.i) AS d
+    FROM regexp_split_to_table(regexp_replace(tr.prefix, '''(?:[^'']|'''')*''', '', 'g'), '') WITH ORDINALITY AS s(ch, i)
+  ) x
+  GROUP BY tr.nspname, tr.relname, tr.polname, tr.part
+)
+SELECT DISTINCT '(15) a GUC-keyed private_definer policy is OPEN under a partner binding (end its USING / WITH CHECK that reads the setting with the TOP-LEVEL conjunct AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM ''partner'' (or the direct call); an OR-form, a conjunct that is not the LAST top-level AND, or one buried in another expression does not count): ' || w.nspname || '.' || w.relname || '.' || w.polname
+FROM win w
+WHERE NOT EXISTS (SELECT 1 FROM depth d WHERE d.nspname = w.nspname AND d.relname = w.relname AND d.polname = w.polname AND d.part = w.part AND d.lo >= 1 AND d.hi = 1)`],
 ];
 // 14 (c) and (a3): two named lists, each a checked-in fixture (one `schema.name(identity args)` per line, '#' comments).
 //   * supabase/tests/fixtures/partner_kind_readers.txt: functions OUTSIDE the *_for_partner family that may read the actor binding or kind = 'partner' (the binders and their

@@ -550,7 +550,7 @@ SELECT is((SELECT count(*)::int FROM pg_attribute a WHERE a.attrelid = 'app.part
 SELECT is((SELECT count(*)::int FROM pg_constraint k WHERE k.conrelid = 'app.partner_auth_alarm'::regclass AND k.contype = 'f'), 0, 'and no foreign key (it names a credential by id and survives the credential''s deletion)');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.partner_auth_alarm'::regclass AND p.polname LIKE 'zz26%'), 1, 'setup: the only other policy on the alarm table is this file''s own temporary one');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.partner_auth_alarm'::regclass AND p.polroles = ARRAY['private_definer'::regrole::oid]
-             AND coalesce(pg_get_expr(p.polqual, p.polrelid), '') || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '') LIKE '%partner_binding_kind() IS NULL%'
+             AND coalesce(pg_get_expr(p.polqual, p.polrelid), '') || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '') LIKE '%partner_binding_kind() AS partner_binding_kind) IS NULL%'
              AND coalesce(pg_get_expr(p.polqual, p.polrelid), '') || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '') NOT LIKE '%current_setting%'), 2,
   'both private_definer policies on the alarm table admit the write only when NO binding exists, and read no setting (the HARD RULE: nothing settable keys an edge-reachable policy)');
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
