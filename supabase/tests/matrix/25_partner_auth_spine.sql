@@ -14,7 +14,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(388);
+SELECT plan(393);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: roles, a temporary seeding policy on the new tables, fixture helpers
@@ -96,14 +96,19 @@ SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_pr
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
           ARRAY['bind_partner_session', 'partner_binding', 'partner_binding_kind', 'zz24_authz_for_partner'],
   'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3) and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
-SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')), 0,
-  'PA-1: edge_partner_minter can EXECUTE nothing yet (S1.1b adds the mint definers)');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure, 'private.partner_session_policy(uuid)'::regprocedure,
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
+          ARRAY['partner_challenge_issue_sign_in', 'partner_session_mint'],
+  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure,
              'private.partner_session_guard()'::regprocedure, 'private.partner_member_role_invariant()'::regprocedure, 'private.partner_scope_invariant()'::regprocedure)
            AND (SELECT count(*) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
                                             ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
-                WHERE has_function_privilege(r.n, p.oid, 'EXECUTE')) = 0), 5,
-  'PA-1: partner_authorize, the policy helper and the three trigger functions are executable by NO role at all but their owner');
+                WHERE has_function_privilege(r.n, p.oid, 'EXECUTE')) = 0), 4,
+  'PA-1: partner_authorize and the three guard / invariant trigger functions are executable by NO role at all but their owner');
+SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
+                                            ('partner_session_toucher'), ('partner_session_issuer'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
+           WHERE has_function_privilege(r.n, 'private.partner_session_policy(uuid)'::regprocedure, 'EXECUTE')), ARRAY['partner_session_issuer'],
+  'PA-1: the policy helper is executable by its owner and, since 0048, by partner_session_issuer alone (the mint reads the absolute session ceiling from it)');
 SELECT is((SELECT p.provolatile::text FROM pg_proc p WHERE p.oid = 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure), 'v',
   'PA-1: partner_authorize is VOLATILE (it writes last_seen_at and consumes a PIN grant; a STABLE function could not, and its reads must see a concurrent revoke)');
 SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND p.proowner = 'private_definer'::regrole FROM pg_proc p WHERE p.oid = 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure), true,
@@ -785,37 +790,54 @@ GRANT EXECUTE ON FUNCTION pg_temp.consume() TO PUBLIC;
 -- planted a GUC, so it proved nothing about the 0016 windows (the gate un-revoked and promoted a member, deleted a membership and an admin_user row through them). It now plants EVERY
 -- setting the repository has ever keyed a policy on, runs the three gate probes with a no-binding control, and then does the same over the CATALOG: for every (table, command) a window
 -- policy covers, the rows reached with the settings planted must equal the rows reached with them unset, under a partner binding.
+-- THE SETTINGS, in one place: every setting a GUC-keyed private_definer policy has ever read, and the value that makes a row keyed on it visible (the settings are PLANTED at one player, A)
+CREATE FUNCTION pg_temp.plant_settings() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$
+  SELECT ARRAY['app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym',
+               'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id',
+               'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id']
+$f$;
+CREATE FUNCTION pg_temp.plant_value(p_setting text, p_user uuid) RETURNS text LANGUAGE sql IMMUTABLE AS $f$
+  SELECT CASE p_setting WHEN 'app.delete_my_data.target_email' THEN 'player-a@example.test'
+                        WHEN 'app.delete_my_data.target_handle' THEN 'x' WHEN 'app.delete_my_data.target_pseudonym' THEN 'x'
+                        WHEN 'app.edge.link_attest_key' THEN 'x' WHEN 'app.edge.link_hash' THEN 'x'
+                        WHEN 'app.edge.purge_fix_coords' THEN 'on' WHEN 'app.signin.proof_purge' THEN 'on'
+                        ELSE p_user::text END
+$f$;
 CREATE FUNCTION pg_temp.plant_all(p_user uuid) RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE
+  g text;
 BEGIN
-  PERFORM set_config('app.delete_my_data.target_user_id', p_user::text, true), set_config('app.delete_my_data.target_email', 'player-a@example.test', true),
-          set_config('app.delete_my_data.target_handle', 'x', true), set_config('app.delete_my_data.target_pseudonym', 'x', true),
-          set_config('app.edge.link_attest_key', 'x', true), set_config('app.edge.link_device_id', p_user::text, true), set_config('app.edge.link_hash', 'x', true),
-          set_config('app.edge.purge_fix_coords', 'on', true),
-          set_config('app.guard.entitlement_id', p_user::text, true), set_config('app.guard.offer_code_id', p_user::text, true), set_config('app.guard.play_id', p_user::text, true),
-          set_config('app.offline_code.target_device_id', p_user::text, true),
-          set_config('app.signin.proof_id', p_user::text, true), set_config('app.signin.proof_purge', 'on', true), set_config('app.signin.target_user_id', p_user::text, true);
+  FOREACH g IN ARRAY pg_temp.plant_settings() LOOP
+    PERFORM set_config(g, pg_temp.plant_value(g, p_user), true);
+  END LOOP;
 END
 $f$;
 CREATE FUNCTION pg_temp.unplant_all() RETURNS void LANGUAGE plpgsql AS $f$
 DECLARE
   g text;
 BEGIN
-  FOR g IN SELECT unnest(ARRAY['app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym',
-                               'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id',
-                               'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id']) LOOP
+  FOREACH g IN ARRAY pg_temp.plant_settings() LOOP
     PERFORM set_config(g, '', true);
   END LOOP;
 END
 $f$;
+-- Is this policy GUC-keyed? Its own text reads a setting, OR it calls a function (pg_depend, one level deep: the HIGH-1 wrapper rule) whose body does (the S1.1b gate's L-2: `USING (user_id::text = private.zz_guc())`)
+CREATE FUNCTION pg_temp.policy_is_window(p_pol oid) RETURNS boolean LANGUAGE sql STABLE AS $f$
+  SELECT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.oid = p_pol AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%'))
+      OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = p_pol AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%')
+$f$;
 -- a setting a window policy reads that plant_all does not know: the cell below would silently test nothing for it, so it FAILS (a later slice that adds a window must add its setting here)
 CREATE FUNCTION pg_temp.unplanted_settings() RETURNS text[] LANGUAGE sql AS $f$
-  SELECT array_agg(DISTINCT m[1] ORDER BY m[1])
+  SELECT array_agg(DISTINCT x.m[1] ORDER BY x.m[1])
   FROM pg_policy pol
-  CROSS JOIN LATERAL regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), 'current_setting\(''([^'']+)''', 'g') AS m
+  CROSS JOIN LATERAL (
+    SELECT regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), 'current_setting\(''([^'']+)''', 'g') AS m
+    UNION ALL
+    SELECT regexp_matches(fp.prosrc, 'current_setting\s*\(\s*''([^'']+)''', 'gi')
+    FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = pol.oid AND d.refclassid = 'pg_proc'::regclass
+  ) x(m)
   WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
-    AND m[1] NOT IN ('app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym',
-                     'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id',
-                     'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id')
+    AND x.m[1] <> ALL (pg_temp.plant_settings())
 $f$;
 -- measure one statement in a sub-transaction that is always rolled back: the number of rows it reached (-1 if it raised), with the settings planted or unset
 CREATE FUNCTION pg_temp.measure(p_sql text, p_planted boolean, p_user uuid) RETURNS int LANGUAGE plpgsql AS $f$
@@ -824,7 +846,7 @@ DECLARE
   v_msg text;
 BEGIN
   IF p_planted THEN PERFORM pg_temp.plant_all(p_user); ELSE PERFORM pg_temp.unplant_all(); END IF;
-  EXECUTE p_sql INTO v_n;
+  IF p_sql LIKE 'INSERT%' THEN EXECUTE p_sql; v_n := 1; ELSE EXECUTE p_sql INTO v_n; END IF;
   RAISE EXCEPTION 'measured:%', v_n USING ERRCODE = 'P0001';
 EXCEPTION WHEN SQLSTATE 'P0001' THEN
   GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
@@ -835,16 +857,16 @@ WHEN OTHERS THEN
 END
 $f$;
 -- every (relation, command) a GUC-keyed private_definer policy covers, as one statement each
-CREATE FUNCTION pg_temp.window_statements() RETURNS TABLE (rel text, cmd text, stmt text) LANGUAGE plpgsql AS $f$
+CREATE FUNCTION pg_temp.window_statements(p_user uuid DEFAULT '00000000-0000-0000-0000-00000000000a') RETURNS TABLE (rel text, cmd text, stmt text) LANGUAGE plpgsql AS $f$
 DECLARE
   w record;
   v_col text;
 BEGIN
   FOR w IN SELECT DISTINCT n.nspname || '.' || c.relname AS rel, c.oid AS relid, x.cmd
            FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-           CROSS JOIN LATERAL unnest(CASE pol.polcmd WHEN '*' THEN ARRAY['r', 'w', 'd'] WHEN 'a' THEN ARRAY[]::text[] ELSE ARRAY[pol.polcmd::text] END) AS x(cmd)
+           CROSS JOIN LATERAL unnest(CASE pol.polcmd WHEN '*' THEN ARRAY['r', 'w', 'd'] ELSE ARRAY[pol.polcmd::text] END) AS x(cmd)
            WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
-             AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%')
+             AND pg_temp.policy_is_window(pol.oid)
            ORDER BY 1, 3 LOOP
     rel := w.rel;
     cmd := w.cmd;
@@ -852,6 +874,8 @@ BEGIN
       stmt := format('SELECT count(*)::int FROM %s', w.rel);
     ELSIF w.cmd = 'd' THEN
       stmt := format('WITH d AS (DELETE FROM %s RETURNING 1) SELECT count(*)::int FROM d', w.rel);
+    ELSIF w.cmd = 'a' THEN
+      stmt := pg_temp.sweep_insert_stmt(w.relid, w.rel, p_user) || ' ON CONFLICT DO NOTHING';
     ELSE
       SELECT a.attname INTO v_col FROM pg_attribute a WHERE a.attrelid = w.relid AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('private_definer', w.relid, a.attnum, 'UPDATE') ORDER BY a.attnum LIMIT 1;
       IF v_col IS NULL THEN CONTINUE; END IF;
@@ -864,10 +888,105 @@ $f$;
 -- the pairs whose reach CHANGES when the settings are planted
 CREATE FUNCTION pg_temp.window_diffs(p_user uuid) RETURNS text[] LANGUAGE sql AS $f$
   SELECT array_agg(s.rel || ':' || s.cmd || '=' || pg_temp.measure(s.stmt, false, p_user) || '->' || pg_temp.measure(s.stmt, true, p_user) ORDER BY s.rel, s.cmd)
-  FROM pg_temp.window_statements() s
+  FROM pg_temp.window_statements(p_user) s
   WHERE pg_temp.measure(s.stmt, false, p_user) IS DISTINCT FROM pg_temp.measure(s.stmt, true, p_user)
 $f$;
-GRANT EXECUTE ON FUNCTION pg_temp.plant_all(uuid), pg_temp.unplant_all(), pg_temp.unplanted_settings(), pg_temp.measure(text, boolean, uuid), pg_temp.window_statements(), pg_temp.window_diffs(uuid) TO PUBLIC;
+-- the INSERT statement of one swept table: the columns a window policy compares with a setting get the planted value, a primary-key column nothing keys and nothing defaults gets a fresh one
+CREATE FUNCTION pg_temp.sweep_insert_stmt(p_relid oid, p_rel text, p_user uuid) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE
+  c record;
+  k record;
+  v_cols text[];
+  v_vals text[];
+BEGIN
+  v_cols := ARRAY[]::text[];
+  v_vals := ARRAY[]::text[];
+  FOR k IN SELECT DISTINCT ON (m[1]) m[1] AS col, m[2] AS setting, a.atttypid, a.atttypmod
+           FROM pg_policy pol
+           CROSS JOIN LATERAL regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''),
+                                             '\(*(\w+)\)*(?:::text)? = \(*NULLIF\(current_setting\(''([^'']+)''', 'g') AS m
+           JOIN pg_attribute a ON a.attrelid = pol.polrelid AND a.attname = m[1] AND a.attnum > 0 AND NOT a.attisdropped
+           WHERE pol.polrelid = p_relid AND pol.polroles = ARRAY['private_definer'::regrole::oid]
+           ORDER BY m[1] LOOP
+    v_cols := v_cols || quote_ident(k.col);
+    v_vals := v_vals || format('%L::%s', pg_temp.plant_value(k.setting, p_user), format_type(k.atttypid, k.atttypmod));
+  END LOOP;
+  -- a policy that compares a column with a WRAPPER's result (`col::text = private.fn()`, the function body reading the setting) is keyed on that column too
+  FOR k IN SELECT DISTINCT ON (m[1]) m[1] AS col, (regexp_match(fp.prosrc, 'current_setting\s*\(\s*''([^'']+)''', 'i'))[1] AS setting, a.atttypid, a.atttypmod
+           FROM pg_policy pol
+           CROSS JOIN LATERAL regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), '\(*(\w+)\)*(?:::text)? = \(*(?:\w+\.)?(\w+)\(\)', 'g') AS m
+           JOIN pg_proc fp ON fp.proname = m[2] AND fp.prosrc ILIKE '%current_setting(%'
+           JOIN pg_attribute a ON a.attrelid = pol.polrelid AND a.attname = m[1] AND a.attnum > 0 AND NOT a.attisdropped
+           WHERE pol.polrelid = p_relid AND pol.polroles = ARRAY['private_definer'::regrole::oid] AND quote_ident(m[1]) <> ALL (v_cols)
+           ORDER BY m[1] LOOP
+    v_cols := v_cols || quote_ident(k.col);
+    v_vals := v_vals || format('%L::%s', pg_temp.plant_value(k.setting, p_user), format_type(k.atttypid, k.atttypmod));
+  END LOOP;
+  IF p_rel = 'storage.objects' THEN
+    v_cols := v_cols || 'bucket_id'::text;
+    v_vals := v_vals || $$'receipts'$$::text;
+  END IF;
+  -- a primary-key column nothing keys and nothing defaults gets a fresh value (the planted ones may collide with an existing row, which is the ON CONFLICT above)
+  FOR c IN SELECT a.attname, a.atttypid FROM pg_attribute a JOIN pg_index i ON i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)
+           WHERE a.attrelid = p_relid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' AND a.attidentity = ''
+             AND NOT EXISTS (SELECT 1 FROM pg_attrdef d WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum)
+             AND quote_ident(a.attname) <> ALL (v_cols) LOOP
+    v_cols := v_cols || quote_ident(c.attname);
+    v_vals := v_vals || CASE c.atttypid WHEN 'uuid'::regtype THEN 'gen_random_uuid()' WHEN 'text'::regtype THEN 'md5(random()::text)'
+                                        WHEN 'date'::regtype THEN 'current_date' WHEN 'timestamptz'::regtype THEN 'now()' WHEN 'timestamp'::regtype THEN 'now()::timestamp' WHEN 'bool'::regtype THEN 'false' WHEN 'int2'::regtype THEN '0::int2'
+                                        WHEN 'bytea'::regtype THEN 'decode(md5(random()::text), ''hex'')' WHEN 'int4'::regtype THEN '(random() * 1000000000)::int4' WHEN 'int8'::regtype THEN '(random() * 1000000000)::int8'
+                                        ELSE 'NULL::' || format_type(c.atttypid, NULL) END;
+  END LOOP;
+  IF cardinality(v_cols) = 0 THEN RETURN format('INSERT INTO %s DEFAULT VALUES', p_rel); END IF;
+  RETURN format('INSERT INTO %s (%s) VALUES (%s)', p_rel, array_to_string(v_cols, ', '), array_to_string(v_vals, ', '));
+END
+$f$;
+-- SEED (S1.1a LOW 2): one row per swept table, keyed to player A on every column a window policy compares with a setting, so that a pair's difference between "planted" and "unplanted" can be OBSERVED
+-- in the no-binding control instead of being 0 -> 0 on an empty table. It runs as the HARNESS role (before SET ROLE private_definer), in a savepoint the caller rolls back. The question the sweep asks is what the
+-- POLICY SET reaches, not whether the table would accept the row, so the table's FOREIGN KEY / CHECK / EXCLUDE constraints, its non-key NOT NULLs and its USER triggers are stripped first (all of it is
+-- transactional DDL, undone by the rollback). A row that already exists for A is left alone (ON CONFLICT DO NOTHING): the existing one is observed instead.
+CREATE FUNCTION pg_temp.sweep_seed(p_user uuid) RETURNS int LANGUAGE plpgsql AS $f$
+DECLARE
+  t record;
+  c record;
+  k record;
+  v_cols text[];
+  v_vals text[];
+  v_n int := 0;
+  v_got int;
+BEGIN
+  SET CONSTRAINTS ALL IMMEDIATE;
+  FOR t IN SELECT DISTINCT c2.oid AS relid, n.nspname || '.' || c2.relname AS rel
+           FROM pg_policy pol JOIN pg_class c2 ON c2.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c2.relnamespace
+           WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
+             AND pg_temp.policy_is_window(pol.oid)
+           ORDER BY 2 LOOP
+    FOR c IN SELECT kc.conname FROM pg_constraint kc WHERE kc.conrelid = t.relid AND kc.contype IN ('f', 'c', 'x') LOOP
+      EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', t.rel, c.conname);
+    END LOOP;
+    FOR c IN SELECT a.attname FROM pg_attribute a
+             WHERE a.attrelid = t.relid AND a.attnum > 0 AND NOT a.attisdropped AND a.attnotnull AND a.attgenerated = '' AND a.attidentity = ''
+               AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = a.attrelid AND i.indisprimary AND a.attnum = ANY (i.indkey)) LOOP
+      EXECUTE format('ALTER TABLE %s ALTER COLUMN %I DROP NOT NULL', t.rel, c.attname);
+    END LOOP;
+    EXECUTE format('ALTER TABLE %s DISABLE TRIGGER USER', t.rel);
+    EXECUTE format('CREATE POLICY zz_sweep ON %s FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true)', t.rel);
+    -- an earlier file may have revoked a privilege from the harness role for good (23_offline_totp_seed_edge.sql revokes INSERT on app.offline_code_step and commits): the owner gives it back to itself, inside this rolled-back savepoint
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON %s TO CURRENT_USER', t.rel);
+    EXECUTE pg_temp.sweep_insert_stmt(t.relid, t.rel, p_user) || ' ON CONFLICT DO NOTHING';
+    GET DIAGNOSTICS v_got = ROW_COUNT;
+    v_n := v_n + v_got;
+  END LOOP;
+  RETURN v_n;
+END
+$f$;
+-- the pairs whose reach does NOT change when the settings are planted (with no binding these are the pairs the settings do not open: the sweep must name every one of them)
+CREATE FUNCTION pg_temp.window_same(p_user uuid) RETURNS text[] LANGUAGE sql AS $f$
+  SELECT array_agg(s.rel || ':' || s.cmd ORDER BY s.rel, s.cmd)
+  FROM pg_temp.window_statements(p_user) s
+  WHERE pg_temp.measure(s.stmt, false, p_user) IS NOT DISTINCT FROM pg_temp.measure(s.stmt, true, p_user)
+$f$;
+GRANT EXECUTE ON FUNCTION pg_temp.policy_is_window(oid), pg_temp.sweep_insert_stmt(oid, text, uuid), pg_temp.plant_settings(), pg_temp.plant_value(text, uuid), pg_temp.plant_all(uuid), pg_temp.unplant_all(), pg_temp.unplanted_settings(), pg_temp.measure(text, boolean, uuid), pg_temp.window_statements(uuid), pg_temp.window_diffs(uuid), pg_temp.window_same(uuid) TO PUBLIC;
 SELECT is(pg_temp.unplanted_settings(), NULL::text[], 'PA-4c (i): every setting a GUC-keyed private_definer policy reads is one this file plants (a new window must be added to plant_all, or the catalog cells below would test nothing for it)');
 SELECT cmp_ok((SELECT count(*)::int FROM pg_temp.window_statements()), '>=', 60, 'PA-4c (i): the catalog-driven statements cover at least 60 (table, command) pairs (not vacuous)');
 -- the gate's three probes: a revoked staff member (a2) invited by manager_x (b1)
@@ -902,6 +1021,7 @@ RESET ROLE;
 ROLLBACK TO SAVEPOINT pa4c_i_ctl;
 -- catalog-driven, under a partner binding: planting changes nothing for ANY covered (table, command)
 SAVEPOINT pa4c_i_cat;
+SELECT pg_temp.sweep_seed('00000000-0000-0000-0000-00000000000a') AS _seeded \gset
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 RESET ROLE;
@@ -910,10 +1030,23 @@ SELECT is(pg_temp.window_diffs('00000000-0000-0000-0000-00000000000a'), NULL::te
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pa4c_i_cat;
 SAVEPOINT pa4c_i_cat2;
+SELECT pg_temp.sweep_seed('00000000-0000-0000-0000-00000000000a') AS _seeded2 \gset
 SET LOCAL ROLE private_definer;
-SELECT cmp_ok(cardinality(pg_temp.window_diffs('00000000-0000-0000-0000-00000000000a')), '>=', 20, 'PA-4c (i) control: with NO partner binding the same catalog statements reach more rows when the settings are planted, for at least 20 pairs (the windows are open: the zero above is the binding kind)');
+SELECT cmp_ok(:_seeded2, '>=', 20, 'PA-4c (i) control: the sweep SEEDED at least 20 rows keyed to player A (so the no-binding comparison below is not 0 -> 0 on empty tables)');
+SELECT is(pg_temp.window_same('00000000-0000-0000-0000-00000000000a'), ARRAY['app.admin_user:r', 'app.app_review_demo_account:r', 'app.partner_member:r'],
+  'PA-4c (i) control: with NO partner binding, planting the settings changes the rows reached for EVERY (table, command) pair a GUC-keyed private_definer policy covers (select, update, delete and insert alike) except exactly three SELECT pairs, whose rows a second, unconditional private_definer read policy (pd_read_admin_user / pd_read_demo_account / pd_read_partner_member, USING true) already returns with nothing planted: for those the planted window adds nothing to observe, and a pair that joins that list (or leaves it) fails here');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pa4c_i_cat2;
+-- (S1.1b gate L-2) a GUC read BEHIND A WRAPPER is a window too: the catalog sweep must find the policy, know its setting and its key column, and refuse a setting nobody plants
+SAVEPOINT pa4c_i_wrap;
+CREATE TABLE app.zz25w (id int, owner_id uuid);
+ALTER TABLE app.zz25w ENABLE ROW LEVEL SECURITY;
+CREATE FUNCTION private.zz25_guc() RETURNS text LANGUAGE sql STABLE AS $z$ SELECT nullif(current_setting('zz.target', true), '') $z$;
+CREATE POLICY zz25w_pol ON app.zz25w FOR SELECT TO private_definer USING (owner_id::text = private.zz25_guc());
+SELECT ok('zz.target' = ANY (pg_temp.unplanted_settings()), 'PA-4c (i) wrapper: a setting read only through a wrapper function is found and reported as one the cell does not plant (so a window behind a wrapper fails the cell instead of passing it)');
+SELECT ok(EXISTS (SELECT 1 FROM pg_temp.window_statements() WHERE rel = 'app.zz25w' AND cmd = 'r'), 'PA-4c (i) wrapper: the catalog sweep covers the (table, command) pair of a policy whose wrapper reads a setting');
+SELECT ok(pg_temp.sweep_insert_stmt('app.zz25w'::regclass::oid, 'app.zz25w', '00000000-0000-0000-0000-00000000000a') LIKE '%(owner_id) VALUES (%', 'PA-4c (i) wrapper: the seed keys the column the wrapper policy compares');
+ROLLBACK TO SAVEPOINT pa4c_i_wrap;
 -- (ii) as edge_partner PLANT every GUC the repository uses, then drive each writer of partner_session against ANOTHER user's session: 0 rows every time
 SAVEPOINT pa4c_ii;
 SET LOCAL ROLE edge_partner;

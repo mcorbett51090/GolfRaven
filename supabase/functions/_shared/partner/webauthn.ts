@@ -17,7 +17,7 @@
 //   (d) the default accepted algorithms are EdDSA, ES256 and RS256, and `verifyAuthenticationResponse` has no algorithm option at all.
 //       -> `supportedAlgorithmIDs: [-7, -257]` goes to `generateRegistrationOptions` and `verifyRegistrationResponse`, and at sign-in the STORED
 //          key's COSE alg is checked against the same list before the library sees it.
-// Beyond the four: the stored key's shape is checked (EC2/P-256 for -7; RSA, 2048 bits or more, e = 65537 for -257: the shapes the database-side
+// Beyond the four: `transports` is client-supplied and is stored, so it is reduced to the WebAuthn enum, deduplicated and capped (S0-L4); the stored key's shape is checked (EC2/P-256 for -7; RSA, 2048 bits or more, e = 65537 for -257: the shapes the database-side
 // verifier spike assumes), and at sign-in the response's `userHandle` must equal the stored one (a discoverable-credential sign-in always returns it).
 //
 // Error discipline: every refusal is a `WebAuthnRefusal` whose message is its closed code. The library's own message (which can quote the challenge,
@@ -39,6 +39,32 @@ import { decodeAttestationObject, decodeClientDataJSON, decodeCredentialPublicKe
 export const COSE_ES256 = -7;
 export const COSE_RS256 = -257;
 export const PARTNER_ALGORITHM_IDS: readonly number[] = Object.freeze([COSE_ES256, COSE_RS256]);
+
+/**
+ * The WebAuthn `AuthenticatorTransport` enum (WebAuthn L3, 5.8.4) and nothing else. `transports` comes from the BROWSER's registration response, so it is client-supplied and
+ * is stored in `partner_credential.transports` (S0-L4).
+ */
+export const WEBAUTHN_TRANSPORTS: readonly string[] = Object.freeze(["usb", "nfc", "ble", "internal", "hybrid", "cable", "smart-card"]);
+/** No real authenticator reports more than a handful of transports; the count that is stored is capped here. */
+export const MAX_TRANSPORTS = 5;
+/** How many entries of a presented list are even looked at (a hostile client can send a huge array). */
+const TRANSPORTS_EXAMINED = 32;
+
+/**
+ * Reduces a client-supplied `transports` value to the enum members, in first-seen order, without duplicates, at most `MAX_TRANSPORTS` of them. Anything that is not an
+ * array, and every entry that is not exactly one of the enum strings (a different case, a non-string, an unknown name), is dropped, never stored.
+ */
+export function sanitizeTransports(transports: unknown): string[] {
+  if (!Array.isArray(transports)) return [];
+  const out: string[] = [];
+  for (const t of transports.slice(0, TRANSPORTS_EXAMINED)) {
+    if (typeof t === "string" && WEBAUTHN_TRANSPORTS.includes(t) && !out.includes(t)) {
+      out.push(t);
+      if (out.length === MAX_TRANSPORTS) break;
+    }
+  }
+  return out;
+}
 
 /** The ceremony timeout the design emits for both options calls (6.2 step 1). */
 export const CEREMONY_TIMEOUT_MS = 120_000;
@@ -299,7 +325,7 @@ export async function verifyRegistration(input: VerifyRegistrationInput): Promis
     backupState: info.credentialBackedUp,
     userVerified: info.userVerified,
     aaguid: info.aaguid,
-    transports: info.credential.transports ?? [],
+    transports: sanitizeTransports(info.credential.transports),
   };
 }
 

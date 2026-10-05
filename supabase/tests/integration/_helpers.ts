@@ -129,16 +129,16 @@ export function rawOwnerSql(): AdminSql {
  * `rawOwnerSql()` (never `service_role`, which has no write grant here at
  * all). Always drops the policy and revokes the grant afterward, even on
  * failure. */
-async function withTemporaryOwnerAccess<T>(schemaTable: string, fn: (sql: AdminSql) => Promise<T>): Promise<T> {
+export async function withTemporaryOwnerAccess<T>(schemaTable: string, fn: (sql: AdminSql) => Promise<T>, privileges = "insert, update, delete"): Promise<T> {
   const sql = rawOwnerSql();
   const policyName = `integration_suite_temp_${schemaTable.replace(/\W/g, "_")}`;
-  await sql.unsafe(`grant insert, update, delete on ${schemaTable} to current_user`);
+  await sql.unsafe(`grant ${privileges} on ${schemaTable} to current_user`);
   await sql.unsafe(`create policy ${policyName} on ${schemaTable} for all to current_user using (true) with check (true)`);
   try {
     return await fn(sql);
   } finally {
     await sql.unsafe(`drop policy if exists ${policyName} on ${schemaTable}`);
-    await sql.unsafe(`revoke insert, update, delete on ${schemaTable} from current_user`);
+    await sql.unsafe(`revoke ${privileges} on ${schemaTable} from current_user`);
   }
 }
 
