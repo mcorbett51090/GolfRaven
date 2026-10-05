@@ -17,7 +17,7 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
-import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawCount } from "./_helpers.ts";
+import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawCount, rawOwnerSql } from "./_helpers.ts";
 import { hitSystemRateLimit, isServiceRoleBearer, resetPrivilegedConnectionsForTests, RETENTION_DEFINER_BATCH_ROWS, retentionPurgeSteps, retentionStepLockKeys, withSystemCatalogImport } from "../../functions/_shared/privileged.ts";
 import { handleRetentionPurgeRequest, type RetentionDeps, RETENTION_RATE_BUCKET, MAX_BATCHES_PER_STEP } from "../../functions/_shared/retention/purge-handler.ts";
 import { sha256Hex } from "../../functions/_shared/signin/bytes.ts";
@@ -423,6 +423,11 @@ async function seedBacklog(): Promise<{ liveProof: string; livePending: string; 
         perform set_config('app.signin.proof_id', '', true);
       end $d$`);
   });
+  // ANALYZE what was just bulk-loaded, as autovacuum would in a database that has been running for a while. Without it the planner works from whatever pg_class says about the table, and after an
+  // earlier file's rolled-back bulk insert that is "148 pages, 1 tuple" (a vacuum that could not truncate, e.g. because a concurrent session held the xmin horizon at that moment): it then estimates the
+  // 5003 new rows as ONE row, picks a nested loop for the purge's `DELETE ... WHERE id IN (SELECT ... LIMIT 5000)` and runs it in O(n^2), past the 10 s statement timeout. Which state the template database
+  // is in depends on when autovacuum happened to run during the pgTAP and concurrency steps, so the suite must not depend on it.
+  await rawOwnerSql().unsafe("analyze private.signin_email_proof, private.signin_revocation_queue, private.consumed_nonce, private.rate_limit_bucket");
   return { liveProof, livePending, liveNonce, liveBucket };
 }
 

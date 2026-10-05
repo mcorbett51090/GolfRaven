@@ -601,3 +601,124 @@ describe("real code under withOwnership() is exempt from rule (b)", () => {
     expect(lintSource(source, "/repo/supabase/functions/evidence/index.ts")).toEqual([]);
   });
 });
+
+
+// Partner auth S1.1b (S0-L3): the WebAuthn library has ONE importer, supabase/functions/_shared/partner/webauthn.ts.
+describe("S0-L3: the WebAuthn library may be imported only by _shared/partner/webauthn.ts", () => {
+  const MAP: Record<string, string> = {
+    "@simplewebauthn/server": "npm:@simplewebauthn/server@14.0.3",
+    "@simplewebauthn/server/helpers": "npm:@simplewebauthn/server@14.0.3/helpers",
+    webauthn: "npm:@simplewebauthn/server@14.0.3",
+  };
+  const PINNED = ["npm:@simplewebauthn/server@14.0.3", "npm:@simplewebauthn/server@14.0.3/helpers"];
+  const SITE = "webauthn-library-import-site";
+  const rulesOf = (findings: ReturnType<typeof lintSource>) => findings.map((f) => f.rule);
+
+  const read = (rel: string) => readFileSync(join(FIXTURES_ROOT, rel), "utf8");
+  const lintAt = (source: string, path: string, importMap: Record<string, string> = MAP) => lintSource(source, path, { importMap, pinnedImportTargets: PINNED });
+
+  it("must-fail: a static import of the server package and of its /helpers sub-path from any other module is flagged, one finding each", () => {
+    const findings = lintFixtureWithMap("bad/webauthn-import-elsewhere.ts", MAP, PINNED).filter((f) => f.rule === SITE);
+    expect(findings).toHaveLength(2);
+    expect(findings.map((f) => f.line)).toEqual([6, 7]);
+    expect(findings[0]?.message).toContain("_shared/partner/webauthn.ts");
+  });
+
+  it("must-fail: a re-export, a dynamic import() and a require() are each flagged", () => {
+    const findings = lintFixtureWithMap("bad/webauthn-reexport-dynamic-require.ts", MAP, PINNED).filter((f) => f.rule === SITE);
+    expect(findings.map((f) => f.message.split(" ")[0])).toEqual(["re-export", "dynamic", "require"]);
+  });
+
+  it("must-fail: an alias whose import-map TARGET is the library is flagged even though the specifier is not the library's name", () => {
+    const withMap = lintFixtureWithMap("bad/webauthn-alias-import.ts", MAP, PINNED).filter((f) => f.rule === SITE);
+    expect(withMap).toHaveLength(1);
+    expect(withMap[0]?.message).toContain("alias resolves via deno.json/import_map.json to \"npm:@simplewebauthn/server@14.0.3\"");
+    // control: without the alias the bare name resolves to nothing at all and is refused as an unreviewed specifier (a different rule)
+    const withoutMap = lintFixtureWithMap("bad/webauthn-alias-import.ts", {}, []);
+    expect(rulesOf(withoutMap)).not.toContain(SITE);
+    expect(rulesOf(withoutMap)).toContain("banned-import-specifier");
+  });
+
+  it("must-fail: a raw npm: specifier is the site finding (and no longer only the generic one)", () => {
+    const findings = lintAt(`import { x } from "npm:@simplewebauthn/server@14.0.3";\nexport { x };\n`, "/repo/supabase/functions/fn/index.ts");
+    expect(rulesOf(findings)).toEqual([SITE]);
+  });
+
+  it("must-pass: the wrapper itself (exact path) imports both specifiers without a finding", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    for (const base of ["/repo", "C:\\work\\repo", "/a/b/c/d"]) {
+      const path = `${base}/supabase/functions/_shared/partner/webauthn.ts`;
+      expect(lintAt(src, path, MAP).filter((f) => f.rule === SITE)).toEqual([]);
+    }
+  });
+
+  it("must-pass: the wrapper is recognised by a RELATIVE path of exactly its own segments too (a lint run from the repository root)", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    expect(lintAt(src, "supabase/functions/_shared/partner/webauthn.ts", MAP).filter((f) => f.rule === SITE)).toEqual([]);
+  });
+
+  it("must-fail: the whole @simplewebauthn/ scope is covered (the browser package), and the match is case-insensitive like the Supabase one", () => {
+    const at = "/repo/supabase/functions/fn/index.ts";
+    expect(lintAt(`import { a } from "@simplewebauthn/browser";\nexport { a };\n`, at).filter((f) => f.rule === SITE)).toHaveLength(1);
+    expect(lintAt(`import { a } from "npm:@SimpleWebAuthn/server@14.0.3";\nexport { a };\n`, at).filter((f) => f.rule === SITE)).toHaveLength(1);
+  });
+
+  it.each([
+    ["a suffix-only look-alike directory", "/repo/supabase/functions/evil_shared/partner/webauthn.ts"],
+    ["a different file in the same directory", "/repo/supabase/functions/_shared/partner/webauthn-helpers.ts"],
+    ["a file one level up", "/repo/supabase/functions/_shared/webauthn.ts"],
+    ["the same tail outside supabase/functions", "/repo/other/functions/_shared/partner/webauthn.ts"],
+    ["a decoy extension", "/repo/supabase/functions/_shared/partner/webauthn.ts.bak"],
+    ["a function directory", "/repo/supabase/functions/partner-session/index.ts"],
+  ])("must-fail: the same import from %s is flagged", (_name, path) => {
+    expect(lintAt(read("bad/webauthn-import-elsewhere.ts"), path).filter((f) => f.rule === SITE)).toHaveLength(2);
+  });
+
+  // Gate L-3: the exemption is ANCHORED to the functions root, not a path tail.
+  const ROOT = "/repo/supabase/functions";
+  const lintRooted = (source: string, path: string) => lintSource(source, path, { importMap: MAP, pinnedImportTargets: PINNED, functionsRoot: ROOT });
+  const NESTED_WRAPPER = "/repo/supabase/functions/x/supabase/functions/_shared/partner/webauthn.ts";
+
+  it("must-fail: a NESTED supabase/functions/_shared/partner/webauthn.ts is not the wrapper (anchored to the functions root, with and without a root supplied)", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    expect(lintRooted(src, NESTED_WRAPPER).filter((f) => f.rule === SITE)).toHaveLength(2);
+    expect(lintAt(src, NESTED_WRAPPER).filter((f) => f.rule === SITE)).toHaveLength(2);
+    expect(lintAt(src, "supabase/functions/x/supabase/functions/_shared/partner/webauthn.ts").filter((f) => f.rule === SITE)).toHaveLength(2);
+  });
+
+  it("must-pass: the real wrapper under the supplied root is exempt, and a path outside the root is not", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    expect(lintRooted(src, `${ROOT}/_shared/partner/webauthn.ts`).filter((f) => f.rule === SITE)).toEqual([]);
+    expect(lintRooted(src, "/elsewhere/supabase/functions/_shared/partner/webauthn.ts").filter((f) => f.rule === SITE)).toHaveLength(2);
+  });
+
+  it("must-fail: a NESTED _shared/privileged.ts does not get the privileged exemption (general rules apply: a raw service-role env read is flagged)", () => {
+    const src = `const k = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");\nexport { k };\n`;
+    const real = lintRooted(src, `${ROOT}/_shared/privileged.ts`);
+    const nested = lintRooted(src, "/repo/supabase/functions/x/supabase/functions/_shared/privileged.ts");
+    const nestedNoRoot = lintAt(src, "/repo/supabase/functions/x/supabase/functions/_shared/privileged.ts");
+    expect(nested.length).toBeGreaterThan(real.length);
+    expect(nestedNoRoot.length).toBeGreaterThan(0);
+  });
+
+  it("must-fail: privileged.ts, exempt from the general rules, is not exempt from this one", () => {
+    const findings = lintAt(`import { verifyAuthenticationResponse } from "@simplewebauthn/server";\nexport { verifyAuthenticationResponse };\n`, "/repo/supabase/functions/_shared/privileged.ts");
+    expect(findings.filter((f) => f.rule === SITE)).toHaveLength(1);
+  });
+
+  it("must-fail: privileged.ts re-exporting, dynamically importing or require()ing the library is flagged as well", () => {
+    const src = read("bad/webauthn-reexport-dynamic-require.ts");
+    const findings = lintAt(src, "/repo/supabase/functions/_shared/privileged.ts").filter((f) => f.rule === SITE);
+    expect(findings.map((f) => f.message.split(" ")[0])).toEqual(["re-export", "dynamic", "require"]);
+  });
+
+  it("must-pass: privileged.ts importing something unrelated still raises no WebAuthn finding", () => {
+    const findings = lintAt(`import { x } from "../other.ts";\nexport { x };\n`, "/repo/supabase/functions/_shared/privileged.ts");
+    expect(findings.filter((f) => f.rule === SITE)).toEqual([]);
+  });
+
+  it("must-pass: a module that imports other, unrelated packages is not touched by the rule", () => {
+    const findings = lintFixtureWithMap("good/legit-remote-import.ts", { zod: "npm:zod@4.6.5" }, ["npm:zod@4.6.5"]);
+    expect(rulesOf(findings)).not.toContain(SITE);
+  });
+});

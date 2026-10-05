@@ -128,6 +128,8 @@ export interface RegisterOptions {
   reportedId?: string;
   /** Replace the COSE public key bytes written into the authenticator data. */
   coseKeyOverride?: Uint8Array;
+  /** What the browser reports as `response.transports` (default `["internal"]`); any value, so hostile ones can be tried (S0-L4). */
+  transports?: unknown;
 }
 
 export interface AssertOptions {
@@ -270,7 +272,7 @@ export class SoftwareAuthenticator {
     }
     const attestationObject = cbor(new Map<Cbor, Cbor>([["fmt", fmt], ["attStmt", attStmt], ["authData", authData]]));
     const id = o.reportedId ?? this.id;
-    return { id, rawId: id, type: "public-key", clientExtensionResults: {}, response: { clientDataJSON: b64u(clientDataJSON), attestationObject: b64u(attestationObject), transports: ["internal"] } };
+    return { id, rawId: id, type: "public-key", clientExtensionResults: {}, response: { clientDataJSON: b64u(clientDataJSON), attestationObject: b64u(attestationObject), transports: ("transports" in o ? o.transports : ["internal"]) as string[] } };
   }
 
   /** A get ceremony. Advances this authenticator's own counter to the value it reports (unless an explicit counter says otherwise). */

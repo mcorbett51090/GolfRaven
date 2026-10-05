@@ -3316,6 +3316,19 @@ New: `supabase/tests/matrix/20_retention_hygiene_purges.sql` (63 cells, every gr
 
 The runbook additions in design section 15 (item 0 deploy order's isolate-recycling remark, 3a, 7): isolate counts and pooler pool sizes, `verify_jwt` defaults and the non-JWT secret keys against the bearer pattern, and whether the platform injects `SUPABASE_DB_URL`. Nothing was run against a real Supabase project, Supavisor or `pg_cron`; prettier was not run.
 
+### Tracked follow-up (added 2026-10-05, from the P5 S1.1b gate, L-4): the 0040 purge plan is fragile under stale statistics
+
+`private.purge_signin_email_proofs()` (and its siblings) delete with `DELETE ... WHERE id IN (SELECT id ... LIMIT 5000)` under RLS. When `pg_class` carries stale statistics for the table (a vacuum that truncated it left it estimated at about one row), the planner can choose a Nested Loop Semi Join that re-runs the `LIMIT` subquery per outer row: 5,003 freshly inserted rows took 26.9 s instead of about 30 ms and hit the harness's 10 s statement timeout. The `retention-purge` Deno test works around it with `ANALYZE` (P5 S1.1b), which is a property of the test, not of production: a production table that has been loaded for a while has been analyzed by autovacuum, but the dependence is real and is not closed here.
+
+**Not fixed in S1.1b** (0040 is immutable and the slice's brief did not include it). The fix, for a later migration that redefines the purge definers: take the batch **once**, materialised, so the plan cannot re-run it per row:
+
+```sql
+WITH b AS MATERIALIZED (SELECT id FROM private.signin_email_proof WHERE <predicate> ORDER BY <key> LIMIT 5000)
+DELETE FROM private.signin_email_proof p USING b WHERE p.id = b.id;
+```
+
+(the same shape for the other 0040 batched purges), then re-run the whole Deno suite **without** the test-side `ANALYZE`. **Re-evaluate the S1.1a InitPlan NIT afterwards** (partner-auth-design 17.3): converting the 118 `private.partner_binding_kind() IS DISTINCT FROM 'partner'` conjuncts to the InitPlan form was withdrawn because it tipped exactly this plan, so once the purges no longer depend on the plan it may be worth taking.
+
 ## Edge role PR #35 (2026-10-03): hardening the proof-bound link after the PR #31 gate, and the PR #34 lint finding (migration `0041_signin_proof_hardening.sql`)
 
 The PR #31 gate passed 0039 with L1 (LOW), L2 (LOW/NIT) and N2 (NIT); the PR #34 gate left one LOW in the privileged-file lint (LOW-1). All four are addressed here. Migrations 0001-0040 are untouched
