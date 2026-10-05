@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(151);
+SELECT plan(154);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -1631,6 +1631,21 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(e)%private.zz_e_helper()') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): the same helper with nothing granted to edge_partner is clean (control)');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_e_helper();
+-- a PROCEDURE is a function for this purpose (prokind 'p'), and an allowed NAME in another schema's identity is still a different function
+CREATE PROCEDURE private.zz_e_proc() LANGUAGE sql AS $z$ SELECT 1 $z$;
+REVOKE EXECUTE ON PROCEDURE private.zz_e_proc() FROM PUBLIC;
+GRANT EXECUTE ON PROCEDURE private.zz_e_proc() TO edge_partner;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(e)%private.zz_e_proc()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (e) MUST FAIL: a PROCEDURE granted to edge_partner (prokind p is covered, not only functions)');
+SELECT tests.clear_actor();
+DROP PROCEDURE private.zz_e_proc();
+CREATE FUNCTION app.partner_authorize() RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT 1 $z$;
+REVOKE EXECUTE ON FUNCTION app.partner_authorize() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.partner_authorize() TO edge_partner;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(e)%app.partner_authorize()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (e) MUST FAIL: the authorization seam''s own name, granted to edge_partner (the seam is reached only from inside a *_for_partner definer, never by the lane directly)');
+SELECT tests.clear_actor();
+DROP FUNCTION app.partner_authorize();
 -- the allowed names: a *_for_partner function and hit_partner_rate_limit may be granted to edge_partner
 CREATE FUNCTION private.zz_e_ok_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
 BEGIN
@@ -1684,6 +1699,12 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_three') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: a THREE-term AND whose LAST term is the conjunct is clean (control)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_three ON app.zz15_t;
+-- a string literal holding a parenthesis in the prefix does not confuse the nesting profile (the literals are stripped before the parentheses are counted)
+CREATE POLICY zz15_lit ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND owner_id::text <> ')))' AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_lit') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: a closed policy whose prefix holds a string literal of three closing parentheses is clean (control: the literals are stripped before the depth profile)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_lit ON app.zz15_t;
 CREATE POLICY zz15_or ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid OR (id > 0 AND private.partner_binding_kind() IS DISTINCT FROM 'partner'));
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_or') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: an OR-form that ENDS with the conjunct text (the window is open through the first branch)');

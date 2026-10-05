@@ -21,7 +21,7 @@
 \set wp_rsa `cat supabase/tests/fixtures/partner-sig/wycheproof/rsa_signature_2048_sha256_test.json`
 \set handbuilt `cat supabase/tests/fixtures/partner-sig/handbuilt-vectors.json`
 BEGIN;
-SELECT plan(177);
+SELECT plan(191);
 
 -- ----------------------------------------------------------------------------
 -- 0. Posture: who can run what
@@ -136,17 +136,21 @@ SELECT r.alg, r.label, r.expect, decode(r.k1, 'hex') AS k1, decode(r.k2, 'hex') 
 FROM hb_doc d, jsonb_to_recordset(d.j->'vectors') AS r(alg text, label text, expect boolean, k1 text, k2 text, msg text, sig text, note text);
 CREATE TEMP TABLE hb_res AS
 SELECT h.*, CASE h.alg WHEN 'ES256' THEN private.partner_sig_es256_verify(h.k1, h.k2, h.msg, h.sig) ELSE private.partner_sig_rs256_verify(h.k1, h.k2, h.msg, h.sig) END AS got FROM hb h;
-SELECT is((SELECT count(*)::int FROM hb_res), 43, 'hand-built vectors: all 43 were loaded and run');
+SELECT is((SELECT count(*)::int FROM hb_res), 47, 'hand-built vectors: all 47 were loaded and run');
 SELECT is((SELECT count(*)::int FROM hb_res WHERE expect AND got IS TRUE), (SELECT count(*)::int FROM hb_res WHERE expect), 'every hand-built control that must verify does (genuine ES256 and RS256 signatures at 2048, 3072 and 4096 bits, high-s, DER with and without a 0x00 pad, x(R) >= n)');
 SELECT is((SELECT count(*)::int FROM hb_res WHERE NOT expect AND got IS NOT FALSE), 0, 'every hand-built refusal is a refusal');
-SELECT is((SELECT count(*)::int FROM hb_res WHERE expect), 11, 'there are 11 controls (so "all refusals" is not "everything refused")');
+SELECT is((SELECT count(*)::int FROM hb_res WHERE expect), 13, 'there are 13 controls (so "all refusals" is not "everything refused")');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.valid-high-s'), true, 'ES256 low-s is NOT required: s -> n - s verifies (WebAuthn does not ask for it; replay is stopped by the nonce and the counter)');
+SELECT is((SELECT got FROM hb_res WHERE label = 'es.valid-key-is-G'), true, 'ES256: a genuine signature under the public key G itself verifies (the precomputed G + Q is a DOUBLING)');
+SELECT is((SELECT got FROM hb_res WHERE label = 'es.valid-key-is-minus-G'), true, 'ES256: a genuine signature under the public key -G verifies (the precomputed G + Q is the POINT AT INFINITY and adding it must leave the accumulator alone)');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.xr-ge-n'), true, 'ES256 x(R) in [n, p): a signature that verifies ONLY through the r + n branch (r = x(R) - n) is accepted');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.r-not-reduced'), false, 'ES256: the same R with r = x(R) (not reduced mod n) is refused: r < n');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.s-plus-n'), false, 'ES256: s + n (valid DER, the residue of s) is refused: s < n');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.off-curve-accepted-without-check'), false, 'ES256: an OFF-curve public key under which the signature verifies arithmetically is refused: the key must be on the curve');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.neg-der-r'), false, 'ES256: r written as a negative INTEGER (top bit set, no 0x00 pad) is refused');
 SELECT is((SELECT got FROM hb_res WHERE label = 'es.non-minimal-der-r'), false, 'ES256: a redundant leading 0x00 on r is refused');
+SELECT is((SELECT got FROM hb_res WHERE label = 'es.trailing-in-sequence'), false, 'ES256: a valid signature with one extra byte INSIDE the SEQUENCE after s (the length counts it) is refused: the parser must consume exactly r and s');
+SELECT is((SELECT got FROM hb_res WHERE label = 'es.trailing-after-sequence'), false, 'ES256: a valid signature with one extra byte AFTER the SEQUENCE is refused');
 SELECT is((SELECT got FROM hb_res WHERE label = 'rs.s-plus-n'), false, 'RS256: s + n (the same length, the same residue) is refused: s < n');
 SELECT is((SELECT got FROM hb_res WHERE label = 'rs.len-minus-one'), false, 'RS256: the same integer one byte short is refused: len(sig) = k');
 SELECT is((SELECT got FROM hb_res WHERE label = 'rs.len-plus-one'), false, 'RS256: the same integer one byte long is refused: len(sig) = k');
@@ -280,8 +284,17 @@ SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(substring(
 SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_kty => '011802'))), 0, 'cose_parse: a key written as 18 02 (a non-minimal head) is refused');
 SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_xk => '215820', p_yk => '215820'))), 0, 'cose_parse: the same key (-2) twice is refused');
 SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_xk => '235820'))), 0, 'cose_parse: an unknown key (-4) is refused');
+-- a key, a value or a byte string written with the WRONG major type but the right argument: a parser that reads only the argument takes it for the right thing
+SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_crv => '4001'))), 0, 'cose_parse: the key -1 written as a byte-string head (40) is refused: map keys are integers');
+SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_alg => '0346'))), 0, 'cose_parse: alg written as a byte-string head (46), which a parser reading only the argument takes for -7, is refused');
+SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_xk => '217820'))), 0, 'cose_parse: x written as a TEXT string of 32 bytes (78 20) is refused: a byte string only');
+SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(pg_temp.cose_ec(xh, yh, p_crv => '204101'))), 0, 'cose_parse: the curve id as a one-byte byte string (20 41 01) instead of an integer is refused: no curve id at all');
 SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(decode('a5' || '0326' || '0102' || '2001' || '215820' || xh || '225820' || yh, 'hex'))), 1, 'cose_parse: the pairs in ANOTHER order are fine (alg first)');
 SELECT is((SELECT count(*)::int FROM keys, private.partner_cose_parse(decode('a5' || '0102' || '0326' || '2001' || '215820' || xh || '2258ff' || yh, 'hex'))), 0, 'cose_parse: a byte string longer than what is left is refused');
+-- the ES256 verifier on its own refuses a coordinate that is not exactly 32 bytes (the COSE parser upstream already does; this is the second line)
+SELECT is((SELECT private.partner_sig_es256_verify('\x00'::bytea || k1, k2, msg, sig) FROM hb WHERE label = 'es.valid-baseline'), false, 'es256_verify: a 33-byte x (the same value with a leading 0x00) is refused: 32-byte coordinates only');
+SELECT is((SELECT private.partner_sig_es256_verify(k1, '\x00'::bytea || k2, msg, sig) FROM hb WHERE label = 'es.valid-baseline'), false, 'es256_verify: a 33-byte y is refused');
+SELECT is((SELECT private.partner_sig_es256_verify(substring(k1, 2), k2, msg, sig) FROM hb WHERE label = 'es.valid-baseline'), false, 'es256_verify: a 31-byte x is refused');
 -- RSA
 SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa('00' || nh, p_nk => '20590101'))), 0, 'cose_parse: a modulus with a leading 0x00 byte (257 bytes) is refused');
 SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa('00' || substr(nh, 3), p_nk => '20590100'))), 0, 'cose_parse: a 256-byte modulus whose first byte is 0x00 is refused');
@@ -296,6 +309,9 @@ SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_
 SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa(nh, p_head => 'a5'))), 0, 'cose_parse: a map of 5 pairs holding RSA fields is refused');
 SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa(nh, p_nk => '2059' || '0100') || '\x00'::bytea)), 0, 'cose_parse: a trailing byte after an RSA key is refused');
 SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa(nh, p_nk => '2a59' || '0100'))), 0, 'cose_parse: an RSA key with an unknown key (-11) in place of the modulus is refused');
+SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa(nh, p_head => 'a5') || '\x2143010001'::bytea)), 0, 'cose_parse: an RSA key whose exponent (-2) appears TWICE (five pairs, four distinct keys) is refused: each key once');
+SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa(nh, p_head => 'a5') || '\x0441ff'::bytea)), 0, 'cose_parse: an RSA key with a FIFTH pair under an unknown key (4, with a byte-string value) is refused: exactly the four fields');
+SELECT is((SELECT count(*)::int FROM rsa_key_hex, private.partner_cose_parse(pg_temp.cose_rsa(nh, p_head => 'a5') || '\x2241ff'::bytea)), 0, 'cose_parse: an RSA key with a fifth pair under a KNOWN EC key (-3) is refused: the key set must be exactly the RSA one');
 SELECT is((SELECT count(*)::int FROM private.partner_cose_parse(NULL)), 0, 'cose_parse: NULL gives nothing');
 SELECT is((SELECT count(*)::int FROM private.partner_cose_parse('\xa5'::bytea)), 0, 'cose_parse: a key that is too short gives nothing');
 

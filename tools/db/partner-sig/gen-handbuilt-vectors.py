@@ -20,6 +20,8 @@ THE CONSTRUCTIONS (each is a vector that a specific weakening of the strict veri
   es.r-not-reduced          the same R with r = x(R) (not reduced mod n): a verifier without `r < n` accepts it, the strict one refuses it.
   es.off-curve-accepted     an OFF-curve public key under which a verifier WITHOUT the on-curve check ACCEPTS the signature. With u2 = 1 and u1 even the verifier's last step is the chord addition
                             M + Q, M = u1 G, whose formula involves neither a nor b: choose r, take M, pick x2 and solve the chord for y2 so that x(M + Q) = r. Q is then (almost surely) not on P-256.
+  es.valid-key-is-G / -minus-G  genuine signatures under the two degenerate public keys G and -G (the add routine's P = Q and P = -Q branches, reached through the precomputed G + Q).
+  es.trailing-*             a valid signature with one extra byte inside the SEQUENCE after s (its length counts it) and one after the SEQUENCE.
   es.neg-der / non-min-der  r (or s) with its top bit set written WITHOUT the 0x00 pad (a negative INTEGER), and a redundant leading 0x00 (non-minimal).
   rs.valid-*                genuine RS256 signatures at 2048, 3072 and 4096 bits.
   rs.s-plus-n               a 2048-bit key whose modulus is just above 2^2047 and s + n, which still fits the modulus length: a verifier without `s < n` accepts it.
@@ -247,27 +249,41 @@ def main():
     es_vec(vectors, "es.s-zero", False, q, msg, sig_rs(r, 0))
     es_vec(vectors, "es.r-zero", False, q, msg, sig_rs(0, s))
     es_vec(vectors, "es.other-message", False, q, msg + b"!", sig_rs(r, s))
+    # extra bytes AFTER the second INTEGER: inside the SEQUENCE (its length counts them) and outside it (the length does not)
+    es_vec(vectors, "es.trailing-in-sequence", False, q, msg, der_sig(der_int(r), der_int(s) + b"\x00"), "a valid signature with one extra byte inside the SEQUENCE after s: a parser that stops reading at s accepts it")
+    es_vec(vectors, "es.trailing-after-sequence", False, q, msg, sig_rs(r, s) + b"\x00", "a valid signature with one extra byte after the SEQUENCE")
+    # the two degenerate public keys: Q = G (G + Q is a DOUBLING) and Q = -G (G + Q is the point at infinity, which the Shamir loop then adds to its accumulator)
+    for label, dd, note in (("es.valid-key-is-G", 1, "the public key is G itself (d = 1): the precomputed G + Q is a doubling"),
+                            ("es.valid-key-is-minus-G", N - 1, "the public key is -G (d = n - 1): the precomputed G + Q is the point at infinity, and adding it must leave the accumulator alone")):
+        qd = pmul(dd, G)
+        for i in range(64):
+            md = (b"degenerate key %s %d" % (label.encode(), i))
+            rd, sd = ecdsa_sign_with(dd, md)
+            if verify_model(qd, md, rd, sd):
+                es_vec(vectors, label, True, qd, md, sig_rs(rd, sd), note)
+                break
     q2 = pmul(d + 1, G)
     es_vec(vectors, "es.other-key", False, q2, msg, sig_rs(r, s))
     # negative / non-minimal DER, from signatures whose r (or s) has the top bit set / clear
-    found_hi = found_lo = False
-    for i in range(400):
+    found_hi = found_lo = found_s_hi = False
+    for i in range(4000):
         m = b"der variants %d" % i
         rr, ss = ecdsa_sign_with(d, m)
         if rr >> 255 and not found_hi:
             es_vec(vectors, "es.valid-der-hi-r", True, q, m, sig_rs(rr, ss), "control: r with the top bit set, padded with 0x00 as DER requires")
             es_vec(vectors, "es.neg-der-r", False, q, m, der_sig(der_int(rr, negative_ok=True), der_int(ss)), "r written without its 0x00 pad: a negative INTEGER")
             found_hi = True
-        if not (ss >> 255) and ss.bit_length() <= 247 and not found_lo:
-            pass
         if not (rr >> 255) and not found_lo:
             es_vec(vectors, "es.non-minimal-der-r", False, q, m, der_sig(der_int(rr, pad=True), der_int(ss)), "a redundant leading 0x00 on r")
             es_vec(vectors, "es.valid-der-lo-r", True, q, m, sig_rs(rr, ss), "control")
             found_lo = True
-        if (ss >> 255):
+        if (ss >> 255) and not found_s_hi:
             es_vec(vectors, "es.neg-der-s", False, q, m, der_sig(der_int(rr), der_int(ss, negative_ok=True)), "s written without its 0x00 pad: a negative INTEGER")
             es_vec(vectors, "es.valid-der-hi-s", True, q, m, sig_rs(rr, ss), "control")
+            found_s_hi = True
+        if found_hi and found_lo and found_s_hi:
             break
+    assert found_hi and found_lo and found_s_hi, "the DER variants need a signature of each shape"
     es_vec(vectors, "es.non-minimal-der-s", False, q, msg, der_sig(der_int(r), der_int(s, pad=True)) if not (s >> 255) else der_sig(der_int(r), der_int(s, pad=True)), "a redundant leading 0x00 (on a value that already has one when its top bit is set: non-minimal either way)")
 
     # x(R) in [n, p): the `r + n` branch (a real signature; the key is constructed from the signature)

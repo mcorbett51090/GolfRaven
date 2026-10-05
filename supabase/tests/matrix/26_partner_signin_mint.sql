@@ -10,7 +10,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(223);
+SELECT plan(231);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -222,20 +222,23 @@ DELETE FROM vault.secrets WHERE name = 'partner_challenge_key';
 INSERT INTO vault.secrets (id, name, secret) VALUES ('a0000000-1111-0000-0000-0000000000f2', 'partner_challenge_key', 'shim-test-only-partner-challenge-key-32bytes-minimum-qqqqqqqqqqqqqqqqqqqqq');
 
 -- the issuer
-CREATE TEMP TABLE issued AS SELECT 0 AS n, NULL::bytea AS nonce, NULL::bigint AS exp, NULL::bytea AS mac WHERE false;
+CREATE TEMP TABLE issued AS SELECT 0 AS n, NULL::bytea AS nonce, NULL::bigint AS exp, NULL::bytea AS mac, NULL::bigint AS lo, NULL::bigint AS hi WHERE false;
 GRANT ALL ON issued TO PUBLIC;
 SET LOCAL ROLE edge_partner_minter;
 DO $d$
+DECLARE
+  lo bigint;
 BEGIN
   FOR i IN 1 .. 200 LOOP
-    INSERT INTO pg_temp.issued SELECT i, c.o_nonce, c.o_exp, c.o_mac FROM private.partner_challenge_issue_sign_in() c;
+    lo := floor(extract(epoch FROM clock_timestamp()))::bigint;
+    INSERT INTO pg_temp.issued SELECT i, c.o_nonce, c.o_exp, c.o_mac, lo, floor(extract(epoch FROM clock_timestamp()))::bigint FROM private.partner_challenge_issue_sign_in() c;
   END LOOP;
 END
 $d$;
 RESET ROLE;
 SELECT is((SELECT count(DISTINCT nonce)::int FROM issued), 200, 'issue: 200 calls give 200 distinct nonces');
 SELECT is((SELECT count(*)::int FROM issued WHERE octet_length(nonce) <> 32 OR octet_length(mac) <> 32), 0, 'issue: every nonce and every MAC is 32 bytes');
-SELECT is((SELECT count(*)::int FROM issued WHERE exp NOT BETWEEN floor(extract(epoch FROM clock_timestamp()))::bigint + 110 AND floor(extract(epoch FROM clock_timestamp()))::bigint + 125), 0, 'issue: the expiry is about 120 seconds ahead (the ceremony timeout of the options call)');
+SELECT is((SELECT count(*)::int FROM issued WHERE exp NOT BETWEEN lo + 120 AND hi + 120), 0, 'issue: the expiry is EXACTLY 120 seconds ahead of the second the call ran in (the ceremony timeout of the options call; bracketed by the clock before and after each call)');
 SET LOCAL ROLE private_definer;
 SELECT is((SELECT count(*)::int FROM issued i WHERE (SELECT o_ok FROM private.partner_challenge_core(1::smallint, i.exp, i.nonce, '00000000-0000-0000-0000-000000000000', i.mac)) IS NOT TRUE), 0,
   'issue: every issued MAC verifies as a sign_in challenge with the zero binding (the encoding of 5.1)');
@@ -345,6 +348,7 @@ SELECT is((SELECT (pg_temp.side('rl') ->> 'alarms')::int), 1, 'setup: the one al
 SELECT is(pg_temp.go('rl_60_bad', 'rl', 2, '{"sig_tamper": true}'), 'rate_limited', 'S0-L5: the 61st attempt is refused as rate_limited, BEFORE the signature is looked at (a bad signature does not reach the verifier)');
 SELECT is((SELECT (pg_temp.side('rl') ->> 'alarms')::int), 1, 'S0-L5: and the refusal wrote no alarm (it never verified anything)');
 SELECT is(pg_temp.go('rl_60_good', 'rl', 2), 'rate_limited', 'S0-L5: a perfectly valid assertion is refused too, while 60 are in the window');
+SELECT is(pg_temp.go('rl_60_struct', 'rl', 2, '{"client": {"origin": "https://evil.example.test"}}'), 'rate_limited', 'S0-L5: with 60 in the window an assertion that is ALSO structurally defective (another origin) is rate_limited, not bad_origin: the limit is checked before the structural checks');
 SELECT is((pg_temp.side('rl') ->> 'nonces')::int, 1, 'S0-L5: neither refusal consumed a nonce (only the one successful mint did)');
 SELECT is((pg_temp.side('rl') ->> 'counter')::bigint, 1::bigint, 'S0-L5: nor moved the counter');
 -- what does and does not count
@@ -359,6 +363,16 @@ SELECT pg_temp.fill_sessions('rl_rev', 60, interval '0', 'sign_in', true);
 SELECT is(pg_temp.go('rl_rev_no', 'rl_rev', 1), 'rate_limited', 'S0-L5: a REVOKED sign-in session still counts (it was a successful sign-in)');
 SELECT pg_temp.newcred('rl_other') IS NOT NULL AS rl5 \gset
 SELECT is(pg_temp.go('rl_other_ok', 'rl_other', 1), 'ok', 'S0-L5: the count is per CREDENTIAL: another credential (the 60 above belong to a different one) is unaffected');
+-- the count is per CREDENTIAL, not per person: the same person with two credentials
+SELECT pg_temp.newcred('mx_a') IS NOT NULL AS mx1 \gset
+SELECT pg_temp.newcred('mx_b', (SELECT uid FROM creds WHERE label = 'mx_a')) IS NOT NULL AS mx2 \gset
+SELECT pg_temp.fill_sessions('mx_a', 59);
+SELECT pg_temp.fill_sessions('mx_b', 1);
+SELECT is(pg_temp.go('mx_a_ok', 'mx_a', 1), 'ok', 'S0-L5: 59 sign-ins on this credential and 1 on the same person''s other credential (60 for the person) is NOT rate limited: the limit is per credential');
+SELECT pg_temp.newcred('mx_c') IS NOT NULL AS mx3 \gset
+SELECT pg_temp.newcred('mx_d', (SELECT uid FROM creds WHERE label = 'mx_c')) IS NOT NULL AS mx4 \gset
+SELECT pg_temp.fill_sessions('mx_c', 60);
+SELECT is(pg_temp.go('mx_d_ok', 'mx_d', 1), 'ok', 'S0-L5: the same person''s OTHER credential, with 60 sign-ins on the first, still mints');
 SELECT pg_temp.newcred('rl_edge') IS NOT NULL AS rl6 \gset
 SELECT pg_temp.fill_sessions('rl_edge', 60, interval '59 minutes 30 seconds');
 SELECT is(pg_temp.go('rl_edge_no', 'rl_edge', 1), 'rate_limited', 'S0-L5: 60 sign-ins 59.5 minutes old are still inside the hour');
@@ -384,6 +398,12 @@ SELECT is(pg_temp.go('s_cross_zero', 'struct', 1, '{"client": {"crossOrigin": 0}
 SELECT is(pg_temp.go('s_cross_null', 'struct', 1, '{"client": {"crossOrigin": null}}'), 'cross_origin', 'PA-9b: crossOrigin null is refused');
 SELECT is(pg_temp.go('s_top', 'struct', 1, '{"client": {"topOrigin": "https://partners.example.test"}}'), 'cross_origin', 'PA-9b: any topOrigin is refused, with crossOrigin false');
 -- origin: exact, never a prefix, a subdomain, a scheme or a case variant (S0-N1)
+-- the ORDER: a structurally defective assertion whose signature is ALSO bad is refused for the structure, and is no alarm (the signature is looked at last; an alarm means the Edge's own verification was bypassed)
+SELECT pg_temp.newcred('order') IS NOT NULL AS order_cred \gset
+SELECT is(pg_temp.go('o_origin', 'order', 1, '{"client": {"origin": "https://evil.example.test"}, "sig_tamper": true}'), 'bad_origin', 'PA-9b order: a wrong origin AND a bad signature is bad_origin: the structural check runs before the signature check');
+SELECT is(pg_temp.go('o_uv', 'order', 1, '{"flags": 1, "sig_tamper": true}'), 'user_not_verified', 'PA-9b order: missing user verification AND a bad signature is user_not_verified');
+SELECT is(pg_temp.go('o_rp', 'order', 1, '{"rp": "other.example.test", "sig_tamper": true}'), 'bad_rp_id_hash', 'PA-9b order: another RP ID hash AND a bad signature is bad_rp_id_hash');
+SELECT is((SELECT (pg_temp.side('order') ->> 'alarms')::int), 0, 'PA-9b order: and none of those raised an alarm (the signature was never looked at)');
 SELECT is(pg_temp.go('s_origin_evil', 'struct', 1, '{"client": {"origin": "https://evil.example.test"}}'), 'bad_origin', 'PA-9b: another origin is refused');
 SELECT is(pg_temp.go('s_origin_sub', 'struct', 1, '{"client": {"origin": "https://app.partners.example.test"}}'), 'bad_origin', 'PA-9b / S0-N1: a SUBDOMAIN of the RP ID is a valid WebAuthn origin and is still refused: the origin is matched EXACTLY');
 SELECT is(pg_temp.go('s_origin_slash', 'struct', 1, '{"client": {"origin": "https://partners.example.test/"}}'), 'bad_origin', 'PA-9b: a trailing slash is refused');
@@ -577,6 +597,7 @@ ROLLBACK TO sp_alarm;
 SELECT lives_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('signature_invalid', gen_random_uuid(), '{}'::jsonb)$$, 'and, with no binding, the same call writes the alarm (control)');
 RESET ROLE;
 SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('anything_else', gen_random_uuid(), '{}'::jsonb)$$, '22023', NULL, 'the alarm writer takes only its two kinds');
+SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('signature_invalid', NULL, '{}'::jsonb)$$, '22023', NULL, 'the alarm writer refuses a NULL credential with the argument error (22023), not a NOT NULL violation from the table');
 RESET ROLE;
 SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket) VALUES ('signature_invalid', gen_random_uuid(), 1)$$, '42501', NULL, 'the issuer cannot insert alarm rows itself (no privilege): only through the writer');
 RESET ROLE;

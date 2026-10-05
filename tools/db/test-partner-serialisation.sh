@@ -26,6 +26,7 @@
 #        6c  PA-9: the same race with the HIGHER second counter (12, then 13): both succeed, in order; the counter ends at 13 and each made its session.
 #        6d  the signature alarm commits with the refusal: a tampered signature returns `signature_invalid` and its alarm and audit rows are visible to another connection (a status, not a RAISE:
 #            nothing rolled back), while no nonce was spent and no session exists.
+#        6e  a credential revoked WHILE a mint waits on its row (the revoker holds the lock) is answered unknown_credential: no session, no counter move, no alarm.
 #      The audit_log rows these write cannot be deleted (the table is insert-only by trigger); the other rows are removed by the EXIT trap.
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
@@ -304,7 +305,7 @@ else echo "PASS: REPEATABLE READ is refused by partner_authorize and by the scop
 # ---------------------------------------------------------------------------
 echo "tools/db/test-partner-serialisation.sh: 6. the sign-in mint: concurrent replays, the counter race, the alarm that commits"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-MU1="ee26f000-0000-0000-0000-0000000000b1"; MU2="ee26f000-0000-0000-0000-0000000000b2"; MU3="ee26f000-0000-0000-0000-0000000000b3"; MU4="ee26f000-0000-0000-0000-0000000000b4"
+MU1="ee26f000-0000-0000-0000-0000000000b1"; MU2="ee26f000-0000-0000-0000-0000000000b2"; MU3="ee26f000-0000-0000-0000-0000000000b3"; MU4="ee26f000-0000-0000-0000-0000000000b4"; MU5="ee26f000-0000-0000-0000-0000000000b5"
 RP_INSERTED=0
 hx "
   GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_auth_challenge, app.partner_auth_alarm, app.partner_rp_config TO CURRENT_USER;
@@ -323,7 +324,7 @@ PREP_OUT="$OUT_DIR/prep.txt"
 # (the helpers are loaded AS private_definer: they are called as it, and a function in the temp schema is not executable by another role)
 ( cd "$ROOT_DIR" && "${HARNESS_PSQL[@]}" -c 'SET ROLE private_definer' -f supabase/tests/partner-sign-helpers.sql -c 'RESET ROLE' -f - ) >"$PREP_OUT" <<SQL
 SET ROLE service_role;
-INSERT INTO auth.users (id, email) VALUES ('$MU1', 'mint1@partner.test'), ('$MU2', 'mint2@partner.test'), ('$MU3', 'mint3@partner.test'), ('$MU4', 'mint4@partner.test') ON CONFLICT (id) DO NOTHING;
+INSERT INTO auth.users (id, email) VALUES ('$MU1', 'mint1@partner.test'), ('$MU2', 'mint2@partner.test'), ('$MU3', 'mint3@partner.test'), ('$MU4', 'mint4@partner.test'), ('$MU5', 'mint5@partner.test') ON CONFLICT (id) DO NOTHING;
 RESET ROLE;
 CREATE TEMP TABLE mk (label text, uid uuid, d numeric, cred_id bytea);
 CREATE FUNCTION pg_temp.mkcred(p_label text, p_uid uuid) RETURNS void LANGUAGE plpgsql AS \$f\$
@@ -348,17 +349,18 @@ BEGIN
   RETURN p_label || '|' || encode(m.cred_id, 'hex') || '|' || encode(a.o_nonce, 'hex') || '|' || a.o_exp || '|' || encode(a.o_mac, 'hex') || '|' || encode(a.o_ad, 'hex') || '|' || encode(a.o_cd, 'hex') || '|' || encode(a.o_sig, 'hex');
 END
 \$f\$;
-SELECT pg_temp.mkcred('m1', '$MU1'); SELECT pg_temp.mkcred('m2', '$MU2'); SELECT pg_temp.mkcred('m3', '$MU3'); SELECT pg_temp.mkcred('m4', '$MU4');
+SELECT pg_temp.mkcred('m1', '$MU1'); SELECT pg_temp.mkcred('m2', '$MU2'); SELECT pg_temp.mkcred('m3', '$MU3'); SELECT pg_temp.mkcred('m4', '$MU4'); SELECT pg_temp.mkcred('m5', '$MU5');
 SELECT pg_temp.emit('race', 'm1', 1);
 SELECT pg_temp.emit('lose_a', 'm2', 9);
 SELECT pg_temp.emit('lose_b', 'm2', 8);
 SELECT pg_temp.emit('win_a', 'm3', 12);
 SELECT pg_temp.emit('win_b', 'm3', 13);
 SELECT pg_temp.emit('bad_sig', 'm4', 1, '{"sig_tamper": true}');
+SELECT pg_temp.emit('revoked_mid', 'm5', 1);
 SQL
 declare -A A_CRED A_NONCE A_EXP A_MAC A_AD A_CD A_SIG
 while IFS='|' read -r lbl cred nonce exp mac ad cd sig; do
-  case "$lbl" in race|lose_a|lose_b|win_a|win_b|bad_sig) A_CRED[$lbl]=$cred; A_NONCE[$lbl]=$nonce; A_EXP[$lbl]=$exp; A_MAC[$lbl]=$mac; A_AD[$lbl]=$ad; A_CD[$lbl]=$cd; A_SIG[$lbl]=$sig;; esac
+  case "$lbl" in race|lose_a|lose_b|win_a|win_b|bad_sig|revoked_mid) A_CRED[$lbl]=$cred; A_NONCE[$lbl]=$nonce; A_EXP[$lbl]=$exp; A_MAC[$lbl]=$mac; A_AD[$lbl]=$ad; A_CD[$lbl]=$cd; A_SIG[$lbl]=$sig;; esac
 done < "$PREP_OUT"
 if [ -z "${A_SIG[race]:-}" ] || [ -z "${A_SIG[bad_sig]:-}" ]; then fail "the mint cases: the assertion preparation produced no assertions: $(cat "$PREP_OUT" | head -c 600)"; fi
 
@@ -448,6 +450,29 @@ if [ -n "${A_SIG[bad_sig]:-}" ]; then
   elif [ "$ALM" != "1" ] || [ "$AUD" != "1" ]; then fail "6d: the alarm and audit rows did not survive the refusal (alarms=$ALM audits=$AUD)"
   elif [ "$SESS" != "0" ] || [ "$NONC" != "0" ]; then fail "6d: a refused signature left a session or spent a nonce (sessions=$SESS nonces=$NONC)"
   else echo "PASS: a tampered signature -> signature_invalid, and its alarm and audit rows are committed and visible to another connection; no session, no spent nonce (PA-9b / the 0020 lesson)"; fi
+fi
+
+# 6e. A credential REVOKED while a mint is in flight is not minted for. The revoker takes the credential's row lock first and holds it; the mint (whose credential read saw the old row, as READ COMMITTED does)
+# verifies, records its nonce and WAITS at the counter's compare-and-set; when the revoke commits the update re-checks its WHERE (revoked_at IS NULL), touches nothing, and the answer is
+# unknown_credential: no session, no counter move, and NO counter_regression alarm (a revoked credential is not a clone indicator).
+if [ -n "${A_SIG[revoked_mid]:-}" ]; then
+  ALM0=$(hq "SELECT count(*) FROM app.partner_auth_alarm WHERE credential_id = (SELECT id FROM app.partner_credential WHERE user_id = '$MU5')")
+  printf 'BEGIN;\nUPDATE app.partner_credential SET revoked_at = clock_timestamp() WHERE user_id = '"'"'%s'"'"';\nSELECT pg_sleep(3.5);\nCOMMIT;\n' "$MU5" | "${HARNESS_PSQL[@]}" -q -f - >"$OUT_DIR/rv.out" 2>"$OUT_DIR/rv.err" &
+  PR=$!
+  sleep 1.0 # the revoke holds the row lock
+  mint_sql revoked_mid "$(tokhash rm)" 0 | edge ser_mr >"$OUT_DIR/mr.out" 2>"$OUT_DIR/mr.err" &
+  PM=$!
+  W=$(waits ser_mr)
+  set +e; wait "$PR"; SR=$?; wait "$PM"; SM=$?; set -e
+  SESS=$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$MU5'")
+  CNT=$(hq "SELECT sign_count FROM app.partner_credential WHERE user_id = '$MU5'")
+  ALM=$(( $(hq "SELECT count(*) FROM app.partner_auth_alarm WHERE credential_id = (SELECT id FROM app.partner_credential WHERE user_id = '$MU5')") - ALM0 ))
+  if [ "$SR" -ne 0 ] || [ "$SM" -ne 0 ]; then fail "6e: a session failed: revoker=$SR mint=$SM $(cat "$OUT_DIR/rv.err" "$OUT_DIR/mr.err")"
+  elif [ "$W" != "yes" ]; then fail "6e: the mint was never seen WAITING on the credential row in pg_locks"
+  elif [ "$(status_of "$OUT_DIR/mr.out")" != "unknown_credential" ]; then fail "6e: expected unknown_credential for a credential revoked mid-mint, got '$(status_of "$OUT_DIR/mr.out")': $(cat "$OUT_DIR/mr.err")"
+  elif [ "$SESS" != "0" ] || [ "$CNT" != "0" ]; then fail "6e: a revoked credential was minted for or its counter moved (sessions=$SESS counter=$CNT)"
+  elif [ "$ALM" != "0" ]; then fail "6e: a revoked credential raised an alarm ($ALM): it is not a counter regression"
+  else echo "PASS: credential revoked while a mint waited on its row -> unknown_credential, no session, the counter unmoved and no alarm (the compare-and-set re-checks revoked_at)"; fi
 fi
 
 if [ "$FAILED" -ne 0 ]; then
