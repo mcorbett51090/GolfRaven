@@ -1691,7 +1691,7 @@ DROP POLICY zz15_closed ON app.zz15_t;
 -- (S1.1a gate LOW 2) the conjunct must be the TOP-LEVEL TRAILING AND: text that merely CONTAINS it does not close the window
 CREATE POLICY zz15_initplan ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner');
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_initplan') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: the InitPlan form of the conjunct (what 0048 section 7b converted every policy to) is clean (control)');
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_initplan') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: the InitPlan form of the conjunct is clean (control: accepted for a future policy and used by the two alarm policies of 0048; the 118 existing ones keep the direct call, see 17.3)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_initplan ON app.zz15_t;
 CREATE POLICY zz15_three ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND id > 0 AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
@@ -1753,7 +1753,7 @@ CREATE POLICY zz15_upd_ok ON app.zz15_t FOR UPDATE TO private_definer
   WITH CHECK (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_upd_ok') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: an UPDATE policy closed in BOTH clauses (one InitPlan, one direct) is clean (control)');
-SELECT is(pg_temp.edge_check_15() IS NULL OR cardinality(pg_temp.edge_check_15()) = 0, true, 'check 15: and nothing else in the schema is open (the InitPlan form is accepted for the 118 converted policies)');
+SELECT is(pg_temp.edge_check_15() IS NULL OR cardinality(pg_temp.edge_check_15()) = 0, true, 'check 15: and nothing else in the schema is open (the direct and the InitPlan forms are both accepted)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_upd_ok ON app.zz15_t;
 DROP TABLE app.zz15_t;
