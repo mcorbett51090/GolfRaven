@@ -10,7 +10,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(231);
+SELECT plan(235);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -376,6 +376,9 @@ SELECT is(pg_temp.go('mx_d_ok', 'mx_d', 1), 'ok', 'S0-L5: the same person''s OTH
 SELECT pg_temp.newcred('rl_edge') IS NOT NULL AS rl6 \gset
 SELECT pg_temp.fill_sessions('rl_edge', 60, interval '59 minutes 30 seconds');
 SELECT is(pg_temp.go('rl_edge_no', 'rl_edge', 1), 'rate_limited', 'S0-L5: 60 sign-ins 59.5 minutes old are still inside the hour');
+SELECT pg_temp.newcred('rl_just_out') IS NOT NULL AS rl7 \gset
+SELECT pg_temp.fill_sessions('rl_just_out', 60, interval '60 minutes 30 seconds');
+SELECT is(pg_temp.go('rl_just_out_ok', 'rl_just_out', 1), 'ok', 'S0-L5: 60 sign-ins 60.5 minutes old are OUTSIDE the hour (the window is one hour, not 61 minutes)');
 
 
 -- ----------------------------------------------------------------------------
@@ -506,6 +509,13 @@ SELECT is((SELECT (l.actor_user_id IS NULL AND l.action = 'partner.mint.signatur
 SELECT is(pg_temp.go('sig_retry', 'sig', 1, (SELECT jsonb_build_object('nonce_hex', encode(nonce, 'hex'), 'mac_hex', encode(mac, 'hex'), 'exp_abs', exp) FROM asr WHERE label = 'sig_bad')), 'ok', 'a failed verification does not burn the challenge: it can be presented again within its 120 s with a real signature');
 SELECT is(pg_temp.go('sig_bad2', 'sig', 2, '{"sig_tamper": true}'), 'signature_invalid', 'a second bad signature is refused the same way');
 SELECT is((pg_temp.side('sig') ->> 'alarms')::int || ':' || (pg_temp.side('sig') ->> 'audits')::int, '1:1', 'and, within the same minute, adds no second alarm or audit row (bounded)');
+-- the dedupe granularity is the CLOCK MINUTE: the bucket is floor(epoch / 60) of the alarm's own instant (not an hour, not a second) ...
+SELECT is((SELECT (a.minute_bucket = pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint) FROM app.partner_auth_alarm a JOIN creds c ON c.cred_row = a.credential_id WHERE c.label = 'sig' AND a.kind = 'signature_invalid'), true,
+  'the alarm''s bucket is the current clock minute (floor(epoch / 60); the cells above ran inside one minute), so one alarm per credential, kind and MINUTE');
+-- ... and an alarm of ANOTHER minute neither suppresses nor is suppressed by it: with a row already present for the previous minute, the next refusal still writes its own row
+INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket) SELECT 'counter_regression', c.cred_row, pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint - 1 FROM creds c WHERE c.label = 'sig';
+SELECT is(pg_temp.go('sig_cnt', 'sig', 1), 'counter_regression', 'setup: a counter regression on the same credential (counter 1 is not above the stored 1)');
+SELECT is((SELECT count(*)::int FROM app.partner_auth_alarm a JOIN creds c ON c.cred_row = a.credential_id WHERE c.label = 'sig' AND a.kind = 'counter_regression'), 2, 'a counter_regression row of the PREVIOUS minute does not suppress this minute''s: two rows, two minutes');
 SELECT pg_temp.newcred('sig2') IS NOT NULL AS sig2_cred \gset
 SELECT is(pg_temp.go('sig2_bad', 'sig2', 1, '{"sig_tamper": true}'), 'signature_invalid', 'another credential''s bad signature is refused ...');
 SELECT is((pg_temp.side('sig2') ->> 'alarms')::int || ':' || (pg_temp.side('sig2') ->> 'audits')::int, '1:1', '... and has an alarm of its own (the key of the dedupe is the credential)');
