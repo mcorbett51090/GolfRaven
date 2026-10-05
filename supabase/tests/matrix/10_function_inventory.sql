@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(154);
+SELECT plan(159);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -865,7 +865,7 @@ UNION ALL
 SELECT '(e) edge_partner holds an EXECUTE grant outside its allowed set (bind_partner_session, partner_binding, partner_binding_kind, hit_partner_rate_limit and the *_for_partner family): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')
-  AND p.proname NOT IN ('bind_partner_session', 'partner_binding', 'partner_binding_kind', 'hit_partner_rate_limit')
+  AND (n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')') <> ALL (ARRAY['private.bind_partner_session(text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.hit_partner_rate_limit(text, interval, integer)'])
   AND p.proname NOT LIKE '%\_for\_partner'
 
   ) AS t(v)
@@ -877,15 +877,16 @@ WITH tails(tail) AS (
   VALUES (' AND (private.partner_binding_kind() IS DISTINCT FROM ''partner''::text))'),
          (' AND (( SELECT private.partner_binding_kind() AS partner_binding_kind) IS DISTINCT FROM ''partner''::text))')
 ), exprs AS (
-  SELECT n.nspname, c.relname, pol.polname, 'USING' AS part, pg_get_expr(pol.polqual, pol.polrelid) AS e
+  SELECT n.nspname, c.relname, pol.polname, 'USING' AS part, pg_get_expr(pol.polqual, pol.polrelid) AS e, pol.oid AS poloid
   FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
   UNION ALL
-  SELECT n.nspname, c.relname, pol.polname, 'WITH CHECK', pg_get_expr(pol.polwithcheck, pol.polrelid)
+  SELECT n.nspname, c.relname, pol.polname, 'WITH CHECK', pg_get_expr(pol.polwithcheck, pol.polrelid), pol.oid
   FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
 ), win AS (
-  SELECT * FROM exprs WHERE e LIKE '%current_setting(%'
+  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e LIKE '%current_setting(%'
+    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%'))
 ), trail AS (
   SELECT w.nspname, w.relname, w.polname, w.part, left(w.e, length(w.e) - length(t.tail)) AS prefix
   FROM win w JOIN tails t ON right(w.e, length(t.tail)) = t.tail
@@ -1631,6 +1632,28 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(e)%private.zz_e_helper()') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): the same helper with nothing granted to edge_partner is clean (control)');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_e_helper();
+-- an OVERLOAD of an allowed name is a different function: the allow-list is by IDENTITY (schema, name, argument types), not by name (the S1.1b gate's L-1)
+CREATE FUNCTION private.bind_partner_session(p_x int) RETURNS int LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT 1 $z$;
+REVOKE EXECUTE ON FUNCTION private.bind_partner_session(int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.bind_partner_session(int) TO edge_partner;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(e)%private.bind_partner_session(p_x integer)') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (e) MUST FAIL: an OVERLOAD of bind_partner_session (other argument types) granted to edge_partner');
+SELECT tests.clear_actor();
+DROP FUNCTION private.bind_partner_session(int);
+CREATE FUNCTION private.partner_binding_kind(p_x int) RETURNS text LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT 'x'::text $z$;
+REVOKE EXECUTE ON FUNCTION private.partner_binding_kind(int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.partner_binding_kind(int) TO edge_partner;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(e)%private.partner_binding_kind(p_x integer)') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (e) MUST FAIL: an overload of partner_binding_kind granted to edge_partner');
+SELECT tests.clear_actor();
+DROP FUNCTION private.partner_binding_kind(int);
+CREATE FUNCTION app.hit_partner_rate_limit(p_key text, p_window interval, p_max int) RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT true $z$;
+REVOKE EXECUTE ON FUNCTION app.hit_partner_rate_limit(text, interval, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION app.hit_partner_rate_limit(text, interval, int) TO edge_partner;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(e)%app.hit_partner_rate_limit(%') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (e) MUST FAIL: the allowed NAME in another schema (app.hit_partner_rate_limit) granted to edge_partner');
+SELECT tests.clear_actor();
+DROP FUNCTION app.hit_partner_rate_limit(text, interval, int);
 -- a PROCEDURE is a function for this purpose (prokind 'p'), and an allowed NAME in another schema's identity is still a different function
 CREATE PROCEDURE private.zz_e_proc() LANGUAGE sql AS $z$ SELECT 1 $z$;
 REVOKE EXECUTE ON PROCEDURE private.zz_e_proc() FROM PUBLIC;
@@ -1655,14 +1678,14 @@ END
 $z$;
 REVOKE EXECUTE ON FUNCTION private.zz_e_ok_for_partner() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.zz_e_ok_for_partner() TO edge_partner;
-CREATE FUNCTION private.hit_partner_rate_limit(p_key text, p_window int, p_max int) RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT true $z$;
-REVOKE EXECUTE ON FUNCTION private.hit_partner_rate_limit(text, int, int) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.hit_partner_rate_limit(text, int, int) TO edge_partner;
+CREATE FUNCTION private.hit_partner_rate_limit(p_key text, p_window interval, p_max int) RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT true $z$;
+REVOKE EXECUTE ON FUNCTION private.hit_partner_rate_limit(text, interval, int) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.hit_partner_rate_limit(text, interval, int) TO edge_partner;
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(e)%') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): a *_for_partner function and hit_partner_rate_limit are allowed on edge_partner (controls)');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_e_ok_for_partner();
-DROP FUNCTION private.hit_partner_rate_limit(text, int, int);
+DROP FUNCTION private.hit_partner_rate_limit(text, interval, int);
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_14(), NULL::text[], 'check 14: clean again after every fixture function is dropped');
 SELECT tests.clear_actor();
@@ -1705,6 +1728,19 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_lit') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: a closed policy whose prefix holds a string literal of three closing parentheses is clean (control: the literals are stripped before the depth profile)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_lit ON app.zz15_t;
+-- (S1.1b gate L-2) a GUC read BEHIND A WRAPPER FUNCTION is a window: the policy's own text never says current_setting(, the function it calls does (one level deep, as check 7b parses it)
+CREATE FUNCTION private.zz15_guc() RETURNS text LANGUAGE sql STABLE AS $z$ SELECT nullif(current_setting('app.zz15.wrapped', true), '') $z$;
+CREATE POLICY zz15_wrap ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_guc());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_wrap') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: a policy whose WRAPPER FUNCTION reads the setting, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_wrap ON app.zz15_t;
+CREATE POLICY zz15_wrap_ok ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_guc() AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_wrap_ok') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: the same wrapper policy WITH the conjunct is clean (control)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_wrap_ok ON app.zz15_t;
+DROP FUNCTION private.zz15_guc();
 CREATE POLICY zz15_or ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid OR (id > 0 AND private.partner_binding_kind() IS DISTINCT FROM 'partner'));
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_or') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: an OR-form that ENDS with the conjunct text (the window is open through the first branch)');
