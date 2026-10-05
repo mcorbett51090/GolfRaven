@@ -652,6 +652,17 @@ describe("S0-L3: the WebAuthn library may be imported only by _shared/partner/we
     }
   });
 
+  it("must-pass: the wrapper is recognised by a RELATIVE path of exactly its own segments too (a lint run from the repository root)", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    expect(lintAt(src, "supabase/functions/_shared/partner/webauthn.ts", MAP).filter((f) => f.rule === SITE)).toEqual([]);
+  });
+
+  it("must-fail: the whole @simplewebauthn/ scope is covered (the browser package), and the match is case-insensitive like the Supabase one", () => {
+    const at = "/repo/supabase/functions/fn/index.ts";
+    expect(lintAt(`import { a } from "@simplewebauthn/browser";\nexport { a };\n`, at).filter((f) => f.rule === SITE)).toHaveLength(1);
+    expect(lintAt(`import { a } from "npm:@SimpleWebAuthn/server@14.0.3";\nexport { a };\n`, at).filter((f) => f.rule === SITE)).toHaveLength(1);
+  });
+
   it.each([
     ["a suffix-only look-alike directory", "/repo/supabase/functions/evil_shared/partner/webauthn.ts"],
     ["a different file in the same directory", "/repo/supabase/functions/_shared/partner/webauthn-helpers.ts"],
