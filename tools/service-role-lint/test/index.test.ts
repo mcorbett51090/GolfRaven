@@ -516,4 +516,20 @@ describe("S0-L3: the WebAuthn library import site, through lintDirectory", () =>
     expect(results.find((r) => r.filePath.endsWith("partner/webauthn.ts"))).toBeUndefined();
     expect(results.find((r) => r.filePath.endsWith("deno.json"))).toBeUndefined();
   });
+
+  it("must-fail (gate L-3): a nested <root>/x/supabase/functions/_shared/partner/webauthn.ts is NOT the wrapper, though its path tail is identical", () => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "srl-webauthn-nested-"));
+    const functionsRoot = join(tmpRoot, "supabase", "functions");
+    const nested = join(functionsRoot, "x", "supabase", "functions", "_shared", "partner");
+    mkdirSync(join(functionsRoot, "_shared", "partner"), { recursive: true });
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(functionsRoot, "deno.json"), JSON.stringify(MAP));
+    writeFileSync(join(functionsRoot, "_shared", "partner", "webauthn.ts"), IMPORTS);
+    writeFileSync(join(nested, "webauthn.ts"), IMPORTS);
+
+    const results = lintDirectory(functionsRoot, tmpRoot);
+    const sites = results.filter((r) => r.filePath.includes("x/supabase/functions") || r.filePath.includes("x\\supabase")).flatMap((r) => r.findings).filter((f) => f.rule === "webauthn-library-import-site");
+    expect(sites).toHaveLength(2);
+    expect(results.find((r) => r.filePath === join("_shared", "partner", "webauthn.ts"))).toBeUndefined();
+  });
 });

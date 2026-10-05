@@ -495,11 +495,28 @@ function isBannedSpecifierOrAlias(
   return { banned: false };
 }
 
-function isWebauthnWrapperFile(filePath: string): boolean {
+// Is `filePath` EXACTLY the file `exactSegments` names (a path from `supabase`, e.g. supabase/functions/_shared/privileged.ts)?
+// With a `functionsRoot` (index.ts always supplies it) the match is ANCHORED: the file must sit under that root and its path relative to the root must be exactly the
+// segments after `supabase/functions`. A tail-only match let `<root>/x/supabase/functions/_shared/partner/webauthn.ts` pass as the wrapper (gate L-3).
+// Without a root (a standalone lintSource call) nothing can be anchored, so the tail must match AND no `supabase/functions` pair may appear earlier in the path (fail-closed
+// on the nested shape; a path that does not look like a repo path at all is simply not exempt).
+function isExactFunctionsFile(filePath: string, exactSegments: readonly string[], functionsRoot: string | undefined): boolean {
   const segments = filePath.split(/[\\/]/).filter(Boolean);
-  if (segments.length < WEBAUTHN_WRAPPER_SEGMENTS.length) return false;
-  const tail = segments.slice(-WEBAUTHN_WRAPPER_SEGMENTS.length);
-  return tail.every((seg, i) => seg === WEBAUTHN_WRAPPER_SEGMENTS[i]);
+  if (functionsRoot) {
+    const rootSegments = functionsRoot.split(/[\\/]/).filter(Boolean);
+    const rel = exactSegments.slice(2); // drop the leading supabase/functions
+    if (segments.length !== rootSegments.length + rel.length) return false;
+    return rootSegments.every((seg, i) => seg === segments[i]) && rel.every((seg, i) => seg === segments[rootSegments.length + i]);
+  }
+  if (segments.length < exactSegments.length) return false;
+  const cut = segments.length - exactSegments.length;
+  if (!exactSegments.every((seg, i) => seg === segments[cut + i])) return false;
+  for (let i = 0; i + 1 < cut; i++) if (segments[i] === "supabase" && segments[i + 1] === "functions") return false;
+  return true;
+}
+
+function isWebauthnWrapperFile(filePath: string, functionsRoot: string | undefined): boolean {
+  return isExactFunctionsFile(filePath, WEBAUTHN_WRAPPER_SEGMENTS, functionsRoot);
 }
 
 // S0-L3: does this specifier (as written, or as the reviewed import map resolves it) name the WebAuthn library? A raw substring match on the WHOLE `@simplewebauthn/` scope, like
@@ -517,7 +534,7 @@ function webauthnSiteMessage(kind: string, spec: string, resolvedVia: string | u
 }
 
 // The WebAuthn import-site rule alone, for a file the general rules exempt (privileged.ts): every module specifier of the file, however it is written.
-function webauthnSiteFindingsOnly(source: string, filePath: string, importMap: Record<string, string> | undefined): Finding[] {
+function webauthnSiteFindingsOnly(source: string, filePath: string, importMap: Record<string, string> | undefined, functionsRoot: string | undefined): Finding[] {
   let ast: TSESTree.Program;
   try {
     ast = parse(source, { loc: true, range: true, jsx: false });
@@ -528,7 +545,7 @@ function webauthnSiteFindingsOnly(source: string, filePath: string, importMap: R
   const check = (node: TSESTree.Node, spec: unknown, kind: string): void => {
     if (typeof spec !== "string") return;
     const lib = referencesWebauthnLibrary(spec, importMap);
-    if (lib.hit && !isWebauthnWrapperFile(filePath)) out.push({ rule: "webauthn-library-import-site", message: webauthnSiteMessage(kind, spec, lib.resolvedVia), ...nodeLoc(node) });
+    if (lib.hit && !isWebauthnWrapperFile(filePath, functionsRoot)) out.push({ rule: "webauthn-library-import-site", message: webauthnSiteMessage(kind, spec, lib.resolvedVia), ...nodeLoc(node) });
   };
   walk(ast, (node) => {
     if (node.type === AST_NODE_TYPES.ImportDeclaration) check(node, node.source.value, "import");
@@ -542,11 +559,8 @@ function webauthnSiteFindingsOnly(source: string, filePath: string, importMap: R
   return out;
 }
 
-function isAllowedFile(filePath: string): boolean {
-  const segments = filePath.split(/[\\/]/).filter(Boolean);
-  if (segments.length < EXEMPT_SEGMENTS.length) return false;
-  const tail = segments.slice(-EXEMPT_SEGMENTS.length);
-  return tail.every((seg, i) => seg === EXEMPT_SEGMENTS[i]);
+function isAllowedFile(filePath: string, functionsRoot: string | undefined): boolean {
+  return isExactFunctionsFile(filePath, EXEMPT_SEGMENTS, functionsRoot);
 }
 
 // ⛔ FIX (M2 BLOCKING, post-P3a re-gate): a computed member-access KEY
@@ -637,12 +651,12 @@ function isExactDenoEnvGetCall(node: TSESTree.Node): node is TSESTree.CallExpres
 
 export function lintSource(source: string, filePath: string, options: LintOptions = {}): Finding[] {
   const findings: Finding[] = [];
-  if (isAllowedFile(filePath)) {
+  if (isAllowedFile(filePath, options.functionsRoot)) {
     // privileged.ts is the sanctioned construction site: exempt from every GENERAL rule below (it legitimately imports the driver and
     // supabase-js and reads raw env), but NOT from the privileged-file pass (edge role PR4b), which keeps the service_role path, the
     // old database URL, the mode switch, stray transactions and session-variable identity out of it.
     // S0-L3 holds here too: the exemption is from the GENERAL rules, and the WebAuthn library's single importer is the wrapper, not privileged.ts.
-    return [...lintPrivilegedSource(source), ...webauthnSiteFindingsOnly(source, filePath, options.importMap)];
+    return [...lintPrivilegedSource(source), ...webauthnSiteFindingsOnly(source, filePath, options.importMap, options.functionsRoot)];
   }
 
   let ast: TSESTree.Program;
@@ -947,7 +961,7 @@ export function lintSource(source: string, filePath: string, options: LintOption
     // S0-L3: the WebAuthn library may be imported (statically, dynamically, by require or re-exported) ONLY by _shared/partner/webauthn.ts. The wrapper is the one place its
     // known gaps (design 6.1 L7) are closed; a second importer would be a second, unwrapped way to verify a ceremony.
     const lib = referencesWebauthnLibrary(spec, options.importMap);
-    if (lib.hit && !isWebauthnWrapperFile(filePath)) {
+    if (lib.hit && !isWebauthnWrapperFile(filePath, options.functionsRoot)) {
       findings.push({ rule: "webauthn-library-import-site", message: webauthnSiteMessage(kind, spec, lib.resolvedVia), ...nodeLoc(node) });
       return;
     }

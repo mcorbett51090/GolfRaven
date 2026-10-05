@@ -674,6 +674,33 @@ describe("S0-L3: the WebAuthn library may be imported only by _shared/partner/we
     expect(lintAt(read("bad/webauthn-import-elsewhere.ts"), path).filter((f) => f.rule === SITE)).toHaveLength(2);
   });
 
+  // Gate L-3: the exemption is ANCHORED to the functions root, not a path tail.
+  const ROOT = "/repo/supabase/functions";
+  const lintRooted = (source: string, path: string) => lintSource(source, path, { importMap: MAP, pinnedImportTargets: PINNED, functionsRoot: ROOT });
+  const NESTED_WRAPPER = "/repo/supabase/functions/x/supabase/functions/_shared/partner/webauthn.ts";
+
+  it("must-fail: a NESTED supabase/functions/_shared/partner/webauthn.ts is not the wrapper (anchored to the functions root, with and without a root supplied)", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    expect(lintRooted(src, NESTED_WRAPPER).filter((f) => f.rule === SITE)).toHaveLength(2);
+    expect(lintAt(src, NESTED_WRAPPER).filter((f) => f.rule === SITE)).toHaveLength(2);
+    expect(lintAt(src, "supabase/functions/x/supabase/functions/_shared/partner/webauthn.ts").filter((f) => f.rule === SITE)).toHaveLength(2);
+  });
+
+  it("must-pass: the real wrapper under the supplied root is exempt, and a path outside the root is not", () => {
+    const src = read("bad/webauthn-import-elsewhere.ts");
+    expect(lintRooted(src, `${ROOT}/_shared/partner/webauthn.ts`).filter((f) => f.rule === SITE)).toEqual([]);
+    expect(lintRooted(src, "/elsewhere/supabase/functions/_shared/partner/webauthn.ts").filter((f) => f.rule === SITE)).toHaveLength(2);
+  });
+
+  it("must-fail: a NESTED _shared/privileged.ts does not get the privileged exemption (general rules apply: a raw service-role env read is flagged)", () => {
+    const src = `const k = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");\nexport { k };\n`;
+    const real = lintRooted(src, `${ROOT}/_shared/privileged.ts`);
+    const nested = lintRooted(src, "/repo/supabase/functions/x/supabase/functions/_shared/privileged.ts");
+    const nestedNoRoot = lintAt(src, "/repo/supabase/functions/x/supabase/functions/_shared/privileged.ts");
+    expect(nested.length).toBeGreaterThan(real.length);
+    expect(nestedNoRoot.length).toBeGreaterThan(0);
+  });
+
   it("must-fail: privileged.ts, exempt from the general rules, is not exempt from this one", () => {
     const findings = lintAt(`import { verifyAuthenticationResponse } from "@simplewebauthn/server";\nexport { verifyAuthenticationResponse };\n`, "/repo/supabase/functions/_shared/privileged.ts");
     expect(findings.filter((f) => f.rule === SITE)).toHaveLength(1);
