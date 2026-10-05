@@ -7,7 +7,7 @@
 // from every rule: this pass runs over exactly that file and fails the build on the shapes that would quietly bring back the BYPASSRLS
 // path PR4b deleted, or move the actor identity out of the database binding and into something the connection can forge:
 //
-//   privileged-forbidden-role     a `service_role` literal, or a `SET [LOCAL|SESSION] ROLE <anything but edge_actor | edge_system>`,
+//   privileged-forbidden-role     a `service_role` literal, or a `SET [LOCAL|SESSION] ROLE <anything but edge_actor | edge_system | edge_partner>`,
 //                                 `RESET ROLE`, `SET SESSION AUTHORIZATION`, or a role-switch whose role is not a literal.
 //                                 The one exception: the string array `EDGE_FORBIDDEN_MEMBERSHIPS`, the self-check's list of roles the
 //                                 edge login must NOT belong to (it names `service_role` in order to refuse it).
@@ -45,6 +45,9 @@
 //                                 function that switches roles); the kind string only inside `openScopedTx` and `signinEmailProofs` (the one caller);
 //                                 every `openScopedTx(` call passes a string-literal kind (so the scope above can be read off the text); and
 //                                 `openScopedTx` is only ever called, never aliased or passed.
+//                                 (partner auth S1.2, PA-13) The same scope holds for the PARTNER minter: the role `edge_partner_minter` only inside
+//                                 `openScopedTx`, the `"partner_mint"` kind only inside `openScopedTx` and `withPartnerMint` (its own caller: the
+//                                 sign-in proof minter's caller may not use it, and the other way round). `edge_partner` is an ordinary lane role.
 //
 // PR4c (LOW-1) also tightened two of the rules above:
 //   * `Deno` is now an ALLOW-list, not a shape list: ANY reference to the identifier `Deno` other than the exact chain `Deno.env.get("<one string
@@ -80,15 +83,17 @@ type PrivilegedRuleId =
 
 export type PrivilegedFinding = Omit<Finding, "rule"> & { rule: PrivilegedRuleId };
 
-/** The roles a transaction may switch into (the edge roles; the login `edge_gateway` is a member of each with SET). `edge_signin_minter` is allowed only in
- * MINT_ROLE_FUNCTIONS (see `privileged-mint-scope`). */
-const ALLOWED_ROLES = new Set(["edge_actor", "edge_system"]);
-const MINTER_ROLE = "edge_signin_minter";
-const MINT_KIND = "signin_mint";
-/** The only function that may name the minter role (it is the only one that switches roles). */
+/** The roles a transaction may switch into (the edge roles; the login `edge_gateway` is a member of each with SET). The MINTER roles (`edge_signin_minter`, and since partner auth S1.2 `edge_partner_minter`)
+ * are allowed only in MINT_ROLE_FUNCTIONS (see `privileged-mint-scope`). `edge_partner` (the partner lane: no table privilege, `bind_partner_session` its one way in) is an ordinary lane role. */
+const ALLOWED_ROLES = new Set(["edge_actor", "edge_system", "edge_partner"]);
+const MINTER_ROLES = ["edge_signin_minter", "edge_partner_minter"] as const;
+/** Each mint KIND of `openScopedTx` and the functions that may name it: the one that implements it (`openScopedTx`) and its ONE caller. `partner_mint` (S1.2, PA-13) is the partner sign-in minter's kind. */
+const MINT_KINDS: ReadonlyArray<{ kind: string; callers: Set<string> }> = [
+  { kind: "signin_mint", callers: new Set(["openScopedTx", "signinEmailProofs"]) },
+  { kind: "partner_mint", callers: new Set(["openScopedTx", "withPartnerMint"]) },
+];
+/** The only function that may name a minter role (it is the only one that switches roles). */
 const MINT_ROLE_FUNCTIONS = new Set(["openScopedTx"]);
-/** The only functions that may name the `signin_mint` kind: the one that implements it, and the one that uses it. */
-const MINT_KIND_FUNCTIONS = new Set(["openScopedTx", "signinEmailProofs"]);
 /** The one specifier the driver is imported by (supabase/functions/deno.json maps it to a pinned URL). */
 const DRIVER_SPECIFIER = "postgres";
 const SCOPED_TX_FUNCTION = "openScopedTx";
@@ -229,17 +234,21 @@ export function lintPrivilegedSource(source: string): PrivilegedFinding[] {
       } else if (m[4] !== undefined) {
         const target = m[4] === HOLE ? HOLE : m[4].replace(/^"|"$/g, "").toLowerCase();
         if (target === HOLE) add("privileged-forbidden-role", node, "SET ROLE with a role that is not a literal: the role must be spelled out (edge_actor | edge_system)");
-        else if (target === MINTER_ROLE) {
+        else if ((MINTER_ROLES as readonly string[]).includes(target)) {
           // allowed only inside openScopedTx; outside it the text scan below reports the role name as a privileged-mint-scope finding
-        } else if (!ALLOWED_ROLES.has(target)) add("privileged-forbidden-role", node, `SET ROLE ${target}: only edge_actor and edge_system may be switched to`);
+        } else if (!ALLOWED_ROLES.has(target)) add("privileged-forbidden-role", node, `SET ROLE ${target}: only edge_actor, edge_system and edge_partner may be switched to`);
       }
     }
-    // privileged-mint-scope: the minter role and the kind that uses it
-    if (new RegExp(MINTER_ROLE, "i").test(text) && !inFunction(MINT_ROLE_FUNCTIONS)) {
-      add("privileged-mint-scope", node, `the minter role \`${MINTER_ROLE}\` outside ${[...MINT_ROLE_FUNCTIONS].join(" / ")}: only the one function that switches roles may name it (it is the only role that can write the email-proof table)`);
+    // privileged-mint-scope: the minter roles and the kinds that use them
+    for (const minterRole of MINTER_ROLES) {
+      if (new RegExp(minterRole, "i").test(text) && !inFunction(MINT_ROLE_FUNCTIONS)) {
+        add("privileged-mint-scope", node, `the minter role \`${minterRole}\` outside ${[...MINT_ROLE_FUNCTIONS].join(" / ")}: only the one function that switches roles may name it (a minter role is a capability no handler may reach by name)`);
+      }
     }
-    if (new RegExp(`\\b${MINT_KIND}\\b`).test(text) && !inFunction(MINT_KIND_FUNCTIONS)) {
-      add("privileged-mint-scope", node, `the \`${MINT_KIND}\` transaction kind outside ${[...MINT_KIND_FUNCTIONS].join(" / ")}: only the minter path may open a transaction as the minter role`);
+    for (const mk of MINT_KINDS) {
+      if (new RegExp(`\\b${mk.kind}\\b`).test(text) && !inFunction(mk.callers)) {
+        add("privileged-mint-scope", node, `the \`${mk.kind}\` transaction kind outside ${[...mk.callers].join(" / ")}: only the minter path may open a transaction as a minter role`);
+      }
     }
     // privileged-guc-in-ts
     if (/\b(set_config|current_setting)\s*\(/i.test(text)) {
