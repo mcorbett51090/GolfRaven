@@ -1274,7 +1274,7 @@ Slice S1.1b (the **database side of partner sign-in minting**: the SQL signature
 
 ### 17.6 Mutation pass
 
-Every mutant was applied **only to a scratch copy** (`/tmp`, a fresh database each, the affected files run), and `grep -rln MUTATED` over the worktree was empty before each commit.
+Every mutant was applied **only to a scratch copy** (`/tmp`, a fresh database each, the affected files run), and a grep of the worktree for the marker comment every mutant carries was empty before each commit.
 
 | Target | Mutants | Result |
 |---|---|---|
