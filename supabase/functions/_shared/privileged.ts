@@ -384,14 +384,15 @@ export async function openScopedTx<T>(kind: "actor" | "system" | "delegate" | "s
       // The post-bind assertion of design 4.2 (R2-L3): the transaction runs as edge_partner (so no edge_actor privilege exists in it), the role is neither SUPERUSER nor BYPASSRLS, and the binding reads
       // back as kind 'partner' through the one read-only helper edge_partner may execute. It deliberately does NOT call private.actor_uid(): that function is edge_actor's alone (0030:568), and
       // "the user lane sees no actor" is enforced where it can be, inside private.bind_partner_session, which checks from the row it just wrote that actor_uid() is NULL and the kind is 'partner'.
+      // The role is checked FIRST, in a statement of its own: under any other role `private.partner_binding_kind()` is not even executable, and the refusal must name the role, not a permission.
       const check = await trx`
         select current_user::text as u,
-               (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged,
-               private.partner_binding_kind() as kind`;
+               (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged`;
       const c = check[0];
       if (c?.u !== role) throw new Error(`openScopedTx: expected current_user = '${role}' after SET LOCAL ROLE, got '${c?.u}'`);
       if (c?.privileged !== false) throw new Error(`openScopedTx: role '${role}' is SUPERUSER or BYPASSRLS — refusing to run`);
-      if (c?.kind !== "partner") throw new Error(`openScopedTx: the partner binding kind is '${c?.kind ?? null}', expected 'partner' — refusing to run`);
+      const bound = await trx`select private.partner_binding_kind() as kind`;
+      if (bound[0]?.kind !== "partner") throw new Error(`openScopedTx: the partner binding kind is '${bound[0]?.kind ?? null}', expected 'partner' — refusing to run`);
     } else if (kind !== "system" && kind !== "signin_mint" && kind !== "partner_mint") {
       const check = await trx`
         select current_user::text as u,
