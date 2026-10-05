@@ -27,6 +27,7 @@
 #        6d  the signature alarm commits with the refusal: a tampered signature returns `signature_invalid` and its alarm and audit rows are visible to another connection (a status, not a RAISE:
 #            nothing rolled back), while no nonce was spent and no session exists.
 #        6e  a credential revoked WHILE a mint waits on its row (the revoker holds the lock) is answered unknown_credential: no session, no counter move, no alarm.
+#        6f  the 60-per-hour limit under concurrency: 8 concurrent mints at 58 sessions give exactly 2 ok and 6 rate_limited (60 sessions), a mint seen waiting on the credential row in pg_locks.
 #      The audit_log rows these write cannot be deleted (the table is insert-only by trigger); the other rows are removed by the EXIT trap.
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
@@ -62,6 +63,16 @@ hx() { "${HARNESS_PSQL[@]}" -c "$1" >/dev/null; }
 edge() { env PGAPPNAME="$1" PGUSER=edge_gateway psql -v ON_ERROR_STOP=1 -A -t -q; }
 epoch() { hq "SELECT extract(epoch FROM clock_timestamp())"; }
 
+# The access this script grants CURRENT_USER is temporary, so the cleanup takes it back -- but never from a role that OWNS the table: the owner's implicit privileges are not the
+# script's to remove, and `REVOKE ALL ... FROM CURRENT_USER` on an owned table strips them (after a restricted migration the owner holds arwdDxtm; the previous cleanup left it with
+# none (gate N-3).
+revoke_temp_grants() {
+  local t
+  for t in "$@"; do
+    hx "DO \$\$ BEGIN IF (SELECT relowner FROM pg_class WHERE oid = '$t'::regclass) IS DISTINCT FROM (SELECT oid FROM pg_roles WHERE rolname = CURRENT_USER) THEN REVOKE ALL ON $t FROM CURRENT_USER; END IF; END \$\$;" 2>/dev/null
+  done
+}
+
 cleanup() {
   set +e
   # one statement batch per concern: a refusal in one must not roll back the others
@@ -73,8 +84,10 @@ cleanup() {
   hx "DELETE FROM app.partner_session WHERE user_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_auth_challenge WHERE user_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_auth_alarm WHERE credential_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_credential WHERE user_id::text LIKE 'ee26f000-%';" 2>/dev/null
   hx "SET ROLE service_role; SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id::text LIKE 'ee26f000-%';" 2>/dev/null
   if [ "${RP_INSERTED:-0}" = 1 ]; then hx "DELETE FROM app.partner_rp_config;" 2>/dev/null; fi
-  hx "DROP POLICY IF EXISTS zz26s_chal ON app.partner_auth_challenge; DROP POLICY IF EXISTS zz26s_alarm ON app.partner_auth_alarm; DROP POLICY IF EXISTS zz26s_rp ON app.partner_rp_config; DROP POLICY IF EXISTS zz26s_audit ON app.audit_log; REVOKE ALL ON app.partner_auth_challenge, app.partner_auth_alarm, app.partner_rp_config FROM CURRENT_USER;" 2>/dev/null
-  hx "DROP POLICY IF EXISTS zz24s_cred ON app.partner_credential; DROP POLICY IF EXISTS zz24s_sess ON app.partner_session; REVOKE ALL ON app.partner_credential, app.partner_session FROM CURRENT_USER;" 2>/dev/null
+  hx "DROP POLICY IF EXISTS zz26s_chal ON app.partner_auth_challenge; DROP POLICY IF EXISTS zz26s_alarm ON app.partner_auth_alarm; DROP POLICY IF EXISTS zz26s_rp ON app.partner_rp_config; DROP POLICY IF EXISTS zz26s_audit ON app.audit_log; " 2>/dev/null
+  revoke_temp_grants app.partner_auth_challenge app.partner_auth_alarm app.partner_rp_config
+  hx "DROP POLICY IF EXISTS zz24s_cred ON app.partner_credential; DROP POLICY IF EXISTS zz24s_sess ON app.partner_session; " 2>/dev/null
+  revoke_temp_grants app.partner_credential app.partner_session
   rm -rf "$OUT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -305,7 +318,7 @@ else echo "PASS: REPEATABLE READ is refused by partner_authorize and by the scop
 # ---------------------------------------------------------------------------
 echo "tools/db/test-partner-serialisation.sh: 6. the sign-in mint: concurrent replays, the counter race, the alarm that commits"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-MU1="ee26f000-0000-0000-0000-0000000000b1"; MU2="ee26f000-0000-0000-0000-0000000000b2"; MU3="ee26f000-0000-0000-0000-0000000000b3"; MU4="ee26f000-0000-0000-0000-0000000000b4"; MU5="ee26f000-0000-0000-0000-0000000000b5"
+MU1="ee26f000-0000-0000-0000-0000000000b1"; MU2="ee26f000-0000-0000-0000-0000000000b2"; MU3="ee26f000-0000-0000-0000-0000000000b3"; MU4="ee26f000-0000-0000-0000-0000000000b4"; MU5="ee26f000-0000-0000-0000-0000000000b5"; MU6="ee26f000-0000-0000-0000-0000000000b6"
 RP_INSERTED=0
 hx "
   GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_auth_challenge, app.partner_auth_alarm, app.partner_rp_config TO CURRENT_USER;
@@ -324,7 +337,7 @@ PREP_OUT="$OUT_DIR/prep.txt"
 # (the helpers are loaded AS private_definer: they are called as it, and a function in the temp schema is not executable by another role)
 ( cd "$ROOT_DIR" && "${HARNESS_PSQL[@]}" -c 'SET ROLE private_definer' -f supabase/tests/partner-sign-helpers.sql -c 'RESET ROLE' -f - ) >"$PREP_OUT" <<SQL
 SET ROLE service_role;
-INSERT INTO auth.users (id, email) VALUES ('$MU1', 'mint1@partner.test'), ('$MU2', 'mint2@partner.test'), ('$MU3', 'mint3@partner.test'), ('$MU4', 'mint4@partner.test'), ('$MU5', 'mint5@partner.test') ON CONFLICT (id) DO NOTHING;
+INSERT INTO auth.users (id, email) VALUES ('$MU1', 'mint1@partner.test'), ('$MU2', 'mint2@partner.test'), ('$MU3', 'mint3@partner.test'), ('$MU4', 'mint4@partner.test'), ('$MU5', 'mint5@partner.test'), ('$MU6', 'mint6@partner.test') ON CONFLICT (id) DO NOTHING;
 RESET ROLE;
 CREATE TEMP TABLE mk (label text, uid uuid, d numeric, cred_id bytea);
 CREATE FUNCTION pg_temp.mkcred(p_label text, p_uid uuid) RETURNS void LANGUAGE plpgsql AS \$f\$
@@ -349,7 +362,7 @@ BEGIN
   RETURN p_label || '|' || encode(m.cred_id, 'hex') || '|' || encode(a.o_nonce, 'hex') || '|' || a.o_exp || '|' || encode(a.o_mac, 'hex') || '|' || encode(a.o_ad, 'hex') || '|' || encode(a.o_cd, 'hex') || '|' || encode(a.o_sig, 'hex');
 END
 \$f\$;
-SELECT pg_temp.mkcred('m1', '$MU1'); SELECT pg_temp.mkcred('m2', '$MU2'); SELECT pg_temp.mkcred('m3', '$MU3'); SELECT pg_temp.mkcred('m4', '$MU4'); SELECT pg_temp.mkcred('m5', '$MU5');
+SELECT pg_temp.mkcred('m1', '$MU1'); SELECT pg_temp.mkcred('m2', '$MU2'); SELECT pg_temp.mkcred('m3', '$MU3'); SELECT pg_temp.mkcred('m4', '$MU4'); SELECT pg_temp.mkcred('m5', '$MU5'); SELECT pg_temp.mkcred('m6', '$MU6');
 SELECT pg_temp.emit('race', 'm1', 1);
 SELECT pg_temp.emit('lose_a', 'm2', 9);
 SELECT pg_temp.emit('lose_b', 'm2', 8);
@@ -357,10 +370,18 @@ SELECT pg_temp.emit('win_a', 'm3', 12);
 SELECT pg_temp.emit('win_b', 'm3', 13);
 SELECT pg_temp.emit('bad_sig', 'm4', 1, '{"sig_tamper": true}');
 SELECT pg_temp.emit('revoked_mid', 'm5', 1);
+SELECT pg_temp.emit('f1', 'm6', 0);
+SELECT pg_temp.emit('f2', 'm6', 0);
+SELECT pg_temp.emit('f3', 'm6', 0);
+SELECT pg_temp.emit('f4', 'm6', 0);
+SELECT pg_temp.emit('f5', 'm6', 0);
+SELECT pg_temp.emit('f6', 'm6', 0);
+SELECT pg_temp.emit('f7', 'm6', 0);
+SELECT pg_temp.emit('f8', 'm6', 0);
 SQL
 declare -A A_CRED A_NONCE A_EXP A_MAC A_AD A_CD A_SIG
 while IFS='|' read -r lbl cred nonce exp mac ad cd sig; do
-  case "$lbl" in race|lose_a|lose_b|win_a|win_b|bad_sig|revoked_mid) A_CRED[$lbl]=$cred; A_NONCE[$lbl]=$nonce; A_EXP[$lbl]=$exp; A_MAC[$lbl]=$mac; A_AD[$lbl]=$ad; A_CD[$lbl]=$cd; A_SIG[$lbl]=$sig;; esac
+  case "$lbl" in race|lose_a|lose_b|win_a|win_b|bad_sig|revoked_mid|f1|f2|f3|f4|f5|f6|f7|f8) A_CRED[$lbl]=$cred; A_NONCE[$lbl]=$nonce; A_EXP[$lbl]=$exp; A_MAC[$lbl]=$mac; A_AD[$lbl]=$ad; A_CD[$lbl]=$cd; A_SIG[$lbl]=$sig;; esac
 done < "$PREP_OUT"
 if [ -z "${A_SIG[race]:-}" ] || [ -z "${A_SIG[bad_sig]:-}" ]; then fail "the mint cases: the assertion preparation produced no assertions: $(cat "$PREP_OUT" | head -c 600)"; fi
 
@@ -473,6 +494,39 @@ if [ -n "${A_SIG[revoked_mid]:-}" ]; then
   elif [ "$SESS" != "0" ] || [ "$CNT" != "0" ]; then fail "6e: a revoked credential was minted for or its counter moved (sessions=$SESS counter=$CNT)"
   elif [ "$ALM" != "0" ]; then fail "6e: a revoked credential raised an alarm ($ALM): it is not a counter regression"
   else echo "PASS: credential revoked while a mint waited on its row -> unknown_credential, no session, the counter unmoved and no alarm (the compare-and-set re-checks revoked_at)"; fi
+fi
+
+# 6f. THE 60-PER-HOUR LIMIT UNDER CONCURRENCY (the S1.1b gate's M-1). A credential with 58 sign-in sessions in the last hour; eight concurrent mints, each with its own valid challenge and counter 0 (so the counter's
+# compare-and-set serialises nothing). Without a per-credential lock between the count and the insert all eight read 58 and all succeed (66 sessions); with the credential's row lock exactly two succeed and six are
+# rate_limited, so the credential ends at EXACTLY 60. The first mint holds its transaction open, so the others are seen WAITING on the credential row in pg_locks.
+if [ -n "${A_SIG[f1]:-}" ]; then
+  hx "ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+      INSERT INTO app.partner_session (token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind, mint_nonce_hash, mint_authenticator_data, mint_client_data_json, mint_signature)
+      SELECT encode(sha256(convert_to('6f-' || g || '-' || random()::text, 'UTF8')), 'hex'), '$MU6', c.id, 1, now() - interval '10 minutes', now() - interval '10 minutes', now() + interval '8 hours', 'sign_in',
+             sha256(convert_to('6fn-' || g || random()::text, 'UTF8')), decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex')
+      FROM app.partner_credential c, generate_series(1, 58) g WHERE c.user_id = '$MU6';
+      SET CONSTRAINTS ALL IMMEDIATE;
+      ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;"
+  mint_sql f1 "$(tokhash f1)" 3.5 | edge ser_f1 >"$OUT_DIR/f1.out" 2>"$OUT_DIR/f1.err" &
+  FP=($!)
+  sleep 1.2 # f1 has taken the credential's lock and is sleeping inside its transaction
+  for i in 2 3 4 5 6 7 8; do
+    mint_sql "f$i" "$(tokhash f$i)" 0 | edge "ser_f$i" >"$OUT_DIR/f$i.out" 2>"$OUT_DIR/f$i.err" &
+    FP+=($!)
+  done
+  W=no
+  for w in 2 3 4 5 6 7 8; do [ "$(waits ser_f$w)" = yes ] && { W=yes; break; }; done
+  set +e; for pid in "${FP[@]}"; do wait "$pid"; done; set -e
+  FOK=0; FRL=0; FOTH=0
+  for i in 1 2 3 4 5 6 7 8; do
+    st="$(status_of "$OUT_DIR/f$i.out")"
+    case "$st" in ok) FOK=$((FOK + 1));; rate_limited) FRL=$((FRL + 1));; *) FOTH=$((FOTH + 1)); echo "  mint f$i: '${st}' $(head -c 300 "$OUT_DIR/f$i.err")" >&2;; esac
+  done
+  FSESS=$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$MU6' AND mint_kind = 'sign_in'")
+  if [ "$W" != "yes" ]; then fail "6f: no concurrent mint was ever seen WAITING in pg_locks (the per-credential lock is missing)"
+  elif [ "$FOK" -ne 2 ] || [ "$FRL" -ne 6 ] || [ "$FOTH" -ne 0 ]; then fail "6f: eight concurrent mints at 58 sessions gave ok=$FOK rate_limited=$FRL other=$FOTH, expected 2 / 6 / 0"
+  elif [ "$FSESS" != "60" ]; then fail "6f: the credential ended at $FSESS sessions in the hour, expected exactly 60"
+  else echo "PASS: 8 concurrent mints at 58 sessions -> a concurrent mint waited on the credential row, exactly 2 ok and 6 rate_limited, the credential ends at exactly 60 (S0-L5 under concurrency)"; fi
 fi
 
 if [ "$FAILED" -ne 0 ]; then

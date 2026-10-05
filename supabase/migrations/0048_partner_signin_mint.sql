@@ -665,6 +665,10 @@ BEGIN
   END IF;
 
   -- 3. S0-L5: at most 60 successful sign-ins per credential per hour, enforced BEFORE any verification (a refusal here costs the database nothing but this count)
+  -- The count and the later insert must be one critical section PER CREDENTIAL, or N concurrent mints at 58 all read 58 and all succeed (the gate's M-1: 8 concurrent mints made 66). Taking the credential's row lock
+  -- here serialises mints of one credential from this point on (the lock is held to the end of the transaction, past the session insert), so each count sees every earlier mint's session. FOR NO KEY UPDATE:
+  -- the same lock the counter's compare-and-set takes, and it does not block the foreign-key checks of the session insert.
+  PERFORM 1 FROM app.partner_credential c WHERE c.id = v_cred.id FOR NO KEY UPDATE;
   SELECT pg_catalog.count(*) INTO v_n FROM app.partner_session s
   WHERE s.credential_id = v_cred.id AND s.mint_kind = 'sign_in' AND s.created_at > pg_catalog.clock_timestamp() - interval '1 hour';
   IF v_n >= 60 THEN
