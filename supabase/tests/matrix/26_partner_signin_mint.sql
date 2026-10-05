@@ -453,6 +453,8 @@ SELECT is((SELECT sign_count FROM app.partner_credential pc JOIN creds c ON c.cr
 -- ----------------------------------------------------------------------------
 -- 8. PA-9: the counter never decreases except 0 -> 0 (compare-and-set); a regression is an alarm that commits with the refusal
 -- ----------------------------------------------------------------------------
+-- the alarm rows are bucketed by the CLOCK MINUTE: the cells below that count them must not straddle a minute boundary, so wait it out when fewer than 12 seconds of the minute are left
+SELECT pg_sleep(CASE WHEN extract(second FROM clock_timestamp()) > 48 THEN 61 - extract(second FROM clock_timestamp()) ELSE 0 END);
 SELECT pg_temp.newcred('cnt') IS NOT NULL AS cnt_cred \gset
 SELECT is(pg_temp.go('c0a', 'cnt', 0), 'ok', 'PA-9: 0 against a stored 0 is accepted (a synced passkey never counts) ...');
 SELECT is(pg_temp.go('c0b', 'cnt', 0), 'ok', 'PA-9: ... every time');
@@ -493,6 +495,8 @@ RESET ROLE;
 -- ----------------------------------------------------------------------------
 -- 9. The signature check is LAST, and a failure is an ALARM that commits with the refusal
 -- ----------------------------------------------------------------------------
+-- the alarm rows are bucketed by the CLOCK MINUTE: the cells below that count them must not straddle a minute boundary, so wait it out when fewer than 12 seconds of the minute are left
+SELECT pg_sleep(CASE WHEN extract(second FROM clock_timestamp()) > 48 THEN 61 - extract(second FROM clock_timestamp()) ELSE 0 END);
 SELECT pg_temp.newcred('sig') IS NOT NULL AS sig_cred \gset
 SELECT is(pg_temp.go('sig_bad', 'sig', 1, '{"sig_tamper": true}'), 'signature_invalid', 'a tampered signature is refused as signature_invalid (the Edge passed it first: an alarm)');
 SELECT is(pg_temp.side('sig'), '{"sessions": 0, "counter": 0, "nonces": 0, "alarms": 1, "audits": 1}'::jsonb, 'ONE alarm row and ONE audit row, no session, no spent nonce, the counter untouched');

@@ -14,11 +14,18 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import postgres from "https://deno.land/x/postgresjs@v3.4.5/mod.js";
-import { createTestUser, freshUuid, withTemporaryOwnerAccess } from "./_helpers.ts";
+import { createTestUser, freshUuid, rawOwnerSql, withTemporaryOwnerAccess as withOwnerAccess } from "./_helpers.ts";
 import { fromB64u, SoftwareAuthenticator } from "../deno-unit/software-authenticator.ts";
 import { verifyAssertion, type RpConfig, WebAuthnRefusal } from "../../functions/_shared/partner/webauthn.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
+
+// The migrating role (migration_owner under HARNESS_MODE=restricted) holds NO privilege on these tables by design (0047 revokes it), SELECT included: the temporary access grants all four.
+// partner_credential is the exception: the foreign key partner_session.credential_id -> partner_credential is checked AT COMMIT, as a `SELECT ... FOR KEY SHARE`, with the privileges of the referenced table's OWNER, so the
+// owner needs SELECT and UPDATE on it for as long as a mint's transaction commits, i.e. for the whole file (granted below, revoked in the teardown test; this suite runs on its own copy of the database).
+const withTemporaryOwnerAccess = <T>(table: string, fn: (sql: ReturnType<typeof postgres>) => Promise<T>) =>
+  withOwnerAccess(table, fn as never, table === "app.partner_credential" ? "insert, delete" : "select, insert, update, delete") as Promise<T>;
+await rawOwnerSql().unsafe("grant select, update on app.partner_credential to current_user");
 
 const RP: RpConfig = { rpId: "partners.example.test", origin: "https://partners.example.test" };
 
@@ -120,6 +127,18 @@ async function libraryAccepts(auth: SoftwareAuthenticator, ch: Challenge, respon
   }
 }
 
+/** The alarms of one person's credential, as two reads (the owner holds a policy on each table only while that table is being read, so a join across the two would see no credential row). */
+async function alarmCount(uid: string, kind: string): Promise<Array<{ n: number }>> {
+  const cred = await rows("app.partner_credential", (sql) => sql`select id::text as id from app.partner_credential where user_id = ${uid}`);
+  return await rows("app.partner_auth_alarm", (sql) => sql`select count(*)::int as n from app.partner_auth_alarm where credential_id = ${cred[0]!.id} and kind = ${kind}`) as Array<{ n: number }>;
+}
+
+/** The alarm rows are bucketed by the CLOCK MINUTE: a test that counts them must not straddle a minute boundary, so wait it out when fewer than 12 seconds of the minute are left. */
+async function avoidMinuteBoundary(): Promise<void> {
+  const sec = new Date().getUTCSeconds() + new Date().getUTCMilliseconds() / 1000;
+  if (sec > 48) await new Promise((r) => setTimeout(r, (61 - sec) * 1000));
+}
+
 async function rows<T>(table: string, query: (sql: ReturnType<typeof postgres>) => Promise<T>): Promise<T> {
   return await withTemporaryOwnerAccess(table, query as never) as T;
 }
@@ -177,8 +196,7 @@ Deno.test("mint: a tampered signature is refused by the database AND the library
   assertEquals(n[0]!.n, 0);
   const used = await rows("app.partner_auth_challenge", (sql) => sql`select count(*)::int as n from app.partner_auth_challenge where user_id = ${uid}`);
   assertEquals(used[0]!.n, 0, "a refused signature burns no nonce");
-  const alarms = await rows("app.partner_auth_alarm", (sql) =>
-    sql`select count(*)::int as n from app.partner_auth_alarm a join app.partner_credential c on c.id = a.credential_id where c.user_id = ${uid} and a.kind = 'signature_invalid'`);
+  const alarms = await alarmCount(uid, "signature_invalid");
   assertEquals(alarms[0]!.n, 1, "the alarm committed with the refusal");
   const c = await rows("app.partner_credential", (sql) => sql`select sign_count::int as n from app.partner_credential where user_id = ${uid}`);
   assertEquals(c[0]!.n, 0, "the counter did not move");
@@ -195,6 +213,7 @@ Deno.test("mint: a replayed assertion is refused, the second presentation of a u
 });
 
 Deno.test("mint: a counter that does not strictly increase is refused (equal and lower), and an alarm is raised", DT, async () => {
+  await avoidMinuteBoundary();
   const { auth, uid } = await enrol("ES256");
   const first = await assertion(auth, await issue(), { counter: 5 });
   assertEquals((await mint(first.presented)).status, "ok");
@@ -206,8 +225,7 @@ Deno.test("mint: a counter that does not strictly increase is refused (equal and
   assertEquals((await mint(lower.presented)).status, "counter_regression");
   const c = await rows("app.partner_credential", (sql) => sql`select sign_count::int as n from app.partner_credential where user_id = ${uid}`);
   assertEquals(c[0]!.n, 5);
-  const alarms = await rows("app.partner_auth_alarm", (sql) =>
-    sql`select count(*)::int as n from app.partner_auth_alarm a join app.partner_credential c on c.id = a.credential_id where c.user_id = ${uid} and a.kind = 'counter_regression'`);
+  const alarms = await alarmCount(uid, "counter_regression");
   assertEquals(alarms[0]!.n, 1, "one alarm for the credential in this minute (the two refusals share a bucket)");
   const ok = await assertion(auth, await issue(), { counter: 6 });
   assertEquals((await mint(ok.presented)).status, "ok", "and a higher counter still mints");
@@ -253,6 +271,7 @@ Deno.test("mint: an unknown credential is a status, not an error", DT, async () 
   assertEquals(r.status, "unknown_credential");
 });
 
-Deno.test("teardown: the edge connection is closed", DT, async () => {
+Deno.test("teardown: the edge connection is closed and the owner's temporary SELECT and UPDATE are given back", DT, async () => {
   await edge.end({ timeout: 1 });
+  await rawOwnerSql().unsafe("revoke select, update on app.partner_credential from current_user");
 });
