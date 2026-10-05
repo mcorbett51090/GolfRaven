@@ -20,7 +20,8 @@ import { verifyAssertion, type RpConfig, WebAuthnRefusal } from "../../functions
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 
-// The migrating role (migration_owner under HARNESS_MODE=restricted) holds NO privilege on these tables by design (0047 revokes it), SELECT included: the temporary access grants all four.
+// The migrating role (migration_owner under HARNESS_MODE=restricted) holds NO privilege on these tables once an earlier suite has revoked it -- tools/db/test-partner-serialisation.sh's old cleanup did (REVOKE ALL ... FROM CURRENT_USER),
+// and so does every withTemporaryOwnerAccess teardown; 0047 does not (after a restricted migration the owner holds arwdDxtm). This file cannot assume either state, so the temporary access grants all four and gives them back.
 // partner_credential is the exception: the foreign key partner_session.credential_id -> partner_credential is checked AT COMMIT, as a `SELECT ... FOR KEY SHARE`, with the privileges of the referenced table's OWNER, so the
 // owner needs SELECT and UPDATE on it for as long as a mint's transaction commits, i.e. for the whole file (granted below, revoked in the teardown test; this suite runs on its own copy of the database).
 const withTemporaryOwnerAccess = <T>(table: string, fn: (sql: ReturnType<typeof postgres>) => Promise<T>) =>
