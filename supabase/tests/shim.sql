@@ -219,7 +219,9 @@ INSERT INTO vault.secrets (id, name, secret) VALUES
   -- 0045: the offline-code seed derivation key K (HMAC key, >= 32 bytes). Real deployments create it once with vault.create_secret(..., 'offline_seed_key').
   ('a0000000-1111-0000-0000-0000000000f1', 'offline_seed_key', 'shim-test-only-offline-seed-key-32bytes-minimum-zzzzzzzzzzzzzzzzzzzzzzzz'),
   -- 0048: the partner sign-in challenge HMAC key (>= 32 bytes). Real deployments create it once with vault.create_secret(..., 'partner_challenge_key'). The test vector in 26_partner_signin_mint.sql is computed OUTSIDE the database from this constant.
-  ('a0000000-1111-0000-0000-0000000000f2', 'partner_challenge_key', 'shim-test-only-partner-challenge-key-32bytes-minimum-qqqqqqqqqqqqqqqqqqqqq')
+  ('a0000000-1111-0000-0000-0000000000f2', 'partner_challenge_key', 'shim-test-only-partner-challenge-key-32bytes-minimum-qqqqqqqqqqqqqqqqqqqqq'),
+  -- 0052: the partner step-up PIN pepper (>= 32 bytes). Real deployments create it once with vault.create_secret(..., 'partner_pin_pepper'). The verifier vector in 28_partner_pin_step_up.sql is computed OUTSIDE the database from this constant.
+  ('a0000000-1111-0000-0000-0000000000f3', 'partner_pin_pepper', 'shim-test-only-partner-pin-pepper-32bytes-minimum-wwwwwwwwwwwwwwwwwwwwwwww')
 ON CONFLICT (name) DO NOTHING;
 
 -- migration_owner (the pgTAP matrix's own connecting role under

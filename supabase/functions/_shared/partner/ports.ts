@@ -74,6 +74,38 @@ export interface ReauthInput {
   readonly signature: Uint8Array;
 }
 
+/** What `GET pin` returns: the PBKDF2 inputs the browser derives with (`ok`), or why it cannot (`unset`, `must_change`, `locked`: none of them carries a salt). */
+export type PinParams =
+  | { readonly state: "ok"; readonly salt: Uint8Array; readonly iterations: number; readonly retryAfterSeconds: number }
+  | { readonly state: "unset" | "must_change" | "locked" };
+
+/** The outcome of evaluating a derived key (partner_pin_verify_for_partner): every one a RETURNED status, so the failure counter commits with the refusal (the 0020 lesson). */
+export type PinCheckStatus = "ok" | "wrong" | "locked" | "retry_after" | "unset" | "must_change";
+export interface PinVerifyResult {
+  readonly status: PinCheckStatus;
+  /** Whole seconds until the next attempt is allowed (`retry_after`), or the backoff the failure just started (`wrong`); 0 otherwise. */
+  readonly retryAfterSeconds: number;
+  /** ISO time the single-use PIN grant expires (`ok` only). */
+  readonly grantUntil: string | null;
+}
+
+export interface PinSetInput {
+  /** The browser-derived key (32 bytes): never the PIN. */
+  readonly derived: Uint8Array;
+  /** The salt the browser chose (16 bytes). */
+  readonly salt: Uint8Array;
+  readonly iterations: number;
+}
+export interface PinChangeInput extends PinSetInput {
+  /** The derived key of the CURRENT PIN (32 bytes). */
+  readonly current: Uint8Array;
+}
+export type PinWriteStatus = "ok" | "already_set" | "no_pin" | "must_change" | "wrong" | "locked" | "retry_after" | "unset";
+export interface PinWriteResult {
+  readonly status: PinWriteStatus;
+  readonly retryAfterSeconds: number;
+}
+
 /** One transaction as `edge_partner`, bound to the presented session. Every method is a `_for_partner` definer that begins with `partner_authorize`. */
 export interface PartnerSessionTx {
   whoami(): Promise<unknown>;
@@ -83,6 +115,28 @@ export interface PartnerSessionTx {
   /** The key a reauth assertion is verified against: a live credential of THE SESSION'S OWN person, or null (PA-27). */
   reauthCredential(credentialId: Uint8Array): Promise<ReauthCredential | null>;
   reauth(input: ReauthInput): Promise<{ readonly status: string; readonly reauthUntil: string | null }>;
+  /** GET pin (class A0, staff or manager): the PBKDF2 inputs for this person. */
+  pinParams(): Promise<PinParams>;
+  /** POST step-up/pin: evaluates the derived key; on `ok` the session holds a single-use PIN grant. A returned status for every refusal: the transaction COMMITS (the counter and the audit row with it). */
+  pinVerify(derived: Uint8Array): Promise<PinVerifyResult>;
+  /** POST pin/set: the first PIN, or the replacement after a reset. 42501 (`PartnerAuthorityRefused`) without an enrolment window or an email proof. */
+  pinSet(input: PinSetInput): Promise<PinWriteResult>;
+  /** POST pin/change: replace a live PIN (needs the current one, counted like a verify). */
+  pinChange(input: PinChangeInput): Promise<PinWriteResult>;
+  /** The member's OWN mailbox for the email OTP of the proof, or null when the account has none. Never returned to a client. */
+  otpTarget(): Promise<string | null>;
+  /** Records the email proof bound to a fresh GoTrue session of this person: `refused` when the session is not fresh for this person or was already used for a proof. */
+  otpProof(gotrueSessionId: string): Promise<{ readonly status: "ok" | "refused"; readonly otpProofUntil: string | null }>;
+}
+
+/**
+ * The email OTP of the proof (6.1, 6.3), through GoTrue with the ANON key, as the player flow already does (E19): `send` mails a one-time code to the member's own address; `verify` proves the mailbox and returns the
+ * GoTrue session the verification created, which the database then checks (it must exist, for THIS person, fresh) and which the caller closes AFTER the proof is recorded, on every path. A wrong or expired code is
+ * `{ ok: false }`; a transport failure THROWS (it says nothing about the code).
+ */
+export interface EmailOtpPort {
+  send(email: string): Promise<void>;
+  verify(email: string, code: string): Promise<{ readonly ok: false } | { readonly ok: true; readonly userId: string; readonly sessionId: string | null; closeSession(): Promise<void> }>;
 }
 
 export interface PartnerDb {
@@ -144,5 +198,13 @@ export class PartnerNotConfigured extends Error {
   constructor() {
     super("partner_not_configured");
     this.name = "PartnerNotConfigured";
+  }
+}
+
+/** A unique index refused the write (23505): in this lane, only a GoTrue session that already proved another proof. The handler answers a 409 (an OTP proof answers its one 403). */
+export class PartnerConflict extends Error {
+  constructor() {
+    super("partner_conflict");
+    this.name = "PartnerConflict";
   }
 }

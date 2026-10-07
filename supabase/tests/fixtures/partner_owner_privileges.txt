@@ -12,10 +12,19 @@
 # Regenerate from a freshly-migrated database:
 #   psql -At -c "SELECT jsonb_build_object('role_name',role_name,'object_kind',object_kind,'object_name',object_name,'privilege',privilege,'column_name',column_name)::text
 #     FROM private.partner_owner_privilege ORDER BY role_name,object_kind,object_name,privilege,column_name;"
+# 0052 (S1.3): partner_pin_verifier gains the PIN table (SELECT, INSERT, UPDATE; no DELETE), SELECT of the two session columns a PIN set must see (enrolment_until, otp_proof_until) and EXECUTE of the
+# policy predicate partner_binding_user() and the pepper core partner_pin_core(). Regenerated from a freshly migrated database; the diff is review material.
+{"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": "enrolment_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": "otp_proof_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": "pin_grant_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "UPDATE", "role_name": "partner_pin_verifier", "column_name": "pin_grant_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "EXECUTE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "EXECUTE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_user()"}
+{"privilege": "EXECUTE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_pin_core(uuid,bytea,bytea)"}
+{"privilege": "INSERT", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "relation", "object_name": "app.partner_pin"}
+{"privilege": "SELECT", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "relation", "object_name": "app.partner_pin"}
+{"privilege": "UPDATE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "relation", "object_name": "app.partner_pin"}
 {"privilege": "USAGE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "schema", "object_name": "app"}
 {"privilege": "USAGE", "role_name": "partner_pin_verifier", "column_name": null, "object_kind": "schema", "object_name": "private"}
 {"privilege": "SELECT", "role_name": "partner_reauth_verifier", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}

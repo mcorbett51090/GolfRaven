@@ -6,13 +6,19 @@
 //   POST options, sign-out, lock, reauth/options    {}                                                       (no field at all)
 //   POST verify                                      { challengeToken, credential, pop_jkt? }                  pop_jkt: the reserved proof-of-possession slot (N7), accepted and IGNORED
 //   POST reauth                                      { challengeToken, credential }
+//   POST step-up/pin                                 { derived }                                                (derived: 43 base64url characters = the 32 browser-derived bytes; never the PIN)
+//   POST pin/set                                     { derived, salt, iterations }                              (salt: 22 characters = 16 bytes; iterations: an integer in the contract's range)
+//   POST pin/change                                  { currentDerived, derived, salt, iterations }
+//   POST otp-proof/start                             {}
+//   POST otp-proof/verify                            { code }                                                   (the emailed one-time code: 6 to 10 digits)
 //
 //   challengeToken  `<nonce b64u, 43>.<exp, epoch seconds>.<mac b64u, 43>`: what POST options returned
 //   credential      the browser's `PublicKeyCredential.toJSON()` of a `navigator.credentials.get`: { id, rawId, type: "public-key", response: { clientDataJSON, authenticatorData, signature, userHandle? },
 //                   authenticatorAttachment?, clientExtensionResults? }. Every binary field is CANONICAL unpadded base64url (re-encoding must give the same string); `clientExtensionResults` is accepted and dropped
 //                   (the lane uses no extension), `authenticatorAttachment` is accepted and ignored.
 
-import type { AssertionJson } from "./ports.ts";
+import { parseDerivedKey, parseIterations, parsePinSalt } from "./pin-contract.ts";
+import type { AssertionJson, PinChangeInput, PinSetInput } from "./ports.ts";
 import { fromB64u } from "./token.ts";
 
 export interface ParseIssue {
@@ -153,4 +159,59 @@ export function uuidToBytes(uuid: string): Uint8Array | null {
   const hex = uuid.replace(/-/g, "");
   if (!/^[0-9a-fA-F]{32}$/.test(hex) || !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(uuid)) return null;
   return Uint8Array.from(hex.match(/../g)!, (h) => parseInt(h, 16));
+}
+
+/** POST step-up/pin: `{ derived }`. The Edge checks LENGTH and ENCODING only: it cannot see the PIN, so it cannot judge its shape (pin-contract.ts). */
+export function parsePinVerifyBody(raw: unknown): ParseResult<{ readonly derived: Uint8Array }> {
+  if (!plain(raw)) return { ok: false, issues: [{ path: "", message: "expected a JSON object" }] };
+  const issues: ParseIssue[] = [];
+  unknownKeys(raw, new Set(["derived"]), "", issues);
+  const derived = parseDerivedKey(raw.derived);
+  if (derived === null) issues.push({ path: "derived", message: "must be canonical base64url of 32 bytes (43 characters)" });
+  if (issues.length > 0 || derived === null) return { ok: false, issues };
+  return { ok: true, value: { derived } };
+}
+
+function parseNewPin(raw: Record<string, unknown>, issues: ParseIssue[]): PinSetInput | null {
+  const derived = parseDerivedKey(raw.derived);
+  if (derived === null) issues.push({ path: "derived", message: "must be canonical base64url of 32 bytes (43 characters)" });
+  const salt = parsePinSalt(raw.salt);
+  if (salt === null) issues.push({ path: "salt", message: "must be canonical base64url of 16 bytes (22 characters)" });
+  const iterations = parseIterations(raw.iterations);
+  if (iterations === null) issues.push({ path: "iterations", message: "must be an integer from 210000 to 1000000" });
+  return derived === null || salt === null || iterations === null ? null : { derived, salt, iterations };
+}
+
+/** POST pin/set: `{ derived, salt, iterations }`. */
+export function parsePinSetBody(raw: unknown): ParseResult<PinSetInput> {
+  if (!plain(raw)) return { ok: false, issues: [{ path: "", message: "expected a JSON object" }] };
+  const issues: ParseIssue[] = [];
+  unknownKeys(raw, new Set(["derived", "salt", "iterations"]), "", issues);
+  const v = parseNewPin(raw, issues);
+  if (issues.length > 0 || v === null) return { ok: false, issues };
+  return { ok: true, value: v };
+}
+
+/** POST pin/change: `{ currentDerived, derived, salt, iterations }`. */
+export function parsePinChangeBody(raw: unknown): ParseResult<PinChangeInput> {
+  if (!plain(raw)) return { ok: false, issues: [{ path: "", message: "expected a JSON object" }] };
+  const issues: ParseIssue[] = [];
+  unknownKeys(raw, new Set(["currentDerived", "derived", "salt", "iterations"]), "", issues);
+  const current = parseDerivedKey(raw.currentDerived);
+  if (current === null) issues.push({ path: "currentDerived", message: "must be canonical base64url of 32 bytes (43 characters)" });
+  const v = parseNewPin(raw, issues);
+  if (issues.length > 0 || v === null || current === null) return { ok: false, issues };
+  return { ok: true, value: { ...v, current } };
+}
+
+const OTP_CODE_RE = /^[0-9]{6,10}$/;
+
+/** POST otp-proof/verify: `{ code }`, the emailed one-time code (6 to 10 digits). */
+export function parseOtpVerifyBody(raw: unknown): ParseResult<{ readonly code: string }> {
+  if (!plain(raw)) return { ok: false, issues: [{ path: "", message: "expected a JSON object" }] };
+  const issues: ParseIssue[] = [];
+  unknownKeys(raw, new Set(["code"]), "", issues);
+  if (typeof raw.code !== "string" || !OTP_CODE_RE.test(raw.code)) issues.push({ path: "code", message: "must be 6 to 10 digits" });
+  if (issues.length > 0) return { ok: false, issues };
+  return { ok: true, value: { code: raw.code as string } };
 }

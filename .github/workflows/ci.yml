@@ -473,7 +473,8 @@ jobs:
           set -euo pipefail
           deno cache --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen \
             supabase/tests/deno-unit/partner-webauthn.deno.test.ts \
-            supabase/tests/deno-unit/partner-session-handler.deno.test.ts
+            supabase/tests/deno-unit/partner-session-handler.deno.test.ts \
+            supabase/tests/deno-unit/partner-pin-contract.deno.test.ts
           deno test --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen --cached-only --deny-net \
             supabase/tests/deno-unit/
 
