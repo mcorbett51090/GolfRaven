@@ -24,10 +24,11 @@ export function pkcs8PemToDer(pem: string): Uint8Array | null {
   const m = PKCS8_PEM.exec(normalised);
   if (!m) return null;
   const text = m[1]!.replace(/[ \t\r\n]+/g, "");
-  if (text.length === 0 || text.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(text)) return null;
   try {
+    // atob is lenient (it accepts unpadded input and non-zero trailing bits), so the strictness is the round trip: the decoded bytes must
+    // re-encode to exactly the text. That alone refuses unpadded, mis-padded, non-alphabet and non-canonical input, and an empty body.
     const bin = atob(text);
-    if (bin.length === 0 || btoa(bin) !== text) return null; // non-canonical (non-zero trailing bits) is refused
+    if (bin.length === 0 || btoa(bin) !== text) return null;
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
