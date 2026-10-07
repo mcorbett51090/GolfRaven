@@ -12,9 +12,10 @@
 // rather than reaching for a default.
 
 import { toBase64Url } from "./binding.ts";
+import { pkcs8PemToDer } from "../pem.ts";
 
 export interface VendorHttp {
-  fetch(url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }): Promise<Response>;
+    fetch(url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }): Promise<Response>;
   nowMs(): number;
   randomUuid(): string;
   /** Per-vendor-call wall-clock bound; see `VENDOR_CALL_TIMEOUT_MS`. */
@@ -50,20 +51,11 @@ export function platformVendorHttp(timeoutMs = VENDOR_CALL_TIMEOUT_MS): VendorHt
   };
 }
 
-/** PEM (PKCS#8, "BEGIN PRIVATE KEY") -> DER bytes. `null` if it is not a
- * single well-formed PEM block. */
+/** PEM (PKCS#8, "BEGIN PRIVATE KEY") -> DER bytes. `null` if it is not a single well-formed PEM block. The parser is the shared one
+ * (../pem.ts), so a key is accepted in exactly the forms the Sign in with Apple key is: real line breaks, or a one-line value with a literal
+ * backslash-n for each line break (how a single-line environment variable carries a PEM). */
 export function pemToDer(pem: string): Uint8Array | null {
-  const m = /^\s*-----BEGIN PRIVATE KEY-----([A-Za-z0-9+/=\s]+)-----END PRIVATE KEY-----\s*$/.exec(pem);
-  if (!m) return null;
-  const b64 = m[1]!.replace(/\s+/g, "");
-  try {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out.length > 0 ? out : null;
-  } catch {
-    return null;
-  }
+  return pkcs8PemToDer(pem);
 }
 
 function b64urlJson(value: unknown): string {

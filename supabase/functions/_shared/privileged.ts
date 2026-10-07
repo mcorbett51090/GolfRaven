@@ -2754,17 +2754,21 @@ function buildRewardsRepo(trx: TxSql, uid: string): RewardsRepo {
  * Secrets (the DeviceCheck .p8 key, the Google service-account key) live ONLY
  * in the environment; nothing in this repository carries one.
  *   Apple:  GR_APPLE_TEAM_ID, GR_APPLE_BUNDLE_ID, GR_APPLE_DEVICECHECK_KEY_ID,
- *           GR_APPLE_DEVICECHECK_PRIVATE_KEY (PKCS#8 PEM),
+ *           GR_APPLE_DEVICECHECK_PRIVATE_KEY (PKCS#8 PEM: real line breaks, or one line with a literal \n for each),
  *           GR_APPLE_DEVICECHECK_ENV ("production" | "development")
  *   Google: GR_PLAY_PACKAGE_NAME, GR_PLAY_CERT_SHA256 (comma-separated base64url),
  *           GR_PLAY_SERVICE_ACCOUNT_EMAIL, GR_PLAY_SERVICE_ACCOUNT_PRIVATE_KEY (PEM) */
 export function loadRewardsAttestationConfig(): RewardsAttestationConfig {
-  const teamId = Deno.env.get("GR_APPLE_TEAM_ID") ?? "";
-  const bundleId = Deno.env.get("GR_APPLE_BUNDLE_ID") ?? "";
-  const keyId = Deno.env.get("GR_APPLE_DEVICECHECK_KEY_ID") ?? "";
+  // Trimmed exactly as the App Attest and Sign in with Apple loaders trim (a trailing newline pasted with a secret must not make `production\n`
+  // read as "not configured", nor leave whitespace inside an id). The PEM itself is passed through untouched (the shared parser, ../pem.ts,
+  // tolerates surrounding whitespace and a one-line `\n`-escaped form); it only has to be non-blank here, as for Sign in with Apple.
+  const teamId = (Deno.env.get("GR_APPLE_TEAM_ID") ?? "").trim();
+  const bundleId = (Deno.env.get("GR_APPLE_BUNDLE_ID") ?? "").trim();
+  const keyId = (Deno.env.get("GR_APPLE_DEVICECHECK_KEY_ID") ?? "").trim();
   const privateKeyPem = Deno.env.get("GR_APPLE_DEVICECHECK_PRIVATE_KEY") ?? "";
-  const environment = Deno.env.get("GR_APPLE_DEVICECHECK_ENV") ?? "";
-  const appleComplete = teamId !== "" && bundleId !== "" && keyId !== "" && privateKeyPem !== "" && (environment === "production" || environment === "development");
+  const environment = (Deno.env.get("GR_APPLE_DEVICECHECK_ENV") ?? "").trim();
+  const appleComplete =
+    teamId !== "" && bundleId !== "" && !/\s/.test(teamId + bundleId) && keyId !== "" && privateKeyPem.trim() !== "" && (environment === "production" || environment === "development");
 
   return {
     apple: appleComplete ? { teamId, bundleId, keyId, privateKeyPem, environment: environment as "production" | "development" } : null,
