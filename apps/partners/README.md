@@ -50,13 +50,21 @@ GOLFRAVEN_PARTNERS_API_BASE=https://<project>.supabase.co/functions/v1 pnpm --fi
 ```
 
 `GOLFRAVEN_PARTNERS_API_BASE` is the **functions root** of the partners API: the client calls `<base>/partner-session/<route>` and, later,
-`<base>/partner-attest/...`. It is baked into the bundle and its origin becomes the CSP `connect-src`. The default is a placeholder on the
+`<base>/partner-attest/...`. It is baked into the bundle, and the CSP `connect-src` is built from it: one **path-scoped** source per partner
+function (`<base>/partner-session/`; the list is `src/api/partner-functions.json`, the same one the client's `call()` allow-list uses), never the
+whole API origin (the same host serves `/rest/v1` and every other edge function). The default is a placeholder on the
 reserved `.example` TLD (`https://partners-api.golfraven.example/functions/v1`) because the real host is owner question Q1;
-`GOLFRAVEN_ENV=production` **refuses the placeholder**, so a production deploy cannot ship it by accident.
+`GOLFRAVEN_ENV=production` **refuses the placeholder** (any spelling, a trailing dot included), **refuses `localhost`, loopback and bare-IP
+hosts**, and **refuses `GOLFRAVEN_PARTNERS_E2E=1`**, so a production deploy cannot ship any of them by accident.
 
 Output (`dist/`): `index.html`, `assets/app-<hash>.js`, `assets/styles-<hash>.css`, `manifest.webmanifest`, `favicon.svg` and a generated
 `_headers` (Cloudflare Pages syntax) carrying the CSP and the other headers. The last build step scans the output and fails the build on an
-inline script, eval, `new Function`, a storage API, a service worker, a source map or an origin that is not the API's.
+inline script, eval, `new Function`, a storage API, a service worker, a source map or an origin that is not the API's, and (from esbuild's metafile)
+on any bundle input that is not under `src/` or that comes from `node_modules`.
+
+`_headers` also carries `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and marks `/` and `/index.html` `Cache-Control: no-store`
+(the hashed `/assets/*` stay immutable). `Permissions-Policy: camera=()` is deliberate for S7a; **S7b (the course-QR scan screen) must change it
+to `camera=(self)`**.
 
 ### Deploy checklist (operator steps; none are code)
 
@@ -68,7 +76,7 @@ inline script, eval, `new Function`, a storage API, a service worker, a source m
 
 ## The CSP
 
-`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src <API origin>; manifest-src 'self'; worker-src 'none';
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src <API origin>/functions/v1/partner-session/; manifest-src 'self'; worker-src 'none';
 object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`.
 Emitted by `scripts/lib/csp.mjs`, once as the response header and once as the `<meta>`. Stricter than design 4.6 in three places (no `'self'` in
 `connect-src`, no `data:` images, `worker-src 'none'`); see the design doc's "As built: S7a". Trusted Types is enforced by Chromium; Safari
@@ -85,8 +93,8 @@ support is `[unverified]` and an unsupporting browser ignores both directives, l
 
 Errors are `PartnerApiError` with a closed `kind`: `unauthenticated` (401, the one answer for a dead session and a refused sign-in),
 `reauth_refused` (403 on `POST reauth`: the session is alive), `forbidden` (403), `unsupported_media_type` (415), `rate_limited` (429),
-`bad_request`, `not_found`, `unavailable` (503), `server`, `network`, `malformed_response`. A 401 on an authenticated call wipes the token
-before the caller sees the error. `Retry-After` on a 429 is read when the browser lets the page see it: the partner CORS helper sends
+`bad_request`, `not_found`, `unavailable` (503), `server`, `network` (a refused, dropped or **timed-out** request: every request is cut off after
+15 s), `malformed_response`, `aborted` (a cancelled sign-in). A 401 on an authenticated call wipes the token before the caller sees the error. `Retry-After` on a 429 is read when the browser lets the page see it: the partner CORS helper sends
 `Access-Control-Expose-Headers: Retry-After` (and only that), so `retryAfterSeconds` is the server's value in a real cross-origin browser; it is
 `null` only if a deployment drops the header, and the UI then shows a generic wait message.
 
@@ -95,16 +103,17 @@ before the caller sees the error. `Retry-After` on a 429 is read when the browse
 - **Sign-in**: `POST options`, `navigator.credentials.get` with the server's options, `POST verify`, then `GET session`. The page **refuses
   options that weaken the ceremony**: `userVerification` must be `required` and `allowCredentials` must be empty (usernameless,
   discoverable credentials), or it never calls the browser.
-- **Lock**: sends `POST lock`, then **wipes the token whether or not that request succeeded**, and shows sign-in with a "Locked" notice.
-  Resuming needs a new passkey tap and opens a **new** session. On the server (`partner_session_lock_for_partner`, 0049) lock clears, for that
-  session only, the **PIN grant**, the **reauth window** and the **email OTP proof**, and counts as activity (it advances `last_seen_at`, which
-  restarts the idle clock). It does **not** revoke the session: the server session **survives until its idle or absolute expiry** (30 min / 8 h
-  for staff, shorter for operator and admin, `[proposed]`), with no holder. **Sign-out is the revoke.** On a shared shop iPad that difference
-  matters: a locked session is still a valid bearer, so a token copied before the lock (the in-memory token is stealable by a script on the
-  page; the CSP mitigates that and does not remove it) stays usable for up to the idle window, with step-up grants cleared. Use **sign-out at
-  the end of a shift** and lock between customers. Whether lock should also revoke is an open decision for the gate (design doc 19.4); the
-  behaviour is as built.
-- **Sign-out**: `POST sign-out` (revokes the session), and the token is wiped even when the request fails (the UI says so honestly).
+- **Lock** (gate ruling, design 19.4): wipes the token and shows sign-in with a "Locked" notice **at once**, then sends `POST sign-out` with a
+  copy of the token, so lock **revokes the session**: a token copied out of the page before the lock is dead immediately, not at its idle
+  expiry. Resuming needs a new passkey tap and opens a **new** session. The wording stays "Locked" (and, if the server could not be told,
+  "locked on this device, the server could not be reached"). The server's own `lock` route (clears the PIN grant, reauth window and OTP proof
+  without revoking, 0049) is **no longer called by the page**; retiring it, or making it revoke with `revoke_reason = 'lock'`, is a server
+  follow-up (not in this slice), and any non-revoking lock must authorize as PEEK.
+- **Sign-out**: the same ordering: the token is wiped and the screen leaves the session **before** `POST sign-out` is sent, and it stays that way
+  if the request fails or never answers (the UI then says so honestly). Lock and Sign-out are never disabled by a busy refresh.
+- **Leaving the page**: `pagehide` wipes the token and sends a keepalive sign-out; `pageshow` with `persisted` (a back/forward-cache restore)
+  forces signed-out (`src/app/lifecycle.ts`). Chromium restores a page from the bfcache with its variables and screen intact, so a signed-in
+  page could come back with a live token.
 - **Reauth** (`src/auth/reauth.ts`, `reauthWithPasskey(api, { credentials })`): `POST reauth/options`, a fresh assertion, `POST reauth`; opens
   the server's 5-minute window. Exported for the screens that need it (adding a credential, A2 actions); S7a has no screen of its own for it.
 
