@@ -780,14 +780,14 @@ SELECT '(a2) a *_for_partner function has an EXCEPTION ... WHEN block, which cou
 FROM body f
 WHERE f.b ~ '\\mexception\\s+when\\M'
 UNION ALL
-SELECT '(a3) a *_for_partner function whose private.partner_authorize class is not a string literal in A0 / A0_KEEPALIVE / A1 / A2 / A3 (SESSION and PEEK only for a function named in supabase/tests/fixtures/partner_session_class_functions.txt): ' || c.ident
+SELECT '(a3) a *_for_partner function whose private.partner_authorize class is not a string literal in A0 / A0_WRITE / A0_KEEPALIVE / A1 / A2 / A3 (SESSION and PEEK only for a function named in supabase/tests/fixtures/partner_session_class_functions.txt): ' || c.ident
 FROM (
   SELECT f.ident,
          (regexp_match((regexp_match(f.kept, 'private\\.partner_authorize\\s*\\(([^;]*)\\)\\s*(?:;|$)', 'i'))[1], ',\\s*''([A-Za-z0-9_]+)''\\s*$'))[1] AS cls
   FROM fam f
 ) c
 WHERE c.cls IS NULL
-   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY['private.partner_whoami_for_partner()', 'private.partner_session_revoke_for_partner()', 'private.partner_session_lock_for_partner()'] /* end_session_class_functions */)))
+   OR (c.cls NOT IN ('A0', 'A0_WRITE', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY['private.partner_whoami_for_partner()', 'private.partner_session_revoke_for_partner()', 'private.partner_session_lock_for_partner()'] /* end_session_class_functions */)))
 UNION ALL
 SELECT '(b) an edge_actor-executable definer outside the *_for_partner family evaluates partner scope: ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace

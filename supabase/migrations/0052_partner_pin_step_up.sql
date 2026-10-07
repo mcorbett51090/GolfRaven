@@ -51,8 +51,9 @@ DECLARE
   v_s record;
   v_pol record;
   v_write boolean;
+  v_nku boolean;
 BEGIN
-  IF p_class IS NULL OR p_class NOT IN ('SESSION', 'PEEK', 'A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') THEN
+  IF p_class IS NULL OR p_class NOT IN ('SESSION', 'PEEK', 'A0', 'A0_WRITE', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') THEN
     RAISE EXCEPTION 'partner_authorize: unknown action class' USING ERRCODE = '22023';
   END IF;
   -- 0. READ COMMITTED only (S1.1a gate, NIT): every guarantee below (a revoke that committed while we waited for the lock is SEEN by the next statement; the scope re-read) relies on a fresh
@@ -76,10 +77,13 @@ BEGIN
     RAISE EXCEPTION 'partner_authorize: an explicit, non-empty role list without sponsor is required' USING ERRCODE = '22023';
   END IF;
   -- 2. lock the session row FIRST, and ONLY it (R3-M1 option a). FOR SHARE for a call that will not write it, FOR NO KEY UPDATE for a call that will (two FOR SHARE
-  -- holders that both then UPDATE deadlock). The policy this needs is pd_partner_session_action (a lock is invisible without it under FORCE RLS, R2-M2).
+  -- holders that both then UPDATE deadlock: S1.3 gate LOW-1). A call that WRITES the session row in its own body, not only in this function, must say so up front: class A0_WRITE (A0 in every other respect:
+  -- the PIN verify, the PIN set / change, the email proof, the reauth), and the two session classes SESSION (sign-out, lock: both write). A0 and A0_KEEPALIVE stay FOR SHARE unless the idle bump below writes.
+  -- The policy this needs is pd_partner_session_action (a lock is invisible without it under FORCE RLS, R2-M2).
   SELECT s.last_seen_at INTO v_s FROM app.partner_session s WHERE s.id = v_sid;
   v_write := p_class IN ('A1', 'A2') OR (p_class NOT IN ('A0_KEEPALIVE', 'PEEK') AND (v_s.last_seen_at IS NULL OR v_s.last_seen_at < clock_timestamp() - interval '1 minute'));
-  IF v_write THEN
+  v_nku := v_write OR p_class IN ('A0_WRITE', 'SESSION');
+  IF v_nku THEN
     SELECT s.user_id, s.credential_id, s.aal, s.last_seen_at, s.expires_at, s.revoked_at, s.reauth_until INTO v_s
     FROM app.partner_session s WHERE s.id = v_sid FOR NO KEY UPDATE;
   ELSE
@@ -156,8 +160,8 @@ AS $$
   WHERE b.backend_pid = pg_backend_pid() AND b.xact = pg_current_xact_id_if_assigned() AND b.kind = 'partner'
 $$;
 
--- THE core. The only place the Vault pepper `partner_pin_pepper` is read (the 0045 offline_seed_derive / 0048 partner_challenge_core shape). EXECUTE for partner_pin_verifier ONLY: it computes the verifier for ANY
--- (user, derived) it is handed, so no session may reach it. The message is labelled and FIXED WIDTH after the label (so no two different tuples produce the same bytes):
+-- THE core. The only place the Vault pepper `partner_pin_pepper` is read (the 0045 offline_seed_derive / 0048 partner_challenge_core shape). EXECUTE for partner_pin_verifier and for its OWNER private_definer
+-- (an owner always holds EXECUTE on its own function; nothing a session can reach calls it as private_definer: the wrappers do not): it computes the verifier for ANY (user, derived) it is handed, so no session may reach it. The message is labelled and FIXED WIDTH after the label (so no two different tuples produce the same bytes):
 --     "golfraven/partner-pin/v1" (UTF-8) || 0x00 || user id (16 bytes) || derived (32 bytes)
 -- and the verifier is HMAC-SHA256 under the pepper (at least 32 bytes). Binding the user id means a verifier row copied to another person verifies nothing. A presented verifier is compared as
 -- HMAC(K, stored) = HMAC(K, computed), so the comparison never depends on a byte-by-byte equality of a secret-derived value (0048). The failure message names no key material (the Edge maps 55000 to a bare 503).
@@ -498,7 +502,7 @@ BEGIN
 END
 $$;
 
--- 5b. POST step-up/pin: verify the derived key and, on `ok`, set the single-use PIN grant (class A0: verifying must not itself consume a grant). A wrong key and the failure that locks write an audit_log row
+-- 5b. POST step-up/pin: verify the derived key and, on `ok`, set the single-use PIN grant (class A0_WRITE: A0 that locks the session row FOR NO KEY UPDATE up front, because the grant is written on it; verifying must not itself consume a grant). A wrong key and the failure that locks write an audit_log row
 -- (bounded: at most 5 wrong keys per lock, and a locked PIN writes nothing more) and RETURN the status: this function raises nothing over a refusal, so the counter and the audit row COMMIT (0020).
 CREATE FUNCTION private.partner_pin_verify_for_partner(p_derived bytea)
 RETURNS TABLE (o_status text, o_retry_after integer, o_grant_until timestamptz)
@@ -509,7 +513,7 @@ DECLARE
   v_uid uuid;
   v_r record;
 BEGIN
-  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0');
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0_WRITE');
   SELECT a.o_status, a.o_retry_after, a.o_newly_locked, a.o_grant_until INTO v_r FROM private.partner_pin_verify_apply(p_derived) a;
   IF v_r.o_status = 'wrong' OR v_r.o_newly_locked THEN
     PERFORM private.partner_audit_write(CASE WHEN v_r.o_newly_locked THEN 'partner.pin.locked' ELSE 'partner.pin.wrong' END, 'app.partner_pin', v_uid::text, pg_catalog.jsonb_build_object('stage', 'verify'));
@@ -518,7 +522,7 @@ BEGIN
 END
 $$;
 
--- 5c. POST pin/set: the first PIN, or the replacement after a reset. The prerequisite (an enrolment window or an email proof) is checked by the verifier-owned writer; this wrapper audits a success.
+-- 5c. POST pin/set: the first PIN, or the replacement after a reset (class A0_WRITE: the proof is spent on the session row). The prerequisite (an enrolment window or an email proof) is checked by the verifier-owned writer; this wrapper spends the proof and audits a success.
 CREATE FUNCTION private.partner_pin_set_for_partner(p_derived bytea, p_salt bytea, p_iterations integer)
 RETURNS TABLE (o_status text, o_retry_after integer)
 LANGUAGE plpgsql SECURITY DEFINER
@@ -528,13 +532,16 @@ DECLARE
   v_uid uuid;
   v_r record;
 BEGIN
-  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0');
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0_WRITE');
   -- the PIN is a staff / manager factor: an admin passes the anywhere branch of partner_authorize with no membership at all, and an admin or operator has NO PIN (6.3; the A3 substitution is S1.4's)
   IF NOT EXISTS (SELECT 1 FROM app.partner_member m WHERE m.user_id = v_uid AND m.revoked_at IS NULL AND m.role IN ('staff', 'manager')) THEN
     RAISE EXCEPTION 'partner_pin_set_for_partner: only an active staff or manager member holds a PIN' USING ERRCODE = '42501';
   END IF;
   SELECT a.o_status, a.o_retry_after INTO v_r FROM private.partner_pin_set_apply('set', p_derived, p_salt, p_iterations, NULL) a;
   IF v_r.o_status = 'ok' THEN
+    -- the email proof is SINGLE USE for a PIN set or change (S1.3 gate MEDIUM-1): spent in the SAME transaction as the write, on `ok` only. A refusal (`locked`, `already_set`) writes no PIN and keeps the proof.
+    -- private_definer holds UPDATE on this one column (0049: lock clears it) and the guard always allows a clear. The GoTrue session id stays, so one GoTrue session still proves one proof.
+    UPDATE app.partner_session s SET otp_proof_until = NULL WHERE s.id = private.partner_binding_session() AND s.otp_proof_until IS NOT NULL;
     PERFORM private.partner_audit_write('partner.pin.set', 'app.partner_pin', v_uid::text, '{}'::jsonb);
   END IF;
   RETURN QUERY SELECT v_r.o_status, v_r.o_retry_after;
@@ -551,12 +558,14 @@ DECLARE
   v_uid uuid;
   v_r record;
 BEGIN
-  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0');
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0_WRITE');
   IF NOT EXISTS (SELECT 1 FROM app.partner_member m WHERE m.user_id = v_uid AND m.revoked_at IS NULL AND m.role IN ('staff', 'manager')) THEN
     RAISE EXCEPTION 'partner_pin_change_for_partner: only an active staff or manager member holds a PIN' USING ERRCODE = '42501';
   END IF;
   SELECT a.o_status, a.o_retry_after, a.o_newly_locked INTO v_r FROM private.partner_pin_set_apply('change', p_derived, p_salt, p_iterations, p_current) a;
   IF v_r.o_status = 'ok' THEN
+    -- single use, as the set above: spent on `ok` only. A wrong current PIN does NOT spend it (the counter and the lock, not the proof, bound that guess: five wrong keys lock the PIN).
+    UPDATE app.partner_session s SET otp_proof_until = NULL WHERE s.id = private.partner_binding_session() AND s.otp_proof_until IS NOT NULL;
     PERFORM private.partner_audit_write('partner.pin.change', 'app.partner_pin', v_uid::text, '{}'::jsonb);
   ELSIF v_r.o_status = 'wrong' OR v_r.o_newly_locked THEN
     PERFORM private.partner_audit_write(CASE WHEN v_r.o_newly_locked THEN 'partner.pin.locked' ELSE 'partner.pin.wrong' END, 'app.partner_pin', v_uid::text, pg_catalog.jsonb_build_object('stage', 'change'));
@@ -582,7 +591,7 @@ $$;
 
 -- 5f. Records the email proof on the bound session: otp_proof_until = now + 10 min, bound to the GoTrue session the Edge's verifyOtp created. The S1.1a guard re-checks that this GoTrue session exists for THIS
 -- user and is fresh (the 0041 mechanism: the one secret an injected call cannot know) and the UNIQUE index lets one GoTrue session prove at most one proof. A session that is not fresh for this user is a STATUS
--- (`refused`), nothing is written. Class A0.
+-- (`refused`), nothing is written. Class A0_WRITE (it writes the session row).
 CREATE FUNCTION private.partner_session_otp_proof_for_partner(p_gotrue_session_id uuid)
 RETURNS TABLE (o_status text, o_otp_proof_until timestamptz)
 LANGUAGE plpgsql SECURITY DEFINER
@@ -593,7 +602,7 @@ DECLARE
   v_sid uuid;
   v_until timestamptz;
 BEGIN
-  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager', 'operator']::app.partner_role[], 'A0');
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager', 'operator']::app.partner_role[], 'A0_WRITE');
   v_sid := private.partner_binding_session();
   IF p_gotrue_session_id IS NULL THEN
     RAISE EXCEPTION 'partner_session_otp_proof_for_partner: a GoTrue session id is required' USING ERRCODE = '22023';
@@ -608,6 +617,33 @@ BEGIN
   WHERE s.id = v_sid
   RETURNING s.otp_proof_until INTO v_until;
   RETURN QUERY SELECT 'ok'::text, v_until;
+END
+$$;
+
+-- 5g. The S1.2 reauth wrapper (0049 6g), REDEFINED with CREATE OR REPLACE (0049 is immutable): the body is 0049's byte for byte except the class, A0 -> A0_WRITE. It writes the session row (reauth_until, through
+-- the verifier-owned partner_reauth_apply), so under class A0 it took FOR SHARE on a fresh session and then upgraded to a write lock: two parallel reauths of one session deadlocked (S1.3 gate LOW-1). Owner,
+-- signature, ACL (edge_partner only) and comment are unchanged by CREATE OR REPLACE; the check-14 first-statement shape is unchanged.
+CREATE OR REPLACE FUNCTION private.partner_session_reauth_for_partner(
+  p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea,
+  p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)
+RETURNS TABLE (o_status text, o_reauth_until timestamptz)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_uid uuid;
+  v_sid uuid;
+  v_status text;
+  v_until timestamptz;
+BEGIN
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager', 'operator']::app.partner_role[], 'A0_WRITE');
+  v_sid := private.partner_binding_session();
+  SELECT a.o_status, a.o_reauth_until INTO v_status, v_until
+  FROM private.partner_reauth_apply(p_credential_id, p_nonce, p_exp, p_mac, p_authenticator_data, p_client_data_json, p_signature) a;
+  IF v_status IN ('signature_invalid', 'counter_regression') THEN
+    PERFORM private.partner_audit_write('partner.reauth.' || v_status, 'app.partner_session', v_sid::text, pg_catalog.jsonb_build_object('stage', 'reauth'));
+  END IF;
+  RETURN QUERY SELECT v_status, v_until;
 END
 $$;
 
@@ -647,7 +683,7 @@ REVOKE EXECUTE ON FUNCTION
   private.partner_session_otp_target_for_partner(),
   private.partner_session_otp_proof_for_partner(uuid)
 FROM PUBLIC;
--- partner_binding_user and partner_pin_core: partner_pin_verifier only (the policy's function is EXECUTE-checked against the role the policy applies to; the core is called by the verifier's definers)
+-- partner_binding_user and partner_pin_core: partner_pin_verifier, plus the owner private_definer (the owner's implicit grant; the PUBLIC grant is revoked above) (the policy's function is EXECUTE-checked against the role the policy applies to; the core is called by the verifier's definers)
 GRANT EXECUTE ON FUNCTION private.partner_binding_user() TO partner_pin_verifier;
 GRANT EXECUTE ON FUNCTION private.partner_pin_core(uuid, bytea, bytea) TO partner_pin_verifier;
 -- the partner lane: edge_partner, and nobody else (check 14 (d) and (e))
@@ -658,7 +694,7 @@ GRANT EXECUTE ON FUNCTION private.partner_pin_change_for_partner(bytea, bytea, b
 GRANT EXECUTE ON FUNCTION private.partner_session_otp_target_for_partner() TO edge_partner;
 GRANT EXECUTE ON FUNCTION private.partner_session_otp_proof_for_partner(uuid) TO edge_partner;
 COMMENT ON FUNCTION private.partner_authorize(text, text, app.partner_role[], text) IS
-  '0047, 0052. Executable by NOBODY (called from sibling definers; every *_for_partner function must call it as its first statement: check 14). Locks the bound session row only, re-reads session / role / scope / aal on every call, enforces the class prerequisite (A1: a PIN grant; A2: a PIN grant at most 30 s old and reauth_until; A3 fails closed until S1.4), returns the member''s uid.';
+  '0047, 0052. Executable by NOBODY (called from sibling definers; every *_for_partner function must call it as its first statement: check 14). Locks the bound session row only (FOR NO KEY UPDATE for A1, A2, A0_WRITE, SESSION and a stale idle bump; FOR SHARE otherwise), re-reads session / role / scope / aal on every call, enforces the class prerequisite (A1: a PIN grant; A2: a PIN grant at most 30 s old and reauth_until; A3 fails closed until S1.4), returns the member''s uid.';
 RESET ROLE;
 
 -- R5-L3: the migrating role keeps NO way to become the owner role (a PG16+ CREATEROLE creator keeps ADMIN on the roles it creates, which is all that may remain)
@@ -672,7 +708,7 @@ INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, expected_edge_actor, expected_edge_system, expected_edge_partner, expected_edge_partner_minter, note)
 VALUES
   ('private', 'partner_binding_user', '', false, false, false, false, false, false, false, '0052: the bound partner USER (kind partner only), the predicate inside the partner_pin policies of partner_pin_verifier; EXECUTE for partner_pin_verifier only (a policy''s function is checked against the role it applies to)'),
-  ('private', 'partner_pin_core', 'p_uid uuid, p_derived bytea, p_stored bytea', false, false, false, false, false, false, false, '0052: the ONLY reader of Vault secret partner_pin_pepper: HMAC-SHA256(pepper, label || 0x00 || user || derived) and the HMAC(K, stored) = HMAC(K, computed) comparison; EXECUTE for partner_pin_verifier only; the pepper is never returned'),
+  ('private', 'partner_pin_core', 'p_uid uuid, p_derived bytea, p_stored bytea', false, false, false, false, false, false, false, '0052: the ONLY reader of Vault secret partner_pin_pepper: HMAC-SHA256(pepper, label || 0x00 || user || derived) and the HMAC(K, stored) = HMAC(K, computed) comparison; EXECUTE for partner_pin_verifier and its owner private_definer, nobody else; the pepper is never returned'),
   ('private', 'partner_pin_attempt', 'p_uid uuid, p_derived bytea', false, false, false, false, false, false, false, '0052: owned by partner_pin_verifier; ONE attempt against a PIN: locks the row FOR UPDATE, applies lock and backoff, compares, counts; every outcome a returned status (never a RAISE); EXECUTE for nobody (the same-owner verify and change definers call it)'),
   ('private', 'partner_pin_verify_apply', 'p_derived bytea', false, false, false, false, false, false, false, '0052 (R5-L1): owned by partner_pin_verifier, the only role that can write partner_session.pin_grant_until; person and session from the binding; sets pin_grant_until = now + 60 s only on ok; EXECUTE for private_definer only'),
   ('private', 'partner_pin_set_apply', 'p_mode text, p_derived bytea, p_salt bytea, p_iterations integer, p_current bytea', false, false, false, false, false, false, false, '0052 (PA-21): owned by partner_pin_verifier; sets or changes the bound person''s PIN only inside an enrolment window or after an email proof (42501 otherwise); a change needs the current key; a locked PIN is never replaced; EXECUTE for private_definer only'),
