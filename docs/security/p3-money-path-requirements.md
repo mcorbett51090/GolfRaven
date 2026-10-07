@@ -3320,7 +3320,7 @@ The runbook additions in design section 15 (item 0 deploy order's isolate-recycl
 
 `private.purge_signin_email_proofs()` (and its siblings) delete with `DELETE ... WHERE id IN (SELECT id ... LIMIT 5000)` under RLS. When `pg_class` carries stale statistics for the table (a vacuum that truncated it left it estimated at about one row), the planner can choose a Nested Loop Semi Join that re-runs the `LIMIT` subquery per outer row: 5,003 freshly inserted rows took 26.9 s instead of about 30 ms and hit the harness's 10 s statement timeout. The `retention-purge` Deno test works around it with `ANALYZE` (P5 S1.1b), which is a property of the test, not of production: a production table that has been loaded for a while has been analyzed by autovacuum, but the dependence is real and is not closed here.
 
-**Not fixed in S1.1b** (0040 is immutable and the slice's brief did not include it). The fix, for a later migration that redefines the purge definers: take the batch **once**, materialised, so the plan cannot re-run it per row:
+**Closed by migration `0050_db_hygiene.sql`** (see "As built: DB hygiene" in `partner-auth-design.md`): all six batched purge definers now take the batch once; the shape below was measured on stale statistics (4.2 s against 5.4 s / 118.8 s for the old shape) and replaced by an array batch (13 to 69 ms); the test-side `ANALYZE` is gone; the InitPlan NIT was applied. **Not fixed in S1.1b** (0040 is immutable and the slice's brief did not include it). The fix, for a later migration that redefines the purge definers: take the batch **once**, materialised, so the plan cannot re-run it per row:
 
 ```sql
 WITH b AS MATERIALIZED (SELECT id FROM private.signin_email_proof WHERE <predicate> ORDER BY <key> LIMIT 5000)
