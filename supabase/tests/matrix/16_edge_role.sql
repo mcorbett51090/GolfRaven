@@ -855,7 +855,8 @@ SELECT is((SELECT count(*)::int FROM private.list_rescore_plays('crs_x1', NULL, 
 SELECT is((SELECT count(*)::int FROM private.list_rescore_plays('crs_y1', (SELECT created_at FROM private.list_rescore_plays('crs_y1', NULL, NULL, 1)), (SELECT play_id FROM private.list_rescore_plays('crs_y1', NULL, NULL, 1)), 100)
            WHERE user_id IN ('eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-0000000000b0')), 1, 'list_rescore_plays: the keyset cursor pages (one play after the first)');
 -- purge: two rows lose their coordinates (UA 40 days old; UB at a verified, never-split course); UA's recent row at crs_y1 (open backlog) keeps them
-SELECT is(private.purge_fix_coords(30, 100) >= 2, true, 'purge_fix_coords: purges the aged row and the row at a course that can no longer be re-picked');
+SELECT private.purge_fix_coords(30, 1) AS fix_limit_one \gset
+SELECT is(:fix_limit_one = 1 AND private.purge_fix_coords(30, 100) >= 1, true, 'purge_fix_coords: the limit is honoured (a limit of 1 purges exactly one of the two eligible rows, 0050 pins it) and the next call purges the other: the aged row and the row at a course that can no longer be re-picked');
 SELECT is(private.purge_fix_coords(30, 100), 0, 'purge_fix_coords: idempotent (nothing left to purge)');
 SELECT throws_ok($$SELECT private.purge_fix_coords(31, 10)$$, '22023', NULL, 'purge_fix_coords: a retention above 30 days is refused');
 SELECT throws_ok($$SELECT private.purge_fix_coords(0, 10)$$, '22023', NULL, 'purge_fix_coords: a retention of 0 is refused');

@@ -12,6 +12,8 @@
 //   6. the rate limit (12 per hour) holds;
 //   7. (0040) the four SQL-bounded steps clear a backlog larger than one batch over several batches, a full batch is exactly RETENTION_DEFINER_BATCH_ROWS,
 //      and the catalog import's own purge calls honour the same per-step try-lock;
+//   9. (0050, S1.1b gate L-4) with STALE planner statistics and no ANALYZE each SQL-bounded step is still fast (a full batch in well under a second), and the 0040 statement shape is not (a temp table in the
+//      same state is the positive control); the cell "0050: with STALE planner statistics".
 //   8. (PR4b gate LOW-2) an empty service-role key admits nobody, even a bearer that only SEEMS empty (NBSP, U+3000) after normalisation.
 // The pure contract (ordering, truncation, busy, failure codes, no database text on the wire) is supabase/tests/unit/retention-purge-handler.test.ts.
 
@@ -423,15 +425,124 @@ async function seedBacklog(): Promise<{ liveProof: string; livePending: string; 
         perform set_config('app.signin.proof_id', '', true);
       end $d$`);
   });
-  // ANALYZE what was just bulk-loaded, as autovacuum would in a database that has been running for a while. Without it the planner works from whatever pg_class says about the table, and after an
-  // earlier file's rolled-back bulk insert that is "148 pages, 1 tuple" (a vacuum that could not truncate, e.g. because a concurrent session held the xmin horizon at that moment): it then estimates the
-  // 5003 new rows as ONE row, picks a nested loop for the purge's `DELETE ... WHERE id IN (SELECT ... LIMIT 5000)` and runs it in O(n^2), past the 10 s statement timeout. Which state the template database
-  // is in depends on when autovacuum happened to run during the pgTAP and concurrency steps, so the suite must not depend on it.
-  await rawOwnerSql().unsafe("analyze private.signin_email_proof, private.signin_revocation_queue, private.consumed_nonce, private.rate_limit_bucket");
+  // No ANALYZE here, deliberately. The S1.1b slice added one because the 0040 purges (`DELETE ... WHERE id IN (SELECT ... LIMIT 5000)`) ran in O(n^2) when pg_class held stale statistics (a vacuum that could
+  // not truncate leaves "148 pages, 0 tuples"). Since 0050 the definers take their batch once and no longer depend on the plan, so the suite does not depend on which state autovacuum left the template
+  // database in; the cell "0050: stale planner statistics ..." below builds exactly that state on purpose and pins it.
   return { liveProof, livePending, liveNonce, liveBucket };
 }
 
 const BOUNDED_CLASSES = ["signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets"] as const;
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 2c. 0050 (S1.1b gate L-4): the batched purges do not depend on the planner's statistics
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+const STALE_TABLES = ["private.signin_email_proof", "private.signin_revocation_queue", "private.consumed_nonce", "private.rate_limit_bucket"] as const;
+
+/**
+ * Put the four backlog tables into the state the S1.1b gate found them in, WITHOUT an ANALYZE: load a backlog, delete it, VACUUM (TRUNCATE false) (a vacuum that could not truncate, made deterministic:
+ * the pages stay, pg_class says "N pages, 0 tuples"), then load the backlog again. The planner now estimates 5003 fresh rows as one row. Autovacuum is switched off on the four tables for the duration
+ * so it cannot repair the statistics under the test; the returned function puts that back.
+ */
+async function makeStatsStale(): Promise<() => Promise<void>> {
+  const owner = rawOwnerSql();
+  for (const t of STALE_TABLES) await owner.unsafe(`alter table ${t} set (autovacuum_enabled = false)`);
+  const restore = async () => {
+    for (const t of STALE_TABLES) await owner.unsafe(`alter table ${t} reset (autovacuum_enabled)`);
+  };
+  try {
+    await seedBacklog();
+    await asDefiner(async (sql) => {
+      await sql`delete from private.consumed_nonce where coalesce(expires_at, consumed_at) < now() - interval '7 days'`;
+      await sql`delete from private.rate_limit_bucket where window_start < now() - interval '2 days'`;
+      await sql`delete from private.signin_revocation_queue where status <> 'pending' and completed_at < now() - interval '30 days'`;
+      await sql`select set_config('app.signin.proof_purge', 'on', true)`;
+      await sql`delete from private.signin_email_proof where expires_at < now() - interval '1 hour'`;
+    });
+    await owner.unsafe(`vacuum (truncate false) ${STALE_TABLES.join(", ")}`);
+    await seedBacklog();
+    return restore;
+  } catch (e) {
+    await restore();
+    throw e;
+  }
+}
+
+const STALE_BUDGET_MS = 1000;
+/** Thrown after each run of an old statement shape so the surrounding transaction ALWAYS rolls back. */
+class OldShapeRan extends Error {}
+
+retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched purge is fast; the 0040 statement shape is NOT, on a table in the same state (positive control); the whole backlog is still cleared", async () => {
+  const restore = await makeStatsStale();
+  try {
+    // the precondition: the planner really is misled (a test that passed because autovacuum had repaired the statistics would prove nothing)
+    for (const t of STALE_TABLES) {
+      const [schema, rel] = t.split(".");
+      const stat = await rawCount(`select c.reltuples::int as n from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = '${schema}' and c.relname = '${rel}'`);
+      assert(stat < 1000, `${t} is estimated at ${stat} tuples (the 5003 loaded rows must be unaccounted for): the statistics are not stale`);
+    }
+    // positive control: the old shape cannot finish inside the budget on these statistics. (Each runs in its own transaction and is rolled back whatever happens.)
+    // The positive control, on a table whose planner state is fully under this cell's control (a TEMPORARY table: no RLS, no history, and autovacuum never touches it): the same recipe, and the 0040 shape
+    // verbatim, against the new shape. On the four real tables how slow the old shape is depends on row width, the index and the histogram state autovacuum left in the template database (measured: it ran
+    // 4 s to 119 s on stale statistics, and 22 ms in other states), which is the very dependence 0050 removes; so the real tables are asserted only for the NEW definers, below.
+    const owner = rawOwnerSql();
+    await owner.unsafe(`create temp table hygiene_stale (id uuid primary key default gen_random_uuid(), expires_at timestamptz not null)`);
+    try {
+      await owner.unsafe(`create index on hygiene_stale (expires_at)`);
+      const load = () => owner.unsafe(`insert into hygiene_stale (expires_at) select now() - interval '3 hours' from generate_series(1, ${RETENTION_DEFINER_BATCH_ROWS + 3})`);
+      await load();
+      await owner.unsafe(`delete from hygiene_stale`);
+      await owner.unsafe(`vacuum (truncate false) hygiene_stale`);
+      await load();
+      const est = await owner.unsafe(`select reltuples::int as t from pg_class where relname = 'hygiene_stale'`);
+      assert(Number(est[0]!.t) < 100, `the temp table is estimated at ${est[0]!.t} tuples: the statistics are not stale`);
+      const oldShape = `delete from hygiene_stale p where p.id in (select s.id from hygiene_stale s where s.expires_at < now() - interval '1 hour' order by s.expires_at, s.id limit 5000)`;
+      const newShape = `delete from hygiene_stale p where p.id = any (array(select s.id from hygiene_stale s where s.expires_at < now() - interval '1 hour' order by s.expires_at, s.id limit 5000))`;
+      const attempt = async (statement: string): Promise<string> => {
+        let result = "not run";
+        await owner
+          .begin(async (trx: ReturnType<typeof postgres>) => {
+            await trx.unsafe(`set local statement_timeout = '${STALE_BUDGET_MS}ms'`);
+            const t0 = Date.now();
+            try {
+              const res = await trx.unsafe(statement);
+              result = `finished in ${Date.now() - t0} ms (${res.count} rows)`;
+            } catch (e) {
+              result = (e as { code?: string }).code === "57014" ? "cancelled" : `error ${String(e)}`; // 57014: the statement timeout
+            }
+            throw new OldShapeRan(); // always roll back
+          })
+          .catch((e: unknown) => {
+            if (e instanceof OldShapeRan || result === "cancelled") return; // the driver may surface the cancelled statement's own error at ROLLBACK
+            throw e;
+          });
+        return result;
+      };
+      const oldResult = await attempt(oldShape);
+      const newResult = await attempt(newShape);
+      console.log(`0050 stale statistics (temp table, ${RETENTION_DEFINER_BATCH_ROWS + 3} rows): the 0040 shape: ${oldResult}; the 0050 shape: ${newResult}`);
+      assertEquals(oldResult, "cancelled", `positive control: the 0040 shape was not cancelled inside ${STALE_BUDGET_MS} ms on stale statistics, so this fixture no longer reproduces the pathology`);
+      assert(newResult.startsWith("finished in") && newResult.endsWith("(5000 rows)"), `the 0050 shape: ${newResult}`);
+    } finally {
+      await owner.unsafe(`drop table if exists hygiene_stale`);
+    }
+    // the 0050 definers: one full batch of each, timed
+    const steps = retentionPurgeSteps();
+    for (const name of BOUNDED_CLASSES) {
+      const st = steps.find((x) => x.name === name)!;
+      const t0 = Date.now();
+      const n = await st.runBatch();
+      const ms = Date.now() - t0;
+      console.log(`0050 stale statistics: ${name} removed ${n} rows in ${ms} ms`);
+      assertEquals(n, RETENTION_DEFINER_BATCH_ROWS, `${name}: a full batch`);
+      assert(ms < STALE_BUDGET_MS, `${name} took ${ms} ms on stale statistics (budget ${STALE_BUDGET_MS} ms)`);
+    }
+    const r = await run(realDeps({ hitRateLimit: unlimited }));
+    for (const name of BOUNDED_CLASSES) assertEquals(stepOf(r, name).status, "done", `${name}: ${JSON.stringify(stepOf(r, name))}`);
+  } finally {
+    await restore();
+  }
+});
 
 retentionTest("0040: a backlog larger than one batch is cleared over SEVERAL batches by one run, for each of the four SQL-bounded steps; a live row of each survives", async () => {
   const live = await seedBacklog();
