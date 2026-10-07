@@ -529,6 +529,10 @@ DECLARE
   v_r record;
 BEGIN
   v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0');
+  -- the PIN is a staff / manager factor: an admin passes partner_authorize's "anywhere" branch with no membership at all, and an admin or operator has NO PIN (6.3; the A3 substitution is S1.4's)
+  IF NOT EXISTS (SELECT 1 FROM app.partner_member m WHERE m.user_id = v_uid AND m.revoked_at IS NULL AND m.role IN ('staff', 'manager')) THEN
+    RAISE EXCEPTION 'partner_pin_set_for_partner: only an active staff or manager member holds a PIN' USING ERRCODE = '42501';
+  END IF;
   SELECT a.o_status, a.o_retry_after INTO v_r FROM private.partner_pin_set_apply('set', p_derived, p_salt, p_iterations, NULL) a;
   IF v_r.o_status = 'ok' THEN
     PERFORM private.partner_audit_write('partner.pin.set', 'app.partner_pin', v_uid::text, '{}'::jsonb);
@@ -548,6 +552,9 @@ DECLARE
   v_r record;
 BEGIN
   v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0');
+  IF NOT EXISTS (SELECT 1 FROM app.partner_member m WHERE m.user_id = v_uid AND m.revoked_at IS NULL AND m.role IN ('staff', 'manager')) THEN
+    RAISE EXCEPTION 'partner_pin_change_for_partner: only an active staff or manager member holds a PIN' USING ERRCODE = '42501';
+  END IF;
   SELECT a.o_status, a.o_retry_after, a.o_newly_locked INTO v_r FROM private.partner_pin_set_apply('change', p_derived, p_salt, p_iterations, p_current) a;
   IF v_r.o_status = 'ok' THEN
     PERFORM private.partner_audit_write('partner.pin.change', 'app.partner_pin', v_uid::text, '{}'::jsonb);
