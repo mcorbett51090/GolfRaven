@@ -38,7 +38,8 @@ describe("the derivation contract: PBKDF2-HMAC-SHA256(PIN as ASCII, 16-byte salt
       expect(await derivePinKeyB64u(v.pin, fromHex(v.saltHex), v.iterations)).toBe(v.derivedB64u);
       expect(derived.length).toBe(32);
     }
-  });
+    // eight PBKDF2 runs, four of them at up to a million iterations: a loaded CI core needs more than vitest's 5 s default
+  }, 120_000);
 
   it("the vectors cover the floor, the default and the ceiling, and use PINs a member could actually set", () => {
     const iters = PIN_DERIVATION_VECTORS.map((v) => v.iterations);
