@@ -127,7 +127,17 @@ describe("privileged.ts#reviewAccountGate", () => {
     expect(body.match(/private\./g)!.length).toBe(1);
   });
   it("fails CLOSED on any answer that is not one of the two it knows", () => {
-    expect(body).toMatch(/verdict === "not_review" \|\| verdict === "allowed"\) return verdict;\s*return "disabled";/);
+    expect(body).toMatch(/if \(verdict === "not_review" \|\| verdict === "allowed"\) \{[\s\S]*?return verdict;\s*\}\s*return "disabled";/);
+  });
+  it("remembers ONLY the answer not_review (never allowed or disabled), for a bounded time, in a bounded map", () => {
+    const set = body.indexOf("reviewGateNegativeCache.set(");
+    const guard = body.lastIndexOf('if (verdict === "not_review") {', set);
+    expect(set).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(-1);
+    expect(body.match(/reviewGateNegativeCache\.set\(/g)).toHaveLength(1);
+    expect(body).toContain("cachedUntil > now");
+    expect(body).toContain("reviewGateNegativeCache.size >= REVIEW_GATE_NEGATIVE_MAX");
+    expect(privileged).toMatch(/const REVIEW_GATE_NEGATIVE_TTL_MS = 30_000;/);
   });
 });
 
