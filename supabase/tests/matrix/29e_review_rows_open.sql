@@ -3,7 +3,7 @@
 -- Harness role -> service_role.
 
 \set QUIET 1
-SELECT plan(7);
+SELECT plan(8);
 SET ROLE service_role;
 CREATE FUNCTION pg_temp.n(p_where text) RETURNS int LANGUAGE plpgsql AS $f$
 DECLARE v int;
@@ -18,6 +18,7 @@ SELECT is(pg_temp.n($$action = 'review_account.session_allowed' AND subject_id =
 SELECT is(pg_temp.n($$true$$), 7, 'R now has seven audit rows in total (five refused, two allowed)');
 SELECT is((SELECT count(*)::int FROM app.audit_log WHERE actor_user_id = '29510000-0000-0000-0000-0000000000a0' AND detail <> jsonb_build_object('outcome', CASE action WHEN 'review_account.session_allowed' THEN 'allowed' ELSE 'refused' END)), 0, 'every row''s detail agrees with its action and holds nothing else');
 SELECT is((SELECT count(*)::int FROM app.audit_log WHERE actor_user_id = '29510000-0000-0000-0000-0000000000b0'), 0, 'N still has no audit row');
+SELECT is((SELECT count(*)::int FROM app.marker_credit WHERE user_id = '29510000-0000-0000-0000-0000000000a0') + (SELECT count(*)::int FROM app.purchase_evidence WHERE user_id = '29510000-0000-0000-0000-0000000000a0'), 0, 'R ended with NO marker credit and NO purchase (0051 MEDIUM-1: the scan definers refuse the review account)');
 -- the window ends: move its end to a past instant (its start is an hour ago, so the CHECK holds)
 UPDATE app.app_review_window SET ends_at = now() - interval '1 second' WHERE id = '29510000-0000-0000-0000-00000000f003';
 SELECT is(private.review_window_open_at(now()), false, 'the live window has ended: the predicate says closed at once');

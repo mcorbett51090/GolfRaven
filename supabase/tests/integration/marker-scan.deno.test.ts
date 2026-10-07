@@ -251,6 +251,36 @@ Deno.test("Q1 with a qualifying fix: a valid purchase, a credited credit, ONE fo
   assertEquals(await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${jti}' and consumed_at is not null`), 1);
 });
 
+Deno.test("0051 (review MEDIUM-1): the app-review account's scan, with a qualifying fix, is 403 forbidden and writes NO purchase and NO credit; the refused request rolls back (the check-in token stays unspent); an ordinary player's identical scan is accepted", DT, async () => {
+  const shop = await createShop("rev", "both", 2);
+  const r = await freshPlayer("rev"); // the review account
+  const n = await freshPlayer("rev-n"); // an ordinary player, the control
+  await ensureServiceRole();
+  await adminSql()`delete from app.app_review_demo_account`; // at most ONE review account exists
+  await adminSql()`insert into app.app_review_demo_account (user_id) values (${r.uid})`;
+  const w = await adminSql()`insert into app.app_review_window (starts_at, ends_at, note) values (now() - interval '1 hour', now() + interval '1 hour', 'marker-scan test') returning id`;
+  try {
+    const t = await rotatingToken(shop);
+    const jti = await checkinToken(r, shop);
+    const err = await httpError(scan(r, shop, { qr: { variant: "rotating", token: t.token }, fix: fixOf(), jti }));
+    assertEquals([err?.status, err?.code], [403, "forbidden"]);
+    assertEquals((await purchases(r.uid)).length, 0, "no purchase and no credit for the review account");
+    assertEquals(await rawCount(`select count(*)::int as n from app.marker_credit where user_id = '${r.uid}'`), 0);
+    assertEquals(await rawCount(`select count(*)::int as n from app.checkin_token where jti = '${jti}' and consumed_at is not null`), 0, "the refusal rolled the request back: the check-in token is unspent");
+    assertEquals(await rawCount(`select count(*)::int as n from app.course_qr_token where nonce_hash = '${t.hash}' and used_at is not null`), 0, "and the QR token is unspent");
+    // the co-signal intake (no QR) is refused the same way
+    const jti2 = await checkinToken(r, shop);
+    const err2 = await httpError(scan(r, shop, { fix: fixOf(), jti: jti2 }));
+    assertEquals([err2?.status, err2?.code], [403, "forbidden"]);
+    // control: an ordinary player's scan of a fresh token at the same shop is accepted
+    const t2 = await rotatingToken(shop);
+    const res = ok(await scan(n, shop, { qr: { variant: "rotating", token: t2.token }, ...(await withFix(n, shop)) }));
+    assertEquals(res.body.outcome, "credited");
+  } finally {
+    await adminSql()`delete from app.app_review_window where id = ${w[0]!.id}`;
+  }
+});
+
 Deno.test("Q1 replay: the same token again is 409 qr_used, and the refused request ROLLED BACK (the second check-in token is unspent, no second evidence row)", DT, async () => {
   const shop = await createShop("q1r");
   const a = await freshPlayer("q1r-a");

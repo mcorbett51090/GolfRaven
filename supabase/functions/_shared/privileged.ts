@@ -3414,6 +3414,7 @@ const MARKER_SCAN_REFUSALS: ReadonlySet<string> = new Set([
   "duplicate",
   "cosignal_invalid",
   "cosignal_used",
+  "review_account",
 ]);
 
 const PURCHASE_STATUSES: ReadonlySet<string> = new Set(["valid", "pending", "held_review"]);
@@ -3499,7 +3500,7 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
       }
       const first = rows[0];
       const status = String(first?.o_result);
-      if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used") return { status };
+      if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used" || status === "review_account") return { status };
       if (status !== "attached") throw new Error("markerScan.attachCosignal: private.marker_cosignal_attach_for_actor returned an unexpected result");
       return { status: "attached", purchases: rows.map(toPurchaseView) };
     },

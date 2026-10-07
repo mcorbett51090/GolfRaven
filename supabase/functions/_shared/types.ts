@@ -686,7 +686,9 @@ export type MarkerScanRefusal =
   /** The co-signal's evidence row failed the database's read-back (not the actor's, not this fix / facility / grade / local date / captured time, not accepted). */
   | "cosignal_invalid"
   /** The evidence row already backs another scan. */
-  | "cosignal_used";
+  | "cosignal_used"
+  /** 0051: the app-review account can record no marker purchase and earn no credit (plan line 1871). Nothing was written. */
+  | "review_account";
 
 export type MarkerScanRecordResult = { status: "accepted"; localDate: string; purchases: MarkerPurchaseView[] } | { status: MarkerScanRefusal };
 
@@ -696,7 +698,7 @@ export interface MarkerCosignalAttachInput {
   cosignal: MarkerCosignalInput;
 }
 
-export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" | "cosignal_invalid" | "cosignal_used" };
+export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" | "cosignal_invalid" | "cosignal_used" | "review_account" };
 
 /** What `Repo#offlineCode.provisionSeed` returns: the raw 32-byte seed, its version, and the database clock at issue (ISO-8601). */
 export interface OfflineSeedProvision {
