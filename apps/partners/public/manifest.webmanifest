@@ -1,0 +1,11 @@
+{
+  "name": "GolfRaven Partners",
+  "short_name": "Partners",
+  "description": "GolfRaven staff, operator and admin portal.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f6f7",
+  "theme_color": "#1f3a4d",
+  "icons": [{ "src": "./favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

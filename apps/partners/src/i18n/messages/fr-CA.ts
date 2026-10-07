@@ -1,0 +1,67 @@
+/**
+ * Catalogue français (Canada). Rédigé pour S7a et `[unverified — not reviewed by a native fr-CA speaker]`: le français est plausible pour le
+ * Québec, mais personne ne l'a validé (même statut que le catalogue de apps/mobile).
+ */
+import type { MessageKey } from "./en";
+
+export const frCA: Record<MessageKey, string> = {
+  "app.name": "GolfRaven Partenaires",
+  "app.loading": "Chargement…",
+  "lang.toggle": "English",
+  "lang.toggle.label": "Passer la langue à l'anglais",
+
+  "signIn.title": "Connexion du personnel",
+  "signIn.lead": "Connectez-vous avec votre clé d'accès. Votre appareil demandera votre empreinte, votre visage ou votre code.",
+  "signIn.button": "Se connecter avec une clé d'accès",
+  "signIn.busy": "En attente de votre clé d'accès…",
+  "signIn.cancel": "Annuler",
+
+  "notice.locked": "Verrouillé. Reconnectez-vous avec votre clé d'accès pour continuer.",
+  "notice.signedOut": "Vous êtes déconnecté.",
+  "notice.expired": "Votre session est terminée. Reconnectez-vous.",
+  "notice.signOutOffline": "Vous êtes déconnecté sur cet appareil, mais le serveur est resté injoignable. La session prendra fin d'elle-même.",
+  "notice.lockOffline": "Cet appareil est verrouillé, mais le serveur est resté injoignable pour mettre fin à votre session. Reconnectez-vous pour continuer.",
+
+  "error.cancelled": "L'invite de la clé d'accès a été annulée ou a expiré. Réessayez.",
+  "error.webauthnUnsupported": "Ce navigateur ne gère pas les clés d'accès. Ouvrez cette page dans un navigateur à jour.",
+  "error.webauthnFailed": "La clé d'accès n'a pas pu être utilisée. Réessayez.",
+  "error.badOptions": "Le serveur a envoyé une demande de connexion que cette page refuse. Réessayez plus tard.",
+  "error.signInFailed": "La connexion a échoué. Vérifiez que vous utilisez votre propre clé d'accès et réessayez.",
+  "error.sessionEnded": "Votre session est terminée. Reconnectez-vous.",
+  "error.forbidden": "Vous n'avez pas accès à ceci.",
+  "error.rateLimited": "Trop de tentatives. Patientez un moment et réessayez.",
+  "error.rateLimited.wait": "Trop de tentatives. Réessayez dans {seconds} s.",
+  "error.unavailable": "La connexion des partenaires n'est pas disponible pour le moment.",
+  "error.network": "Le serveur est injoignable. Vérifiez votre connexion et réessayez.",
+  "error.generic": "Un problème est survenu. Réessayez.",
+
+  "home.title": "Connecté",
+  "home.reloadNote": "Recharger cette page vous déconnecte et exige de nouveau votre clé d'accès. C'est voulu.",
+  "home.session.title": "Cette session",
+  "home.field.assurance": "Niveau d'assurance",
+  "home.field.assurance.value": "{aal} (cet accès exige {required})",
+  "home.field.signedInAt": "Connexion",
+  "home.field.lastActive": "Dernière activité",
+  "home.field.idleExpires": "Délai d'inactivité",
+  "home.field.expires": "Fin de la session",
+  "home.field.admin": "Administrateur",
+  "common.yes": "Oui",
+  "common.no": "Non",
+  "home.roles.title": "Rôles",
+  "home.roles.none": "Aucun rôle actif.",
+  "home.roles.scope": "{facilities}, {trails}",
+  "home.facilities.one": "{count} installation",
+  "home.facilities.other": "{count} installations",
+  "home.trails.one": "{count} circuit",
+  "home.trails.other": "{count} circuits",
+  "role.staff": "Personnel",
+  "role.manager": "Gestionnaire",
+  "role.operator": "Exploitant",
+  "home.aalLow": "Cet accès exige un second facteur qui n'est pas encore offert dans cette version. La plupart des écrans resteront fermés d'ici là.",
+  "home.refresh": "Actualiser",
+  "home.lock": "Verrouiller",
+  "home.lock.hint": "Verrouiller efface l'accès de cet appareil. Votre clé d'accès est nécessaire pour continuer.",
+  "home.signOut": "Se déconnecter",
+  "home.later": "Les écrans d'attestation, de code QR du parcours, de remise et de stock arrivent dans de prochaines versions.",
+  "home.busy": "En cours…",
+};
