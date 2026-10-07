@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(159);
+SELECT plan(164);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -885,8 +885,9 @@ WITH tails(tail) AS (
   FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
 ), win AS (
-  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e LIKE '%current_setting(%'
-    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%'))
+  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e ~* '\mcurrent_setting\s*\(' OR x.e ~* '\mpg_settings\M'
+    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass
+      AND (CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\mcurrent_setting\s*\(' OR CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\mpg_settings\M')))
 ), trail AS (
   SELECT w.nspname, w.relname, w.polname, w.part, left(w.e, length(w.e) - length(t.tail)) AS prefix
   FROM win w JOIN tails t ON right(w.e, length(t.tail)) = t.tail
@@ -1790,6 +1791,41 @@ SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_upd_ok') FROM unnest(pg_t
 SELECT is(pg_temp.edge_check_15() IS NULL OR cardinality(pg_temp.edge_check_15()) = 0, true, 'check 15: and nothing else in the schema is open (the direct and the InitPlan forms are both accepted)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_upd_ok ON app.zz15_t;
+-- the check-15 follow-up (S1.2): a window is recognised from the function's DEPARSED definition (pg_get_functiondef), not from prosrc, and pg_settings counts as a reading of settings
+-- W3: a BEGIN ATOMIC wrapper (its prosrc is empty: the body lives in prosqlbody, so a prosrc scan never saw it)
+CREATE FUNCTION private.zz15_atomic() RETURNS text LANGUAGE sql STABLE BEGIN ATOMIC SELECT nullif(current_setting('app.zz15.atomic', true), ''); END;
+CREATE POLICY zz15_atomic ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_atomic());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_atomic') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL (W3): a policy whose BEGIN ATOMIC wrapper function reads the setting, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_atomic ON app.zz15_t;
+CREATE POLICY zz15_atomic_ok ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_atomic() AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_atomic_ok') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15 (W3): the same BEGIN ATOMIC wrapper policy WITH the conjunct is clean (control)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_atomic_ok ON app.zz15_t;
+DROP FUNCTION private.zz15_atomic();
+-- W4: a space between the function name and its parenthesis in the wrapper source (the old `ILIKE '%current_setting(%'` missed it)
+CREATE FUNCTION private.zz15_space() RETURNS text LANGUAGE sql STABLE AS $z$ SELECT nullif(current_setting ('app.zz15.space', true), '') $z$;
+CREATE POLICY zz15_space ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_space());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_space') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL (W4): a wrapper whose source writes current_setting ( with a space, no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_space ON app.zz15_t;
+DROP FUNCTION private.zz15_space();
+-- pg_settings: reading the setting through the view is a window just the same (policy text, then a wrapper)
+CREATE POLICY zz15_pgs ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = (SELECT s.setting FROM pg_settings s WHERE s.name = 'app.zz15.pgs'));
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_pgs') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: a private_definer policy whose own text reads pg_settings, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_pgs ON app.zz15_t;
+CREATE FUNCTION private.zz15_pgs() RETURNS text LANGUAGE sql STABLE AS $z$ SELECT s.setting FROM pg_settings s WHERE s.name = 'app.zz15.pgsw' $z$;
+CREATE POLICY zz15_pgs_w ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_pgs());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_pgs_w') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: a wrapper function that reads pg_settings, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_pgs_w ON app.zz15_t;
+DROP FUNCTION private.zz15_pgs();
 DROP TABLE app.zz15_t;
 
 SELECT * FROM finish();

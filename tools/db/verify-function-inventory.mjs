@@ -420,7 +420,7 @@ const policyFunctionRows = psqlJsonRows(`
   SELECT row_to_json(t) FROM (
     SELECT pn.nspname || '.' || pc.relname || '.' || pol.polname AS policy,
            fn.nspname || '.' || fp.proname AS function_name,
-           fp.prosrc AS prosrc
+           CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END AS prosrc
     FROM pg_policy pol
     JOIN pg_class pc ON pc.oid = pol.polrelid
     JOIN pg_namespace pn ON pn.oid = pc.relnamespace
@@ -428,7 +428,8 @@ const policyFunctionRows = psqlJsonRows(`
     JOIN pg_proc fp ON fp.oid = d.refobjid
     JOIN pg_namespace fn ON fn.oid = fp.pronamespace
     WHERE pn.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND fp.prosrc ILIKE '%current_setting(%'
+      AND fp.prokind IN ('f', 'p')
+      AND pg_get_functiondef(fp.oid) ~* '\\mcurrent_setting\\s*\\('
   ) t
 `);
 for (const { policy, function_name: functionName, prosrc } of policyFunctionRows) {
@@ -827,8 +828,9 @@ WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND has
   FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
 ), win AS (
-  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e LIKE '%current_setting(%'
-    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%'))
+  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e ~* '\\mcurrent_setting\\s*\\(' OR x.e ~* '\\mpg_settings\\M'
+    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass
+      AND (CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\\mcurrent_setting\\s*\\(' OR CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\\mpg_settings\\M')))
 ), trail AS (
   SELECT w.nspname, w.relname, w.polname, w.part, left(w.e, length(w.e) - length(t.tail)) AS prefix
   FROM win w JOIN tails t ON right(w.e, length(t.tail)) = t.tail

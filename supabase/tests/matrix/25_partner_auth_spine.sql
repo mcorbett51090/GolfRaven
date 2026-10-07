@@ -824,8 +824,9 @@ END
 $f$;
 -- Is this policy GUC-keyed? Its own text reads a setting, OR it calls a function (pg_depend, one level deep: the HIGH-1 wrapper rule) whose body does (the S1.1b gate's L-2: `USING (user_id::text = private.zz_guc())`)
 CREATE FUNCTION pg_temp.policy_is_window(p_pol oid) RETURNS boolean LANGUAGE sql STABLE AS $f$
-  SELECT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.oid = p_pol AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%'))
-      OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = p_pol AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%')
+  SELECT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.oid = p_pol AND ((coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '')) ~* '\mcurrent_setting\s*\(|\mpg_settings\M'))
+      OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = p_pol AND d.refclassid = 'pg_proc'::regclass
+                 AND CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\mcurrent_setting\s*\(|\mpg_settings\M')
 $f$;
 -- a setting a window policy reads that plant_all does not know: the cell below would silently test nothing for it, so it FAILS (a later slice that adds a window must add its setting here)
 CREATE FUNCTION pg_temp.unplanted_settings() RETURNS text[] LANGUAGE sql AS $f$
@@ -834,8 +835,8 @@ CREATE FUNCTION pg_temp.unplanted_settings() RETURNS text[] LANGUAGE sql AS $f$
   CROSS JOIN LATERAL (
     SELECT regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), 'current_setting\(''([^'']+)''', 'g') AS m
     UNION ALL
-    SELECT regexp_matches(fp.prosrc, 'current_setting\s*\(\s*''([^'']+)''', 'gi')
-    FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = pol.oid AND d.refclassid = 'pg_proc'::regclass
+    SELECT regexp_matches(CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END, 'current_setting\s*\(\s*''([^'']+)''', 'gi')
+    FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = pol.oid AND d.refclassid = 'pg_proc'::regclass AND fp.prokind IN ('f', 'p')
   ) x(m)
   WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
     AND x.m[1] <> ALL (pg_temp.plant_settings())
@@ -913,10 +914,10 @@ BEGIN
     v_vals := v_vals || format('%L::%s', pg_temp.plant_value(k.setting, p_user), format_type(k.atttypid, k.atttypmod));
   END LOOP;
   -- a policy that compares a column with a WRAPPER's result (`col::text = private.fn()`, the function body reading the setting) is keyed on that column too
-  FOR k IN SELECT DISTINCT ON (m[1]) m[1] AS col, (regexp_match(fp.prosrc, 'current_setting\s*\(\s*''([^'']+)''', 'i'))[1] AS setting, a.atttypid, a.atttypmod
+  FOR k IN SELECT DISTINCT ON (m[1]) m[1] AS col, (regexp_match(pg_get_functiondef(fp.oid), 'current_setting\s*\(\s*''([^'']+)''', 'i'))[1] AS setting, a.atttypid, a.atttypmod
            FROM pg_policy pol
            CROSS JOIN LATERAL regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), '\(*(\w+)\)*(?:::text)? = \(*(?:\w+\.)?(\w+)\(\)', 'g') AS m
-           JOIN pg_proc fp ON fp.proname = m[2] AND fp.prosrc ILIKE '%current_setting(%'
+           JOIN pg_proc fp ON fp.proname = m[2] AND fp.prokind IN ('f', 'p') AND pg_get_functiondef(fp.oid) ~* '\mcurrent_setting\s*\('
            JOIN pg_attribute a ON a.attrelid = pol.polrelid AND a.attname = m[1] AND a.attnum > 0 AND NOT a.attisdropped
            WHERE pol.polrelid = p_relid AND pol.polroles = ARRAY['private_definer'::regrole::oid] AND quote_ident(m[1]) <> ALL (v_cols)
            ORDER BY m[1] LOOP
