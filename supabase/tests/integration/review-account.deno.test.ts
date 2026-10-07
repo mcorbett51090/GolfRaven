@@ -219,8 +219,8 @@ Deno.test("LOW-3: when the audit row cannot be written, the review account is re
   await createTestUser(plain, `rv-plain2-${plain.slice(0, 8)}`);
   const owner = rawOwnerSql();
   // a trigger the OWNER plants (the audit_log insert-only trigger is untouched): every review-account audit INSERT fails
-  await owner.unsafe(`create function public.zz_review_audit_fail() returns trigger language plpgsql as $f$ begin if new.action like 'review_account.%' then raise exception 'forced audit failure' using errcode = 'XX000'; end if; return new; end $f$`);
-  await owner.unsafe(`create trigger zz_review_audit_fail before insert on app.audit_log for each row execute function public.zz_review_audit_fail()`);
+  await owner.unsafe(`create function app.zz_review_audit_fail() returns trigger language plpgsql as $f$ begin if new.action like 'review_account.%' then raise exception 'forced audit failure' using errcode = 'XX000'; end if; return new; end $f$`);
+  await owner.unsafe(`create trigger zz_review_audit_fail before insert on app.audit_log for each row execute function app.zz_review_audit_fail()`);
   const w = await openWindow("-1 hour", "1 hour");
   try {
     for (const label of ["inside a window", "outside every window"]) {
@@ -232,7 +232,7 @@ Deno.test("LOW-3: when the audit row cannot be written, the review account is re
     assertEquals((await entry(tokenFor(plain, freshUuid()))).status, 200, "an ordinary account never reaches the audit write");
   } finally {
     await owner.unsafe(`drop trigger if exists zz_review_audit_fail on app.audit_log`);
-    await owner.unsafe(`drop function if exists public.zz_review_audit_fail()`);
+    await owner.unsafe(`drop function if exists app.zz_review_audit_fail()`);
     await dropWindow(w);
   }
   // control: with the trigger gone the same request is audited and answered normally
