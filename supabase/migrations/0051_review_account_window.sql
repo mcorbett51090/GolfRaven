@@ -73,13 +73,23 @@ GRANT SELECT ON app.app_review_window TO private_definer;
 CREATE POLICY pd_read_review_window ON app.app_review_window FOR SELECT TO private_definer USING (true);
 
 -- ============================================================================
--- 1b. ONE review account, as a database fact
+-- 1b. ONE ACTIVE review account, and RETIRING one, as database facts
 -- ============================================================================
--- "One `app-review` account" (plan line 1871). A second row would be a second account that a window enables; the unique index on a constant makes a second INSERT a 23505.
--- (The owner tool refuses to provision a second one with its own message first; this is the floor beneath it.)
-CREATE UNIQUE INDEX app_review_demo_account_single ON app.app_review_demo_account ((true));
+-- "One `app-review` account" (plan line 1871). A second ACTIVE row would be a second account that a window enables: the unique index on a constant, over active rows only, makes a second
+-- INSERT a 23505. (The owner tool refuses to provision a second one with its own message first; this is the floor beneath it.)
+--
+-- RETIRING (retired_at): replacing the account must NOT make the old one an ordinary player. Banning its Auth user does not revoke an access token already issued, so for up to jwt_expiry the
+-- old token would still work: if its row were deleted, is_demo_account would turn false and the account would pass every refusal (no window gate, no reward / credit refusal). So a retired
+-- account KEEPS its row, marked: is_demo_account stays TRUE (every refusal keeps applying), the window gate and the binder refuse it ALWAYS (window open or not), and it no longer counts as the
+-- active account (a new one can be provisioned). Retired is ONE-WAY and the row is kept while its Auth user exists (private.review_account_retire_guard, below).
+-- Who may write retired_at: exactly who may write the table today (service_role, whose DML grant is 0009's, unchanged: nothing is broadened); the owner tool is the path. The edge roles keep what
+-- they had (edge_actor reads its own row, 0031).
+ALTER TABLE app.app_review_demo_account ADD COLUMN retired_at timestamptz;
+COMMENT ON COLUMN app.app_review_demo_account.retired_at IS
+  '0051. NULL: the (single) active review account. Set: retired. A retired row is kept: is_demo_account stays true, the window gate and the binder refuse it always. One-way (private.review_account_retire_guard) and removable only once its Auth user is gone.';
+CREATE UNIQUE INDEX app_review_demo_account_single ON app.app_review_demo_account ((true)) WHERE retired_at IS NULL;
 COMMENT ON INDEX app.app_review_demo_account_single IS
-  '0051. At most one app-review account may exist (plan line 1871: "One app-review account"). To replace it: ban its Auth user first, then delete its row (tools/review-account/review-account.sh retire). Never delete the row alone: that leaves an ordinary player with live tokens.';
+  '0051. At most one ACTIVE app-review account (plan line 1871: "One app-review account"). To replace it use tools/review-account/review-account.sh retire (closes, bans the Auth user, then sets retired_at). Never delete the row of an account whose Auth user still exists: that makes it an ordinary player with live tokens (and the retire guard refuses it for a retired row).';
 
 -- ============================================================================
 -- 2. One audit row per (account, session, outcome), as a database fact
@@ -129,6 +139,7 @@ SET search_path = ''
 AS $$
 DECLARE
   v_open boolean;
+  v_retired boolean;
   v_action text;
   v_sid text;
 BEGIN
@@ -138,8 +149,10 @@ BEGIN
   IF NOT private.is_demo_account(p_uid) THEN
     RETURN 'not_review';
   END IF;
+  -- A RETIRED account is refused always, window or not (its Auth user is banned, but a token issued before the ban may still be live).
+  v_retired := EXISTS (SELECT 1 FROM app.app_review_demo_account d WHERE d.user_id = p_uid AND d.retired_at IS NOT NULL);
   -- clock_timestamp(), not now(): a long-lived transaction must not carry a stale "open" past the window's end
-  v_open := private.review_window_open_at(clock_timestamp());
+  v_open := NOT v_retired AND private.review_window_open_at(clock_timestamp());
   v_action := CASE WHEN v_open THEN 'review_account.session_allowed' ELSE 'review_account.session_refused' END;
   v_sid := CASE WHEN p_session_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN lower(p_session_id) ELSE NULL END;
   BEGIN
@@ -180,13 +193,42 @@ BEGIN
   END IF;
   -- 0051 (the ONE added check): the app-review account is DISABLED outside a submission window. A system delegate is not a sign-in (it acts on one queued row of the owner,
   -- on the system's own schedule), so only the user kind is refused.
-  IF p_kind = 'user' AND private.is_demo_account(p_uid) AND NOT private.review_window_open_at(clock_timestamp()) THEN
-    RAISE EXCEPTION 'bind_actor: the review account is disabled outside a submission window' USING ERRCODE = '42501';
+  IF p_kind = 'user' AND private.is_demo_account(p_uid) THEN
+    -- a RETIRED account is refused always (a token issued before its Auth ban may still be live)
+    IF EXISTS (SELECT 1 FROM app.app_review_demo_account d WHERE d.user_id = p_uid AND d.retired_at IS NOT NULL) THEN
+      RAISE EXCEPTION 'bind_actor: the review account is retired' USING ERRCODE = '42501';
+    END IF;
+    IF NOT private.review_window_open_at(clock_timestamp()) THEN
+      RAISE EXCEPTION 'bind_actor: the review account is disabled outside a submission window' USING ERRCODE = '42501';
+    END IF;
   END IF;
   INSERT INTO private.actor_binding (backend_pid, xact, actor_uid, kind, session_id, bound_at)
   VALUES (pg_backend_pid(), v_xact, p_uid, p_kind, NULL, clock_timestamp())
   ON CONFLICT (backend_pid) DO UPDATE
     SET xact = EXCLUDED.xact, actor_uid = EXCLUDED.actor_uid, kind = EXCLUDED.kind, session_id = NULL, bound_at = EXCLUDED.bound_at;
+END;
+$$;
+
+-- 3c1. RETIRED IS ONE-WAY, and the row is kept while its Auth user exists. UPDATE: once retired_at is set neither it nor user_id may change (a retired account cannot be revived or re-pointed).
+-- DELETE: a retired row cannot be deleted while auth.users still has the user (a token may still be live; deleting it would make the account an ordinary player). Deleting the Auth user itself
+-- cascades the row away (the cascade runs after the parent row is gone, so the guard sees no user and lets it through), and that is the one way a retired row goes. SECURITY DEFINER because the
+-- caller (service_role, private_definer in delete_my_data) has no business reading auth.users; an unretired row is never touched by it.
+CREATE FUNCTION private.review_account_retire_guard()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    IF OLD.retired_at IS NOT NULL AND (NEW.retired_at IS DISTINCT FROM OLD.retired_at OR NEW.user_id IS DISTINCT FROM OLD.user_id) THEN
+      RAISE EXCEPTION 'a retired review account stays retired: retired_at and user_id cannot change' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF OLD.retired_at IS NOT NULL AND EXISTS (SELECT 1 FROM auth.users u WHERE u.id = OLD.user_id) THEN
+    RAISE EXCEPTION 'a retired review account row is kept while its Auth user exists (a token issued before the ban may still be live): delete the Auth user first' USING ERRCODE = '42501';
+  END IF;
+  RETURN OLD;
 END;
 $$;
 
@@ -719,6 +761,14 @@ $blk$, '') IS DISTINCT FROM current_setting('r51.src.activate_entitlement_for_ac
 END
 $r51_assert$;
 
+-- 3e. The retire guard's trigger (created as the migrating role: CREATE TRIGGER needs EXECUTE on the function, which PUBLIC still holds until the line below), then PUBLIC's EXECUTE is revoked: a
+-- trigger function needs no grant to any role.
+CREATE TRIGGER review_account_retire_guard_trg BEFORE UPDATE OR DELETE ON app.app_review_demo_account
+FOR EACH ROW EXECUTE FUNCTION private.review_account_retire_guard();
+SET ROLE private_definer;
+REVOKE EXECUTE ON FUNCTION private.review_account_retire_guard() FROM PUBLIC;
+RESET ROLE;
+
 
 -- ============================================================================
 -- 4. Registries
@@ -728,6 +778,7 @@ INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, expected_edge_actor, expected_edge_system, expected_edge_partner, expected_edge_partner_minter, note)
 VALUES
   ('private', 'review_window_open_at', 'p_at timestamp with time zone', false, false, true, false, false, false, false, '0051: is the instant inside a submission window of the app-review account (starts_at <= t < ends_at); service_role may ask, so an operator reads the predicate the database enforces'),
+  ('private', 'review_account_retire_guard', '', false, false, false, false, false, false, false, '0051: trigger function (BEFORE UPDATE OR DELETE on app.app_review_demo_account): a retired account stays retired and its row is kept while its Auth user exists; never EXECUTEd directly by any role'),
   ('private', 'review_account_gate', 'p_uid uuid, p_session_id text', false, false, false, false, true, false, false, '0051: edge_system only; for a review account writes ONE audit_log row per (account, session, outcome) and returns allowed | disabled, for anyone else not_review; a status, never a RAISE, so the audit row commits with the refusal');
 
 -- 4b. private.definer_policy_allowlist: the one new private_definer policy (expressions derived from the live policy)

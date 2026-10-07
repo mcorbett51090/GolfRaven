@@ -8,13 +8,14 @@
 -- 29f removes everything this file seeds. Re-runnable on one cluster.
 
 \set QUIET 1
-SELECT plan(46);
+SELECT plan(58);
 
 SET ROLE service_role;
 BEGIN;
 INSERT INTO auth.users (id) VALUES
   ('29510000-0000-0000-0000-0000000000a0'),
-  ('29510000-0000-0000-0000-0000000000b0')
+  ('29510000-0000-0000-0000-0000000000b0'),
+  ('29510000-0000-0000-0000-0000000000c0')
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO app.profile (user_id, handle) VALUES
   ('29510000-0000-0000-0000-0000000000a0', 'rev29_r'),
@@ -76,19 +77,47 @@ SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND pg_g
 SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND pg_get_userbyid(p.proowner) = 'private_definer' FROM pg_proc p WHERE p.oid = 'private.review_window_open_at(timestamptz)'::regprocedure), true, 'the predicate is SECURITY DEFINER, search_path empty, owned by private_definer');
 SELECT is((SELECT pg_get_userbyid(p.proowner) FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure), 'private_definer', 'the redefined binder keeps its owner');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%review_window_open_at%'), 1, 'the binder carries the window backstop');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%p_kind = ''user'' AND private.is_demo_account(p_uid) AND NOT private.review_window_open_at%'), 1, 'the backstop applies to the user kind only (a system delegate is the system acting on one queued row, not a sign-in)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%p_kind = ''user'' AND private.is_demo_account(p_uid) THEN%'), 1, 'the backstop applies to the user kind only (a system delegate is the system acting on one queued row, not a sign-in)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%the review account is retired%' AND p.prosrc LIKE '%retired_at IS NOT NULL%'), 1, 'the binder refuses a RETIRED review account always (before it even asks about a window)');
 SELECT is((SELECT indisunique AND indpred IS NOT NULL FROM pg_index WHERE indexrelid = 'app.audit_log_review_session_once'::regclass), true, 'one audit row per (account, session, outcome) is a partial unique index (a database fact)');
 
 -- ============================================================================
 -- 3b. ONE review account (plan line 1871: "One app-review account"), as a database fact
 -- ============================================================================
-SELECT is((SELECT i.indisunique AND pg_get_expr(i.indexprs, i.indrelid) = 'true' FROM pg_index i WHERE i.indexrelid = 'app.app_review_demo_account_single'::regclass), true, 'a unique index on a constant allows at most one review-account row');
+SELECT is((SELECT i.indisunique AND pg_get_expr(i.indexprs, i.indrelid) = 'true' AND pg_get_expr(i.indpred, i.indrelid) = '(retired_at IS NULL)' FROM pg_index i WHERE i.indexrelid = 'app.app_review_demo_account_single'::regclass), true, 'at most ONE ACTIVE review account: a unique index on a constant over rows with retired_at IS NULL');
+SELECT is((SELECT data_type || ':' || is_nullable FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'app_review_demo_account' AND column_name = 'retired_at'), 'timestamp with time zone:YES', 'retired_at exists (NULL = active)');
 SET ROLE service_role;
 BEGIN;
-SELECT throws_ok($$INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, '23505', NULL, 'a SECOND review account is refused (23505)');
-SELECT lives_ok($$DELETE FROM app.app_review_demo_account; INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, 'replacing the review account is delete-then-insert at the database (the tool''s retire bans the old Auth user first, then does this)');
+SELECT throws_ok($$INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, '23505', NULL, 'a SECOND ACTIVE review account is refused (23505)');
+SELECT lives_ok($$DELETE FROM app.app_review_demo_account; INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, 'replacing an active account at the database is delete-then-insert (the tool''s retire does NOT do this: it keeps the row)');
+ROLLBACK;
+BEGIN;
+-- RETIRE R: the row stays, marked
+UPDATE app.app_review_demo_account SET retired_at = now() WHERE user_id = '29510000-0000-0000-0000-0000000000a0';
+SELECT is(private.is_demo_account('29510000-0000-0000-0000-0000000000a0'), true, 'a RETIRED account is still a review account (is_demo_account stays true: every refusal keeps applying)');
+SELECT lives_ok($$INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, 'a retired row does not count as the active account: a new active one can be provisioned');
+SELECT throws_ok($$INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000c0')$$, '23505', NULL, 'but a second ACTIVE one is still refused while the new one exists');
+SELECT throws_ok($$UPDATE app.app_review_demo_account SET retired_at = NULL WHERE user_id = '29510000-0000-0000-0000-0000000000a0'$$, '42501', NULL, 'RETIRED IS ONE-WAY: retired_at cannot be cleared');
+SELECT throws_ok($$UPDATE app.app_review_demo_account SET retired_at = now() + interval '1 day' WHERE user_id = '29510000-0000-0000-0000-0000000000a0'$$, '42501', NULL, 'nor changed');
+SELECT throws_ok($$UPDATE app.app_review_demo_account SET user_id = '29510000-0000-0000-0000-0000000000c0' WHERE user_id = '29510000-0000-0000-0000-0000000000a0'$$, '42501', NULL, 'nor re-pointed at another user');
+SELECT throws_ok($$DELETE FROM app.app_review_demo_account WHERE user_id = '29510000-0000-0000-0000-0000000000a0'$$, '42501', NULL, 'a retired row cannot be DELETED while its Auth user exists (a token issued before the ban may still be live)');
 ROLLBACK;
 RESET ROLE;
+-- the one way a retired row goes: its Auth user is deleted and the foreign key cascades (the guard sees no user). A throw-away user, rolled back. DELETE on auth.users needs a superuser here (no
+-- harness role below it holds the privilege, as on a real project where only GoTrue's own role does), so in HARNESS_MODE=restricted these two cells SKIP (and say so); the superuser run proves them.
+BEGIN;
+SET LOCAL ROLE service_role;
+INSERT INTO auth.users (id) VALUES ('29510000-0000-0000-0000-0000000000d0');
+INSERT INTO app.app_review_demo_account (user_id, retired_at) VALUES ('29510000-0000-0000-0000-0000000000d0', now());
+RESET ROLE;
+SELECT CASE WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+  THEN lives_ok($$DELETE FROM auth.users WHERE id = '29510000-0000-0000-0000-0000000000d0'$$, 'deleting the Auth user of a retired account succeeds (the cascade passes the guard)')
+  ELSE skip('no harness role below a superuser may DELETE FROM auth.users (restricted mode): proven in the superuser run', 1) END;
+SELECT CASE WHEN (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+  THEN is((SELECT count(*)::int FROM app.app_review_demo_account WHERE user_id = '29510000-0000-0000-0000-0000000000d0'), 0, 'and the retired row went with it')
+  ELSE skip('as above', 1) END;
+ROLLBACK;
+SELECT is((SELECT count(*)::int FROM unnest(ARRAY['anon', 'authenticated', 'edge_actor', 'edge_system', 'service_role']) r WHERE has_function_privilege(r, 'private.review_account_retire_guard()', 'EXECUTE')), 0, 'no role is granted EXECUTE on the retire guard (a trigger function needs none)');
 
 -- ============================================================================
 -- 4. The restrictions the review account already had, pinned (service_role asks the predicates; nothing here widens anything)
