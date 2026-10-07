@@ -113,6 +113,9 @@ function mapRecordRefusal(status: string): HttpError {
       return Errors.unprocessable("qr_variant_not_enabled", "this facility does not use that kind of QR code");
     case "no_facility":
       return Errors.unprocessable("unknown_id", "no such facility");
+    case "review_account":
+      // 0051: the app-review account earns no marker credit (plan line 1871). The same 403 the reward activation answers it with.
+      return Errors.forbidden("this account cannot record marker purchases");
     default:
       // a status this code does not know is a deploy skew, not a client error
       throw new Error(`marker_scan_for_actor returned an unexpected status "${status}"`);

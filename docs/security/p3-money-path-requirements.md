@@ -660,7 +660,7 @@ the pipeline, before any side effect:
   submission (`evidence/handler.ts:207` `computeInputHash`), covering content a fix-bearing source's own
   natural `source_ref` (keyed on fixId alone) cannot distinguish. `supabase/migrations/0019_evidence_intake.sql`
   §7 (nullable → backfill-from-`source_ref`-digest → `NOT NULL`, since 0019 is still unmerged).
-- `Repo#evidence.findExisting(source, sourceRef)` (`privileged.ts:428`, `types.ts`'s `Repo.evidence`
+- `Repo#evidence.findExisting(source, sourceRef)` (`privileged.ts:950`, `types.ts`'s `Repo.evidence`
   interface) — the FIRST repo call `handleEvidenceIntake` makes (`evidence/handler.ts:393`), before rate
   -limiting, device resolution, token consumption or any fraud signal.
 - A match with an identical `input_hash` is an idempotent replay: `buildReplayResult` (`evidence/handler.ts:311`)
@@ -684,14 +684,14 @@ did not change this, since the abort was already scoped to one statement. Fixed 
 0016 already narrowed `private_definer` to schema-USAGE-only, and `CREATE OR REPLACE FUNCTION` needs BOTH
 ownership and schema CREATE, not ownership alone — found by actually running this against
 `HARNESS_MODE=restricted`/the H2 check, never reachable from a superuser bootstrap connection alone).
-`privileged.ts#rateLimit.hit` (`privileged.ts:224-286`) now opens its own separate `db.begin()` (not the
+`privileged.ts#rateLimit.hit` (now `hitRateLimitForActor`, `privileged.ts:462-473`) now opens its own separate `db.begin()` (not the
 request's shared `trx`) and compares the returned count to its own max. Integration test: `supabase/tests/integration/repo.deno.test.ts`
 proves N calls against a real Postgres cluster each increment by exactly 1, the (max+1)th correctly flips
 `ok:false` without losing the count; `supabase/tests/matrix/07_rate_limit.sql` updated for the no-raise
 contract (5 assertions, was 4).
 
 **Blocking MEDIUM 4 (batch: one failing item aborts the whole transaction).** Fixed via a new
-`privileged.ts#withOwnershipBatch` (`privileged.ts:854`) — one outer `db.begin()`, each item in its OWN
+`privileged.ts#withOwnershipBatch` (`privileged.ts:1915`) — one outer `db.begin()`, each item in its OWN
 `trx.savepoint(...)`, so a failing item's writes roll back to just its own savepoint while every earlier
 item's committed work is untouched. `evidence-batch/index.ts:75` calls it; rate-limiting (MEDIUM 3's own
 fix) runs first per item, so a cap-crossing item is rejected as `rate_limited` without even attempting its
@@ -716,11 +716,11 @@ gets the facility-local date accepted and the naive UTC date rejected; out-of-wi
 **Should-fix items, all done:**
 
 - **Clamp live fixes to the challenge window, not the token's.** `Repo#checkinToken.consumeForFix`
-  (`privileged.ts:753`) now joins `app.checkin_challenge` and clamps `capturedAt` against ITS
+  (`privileged.ts:1602-1649`, `consumeForFix`) now joins `app.checkin_challenge` and clamps `capturedAt` against ITS
   `issued_at`/`expires_at` (120s live / 24h prefetched, whichever the challenge actually was) instead of
   the token's own separate 15-minute redemption TTL, which could let a capturedAt up to ~13 minutes stale
   pass as valid for a live challenge.
-- **`ensureOwn` on another user's device id: 409, not 500.** `privileged.ts:650` — `Errors.conflict("device_owned_by_other_user", ...)`
+- **`ensureOwn` on another user's device id: 409, not 500.** `privileged.ts:1473` — `Errors.conflict("device_owned_by_other_user", ...)`
   replaces the old bare `throw new Error(...)`.
 - **CI pin-proof step.** `.github/workflows/ci.yml`'s new "deno cache --frozen (proves the pinned hashes,
   tamper-evident)" step. This session independently RE-TESTED the premise ("`deno check --frozen` doesn't
@@ -1822,13 +1822,7 @@ less: a `failed` grade joins row 2, an `unattestable` grade joins row 3 (§7.5 "
 outcome called refused**. The app-review demo account is
 answered **403** before any reward is read (§4.7.7), so it cannot probe for ids either.
 
-> **Tracked gap, P4.2 pre-submission item (not built, deliberately): review-account behaviours 2 and 3 of build plan §7.8 "Apple 2.1".** The plan says
-> the `app-review` account "audits every sign-in, and is disabled outside submission windows". What exists: the `app.app_review_demo_account`
-> table (0007), the 403 above, the partner-route refusal, and the account's own-row read. What does **not** exist: (a) an audit record written
-> on every sign-in of that account, and (b) any mechanism that disables the account outside a submission window (a flag, an expiry or a
-> scheduled job), and (c) a provisioning procedure for the row (the owner steps in `docs/owner/apple-setup-runbook.md`, Step 4.3, are manual).
-> These must be built or explicitly waived by the owner before the App Store submission (M2); until then the account stays enabled once created,
-> so **remove its row or disable its Auth user by hand after each review window**.
+> **Built (migration 0051), no longer a tracked gap: review-account behaviours 2 and 3 of build plan §7.8 "Apple 2.1".** The `app-review` account "audits every sign-in, and is disabled outside submission windows": admin-controlled submission windows (`app.app_review_window`), a per-session `audit_log` row, a binder backstop, and the scan and activation definers refusing it (so it also receives no marker credit). Design and tests: `docs/security/review-account-design.md`; owner procedure: `docs/owner/review-account-procedure.md`. **Never delete the account's row to disable it** (that makes it an ordinary player whose tokens keep working): `close` is the off switch, `retire` replaces the account. A working `sync` schedule or a `close` after every review is a deploy precondition before the first window.
 
 The handler sees only three small interfaces (`IosPort`: `verifyAssertion`, `readBits`, `setBit0`; `AndroidPort`:
 `verifyIntegrity` **only**; plus `Repo#rewards`). `null` for a platform means "not configured". Android has **no vendor
