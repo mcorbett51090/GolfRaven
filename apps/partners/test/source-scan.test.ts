@@ -47,6 +47,8 @@ describe("source rules", () => {
     expect(hits).toEqual([]);
   });
 
+  // A first-line check only: this regex cannot see a side-effect `import "pkg"`, a dynamic `import("pkg")` or a `require`. The authoritative one is
+  // test/bundle-inputs.test.ts (esbuild's metafile, which build.mjs also enforces on every build).
   it("every import is relative: no runtime dependency, no third-party code in the bundle", () => {
     for (const s of sources) {
       for (const m of s.code.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s+["']([^"']+)["']/g)) expect(m[1], `${s.path}: ${m[0]}`).toMatch(/^\.\.?\//);

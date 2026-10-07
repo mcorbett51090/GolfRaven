@@ -56,9 +56,9 @@ describe("a real production-shaped build", () => {
   it("the page's meta CSP and the _headers CSP are the same policy (the meta one without frame-ancestors)", async () => {
     const html = await readFile(join(dist, "index.html"), "utf8");
     const meta = /http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(html)?.[1];
-    expect(meta).toBe(buildCsp(API_ORIGIN, { meta: true }));
+    expect(meta).toBe(buildCsp(API_BASE, { meta: true }));
     const headers = await readFile(join(dist, "_headers"), "utf8");
-    expect(headers).toContain(`Content-Security-Policy: ${buildCsp(API_ORIGIN)}`);
+    expect(headers).toContain(`Content-Security-Policy: ${buildCsp(API_BASE)}`);
   });
 
   it("bakes the API base into the bundle and names no other origin anywhere", async () => {
@@ -111,6 +111,25 @@ describe("the e2e build (harness) is separate from production", () => {
     // and a production scan of an e2e build reports the harness
     const findings = await scanDist(d, { apiOrigin: "http://localhost:4999" });
     expect(findings.some((f) => f.rule === "harness")).toBe(true);
+  });
+
+  it("GOLFRAVEN_PARTNERS_E2E=1 together with GOLFRAVEN_ENV=production is REFUSED, whatever the API base, and builds nothing (LOW-1)", async () => {
+    for (const base of ["http://localhost:4999/functions/v1", "https://abc123.supabase.co/functions/v1", undefined]) {
+      const d = join(scratch, `e2e-prod-${String(base).length}`);
+      const env: Record<string, string> = { GOLFRAVEN_PARTNERS_E2E: "1", GOLFRAVEN_ENV: "production" };
+      if (base !== undefined) env["GOLFRAVEN_PARTNERS_API_BASE"] = base;
+      await expect(buildPartners({ dist: d, env }), String(base)).rejects.toThrow(/GOLFRAVEN_PARTNERS_E2E=1 is refused/);
+      await expect(readdir(d), "nothing was written").rejects.toThrow();
+    }
+    // control: the same build without production goes through
+    await buildPartners({ dist: join(scratch, "e2e-ok"), env: { GOLFRAVEN_PARTNERS_E2E: "1", GOLFRAVEN_PARTNERS_API_BASE: "http://localhost:4999/functions/v1" } });
+  });
+
+  it("a production build of a real API host works and is not the e2e build", async () => {
+    const d = join(scratch, "prod-ok");
+    const r = await buildPartners({ dist: d, env: { GOLFRAVEN_ENV: "production", GOLFRAVEN_PARTNERS_API_BASE: "https://abc123.supabase.co/functions/v1" } });
+    expect(r.apiOrigin).toBe("https://abc123.supabase.co");
+    expect((await files(d)).some((n) => /harness/.test(n))).toBe(false);
   });
 });
 

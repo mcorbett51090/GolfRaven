@@ -6,7 +6,7 @@
  *
  * Environment:
  *   GOLFRAVEN_PARTNERS_API_BASE   the functions root of the partners API (default: a placeholder, see lib/config.mjs). Baked into the bundle and into the CSP.
- *   GOLFRAVEN_ENV=production      refuses the placeholder API host.
+ *   GOLFRAVEN_ENV=production      refuses the placeholder API host, a localhost / loopback / bare-IP host, and GOLFRAVEN_PARTNERS_E2E=1.
  *   DIST_DIR (or argv[2])         the output directory (default: ./dist).
  *   GOLFRAVEN_PARTNERS_E2E=1      the Playwright build only: accepts a loopback http API origin and also builds the test harness page.
  *
@@ -18,17 +18,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveApiBase } from "./lib/config.mjs";
 import { buildCsp, buildHeadersFile } from "./lib/csp.mjs";
+import { checkBundleInputs } from "./lib/inputs.mjs";
 import { scanDist } from "./lib/scan-output.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
  * @param {{ dist: string, env?: NodeJS.ProcessEnv }} opts
- * @returns {Promise<{ apiBase: string, apiOrigin: string, files: string[] }>}
+ * @returns {Promise<{ apiBase: string, apiOrigin: string, files: string[], inputs: string[] }>}
  */
 export async function buildPartners({ dist, env = process.env }) {
   const e2e = env["GOLFRAVEN_PARTNERS_E2E"] === "1";
-  const { base, origin } = resolveApiBase(env["GOLFRAVEN_PARTNERS_API_BASE"], { allowLoopback: e2e, production: env["GOLFRAVEN_ENV"] === "production" });
+  const production = env["GOLFRAVEN_ENV"] === "production";
+  // the e2e switch adds a test harness page and accepts a loopback http API: neither may ever be part of a production build
+  if (e2e && production) throw new Error("GOLFRAVEN_PARTNERS_E2E=1 is refused when GOLFRAVEN_ENV=production");
+  const { base, origin } = resolveApiBase(env["GOLFRAVEN_PARTNERS_API_BASE"], { allowLoopback: e2e, production });
 
   await rm(dist, { recursive: true, force: true });
   await mkdir(dist, { recursive: true });
@@ -54,6 +58,9 @@ export async function buildPartners({ dist, env = process.env }) {
     define: { __GR_PARTNERS_API_BASE__: JSON.stringify(base) },
   });
 
+  const outside = checkBundleInputs(result.metafile, { harness: e2e });
+  if (outside.length > 0) throw new Error(`bundle inputs outside src/:\n${outside.map((l) => `  ${l}`).join("\n")}`);
+
   /** The hashed output file of an entry point, as a page-relative URL. @param {string} entry the entry's path relative to the package root */
   const outputFor = (entry) => {
     const hit = Object.entries(result.metafile.outputs).find(([, o]) => o.entryPoint === entry);
@@ -63,7 +70,7 @@ export async function buildPartners({ dist, env = process.env }) {
   const scriptHref = outputFor("src/main.ts");
   const styleHref = outputFor("src/styles.css");
 
-  const metaCsp = buildCsp(origin, { meta: true });
+  const metaCsp = buildCsp(base, { meta: true });
   const page = async (/** @type {string} */ template, /** @type {Record<string, string>} */ vars) => {
     let html = await readFile(join(root, template), "utf8");
     for (const [k, v] of Object.entries(vars)) html = html.replaceAll(`%${k}%`, v);
@@ -74,14 +81,14 @@ export async function buildPartners({ dist, env = process.env }) {
     await writeFile(join(dist, "harness.html"), await page("test/e2e/harness/harness.html", { CSP_META: metaCsp, SCRIPT: outputFor("test/e2e/harness/harness.ts"), STYLE: styleHref }));
   }
   await cp(join(root, "public"), dist, { recursive: true });
-  await writeFile(join(dist, "_headers"), buildHeadersFile(origin));
+  await writeFile(join(dist, "_headers"), buildHeadersFile(base));
 
   const findings = await scanDist(dist, { apiOrigin: origin, harness: e2e });
   if (findings.length > 0) {
     const lines = findings.map((f) => `  ${f.file}: ${f.rule} (${f.detail})`).join("\n");
     throw new Error(`build-output scan failed:\n${lines}`);
   }
-  return { apiBase: base, apiOrigin: origin, files: Object.keys(result.metafile.outputs) };
+  return { apiBase: base, apiOrigin: origin, files: Object.keys(result.metafile.outputs), inputs: Object.keys(result.metafile.inputs) };
 }
 
 const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
