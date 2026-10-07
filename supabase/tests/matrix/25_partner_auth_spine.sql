@@ -1023,6 +1023,10 @@ RESET ROLE;
 ROLLBACK TO SAVEPOINT pa4c_i_ctl;
 -- catalog-driven, under a partner binding: planting changes nothing for ANY covered (table, command)
 SAVEPOINT pa4c_i_cat;
+-- 0051: at most ONE review account exists (unique index), so the sweep's own demo-account row for player A needs the harness's seeded one out of the way (this savepoint is rolled back)
+SET LOCAL ROLE service_role;
+DELETE FROM app.app_review_demo_account;
+RESET ROLE;
 SELECT pg_temp.sweep_seed('00000000-0000-0000-0000-00000000000a') AS _seeded \gset
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
@@ -1032,6 +1036,10 @@ SELECT is(pg_temp.window_diffs('00000000-0000-0000-0000-00000000000a'), NULL::te
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pa4c_i_cat;
 SAVEPOINT pa4c_i_cat2;
+-- 0051: at most ONE review account exists (unique index), so the sweep's own demo-account row for player A needs the harness's seeded one out of the way (this savepoint is rolled back)
+SET LOCAL ROLE service_role;
+DELETE FROM app.app_review_demo_account;
+RESET ROLE;
 SELECT pg_temp.sweep_seed('00000000-0000-0000-0000-00000000000a') AS _seeded2 \gset
 SET LOCAL ROLE private_definer;
 SELECT cmp_ok(:_seeded2, '>=', 20, 'PA-4c (i) control: the sweep SEEDED at least 20 rows keyed to player A (so the no-binding comparison below is not 0 -> 0 on empty tables)');
