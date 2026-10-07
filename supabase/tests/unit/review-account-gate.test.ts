@@ -52,9 +52,11 @@ describe("every authenticated Edge function authenticates through getActorFromRe
     .map((n) => ({ name: n, path: join(FUNCTIONS, n, "index.ts") }));
   // the system functions authenticate a SCHEDULER or a signed webhook, not a user: they never mint an Actor
   const SYSTEM = new Set(["import-catalog", "retention-purge", "signin-revocation-drain"]);
+  // the partner lane (S1.2, 0049) authenticates a partner SESSION TOKEN through its own binder, never a player identity: it must not call getActorFromRequest at all (which refuses gr_ps_ tokens)
+  const PARTNER_LANE = new Set(["partner-session"]);
 
   it("the user-facing entrypoints all call it, inside handleRequest", () => {
-    const users = entrypoints.filter((e) => !SYSTEM.has(e.name));
+    const users = entrypoints.filter((e) => !SYSTEM.has(e.name) && !PARTNER_LANE.has(e.name));
     expect(users.length).toBeGreaterThanOrEqual(12);
     for (const e of users) {
       const code = stripComments(read(e.path));
@@ -67,6 +69,10 @@ describe("every authenticated Edge function authenticates through getActorFromRe
   // The two catalog orchestrators build an Actor for a system DELEGATE (the system acting on ONE queued row of its owner, bound through the edge_system delegate binders): that is
   // not a sign-in, and the binder's window check deliberately refuses only the user kind. Listed by name so a third site is a deliberate review decision.
   const DELEGATE_ACTOR_SITES = ["catalog/drain-orchestrator.ts", "catalog/rescore-orchestrator.ts"];
+  it("the partner lane's entrypoints do not use the player identity (a partner token is never a player's)", () => {
+    for (const e of entrypoints.filter((x) => PARTNER_LANE.has(x.name))) expect(stripComments(read(e.path)), e.name).not.toContain("getActorFromRequest");
+  });
+
   it("nothing under supabase/functions builds an Actor literal except privileged.ts's getActorFromRequest (and the two named delegate sites)", () => {
     const offenders: string[] = [];
     for (const f of walk(FUNCTIONS)) {
@@ -90,6 +96,20 @@ describe("privileged.ts#getActorFromRequest runs the review-account gate", () =>
     expect(nullOut).toBeGreaterThan(verified);
     expect(gate).toBeGreaterThan(nullOut);
     expect(ret).toBeGreaterThan(gate);
+  });
+
+  it("composes with the partner-token refusal (PA-11): gr_ps_ / gr_inv_ are refused BEFORE the environment is read, any client exists or GoTrue is asked, so before the gate", () => {
+    const prefix = body.indexOf('lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_")');
+    const env = body.indexOf('Deno.env.get("SUPABASE_URL")');
+    const client = body.indexOf("createClient(");
+    const verified = body.indexOf("auth.getUser(token)");
+    const gate = body.indexOf("reviewAccountGate(");
+    expect(prefix).toBeGreaterThan(-1);
+    expect(prefix).toBeLessThan(env);
+    expect(env).toBeLessThan(client);
+    expect(client).toBeLessThan(verified);
+    expect(verified).toBeLessThan(gate);
+    expect(body.slice(prefix, env)).toContain("return null");
   });
 
   it("a disabled answer is a 403 review_account_disabled, thrown (never returned as an Actor)", () => {

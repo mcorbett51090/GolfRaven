@@ -28,7 +28,9 @@ function tokenFor(uid: string, sessionId: string | null): string {
 }
 
 // A local stand-in for GoTrue's `GET /auth/v1/user`: the bearer's `sub` is the user it answers with.
+let stubCalls = 0; // how many times "GoTrue" was asked
 const server = Deno.serve({ hostname: "127.0.0.1", port: 0, onListen: () => {} }, (req) => {
+  stubCalls++;
   const auth = req.headers.get("authorization") ?? "";
   const parts = auth.slice(7).split(".");
   try {
@@ -169,6 +171,17 @@ Deno.test("an ordinary account is never audited and never refused, with or witho
 Deno.test("a bad token is still a 401 (the gate runs only after Auth has verified it)", DT, async () => {
   const res = await entry("not.a.jwt");
   assertEquals(res.status, 401);
+});
+
+Deno.test("a partner session or invite token (gr_ps_ / gr_inv_) is refused before GoTrue is asked and before the gate runs (composition with PA-11)", DT, async () => {
+  const uid = await reviewUser("prefix");
+  const before = stubCalls;
+  for (const t of [`gr_ps_${"a".repeat(40)}`, `GR_PS_${"a".repeat(40)}`, `gr_inv_${"b".repeat(40)}`]) {
+    const res = await entry(t);
+    assertEquals(res.status, 401);
+  }
+  assertEquals(stubCalls, before, "no request reached GoTrue with a partner token");
+  assertEquals((await auditRows(uid)).length, 0, "and the gate never ran");
 });
 
 Deno.test("the database backstop: withOwnership for a disabled review account fails at the binder even with no gate in front of it", DT, async () => {
