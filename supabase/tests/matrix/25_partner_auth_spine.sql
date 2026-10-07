@@ -94,9 +94,10 @@ SELECT is((SELECT count(*)::int FROM pg_namespace n CROSS JOIN (VALUES ('edge_pa
   'PA-1: and no CREATE anywhere (the always-open TEMP schema aside), and USAGE on no schema but private (plus the PUBLIC-open public, tests, pg_catalog and information_schema): in particular NONE on app');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
-          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_binding', 'partner_binding_kind', 'partner_session_lock_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
-                'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_whoami_for_partner', 'zz24_authz_for_partner'],
-  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin and the seven _for_partner definers of 0049 (S1.2), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
+          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_binding', 'partner_binding_kind', 'partner_pin_change_for_partner', 'partner_pin_params_for_partner', 'partner_pin_set_for_partner',
+                'partner_pin_verify_for_partner', 'partner_session_lock_for_partner', 'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner',
+                'partner_session_reauth_for_partner', 'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_whoami_for_partner', 'zz24_authz_for_partner'],
+  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
           ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
   'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2), and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
@@ -571,26 +572,27 @@ SELECT is(private.zz24_authz_for_partner(NULL, NULL, NULL, 'SESSION'), '00000000
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az1;
 
--- PA-4b: A2 and A3 FAIL CLOSED, for every actor, admin included, until S1.3 / S1.4 (no interim relaxation)
+-- PA-4b: A3 FAILS CLOSED, for every actor, admin included, until S1.4 (no interim relaxation). A2 was enabled by S1.3 (0052): without its prerequisites (a passkey assertion at most 5 minutes old and a PIN grant at most 30 s
+-- old; the enabled-class cells are in 28_partner_pin_step_up.sql) it still refuses every actor, so the A2 cells below keep their 42501 and now name the prerequisite.
 SAVEPOINT az4b;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A2')$$, '42501', 'partner_authorize: class A2 is not enabled (fails closed until its prerequisite exists)', 'PA-4b: the ADMIN (aal 2) is refused class A2');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A2')$$, '42501', 'partner_authorize: a passkey assertion in the last 5 minutes is required', 'PA-4b (S1.3: A2 is ENABLED): the ADMIN (aal 2) with no reauth and no PIN grant is refused class A2');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3')$$, '42501', 'partner_authorize: class A3 is not enabled (fails closed until its prerequisite exists)', 'PA-4b: ... and class A3');
-SELECT is(private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A0'), '00000000-0000-0000-0000-4000000000d0'::uuid, 'PA-4b control: the same admin session passes class A0 (so the A2 / A3 refusals are the class, not the session)');
+SELECT is(private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A0'), '00000000-0000-0000-0000-4000000000d0'::uuid, 'PA-4b control: the same admin session passes class A0 (so the A2 / A3 refusals are the class prerequisite, not the session)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b;
 SAVEPOINT az4b2;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_mx');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A2')$$, '42501', NULL, 'PA-4b: the MANAGER at the facility is refused class A2 as well');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A2')$$, '42501', NULL, 'PA-4b: the MANAGER at the facility, with no reauth and no PIN grant, is refused class A2 as well');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', NULL, 'PA-4b: ... and A3');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b2;
 SAVEPOINT az4b3;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A2')$$, '42501', NULL, 'PA-4b: staff is refused A2');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A2')$$, '42501', NULL, 'PA-4b: staff with no reauth and no PIN grant is refused A2');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_y', NULL, ARRAY['staff'], 'A3')$$, '42501', NULL, 'PA-4b: ... and A3 (the refusal comes BEFORE the scope check: the same answer in or out of scope)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b3;
