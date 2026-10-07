@@ -147,6 +147,14 @@ describe("requests: headers and credentials mode", () => {
     for (const r of ["session", "reauth/options", "reauth", "lock"]) expect(byRoute(r).headers["authorization"], r).toBe(`Bearer ${VALID_TOKEN}`);
   });
 
+  it("a token that is HELD never leaks onto the pre-auth routes: options and verify carry no Authorization even in a signed-in client", async () => {
+    const m = await signedIn();
+    await m.api.signInOptions();
+    await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
+    expect(m.calls.map((c) => c.url.slice(BASE.length))).toEqual(["/partner-session/options", "/partner-session/verify"]);
+    for (const c of m.calls) expect(c.headers["authorization"], c.url).toBeUndefined();
+  });
+
   it("never sends the reserved X-GR-PoP header and never puts the token in a URL", async () => {
     for (const c of await everyCall()) {
       expect(c.headers["x-gr-pop"]).toBeUndefined();
@@ -364,6 +372,32 @@ describe("error mapping", () => {
     expect(((await kindOf(api.session())) as PartnerApiError).kind).toBe("malformed_response");
     const missing = await signedIn((c) => (c.url.endsWith("/session") ? jsonResponse(200, { data: { ...WHOAMI, stepUp: undefined } }) : happy(c)));
     expect(((await kindOf(missing.api.session())) as PartnerApiError).kind).toBe("malformed_response");
+  });
+
+  it("whoami: every documented field is required and typed (a missing or mistyped one is malformed_response)", async () => {
+    const mutate: Array<[string, (w: Record<string, unknown>) => void]> = [
+      ["userId", (w) => delete w["userId"]],
+      ["sessionId", (w) => (w["sessionId"] = 5)],
+      ["aal", (w) => (w["aal"] = "1")],
+      ["requiredAal", (w) => delete w["requiredAal"]],
+      ["createdAt", (w) => (w["createdAt"] = null)],
+      ["lastSeenAt", (w) => delete w["lastSeenAt"]],
+      ["idleExpiresAt", (w) => (w["idleExpiresAt"] = 1)],
+      ["expiresAt", (w) => delete w["expiresAt"]],
+      ["isAdmin", (w) => (w["isAdmin"] = "no")],
+      ["isAdmin missing", (w) => delete w["isAdmin"]],
+      ["stepUp", (w) => (w["stepUp"] = "x")],
+      ["stepUp.pinGrantActive", (w) => (w["stepUp"] = { ...WHOAMI.stepUp, pinGrantActive: 1 })],
+      ["stepUp.reauthUntil", (w) => (w["stepUp"] = { ...WHOAMI.stepUp, reauthUntil: 5 })],
+      ["memberships", (w) => (w["memberships"] = {})],
+      ["membership.facilityIds", (w) => (w["memberships"] = [{ orgId: "o", role: "staff", facilityIds: [1], trailIds: [] }])],
+    ];
+    for (const [name, change] of mutate) {
+      const body = JSON.parse(JSON.stringify(WHOAMI)) as Record<string, unknown>;
+      change(body);
+      const { api } = await signedIn((c) => (c.url.endsWith("/session") ? jsonResponse(200, { data: body }) : happy(c)));
+      expect(((await kindOf(api.session())) as PartnerApiError).kind, name).toBe("malformed_response");
+    }
   });
 
   it("whoami parses the documented shape", async () => {

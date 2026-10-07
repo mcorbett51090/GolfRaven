@@ -45,6 +45,14 @@ describe("sign-in", () => {
     expect(JSON.stringify(controller.getState())).not.toContain("gr_ps_");
   });
 
+  it("the signed-in state holds exactly the grant (expiry, aal) and the session: no other field could carry a credential", async () => {
+    const { controller } = setup();
+    await controller.signIn();
+    const s = controller.getState();
+    expect(Object.keys(s).sort()).toEqual(["busy", "grant", "notice", "screen", "session"]);
+    if (s.screen === "signed-in") expect(Object.keys(s.grant).sort()).toEqual(["aal", "expiresAt"]);
+  });
+
   it("a cancelled prompt returns to signed-out with a 'cancelled' error and no session", async () => {
     const { controller, w, api } = setup();
     w.auth.failNextWith = "NotAllowedError";
@@ -89,6 +97,22 @@ describe("sign-in", () => {
     expect(api.hasSession()).toBe(false);
     expect(controller.getState().screen).toBe("signed-out");
     expect(noticeOf(controller.getState())?.kind).toBe("error");
+  });
+
+  it("if the session cannot be read right after verify (a network failure or a 500, NOT a 401 that wipes the token itself), no token is left held", async () => {
+    for (const failure of ["network", "500"] as const) {
+      const { controller, api } = setup({}, (f) => (async (input, init) => {
+        if (String(input).endsWith("/session")) {
+          if (failure === "network") throw new TypeError("offline");
+          return new Response(JSON.stringify({ error: { code: "internal_error", message: "x" } }), { status: 500, headers: { "content-type": "application/json", "access-control-allow-origin": "https://partners.example.test" } });
+        }
+        return f(input, init);
+      }) as typeof fetch);
+      await controller.signIn();
+      expect(controller.getState().screen, failure).toBe("signed-out");
+      expect(api.hasSession(), failure).toBe(false);
+      expect(noticeOf(controller.getState())?.kind, failure).toBe("error");
+    }
   });
 
   it("an unreachable server is a 'network' error and leaves nothing behind", async () => {

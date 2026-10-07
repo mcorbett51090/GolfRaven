@@ -81,16 +81,10 @@ export function createController(deps: ControllerDeps): AppController {
       set({ screen: "signing-in" });
       try {
         const grant = await signInWithPasskey(api, deps.webauthn, abort.signal);
-        let session: WhoAmI;
-        try {
-          session = await api.session();
-        } catch (e) {
-          // a session that cannot even be read is not one to keep holding
-          api.forgetSession();
-          throw e;
-        }
+        const session = await api.session();
         set({ screen: "signed-in", grant, session, busy: null, notice: null });
       } catch (e) {
+        // every failure on the way in, including a session that cannot even be read right after a successful verify, leaves no token behind
         if (api.hasSession()) api.forgetSession();
         set({ screen: "signed-out", notice: { kind: "error", message: messageForError(e, "sign-in") } });
       } finally {
