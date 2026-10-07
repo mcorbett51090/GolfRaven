@@ -306,7 +306,7 @@ The screen, the flow and their tests are done. What remains is a field test, a c
 **`OFFLINE_CODE_UI_ENABLED` (Me → Offline code, and the automatic seed provisioning)**
 
 - [ ] **Device registration:** `me-offline-seed` answers 404 until the device row exists. With the flag on, the app registers it through `POST checkin-challenge` (see "Device registration" in the Offline code table). That needs `checkin-challenge` deployed and its 30-an-hour live-challenge limit not exhausted; if the server later gains a purpose-built registration endpoint, switch `deviceRegistrationFor` to it. Check on a real account that the first "Set up" yields a code, not "not ready".
-- [ ] **The Vault secret `offline_seed_key` is provisioned** (migration 0045 DEPLOY note: `select vault.create_secret('<random, >= 32 bytes>', 'offline_seed_key')`), or `me-offline-seed` answers 503 `offline_seed_unavailable` and every attempt ends in "unavailable".
+- [ ] **The Vault secret `offline_seed_key` is provisioned** (generate it **inside the database**: `select vault.create_secret(encode(gen_random_bytes(32), 'hex'), 'offline_seed_key')`, SQL editor only, never `psql -c`; `[unverified]`: `gen_random_bytes` may live in the `extensions` schema. Migration 0045's DEPLOY comment shows a literal placeholder and is superseded by `docs/security/edge-role-design.md` item 8, as migrations are immutable), or `me-offline-seed` answers 503 `offline_seed_unavailable` and every attempt ends in "unavailable".
 - [ ] **The P5 staff side is live:** the endpoint that VERIFIES the handle plus the code does not exist yet; until it does the card shows a code nobody can accept and each reveal spends the 20-an-hour limit.
 
 **`WALLET_ACTIVATION_UI_ENABLED` (Wallet → Earned rewards → Activate)**

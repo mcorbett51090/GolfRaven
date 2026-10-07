@@ -62,11 +62,13 @@ command with `$(...)` puts the whole key on that process's argv; do not do that)
    both shared parsers accept (`_shared/pem.ts`):
 
    ```sh
-   umask 077
-   ENVDIR="$(mktemp -d)"   # mode 0700, outside the checkout
-   printf 'GR_APPLE_SIWA_PRIVATE_KEY="%s"\n' "$(awk 'NF{printf "%s\\n",$0}' <path-to-the-AuthKey-p8-in-your-vault>)" > "$ENVDIR/secrets.env"
-   supabase secrets set --env-file "$ENVDIR/secrets.env" --project-ref <PROJECT_REF>   # flag name [unverified]
-   rm -rf "$ENVDIR"        # delete it as soon as the command returns
+   (   # a subshell: the umask does not leak into your shell, and the trap cleans up even if a command fails
+     umask 077
+     ENVDIR="$(mktemp -d)"           # mode 0700, outside the checkout
+     trap 'rm -rf "$ENVDIR"' EXIT    # delete the directory and file when this subshell ends, success or not
+     printf 'GR_APPLE_SIWA_PRIVATE_KEY="%s"\n' "$(awk 'NF{printf "%s\\n",$0}' <path-to-the-AuthKey-p8-in-your-vault>)" > "$ENVDIR/secrets.env"
+     supabase secrets set --env-file "$ENVDIR/secrets.env" --project-ref <PROJECT_REF>   # flag name [unverified]
+   )
    ```
 
    `printf` is a shell builtin, so the key is not in any child process's arguments (the only argument `awk` sees is the
@@ -87,8 +89,8 @@ separate values; plan §3.7, `02-build-plan.md:450-457`).
 | Value                                       | Created in (Apple/other)                          | Name it goes into                                          | Stored where                                       | Read by                                                                                                          | If unset or wrong                                                                                                                                  |
 | ------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Team ID                                     | Developer portal, membership details              | `GR_APPLE_TEAM_ID`                                         | Supabase secret                                    | `privileged.ts:2818`, `:2850`, `:2963`, `:2998`                                                                   | All Apple paths unconfigured (rows below)                                                                                                          |
-| Bundle ID `com.golfraven.app`               | Developer portal, Identifiers                     | `GR_APPLE_BUNDLE_ID`                                       | Supabase secret                                    | `privileged.ts:2819`, `:2851`, `:2964`                                                                            | Same. Whitespace in team or bundle id also counts as unconfigured (`privileged.ts:2852`, `:2909`)                                                   |
-| (same bundle ID, app side)                  | already in the repo                               | `ios.bundleIdentifier` in `apps/mobile/app.json:25`        | git (it is public)                                 | Expo prebuild                                                                                                     | A different value on either side breaks App Attest (`rpIdHash`, `app-attest-registration` step 5, `p3-money-path-requirements.md:2663`)            |
+| Bundle ID `com.golfraven.app`               | Developer portal, Identifiers                     | `GR_APPLE_BUNDLE_ID`                                       | Supabase secret                                    | `privileged.ts:2819`, `:2851`, `:2964`                                                                            | Same. Whitespace in team or bundle id also counts as unconfigured (`privileged.ts:2852`, `:2966`)                                                   |
+| (same bundle ID, app side)                  | already in the repo                               | `ios.bundleIdentifier` in `apps/mobile/app.json:25`        | git (it is public)                                 | Expo prebuild                                                                                                     | A different value on either side breaks App Attest (`rpIdHash`, `app-attest-registration` step 5, `p3-money-path-requirements.md:2671`)            |
 | SIWA client id (native flow)                | = the bundle ID                                   | `GR_APPLE_SIWA_CLIENT_ID`                                  | Supabase secret                                    | `privileged.ts:2999`                                                                                              | `me-signin-methods`, `me-delete`, `signin-revocation-drain`: Apple unconfigured (see below)                                                         |
 | SIWA key ID                                 | Developer portal, Keys                            | `GR_APPLE_SIWA_KEY_ID`                                     | Supabase secret                                    | `privileged.ts:3000`                                                                                              | Same                                                                                                                                               |
 | SIWA private key (`.p8` contents)           | Developer portal, Keys (one-time download)        | `GR_APPLE_SIWA_PRIVATE_KEY`                                | Supabase secret (plus your vault)                  | `privileged.ts:3001` then `_shared/pem.ts:21-37`                                                          | Blank: unconfigured. Not a valid PKCS#8 PEM or not a P-256 key: fails on first use (`apple-client-secret.ts:56-63`)                                |
@@ -97,7 +99,7 @@ separate values; plan §3.7, `02-build-plan.md:450-457`).
 | DeviceCheck key ID                          | Developer portal, Keys                            | `GR_APPLE_DEVICECHECK_KEY_ID`                              | Supabase secret                                    | `privileged.ts:2820`                                                                                              | `rewards-activate` on iOS: 503 `attestation_not_configured` (`activate-handler.ts:201`)                                                            |
 | DeviceCheck private key (`.p8` contents)    | Developer portal, Keys (one-time download)        | `GR_APPLE_DEVICECHECK_PRIVATE_KEY`                         | Supabase secret (plus your vault)                  | `privileged.ts:2821` then `_shared/pem.ts:21-37`                                                                  | Same. Real line breaks or one line with a literal `\n` per break are both accepted (one shared parser, Repo inconsistencies item 3, fixed)                                                       |
 | DeviceCheck environment                     | Your decision D1 (Step 3.1)                         | `GR_APPLE_DEVICECHECK_ENV` = `production` or `development` | Supabase secret                                    | `privileged.ts:2822`, host chosen at `devicecheck-client.ts:63-66`                                                | Anything else: unconfigured                                                                                                                        |
-| Supabase Auth Apple provider fields         | Supabase dashboard                                | client id(s), team id, key id, client-secret JWT           | Supabase Auth settings (dashboard), not git        | GoTrue inside Supabase, see `p3-money-path-requirements.md:2966-2968`                                             | Native Apple sign-in does not work                                                                                                                 |
+| Supabase Auth Apple provider fields         | Supabase dashboard                                | client id(s), team id, key id, client-secret JWT           | Supabase Auth settings (dashboard), not git        | GoTrue inside Supabase, see `p3-money-path-requirements.md:2988-2990`                                             | Native Apple sign-in does not work                                                                                                                 |
 | Client-secret JWT (≤ 6 months)              | You mint it locally from the SIWA `.p8` (Step 2.4) | (pasted into the dashboard field above)                    | Dashboard, plus vault copy                         | Monthly check `tools/apple/check-siwa-secret-expiry.mjs:1-12`                                                    | After expiry Auth's Apple sign-in fails; the server's own 10-minute secrets are unaffected (`apple-client-secret.ts:13-14`)                        |
 | Apple App Attestation Root CA               | Not configuration: **pinned in code**             | none (there is no variable)                                | git: `_shared/rewards/apple-app-attest-root.ts:27-41` | `privileged.ts:2967`                                                                                              | n/a. Step 3.2 is the human check that the pinned bytes are really Apple's                                                                          |
 
@@ -169,12 +171,12 @@ non-empty (`privileged.ts:2802-2805`).
 ### 1.3 Bundle-ID reservation (checklist §8, Apple half)
 
 - **What:** checklist §8 wants both the iOS and Android IDs reserved "even before the app is built" so they cannot be
-  squatted (`docs/owner/accounts-and-domain-checklist.md:99-107`).
+  squatted (`docs/owner/accounts-and-domain-checklist.md:103-113`).
 - **Apple half:** registering the App ID (1.2) and creating the App Store Connect record (Step 4.1) is what holds the
   identifier and name `[unverified — training knowledge: that an App ID alone, without an app record, reserves the
   name]`.
 - **Android half:** the same string `com.golfraven.app` (`apps/mobile/app.json:11`) is reserved in Google Play
-  Console. **Blocked on** the Google Play organisation account (checklist §4, `:43-52`). This runbook does not cover
+  Console. **Blocked on** the Google Play organisation account (checklist §4, `:45-54`). This runbook does not cover
   it.
 - **Verify:** both stores list the identifier under the organisation account.
 
@@ -209,7 +211,7 @@ Done in Step 1.2. Nothing more to create for the native iOS flow.
   | Key ID                | `GR_APPLE_SIWA_KEY_ID`        | Plain string, trimmed (`privileged.ts:3000`)                                                                                                                                                                                                                                                             |
   | `.p8` contents        | `GR_APPLE_SIWA_PRIVATE_KEY`   | The whole file: one PKCS#8 `PRIVATE KEY` block (`BEGIN PRIVATE KEY` ... `END PRIVATE KEY`). Real line breaks or one line with literal `\n` are both accepted (`apple-client-secret.ts:31`, `_shared/pem.ts:21-37`). It must be an **EC P-256** key (`apple-client-secret.ts:60`)                                                              |
   | Team ID               | `GR_APPLE_TEAM_ID`            | Plain string, trimmed (`privileged.ts:2998`)                                                                                                                                                                                                                                                             |
-  | Client ID (native)    | `GR_APPLE_SIWA_CLIENT_ID`     | `com.golfraven.app`. It is the identity token's audience for the native flow (`privileged.ts:2992`, `p3-money-path-requirements.md:2959`)                                                                                                                                                                |
+  | Client ID (native)    | `GR_APPLE_SIWA_CLIENT_ID`     | `com.golfraven.app`. It is the identity token's audience for the native flow (`privileged.ts:2992`, `p3-money-path-requirements.md:2981`)                                                                                                                                                                |
 
 - **How the server uses it:** it mints a 10-minute ES256 client-secret JWT itself from the key (header `kid` = key
   ID; `iss` = team ID; `sub` = client ID; `aud` = `https://appleid.apple.com`), caches it, and re-mints when under 2
@@ -226,24 +228,24 @@ Done in Step 1.2. Nothing more to create for the native iOS flow.
   key to Supabase or to the mint tool without it touching a command line" (Secrets section above), never a command
   line argument.
 - **What:** `GR_APPLE_TEAM_ID`, `GR_APPLE_SIWA_CLIENT_ID`, `GR_APPLE_SIWA_KEY_ID`, `GR_APPLE_SIWA_PRIVATE_KEY`
-  (`p3-money-path-requirements.md:2956-2961`, deploy step 2 at `:2973`).
+  (`p3-money-path-requirements.md:2978-2983`, deploy step 2 at `:2995`).
 - **The key never goes on a command line or into shell history or a CI log** (see the Secrets section).
 - **Order matters for deletion:** an account deleted while Apple is unconfigured queues its Apple grant as
   `not_configured_apple` and the queue gives up after **72 hours** (`me-delete/index.ts:29`,
-  `signin-revocation-drain/index.ts:3`, `p3-money-path-requirements.md:2923`). Set these before the first real
+  `signin-revocation-drain/index.ts:3`, `p3-money-path-requirements.md:2945`). Set these before the first real
   Apple-signed-in account can exist in that project.
 - **Verify:** Step 6, probes P2 and P3.
 
 ### 2.4 Configure Supabase Auth's own Apple provider, and mint its client secret
 
 This is a **dashboard step, documented but not built** (`privileged.ts:2994-2996`,
-`p3-money-path-requirements.md:2964-2968`).
+`p3-money-path-requirements.md:2988-2990`).
 
 - **Where:** Supabase dashboard, Authentication, Providers, Apple `[unverified — training knowledge]`.
 - **What:**
   1. Enable the Apple provider.
   2. Client id: `com.golfraven.app` (the bundle ID for the native flow). Put the **same** client id in
-     `GR_APPLE_SIWA_CLIENT_ID` (`p3-money-path-requirements.md:2967-2968`).
+     `GR_APPLE_SIWA_CLIENT_ID` (`p3-money-path-requirements.md:2989-2990`).
   3. Team ID, Key ID and a pre-generated client-secret JWT valid for at most six months (the repo's wording;
      Apple's exact maximum is `[unverified — training knowledge]`).
 - **Confirm you need this secret before minting it.** For a **native-only** Sign in with Apple flow (iOS
@@ -282,12 +284,12 @@ This is a **dashboard step, documented but not built** (`privileged.ts:2994-2996
 
   Do **not** use the script's `APPLE_SIWA_CLIENT_SECRET_JWT=<jwt> node ...` env-var form: the secret would be
   in the shell history. Exit 0 means more than 30 days remain; exit 1 means expired, expiring, malformed or no `exp`;
-  exit 2 means no input (`tools/apple/check-siwa-secret-expiry.mjs:1-12`, `p3-money-path-requirements.md:2982-2988`). It is **not
-  scheduled** anywhere (`p3-money-path-requirements.md:2986`); a calendar reminder is the owner's half.
+  exit 2 means no input (`tools/apple/check-siwa-secret-expiry.mjs:1-12`, `p3-money-path-requirements.md:3004-3010`). It is **not
+  scheduled** anywhere (`p3-money-path-requirements.md:3009-3010`); a calendar reminder is the owner's half.
 - **Decide before launch (not an Apple step):** GoTrue links same-verified-email identities by default
   `[unverified — training knowledge]`, which would defeat plan rule (2) at the sign-in moment. The P4 spike must turn
   automatic linking off or route the first social sign-in through a pre-check
-  (`p3-money-path-requirements.md:3011-3018`).
+  (`p3-money-path-requirements.md:3033-3040`).
 - **Verify:** Step 6, probe P5 (a real Apple sign-in on a TestFlight build), and the monthly check exits 0.
 
 ### 2.5 Services ID (Android and web): **not needed by today's code**
@@ -296,10 +298,10 @@ This is a **dashboard step, documented but not built** (`privileged.ts:2994-2996
   is shown on Android only when Google is offered and then reports "not available on this device"
   (`apps/mobile/README.md:120-121`). Server: "`GR_APPLE_SIWA_CLIENT_ID` is one value today"; a Services ID is "a
   different `aud`" and needs a second audience and a secret whose `sub` is that id
-  (`p3-money-path-requirements.md:2997`, `:3032`).
+  (`p3-money-path-requirements.md:3019`, `:3054`).
 - **So:** there is nothing in the repo to put a Services ID _into_ until that server and client work is built.
   Creating the identifier now is harmless but pointless. Checklist §5 lists it as a P0 deliverable
-  (`docs/owner/accounts-and-domain-checklist.md:54-64`); if you want that box ticked for AT(5), create it, record
+  (`docs/owner/accounts-and-domain-checklist.md:56-68`); if you want that box ticked for AT(5), create it, record
   its identifier in your vault, and leave it unused.
 - **Blocked on the domain (owner question Q1):** a Services ID takes return URLs and a verified domain
   `[unverified — training knowledge]`. The domain is not decided: Q1 is "the partners domain. Confirm the exact
@@ -319,7 +321,7 @@ This is a **dashboard step, documented but not built** (`privileged.ts:2994-2996
   along the lines of "Configure Sign in with Apple for Email Communication") `[unverified — training knowledge]`.
 - **What to register:** the domain (or addresses) that Supabase Auth sends OTP mail from. Checklist §7 settles the
   provider as **Resend** on the P0 domain with SPF, DKIM and DMARC published
-  (`docs/owner/accounts-and-domain-checklist.md:75-97`). Apple may also require SPF/DKIM alignment before accepting
+  (`docs/owner/accounts-and-domain-checklist.md:79-101`). Apple may also require SPF/DKIM alignment before accepting
   the domain `[unverified — training knowledge]`.
 - **Goes into:** nothing in the repo or in a secret. It is Apple-side configuration. Record the registered
   domain(s) and the date in the checklist, not in the runbook.
@@ -337,7 +339,7 @@ This is a **dashboard step, documented but not built** (`privileged.ts:2994-2996
 ### 3.1 Match the environments: build side and server side
 
 The App Attest entitlement carries either `development` or `production`. The attestation's `aaguid` names the
-environment, and the server accepts **exactly one** per deployment (`p3-money-path-requirements.md:2665`).
+environment, and the server accepts **exactly one** per deployment (`p3-money-path-requirements.md:2673`).
 
 | Build kind                                     | `GOLFRAVEN_APP_ATTEST_ENV` at prebuild/EAS build | The server project it talks to must have `GR_APPLE_APPATTEST_ENV` |
 | ---------------------------------------------- | ------------------------------------------------ | ----------------------------------------------------------------- |
@@ -349,7 +351,7 @@ Sources: `apps/mobile/README.md:90`, `:281`; `modules/golfraven-attest/app.plugi
 `privileged.ts:2955-2960`.
 
 - A mismatch is **not** silent: registration is refused with 422 `attestation_rejected` (server-side reason
-  `aaguid_mismatch`, logged, `p3-money-path-requirements.md:2800-2805`), then the app backs off registering for 1 hour
+  `aaguid_mismatch`, logged, `p3-money-path-requirements.md:2810-2817`), then the app backs off registering for 1 hour
   (`apps/mobile/README.md:281`, `:400`), and the device stays `unattestable`.
 - **Consequence for staging:** one Supabase project has one `GR_APPLE_APPATTEST_ENV`. Plan §3.7 puts TestFlight
   against `gr-staging` (`02-build-plan.md:456`), and a TestFlight build is `production`. So `gr-staging` should carry
@@ -359,7 +361,7 @@ Sources: `apps/mobile/README.md:90`, `:281`; `modules/golfraven-attest/app.plugi
   entitlement (`privileged.ts:2956-2959`: "its own variable ... a property of the app BUILD's entitlement, DeviceCheck's
   is a property of the API host"). "In a normal deployment the two agree" is true for **production**; it is **not** a
   rule for staging. See decision D1 below before you set it. There is no mismatch canary today
-  (`p3-money-path-requirements.md:2800-2805`, follow-up F16).
+  (`p3-money-path-requirements.md:2810-2817`, follow-up F16).
 
 **Decision D1 (owner): which DeviceCheck environment does `gr-staging` use?** Do not default it to the same word as
 App Attest. DeviceCheck's two bits are **persistent at Apple, per device**: bit0 means "an account that received a
@@ -371,7 +373,7 @@ Choose one and write the choice in your notes:
 
 | Option | `gr-staging` `GR_APPLE_DEVICECHECK_ENV` | App Attest for the same project | What it costs |
 | --- | --- | --- | --- |
-| **A. Recommended default** | `development` | `GR_APPLE_APPATTEST_ENV=production` (TestFlight builds are `production`, `apps/mobile/README.md:90`) | Whether a TestFlight build's DeviceCheck token is accepted by Apple's **development** host is `[unverified — training knowledge]`; a rejected token comes back as 400/401/403, which this server maps to 503 `attestation_not_configured` (`devicecheck-client.ts:137-141`). Test it with probe P8 on one TestFlight device. If it is rejected, use B or C |
+| **A. Recommended default** | `development` | `GR_APPLE_APPATTEST_ENV=production` (TestFlight builds are `production`, `apps/mobile/README.md:90`) | Whether a TestFlight build's DeviceCheck token is accepted by Apple's **development** host is `[unverified — training knowledge]`; a 400 that names the device token becomes a **failed grade, an open `attestation_failed` signal and a held activation** (`devicecheck-client.ts:138`, `activate-handler.ts:347-362`), which looks like a normal "held for review" in the app; a 401, a 403 or any other 400 becomes 503 `attestation_not_configured` (`:137-141`). Test it with probe P8 on one TestFlight device, **including its database check**. If it is rejected, use B or C |
 | B. Dedicated test devices | `production` | `production` | Keep a written list of devices that are **used only against staging and never with a production account** (their bit0 will be set). Cheap, but a discipline problem: one slip burns a real tester's phone |
 | C. No DeviceCheck on staging | leave the three `GR_APPLE_DEVICECHECK_*` secrets **unset** | `production` | `rewards-activate` on iOS answers 503 `attestation_not_configured` (`activate-handler.ts:201`), so iOS reward activation cannot be exercised on staging. Test it only on option-B devices |
 
@@ -382,7 +384,7 @@ every option, because that follows the TestFlight build, not DeviceCheck.
 
 **Naming warning: this is not the K2 landing-page experiment.** In the build plan "K2" is the player-signal landing-page kill experiment
 (`02-build-plan.md:2641`). The check here is the **"follow-up K2" of the App Attest work**, defined at
-`docs/security/p3-money-path-requirements.md:2685-2688` and `supabase/functions/_shared/rewards/apple-app-attest-root.ts:13-16`.
+`docs/security/p3-money-path-requirements.md:2693-2702` and `supabase/functions/_shared/rewards/apple-app-attest-root.ts:13-16`.
 It is unrelated to the landing page.
 
 **What it is.** Attestation verification trusts one root, pinned in code as base64 DER
@@ -424,7 +426,7 @@ Apple's before this ships.** The URL above is the repo's own cited source (`appl
    also count `[unverified — training knowledge: whether it does]`. Write down which sources you used.
 5. **Fail:** any difference means the pinned root is wrong. Stop. Do not deploy App Attest to production. Open an
    issue; the fix is to replace the bytes and the constant in `apple-app-attest-root.ts` and
-   `p3-money-path-requirements.md:2685-2688` together ("there is deliberately no way to do so at run time",
+   `p3-money-path-requirements.md:2693-2702` together ("there is deliberately no way to do so at run time",
    `apple-app-attest-root.ts:24-25`).
 6. Record the result (date, the fingerprint you saw, the sources and networks you used) in your own notes and, if you want it in the
    public repo, as a one-line "verified on <date>" in the runbook's status table below. Do **not** record anything
@@ -465,7 +467,8 @@ The unit test `supabase/tests/unit/app-attest-registration.test.ts:373` does the
   | `.p8` contents       | `GR_APPLE_DEVICECHECK_PRIVATE_KEY` | One PKCS#8 `PRIVATE KEY` PEM block, with real line breaks or one line with a literal `\n` per break: the same shared parser as the SIWA key (`_shared/pem.ts`). A non-PEM value makes every call throw not-configured (`devicecheck-client.ts:110-111`). Must be EC P-256 (`devicecheck-client.ts:114-116`) |
   | Environment          | `GR_APPLE_DEVICECHECK_ENV`         | Exactly `production` or `development` after trimming (`privileged.ts:2822`); see decision D1 for which one a project should use. It picks the host: `https://api.devicecheck.apple.com` or `https://api.development.devicecheck.apple.com` (`devicecheck-client.ts:63-66`)                                  |
 
-- **Operational caveats from the code.** A 400 whose body does not blame the device token, a 401 or a 403 are all
+- **Operational caveats from the code.** A 400 whose body **does** blame the device token makes the activation `failed` (an
+  `attestation_failed` signal and a hold, `devicecheck-client.ts:138`); a 400 whose body does not blame it, a 401 or a 403 are all
   turned into 503 `attestation_not_configured` (`devicecheck-client.ts:137-141`), with the server log line
   "attestation vendor is not configured" (`activate-handler.ts:123`). So after you configure DeviceCheck, **a 503 from
   `rewards-activate` on iOS means the key, key ID, team ID or environment is wrong**, not that the player did
@@ -579,7 +582,7 @@ for the owner and counsel; do not copy a mapping from here.
 | Data the code handles                                                                  | Where in the code                                                                                                                                                                               | Status today                                                                                                                  |
 | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | Email address (email OTP; Apple email scope)                                           | `apps/mobile/src/auth/supabase-auth.ts:210-213`; `apps/mobile/src/signin/apple-expo.ts:20` (EMAIL scope only, no name); server `signin/apple-id-token.ts:222`                                      | In the build                                                                                                                  |
-| Apple account identifier (`sub`) and an encrypted Apple refresh token (for revocation) | `supabase/functions/_shared/signin/apple-client.ts:54-76`; envelope encryption at `p3-money-path-requirements.md:2904`                                                                       | In the build, server side                                                                                                     |
+| Apple account identifier (`sub`) and an encrypted Apple refresh token (for revocation) | `supabase/functions/_shared/signin/apple-client.ts:54-76`; envelope encryption at `p3-money-path-requirements.md:2926`                                                                       | In the build, server side                                                                                                     |
 | Precise location, foreground only (lat, lng, accuracy, time)                           | `apps/mobile/src/evidence/payload.ts:39-48`; `apps/mobile/src/checkin/expo-location.ts:4-7`, `:57`; usage string at `apps/mobile/app.json:38`                                                    | Behind `CHECKIN_UI_ENABLED = false` (`apps/mobile/src/features.ts:13`)                                                        |
 | Device identifiers for fraud prevention: the DeviceCheck token, the App Attest key id  | `apps/mobile/README.md:278`, `:340`; server stores a hash (`privileged.ts:2673`)                                                                                                                  | Behind the check-in and Wallet flags (`features.ts:13`, `:29`)                                                                |
 | A random device id (UUID) for the install                                              | `apps/mobile/src/evidence/payload.ts:113`                                                                                                                                                         | In the build                                                                                                                  |
@@ -684,21 +687,37 @@ build until its items are done (`apps/mobile/README.md:273`). Consequences:
 ## Step 6. Verification table
 
 Run each probe against the **project you configured**. Substitute your own values; never paste them into the repo or a
-shared log. `$ACCESS_TOKEN` is a signed-in test user's session token; `$ANON_KEY` is the public anon key;
-`$API` is `https://<PROJECT_REF>.supabase.co/functions/v1`. The expected results below were **read from the code, not run** against a deployed project, and the Supabase
+shared log. `$ANON_KEY` is the public anon key (it is already in every app bundle, so it may sit on a command line);
+`$API` is `https://<PROJECT_REF>.supabase.co/functions/v1`. **Bearer tokens are different**: the signed-in test user's
+session token is a credential, and the **service-role key** (P4) bypasses row-level security entirely. Neither may appear
+in a command's arguments (`ps`, `/proc/*/cmdline`, shell history), so every probe sends them through curl's config-on-stdin
+(`-K -`) with a shell function. `printf` is a builtin, so the secret never reaches any process's argv; the only argument
+the password manager's CLI sees is the item's name (bash or zsh; `[unverified for other shells]`):
+
+```sh
+# print-secret = your password manager's CLI command that prints one item's value (replace it).
+secret_curl() {   # secret_curl <password-manager item holding a bearer token> <curl args...>
+  local item="$1"; shift
+  printf 'header = "authorization: Bearer %s"\n' "$(print-secret "$item")" | curl -s -K - "$@"
+}
+```
+
+Never add `-v` (it prints the request headers, including the token) and do not save the output of a run that used the
+service-role key anywhere in the checkout. `$USER_TOKEN_ITEM` and `$SERVICE_ROLE_ITEM` below are the names of those two
+password-manager items, not the values. The expected results below were **read from the code, not run** against a deployed project, and the Supabase
 gateway behaviour is `[unverified — training knowledge]`. If a probe disagrees with this table, believe the probe
 and fix the table.
 
 | ID  | What it proves                                    | How                                                                                                                                                                                                                                                                  | Pass                                                                                                                          | Fail means                                                                                                                                                                                                      |
 | --- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| P1  | `devices-attest-key` is configured                | `curl -s -o /dev/null -w '%{http_code}\n' -X POST "$API/devices-attest-key" -H "apikey: $ANON_KEY" -H "authorization: Bearer $ACCESS_TOKEN" -H 'content-type: application/json' -d '{}'`                                                                              | **400** (the body fails validation, which happens after the config check: `devices-attest-key/index.ts:36-42`)                  | **503** `attestation_not_configured`: team, bundle or `GR_APPLE_APPATTEST_ENV` missing, whitespace in an id, or env not exactly `production`/`development` (`privileged.ts:2966`). 401: bad token                    |
-| P2  | SIWA server values are all set                    | `POST $API/me-signin-methods` with the same headers and a well-shaped body `{"action":"link","provider":"apple","identityToken":"x.y.z","authorizationCode":"x","nonce":"<16+ chars>"}` (`signin/request-shape.ts:6`; the raw nonce is 16-256 characters, `apps/mobile/src/signin/nonce.ts:4`). It costs one of the 10 link attempts per user per hour (`me-signin-methods/index.ts`) | **422** `invalid_identity_token` (Apple is configured and rejected the dummy token, `methods-handler.ts:88`)                    | **503** `provider_not_configured`: one of the four values is missing or blank (`methods-handler.ts:84`, `:102`). This probe does **not** prove the private key is valid, because the key is first used when a code is exchanged (`apple-client-secret.ts:81`) |
-| P3  | The `.p8`, key ID, team ID and client ID are right | After a real Apple sign-in on a TestFlight build, the app's `link` call succeeds (`apps/mobile/src/signin/flow.ts:96`); then call `GET $API/me-signin-methods` and see an `apple` method                                                                                                      | `link` returns `created: false` or `true`, no 5xx; the Apple method is listed                                                  | 503 `provider_not_configured`: P2's cause. A `token_invalid_client` style failure means the key, key ID, team ID or client ID do not match each other (`apple-client.ts:61-66`: `invalid_client` is treated as our configuration being wrong) |
-| P4  | The revocation drain works                        | In staging: delete a throwaway Apple-signed-in account with Apple unconfigured (grant queued as `not_configured_apple`, `revocation.ts:73`), then configure Step 2.3 and run `curl -X POST "$API/signin-revocation-drain" -H "authorization: Bearer <service-role key>"` from a trusted shell | JSON `{"attempted":1,"revoked":1,...}` (`signin-revocation-drain/index.ts:26-37`)                                              | `queuedForRetry` stays 1: read `outcome`/`error` in the function logs (`revocation.ts:109`); `invalid_client` means the SIWA values are inconsistent. 401: the bearer is not the service-role key (`privileged.ts:3009-3015`) |
+| P1  | `devices-attest-key` is configured                | `secret_curl "$USER_TOKEN_ITEM" -o /dev/null -w '%{http_code}\n' -X POST "$API/devices-attest-key" -H "apikey: $ANON_KEY" -H 'content-type: application/json' -d '{}'`                                                                              | **400** (the body fails validation, which happens after the config check: `devices-attest-key/index.ts:36-42`)                  | **503** `attestation_not_configured`: team, bundle or `GR_APPLE_APPATTEST_ENV` missing, whitespace in an id, or env not exactly `production`/`development` (`privileged.ts:2966`). 401: bad token                    |
+| P2  | SIWA server values are all set                    | `secret_curl "$USER_TOKEN_ITEM" -X POST "$API/me-signin-methods" -H "apikey: $ANON_KEY" -H 'content-type: application/json' -d '<body>'` with a well-shaped body `{"action":"link","provider":"apple","identityToken":"x.y.z","authorizationCode":"x","nonce":"<16+ chars>"}` (`signin/request-shape.ts:6`; the raw nonce is 16-256 characters, `apps/mobile/src/signin/nonce.ts:4`). It costs one of the 10 link attempts per user per hour (`me-signin-methods/index.ts`) | **422** `invalid_identity_token` (Apple is configured and rejected the dummy token, `methods-handler.ts:88`)                    | **503** `provider_not_configured`: one of the four values is missing or blank (`methods-handler.ts:84`, `:102`). This probe does **not** prove the private key is valid, because the key is first used when a code is exchanged (`apple-client-secret.ts:81`) |
+| P3  | The `.p8`, key ID, team ID and client ID are right | After a real Apple sign-in on a TestFlight build, the app's `link` call succeeds (`apps/mobile/src/signin/flow.ts:96`); then call `secret_curl "$USER_TOKEN_ITEM" "$API/me-signin-methods" -H "apikey: $ANON_KEY"` (a GET) and see an `apple` method                                                                                                      | `link` returns `created: false` or `true`, no 5xx; the Apple method is listed                                                  | 503 `provider_not_configured`: P2's cause. A `token_invalid_client` style failure means the key, key ID, team ID or client ID do not match each other (`apple-client.ts:61-66`: `invalid_client` is treated as our configuration being wrong) |
+| P4  | The revocation drain works                        | In staging: delete a throwaway Apple-signed-in account with Apple unconfigured (grant queued as `not_configured_apple`, `revocation.ts:73`), then configure Step 2.3 and run `secret_curl "$SERVICE_ROLE_ITEM" -X POST "$API/signin-revocation-drain"` from a trusted shell (the service-role key is read from the password manager into curl's stdin, never an argument) | JSON `{"attempted":1,"revoked":1,...}` (`signin-revocation-drain/index.ts:26-37`)                                              | `queuedForRetry` stays 1: read `outcome`/`error` in the function logs (`revocation.ts:109`); `invalid_client` means the SIWA values are inconsistent. 401: the bearer is not the service-role key (`privileged.ts:3009-3015`) |
 | P5  | Native Apple sign-in end to end                   | TestFlight build on a real iPhone, tap Sign in with Apple, finish the age screen first                                                                                                                                                                                | A session is created (`flow.ts:90`) and the account appears in Supabase Auth with an Apple identity                            | Supabase Auth rejects the id token: the Auth Apple provider's client id does not equal the bundle ID, or (only if the provider turns out to require one for the native flow, Step 2.4 `[unverified — training knowledge]`) its secret JWT is expired or wrong. Failing before the sheet opens: the Sign in with Apple capability is missing from the signed build `[unverified — training knowledge]` |
-| P6  | `DELETE /v1/me` revokes the Apple grant           | Delete the P5 account in the app (AT 19). Read the `me-delete` response                                                                                                                                                                                               | `signinProvidersRevoked: [{provider:"apple", status:"revoked"}]` (`p3-money-path-requirements.md:2930`)                          | `queued_for_retry`: see P4. Apple unconfigured shows `not_configured_apple` in the queue                                                                                                                        |
-| P7  | App Attest end to end                             | Needs the check-in flag (5.4). On a physical iPhone, run a check-in; read the `devices-attest-key` response                                                                                                                                                         | 200/201 with `{deviceId, keyId, replaced}` (`attest-key-handler.ts:70`); then `checkin-token` grades `attested`               | 422 `attestation_rejected` with server reason `aaguid_mismatch`: environment mismatch (Step 3.1). Other reasons are in the verifier table at `p3-money-path-requirements.md:2656-2670`; all are `[unverified]` against a real device |
-| P8  | DeviceCheck credentials are accepted              | Needs the Wallet flag (5.4). Activate an earned reward on an iPhone                                                                                                                                                                                                   | Not 503; the activation proceeds (or is held for review, which is a normal outcome)                                           | 503 `attestation_not_configured` with the function log "attestation vendor is not configured": key, key ID, team ID or environment wrong (on staging with decision D1 option A, a TestFlight token rejected by the `development` host reads the same way: then switch to option B or C), or a malformed PEM (`devicecheck-client.ts:110-111`, `:137-141`; a one-line `\n`-escaped key is valid) |
+| P6  | `DELETE /v1/me` revokes the Apple grant           | Delete the P5 account in the app (AT 19). Read the `me-delete` response                                                                                                                                                                                               | `signinProvidersRevoked: [{provider:"apple", status:"revoked"}]` (`p3-money-path-requirements.md:2952`)                          | `queued_for_retry`: see P4. Apple unconfigured shows `not_configured_apple` in the queue                                                                                                                        |
+| P7  | App Attest end to end                             | Needs the check-in flag (5.4). On a physical iPhone, run a check-in; read the `devices-attest-key` response                                                                                                                                                         | 200/201 with `{deviceId, keyId, replaced}` (`attest-key-handler.ts:70`); then `checkin-token` grades `attested`               | 422 `attestation_rejected` with server reason `aaguid_mismatch`: environment mismatch (Step 3.1). Other reasons are in the verifier table at `p3-money-path-requirements.md:2664-2675`; all are `[unverified]` against a real device |
+| P8  | DeviceCheck credentials are accepted | Needs the Wallet flag (5.4). Activate an earned reward on an iPhone, then check **both** the app's outcome **and** the database (admin SQL editor; the query holds no secret): `select created_at, detail->'reasons' as reasons from app.fraud_signal where user_id = '<test-user-uuid>' and kind = 'attestation_failed' and cleared_at is null order by created_at desc;` | Not 503, **and** no open `attestation_failed` row for the test user whose `reasons` contains `devicecheck_token_rejected`. An outcome "held" for some **other** reason (bits already set on this device, an unattestable grade) is normal | **FAIL** if either: (a) 503 `attestation_not_configured` with the log line "attestation vendor is not configured": key, key ID, team ID or environment wrong, or a malformed PEM (`devicecheck-client.ts:110-111`, `:137-141`; a one-line `\n`-escaped key is valid); or (b) an open `attestation_failed` signal with reason `devicecheck_token_rejected`, **even though the app shows a normal "held for review"**: a 400 from Apple that names the device token becomes `VendorRejectedError` (`devicecheck-client.ts:138`), and the handler grades the activation `failed`, opens the signal and holds it (`activate-handler.ts:347-362`). Under decision D1 **option A** (`development` host on staging) this is exactly what a TestFlight token rejected by that host looks like (whether and how Apple rejects it, and with which body, is `[unverified — training knowledge]`): treat it as "option A does not work", clear the test account's signal (it is cleared only by a human act, and while open it holds that account's next activations, `decision-table.ts:13`), and fall back to option B or C |
 | P9  | Pinned Apple root is really Apple's               | Step 3.2                                                                                                                                                                                                                                                              | Fingerprint equals `1C:B9:...:C9:32` from a clean machine and a second source                                                  | Stop; do not ship App Attest to production                                                                                                                                                                      |
 | P10 | Auth client-secret JWT is not about to expire     | `<password manager CLI: print the JWT> | node tools/apple/check-siwa-secret-expiry.mjs` (stdin form; never put the JWT in an env-var prefix or argument)                                                                                                                                                                                | Exit 0, "more than 30 days"                                                                                                   | Exit 1: re-mint (Step 2.4); exit 2: you gave it no input                                                                                                                                                         |
 | P11 | Private relay mail is delivered                   | A test Apple ID with Hide My Email signs in; an OTP email is sent to that account                                                                                                                                                                                      | The mail arrives at the `@privaterelay.appleid.com` address                                                                    | Sender domain not registered with Apple, or SPF/DKIM not aligned `[unverified — training knowledge]`                                                                                                              |
@@ -711,17 +730,17 @@ and fix the table.
 
 | Blocked item                                                                  | Blocked on                                                                                                                                                                             | Source                                                                                                  |
 | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Services ID return URLs / domain verification (Android + web SIWA)            | **Q1**: the domain (partners host and primary player domain, checklist §1). Also needs server work for a second audience, so the Services ID has no consumer yet                       | `partner-auth-design.md:791`; `apps/mobile/README.md:120`; `p3-money-path-requirements.md:2997`, `:3032` |
-| Private-relay sender-domain registration                                      | **Q7 / checklist §7**: mail provider and sender domain chosen and verified (Resend, SPF/DKIM/DMARC), custom SMTP in Supabase Auth. Also needs the domain (§1)                           | `partner-auth-design.md:797`; checklist `:75-97`; plan `02-build-plan.md:1870`, `:3279`                  |
-| Staging/production secrets (Steps 2.3, 3.4), Auth Apple provider (2.4), probes | **Supabase project creation** (checklist §9: `gr-staging`, then `gr-prod`)                                                                                                             | checklist `:109-126`                                                                                    |
+| Services ID return URLs / domain verification (Android + web SIWA)            | **Q1**: the domain (partners host and primary player domain, checklist §1). Also needs server work for a second audience, so the Services ID has no consumer yet                       | `partner-auth-design.md:791`; `apps/mobile/README.md:120`; `p3-money-path-requirements.md:3019`, `:3054` |
+| Private-relay sender-domain registration                                      | **Q7 / checklist §7**: mail provider and sender domain chosen and verified (Resend, SPF/DKIM/DMARC), custom SMTP in Supabase Auth. Also needs the domain (§1)                           | `partner-auth-design.md:797`; checklist `:79-101`; plan `02-build-plan.md:1870`, `:3279`                  |
+| Staging/production secrets (Steps 2.3, 3.4), Auth Apple provider (2.4), probes | **Supabase project creation** (checklist §9: `gr-staging`, then `gr-prod`)                                                                                                             | checklist `:115-132`                                                                                    |
 | Review account, privacy policy URL, French legal text                          | Supabase production project, custom SMTP, domain, counsel (privacy policy / terms in EN and FR)                                                                                          | plan `02-build-plan.md:1871`, `:2788`                                                                    |
-| Android: bundle reservation, Play Integrity, Data Safety form                  | **Google Play organisation account** (checklist §4) and Google Cloud project                                                                                                           | checklist `:43-52`; `apps/mobile/README.md:277`, `:281`                                                  |
+| Android: bundle reservation, Play Integrity, Data Safety form                  | **Google Play organisation account** (checklist §4) and Google Cloud project                                                                                                           | checklist `:45-54`; `apps/mobile/README.md:277`, `:281`                                                  |
 | App Attest and DeviceCheck verified on a device                               | Check-in and Wallet flags flipped in a test build (engineering), a physical iPhone, Steps 3.2-3.4 done. The native module has never been compiled or run                                | `apps/mobile/README.md:282`, `:426-431`                                                                  |
 | App Attest root accepted for production                                       | The Step 3.2 human fingerprint comparison                                                                                                                                              | `apple-app-attest-root.ts:13-16`                                                                         |
 | EAS builds                                                                    | An Expo account and an `eas.json` (does not exist), a real version and build number                                                                                                    | `apps/mobile/README.md:458-461`                                                                          |
 | Push notifications (APNs key)                                                 | `expo-notifications` is not installed; an owner decision on push credentials                                                                                                           | `apps/mobile/src/push/index.ts:4-8`                                                                      |
 | HealthKit / Health declarations on iOS                                        | Counsel L7 sign-off before the first HealthKit read; nothing HealthKit-related is built                                                                                                | plan `02-build-plan.md:2790`; `policy-scan.ts:62-67`                                                     |
-| Native Apple sign-in not auto-linking by email                                | The P4 spike decision on GoTrue linking (not an Apple task)                                                                                                                            | `p3-money-path-requirements.md:3011-3018`                                                                |
+| Native Apple sign-in not auto-linking by email                                | The P4 spike decision on GoTrue linking (not an Apple task)                                                                                                                            | `p3-money-path-requirements.md:3033-3040`                                                                |
 | Google sign-in                                                                | No native Google SDK or OAuth client; server link is 501                                                                                                                              | `apps/mobile/README.md:117-119`; `methods-handler.ts:96-100`                                            |
 
 ---
@@ -765,6 +784,6 @@ repo.
 - **EAS / Expo:** `eas build:configure` behaviour; that `eas.json` `env` reaches `expo prebuild`; EAS-managed
   credentials; EAS Submit and build-number auto-increment; exact CLI syntax in 5.5.
 - **Apple DeviceCheck and SIWA wire contracts** (also flagged in the repo itself): the hosts, paths, bodies and error
-  conventions (`devicecheck-client.ts:7-21`, `apple-client.ts:5-10`, `p3-money-path-requirements.md:2999-3007`).
+  conventions (`devicecheck-client.ts:7-21`, `apple-client.ts:5-10`, `p3-money-path-requirements.md:3021-3029`).
 - **Real-device behaviour:** everything about App Attest, DeviceCheck and SIWA on a physical iPhone. No Swift or
   Kotlin line has been compiled or run (`apps/mobile/README.md:282`, `:426-431`).

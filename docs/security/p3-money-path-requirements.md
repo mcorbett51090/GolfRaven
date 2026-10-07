@@ -2995,7 +2995,7 @@ the Apple provider; give it the Services ID / bundle id as the client id, the te
 2. Set the four `GR_APPLE_*` function secrets; configure Supabase Auth's Apple provider (above). Register the custom SMTP domain with Apple's
    private relay `[unverified; A78]`.
 3. Create the KEK in Vault: one 32-byte key, base64, named `siwa_token_kek_v1` (e.g. `select vault.create_secret(encode(gen_random_bytes(32),
-   'base64'), 'siwa_token_kek_v1')` `[unverified — Vault's creation API]`). **Never delete a `siwa_token_kek_*` secret while any
+   'base64'), 'siwa_token_kek_v1')` `[unverified — Vault's creation API; and the schema `gen_random_bytes` lives in, possibly `extensions.gen_random_bytes`]`; generated inside the database, SQL editor only, never `psql -c`, see `edge-role-design.md` item 8). **Never delete a `siwa_token_kek_*` secret while any
    `signin_provider_token` or pending queue row still names its id; there is no re-wrap job yet, so until there is one a KEK is never retired.**
 4. Schedule `signin-revocation-drain` (e.g. every 5 minutes, `POST` with `Authorization: Bearer <service-role key>`).
 5. **Run migration 0035 on a real Supabase branch first** and check the two `[unverified]` database assumptions below.
