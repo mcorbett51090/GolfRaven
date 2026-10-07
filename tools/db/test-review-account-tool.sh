@@ -305,6 +305,14 @@ case "$(printf '%s' "$OUT" | tr 'A-Z' 'a-z')" in *banned*) fail "retire in skip 
 [ "$(nlog)" = "$N0" ] || fail "retire in skip mode made an Auth call"
 [ "$(psql_q "SELECT count(*) FROM app.app_review_demo_account WHERE user_id = '$SKIP_UID' AND retired_at IS NOT NULL")" = "1" ] || fail "retire in skip mode did not retire the row in the database"
 ok "retire in skip mode: retired in the database (row kept), says ACTION REQUIRED: ban in the dashboard, never claims a ban, makes no Auth call, exits 3"
+# sync in skip mode (gate NIT): no Auth call, so its summary must never claim a ban or a clear
+N0="$(nlog)"
+set +e; OUT="$(GOLFRAVEN_REVIEW_AUTH=skip run_tool sync 2>&1)"; RC=$?; set -e
+[ "$RC" = "0" ] || fail "sync in skip mode must still exit 0, got $RC: $OUT"
+case "$(printf '%s' "$OUT" | tr 'A-Z' 'a-z')" in *"banned in auth"*|*"cleared of the auth ban"*) fail "sync in skip mode claimed an Auth change: $OUT" ;; esac
+case "$OUT" in *"Auth NOT changed"*"dashboard"*) ;; *) fail "sync in skip mode did not say Auth was not changed: $OUT" ;; esac
+[ "$(nlog)" = "$N0" ] || fail "sync in skip mode made an Auth call"
+ok "sync in skip mode: no Auth call, exit 0, and the summary says Auth was NOT changed instead of claiming a ban"
 
 # an active account again for the sections below, through the api
 N0="$(nlog)"

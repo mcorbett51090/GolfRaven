@@ -145,7 +145,7 @@ close_windows() { printf '%s\n' "WITH c AS (UPDATE app.app_review_window SET end
 window_open() { printf '%s\n' "SELECT private.review_window_open_at(clock_timestamp())" | sql; }
 
 do_sync() {
-  local open uids rets uid n=0
+  local open uids rets uid n=0 skipped=0
   open="$(window_open)" || die "could not read the window state from the database"
   case "$open" in t|f) ;; *) die "the database answered '$open' to 'is a window open'" ;; esac
   uids="$(review_uids)" || die "could not list the review accounts from the database"
@@ -153,13 +153,21 @@ do_sync() {
   while IFS= read -r uid; do
     [ -n "$uid" ] || continue
     if [ "$open" = "t" ]; then ban_user "$uid" clear; else ban_user "$uid" banned; fi
+    [ "$BAN_RESULT" = "skipped" ] && skipped=$((skipped + 1))
     n=$((n + 1))
   done <<< "$uids"
   # a RETIRED account stays banned for ever, window or no window
   while IFS= read -r uid; do
     [ -n "$uid" ] || continue
     ban_user "$uid" banned
+    [ "$BAN_RESULT" = "skipped" ] && skipped=$((skipped + 1))
   done <<< "$rets"
+  if [ "$skipped" -gt 0 ]; then
+    # skip mode made no Auth call: never report a ban or a clear that did not happen (gate NIT)
+    printf 'review-account.sh: window %s; Auth NOT changed (GOLFRAVEN_REVIEW_AUTH=skip): %s the review account in the Supabase dashboard by hand, and keep every RETIRED account blocked there\n' \
+      "$([ "$open" = t ] && echo OPEN || echo closed)" "$([ "$open" = t ] && echo 'unblock' || echo 'block')"
+    return 0
+  fi
   printf 'review-account.sh: window %s; %s review account(s) %s\n' "$([ "$open" = t ] && echo OPEN || echo closed)" "$n" "$([ "$open" = t ] && echo 'cleared of the Auth ban' || echo 'banned in Auth')"
 }
 
