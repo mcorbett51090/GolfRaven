@@ -15,7 +15,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(179);
+SELECT plan(204);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -158,6 +158,13 @@ SELECT is((SELECT array_agg(f.sig ORDER BY f.sig) FROM (VALUES ('private.partner
   'private_definer (the wrappers'' owner) executes the four apply / read / consume definers and NOT partner_pin_attempt');
 SELECT is((SELECT array_agg(f.sig ORDER BY f.sig) FROM (VALUES ('private.partner_pin_core(uuid, bytea, bytea)'), ('private.partner_binding_user()')) f(sig) WHERE has_function_privilege('partner_pin_verifier', f.sig::regprocedure, 'EXECUTE')),
   ARRAY['private.partner_binding_user()', 'private.partner_pin_core(uuid, bytea, bytea)'], 'partner_pin_verifier executes exactly the pepper core and the binding-user predicate');
+-- N1 (S1.3 gate): the FULL ACL, not only "which of the listed roles": the owner holds EXECUTE on its own function, PUBLIC does not, and nobody else does
+SELECT is((SELECT array_agg(f.sig || ' -> ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END || ':' || a.privilege_type || ':' || a.grantor::regrole::text ORDER BY f.sig, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END)
+           FROM (VALUES ('private.partner_pin_core(uuid, bytea, bytea)'), ('private.partner_binding_user()')) f(sig)
+           CROSS JOIN LATERAL aclexplode((SELECT p.proacl FROM pg_proc p WHERE p.oid = f.sig::regprocedure)) a),
+  ARRAY['private.partner_binding_user() -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> private_definer:EXECUTE:private_definer',
+        'private.partner_pin_core(uuid, bytea, bytea) -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_pin_core(uuid, bytea, bytea) -> private_definer:EXECUTE:private_definer'],
+  'N1: partner_pin_core and partner_binding_user carry EXACTLY two ACL entries each: partner_pin_verifier and the owner private_definer (no PUBLIC, no edge role, no other grantee)');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_reauth_verifier'), ('partner_session_issuer'), ('partner_session_toucher')) r(n)
            WHERE has_any_column_privilege(r.n, 'app.partner_pin', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, 'app.partner_pin', 'DELETE,TRUNCATE,TRIGGER')), 0,
   'PA-1: no client role, no edge role, no service_role and no other owner role holds ANY privilege on app.partner_pin');
@@ -179,6 +186,10 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.par
 SELECT is((has_column_privilege('private_definer', 'app.partner_session', 'pin_grant_until', 'UPDATE'), has_column_privilege('partner_pin_verifier', 'app.partner_session', 'pin_grant_until', 'UPDATE'),
            has_column_privilege('partner_reauth_verifier', 'app.partner_session', 'pin_grant_until', 'UPDATE'), has_column_privilege('edge_partner', 'app.partner_session', 'pin_grant_until', 'UPDATE'))::text, '(f,t,f,f)',
   'R5-L1: partner_pin_verifier is the ONLY role that can write pin_grant_until (not private_definer, not the reauth verifier, not the edge lane)');
+-- MEDIUM-1: the wrappers spend the proof by clearing the column, which only private_definer (0047:329) may write, and only down (0047 guard: "cleared or shortened"). No other role gained the column.
+SELECT is((has_column_privilege('private_definer', 'app.partner_session', 'otp_proof_until', 'UPDATE'), has_column_privilege('partner_pin_verifier', 'app.partner_session', 'otp_proof_until', 'UPDATE'),
+           has_column_privilege('partner_reauth_verifier', 'app.partner_session', 'otp_proof_until', 'UPDATE'), has_column_privilege('edge_partner', 'app.partner_session', 'otp_proof_until', 'UPDATE'))::text, '(t,f,f,f)',
+  'MEDIUM-1: private_definer (the wrappers'' owner) is the only role that can write otp_proof_until: the verifier gained nothing, and the single-use clear is a write the guard allows');
 SELECT is(has_function_privilege('edge_partner', 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure, 'EXECUTE')
           OR has_function_privilege('partner_pin_verifier', 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure, 'EXECUTE'), false, 'the authorization seam is still executable by nobody');
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
@@ -447,6 +458,40 @@ SELECT private.bind_partner_session(:'th_mx');
 SELECT is(private.zz28_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A2'), '00000000-0000-0000-0000-2000000000b1'::uuid, 'PA-19: a grant 29 s old passes A2 (the boundary is 30 s, not 20)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a2_edge;
+-- N2 (S1.3 gate): the other side of the 30 s boundary, so a boundary that drifted to 35 s (or to 60) is caught from BOTH sides
+SAVEPOINT a2_edge31;
+SELECT pg_temp.seed_step('mx', '{"pin_grant_s": 29, "reauth_s": 240}'::jsonb);   -- minted 31 s ago: outside the 30 s
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_mx');
+SELECT throws_ok($$SELECT private.zz28_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A2')$$, '42501', 'partner_authorize: a PIN verified in the last 30 seconds and not yet used is required', 'PA-19 / N2: a grant 31 s old is REFUSED by A2 (the boundary is 30 s, not 35)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT a2_edge31;
+-- LOW-1 (S1.3 gate): class A0_WRITE is A0 in every respect (aal, role list, scope, no PIN grant, no reauth); only the lock mode on the session row differs (FOR NO KEY UPDATE up front: tools/db/test-partner-serialisation.sh case 9)
+SAVEPOINT a0w;
+SELECT pg_temp.seed_step('mx', '{"pin_grant_s": 50}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_mx');
+SELECT is(private.zz28_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A0_WRITE'), '00000000-0000-0000-0000-2000000000b1'::uuid, 'LOW-1: A0_WRITE passes for a live session of the right role and scope, with no PIN grant and no reauth required');
+SELECT throws_ok($$SELECT private.zz28_authz_for_partner('fac_x', NULL, NULL, 'A0_WRITE')$$, '22023', 'partner_authorize: an explicit, non-empty role list without sponsor is required', 'LOW-1: A0_WRITE still demands an explicit role list (it is not a session class)');
+SELECT throws_ok($$SELECT private.zz28_authz_for_partner('fac_y', NULL, ARRAY['manager'], 'A0_WRITE')$$, '42501', 'partner_authorize: no scope', 'LOW-1: A0_WRITE still enforces scope');
+RESET ROLE;
+SELECT is((SELECT pin_grant_until IS NOT NULL FROM app.partner_session WHERE token_hash = pg_temp.th('mx')), true, 'LOW-1: A0_WRITE does NOT consume a PIN grant (only A1 and A2 do)');
+ROLLBACK TO SAVEPOINT a0w;
+SAVEPOINT a0w_aal;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_op1');
+SELECT throws_ok($$SELECT private.zz28_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A0_WRITE')$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', 'LOW-1: A0_WRITE still refuses an aal 1 session of an operator (M2)');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT a0w_aal;
+-- the wrappers that WRITE the session row say so (a revert to A0 reopens the same-session deadlock); the read-only ones stay A0
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE '%\_for\_partner'
+           AND regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ 'partner_authorize\([^;]*''A0_WRITE''\)'),
+  ARRAY['partner_pin_change_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner', 'partner_session_otp_proof_for_partner', 'partner_session_reauth_for_partner'],
+  'LOW-1: exactly the five wrappers that write the session row use class A0_WRITE: the PIN verify, set and change, the email proof and the S1.2 reauth (redefined in 0052)');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE '%\_for\_partner'
+           AND regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ 'partner_authorize\([^;]*''A0''\)'),
+  ARRAY['partner_pin_params_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_options_for_partner'],
+  'LOW-1: the read-only A0 wrappers stay A0 (GET pin, the OTP target, the reauth options and credential): no needless serialisation of reads');
 SAVEPOINT a2_reauthexp;
 SELECT pg_temp.seed_step('mx', '{"pin_grant_s": 50, "reauth_s": -1}'::jsonb);
 SET LOCAL ROLE edge_partner;
@@ -615,6 +660,44 @@ RESET ROLE;
 SELECT is(pg_temp.pchg(:'dk_ok'::bytea, :'dk_new'::bytea), 'ok|0', 'a CHANGE under the correct current key succeeds');
 SELECT is((SELECT failed_count::text || ',' || failed_today::text FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), '0,7', 'PA-18: ... it clears the consecutive count and KEEPS the day count (a change does not forgive the day)');
 ROLLBACK TO SAVEPOINT chg_day;
+-- MEDIUM-1 (S1.3 gate): the email proof is SINGLE USE for a PIN set or change. Spent in the SAME transaction as the write, on `ok` only; a refused outcome keeps it.
+SAVEPOINT proof_set_once;
+SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT is(pg_temp.pset(:'dk_ok'::bytea, :'salt_a'::bytea), 'ok|0', 'MEDIUM-1: the first PIN is set under the email proof');
+SELECT is((SELECT otp_proof_until IS NULL FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'MEDIUM-1: ... and the proof is SPENT (otp_proof_until cleared by the same call)');
+SELECT throws_ok($$SELECT pg_temp.pchg('\x1111111111111111111111111111111111111111111111111111111111111111'::bytea, '\x4444444444444444444444444444444444444444444444444444444444444444'::bytea)$$, '42501', 'partner_pin_set_apply: a PIN is set or changed only inside an enrolment window or after an email proof',
+  'MEDIUM-1: a CHANGE under the same, spent proof is refused (42501): one proof, one PIN write');
+SELECT is((SELECT verifier FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), pg_temp.vf('00000000-0000-0000-0000-1000000000a1', :'dk_ok'::bytea), 'MEDIUM-1: ... and the PIN is still the first one');
+ROLLBACK TO SAVEPOINT proof_set_once;
+SAVEPOINT proof_chg_once;
+SELECT pg_temp.seed_pin('00000000-0000-0000-0000-1000000000a1', :'dk_ok'::bytea);
+SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT is(pg_temp.pchg(:'dk_bad'::bytea, :'dk_new'::bytea, :'salt_c'::bytea), 'wrong|0', 'MEDIUM-1: a change with a WRONG current PIN is a status wrong');
+SELECT is((SELECT otp_proof_until IS NOT NULL FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'MEDIUM-1 (decision): a NON-ok outcome (a wrong current PIN) does NOT spend the proof: the lockout, not the proof, bounds that guess');
+SELECT is(pg_temp.pset(:'dk_new'::bytea, :'salt_b'::bytea), 'already_set|0', 'MEDIUM-1: a SET on a live PIN is already_set ...');
+SELECT is((SELECT otp_proof_until IS NOT NULL FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'MEDIUM-1: ... and it does not spend the proof either (nothing was written)');
+SELECT is(pg_temp.pchg(:'dk_ok'::bytea, :'dk_new'::bytea, :'salt_c'::bytea), 'ok|0', 'MEDIUM-1: the change with the CORRECT current PIN succeeds');
+SELECT is((SELECT otp_proof_until IS NULL FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'MEDIUM-1: ... and spends the proof');
+SELECT throws_ok($$SELECT pg_temp.pchg('\x2222222222222222222222222222222222222222222222222222222222222222'::bytea, '\x4444444444444444444444444444444444444444444444444444444444444444'::bytea)$$, '42501', 'partner_pin_set_apply: a PIN is set or changed only inside an enrolment window or after an email proof',
+  'MEDIUM-1: a SECOND change under the same proof is refused (42501)');
+SELECT is((SELECT verifier FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), pg_temp.vf('00000000-0000-0000-0000-1000000000a1', :'dk_new'::bytea), 'MEDIUM-1: ... the PIN is the first change''s, the refused second one wrote nothing');
+SELECT is(pg_temp.pv(:'dk_new'::bytea), 'ok|0|true', 'MEDIUM-1: ... and the new key verifies (a verify needs no proof)');
+ROLLBACK TO SAVEPOINT proof_chg_once;
+SAVEPOINT proof_lock_keep;
+SELECT pg_temp.seed_pin('00000000-0000-0000-0000-1000000000a1', :'dk_ok'::bytea, jsonb_build_object('locked_at', clock_timestamp(), 'failed_count', 5));
+SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT is(pg_temp.pchg(:'dk_ok'::bytea, :'dk_new'::bytea), 'locked|0', 'MEDIUM-1: a change on a LOCKED PIN is the status locked ...');
+SELECT is((SELECT otp_proof_until IS NOT NULL FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'MEDIUM-1: ... and a refusal keeps the proof (spent on ok only)');
+ROLLBACK TO SAVEPOINT proof_lock_keep;
 -- argument validation (after the prerequisite)
 SAVEPOINT args;
 SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);

@@ -20,7 +20,7 @@ import { parseChallengeToken, uuidToBytes } from "../../functions/_shared/partne
 import { newPartnerSessionToken, sha256Hex, toB64u, toHex } from "../../functions/_shared/partner/token.ts";
 import { derivePinKey, derivePinKeyB64u, MIN_ITERATIONS, newPinSalt } from "../../functions/_shared/partner/pin-contract.ts";
 import type { EmailOtpPort } from "../../functions/_shared/partner/ports.ts";
-import { partnerDb, resetPrivilegedConnectionsForTests } from "../../functions/_shared/privileged.ts";
+import { makePartnerEmailOtpSender, partnerDb, resetPrivilegedConnectionsForTests } from "../../functions/_shared/privileged.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
 
@@ -269,7 +269,14 @@ Deno.test("PA-21 / PA-18: a PIN is set only after an email proof (a passkey sess
   assertEquals(good.status, 200, await good.clone().text());
   const grant = (await sessionRow(m.hash))!.pin_grant_until as Date;
   assert(grant.getTime() > Date.now() + 55_000 && grant.getTime() <= Date.now() + 60_000 + 2000, "the single-use grant is now + 60 s, on THIS session");
-  // a second PIN set on a live PIN is refused (change needs the current PIN)
+  // MEDIUM-1 (S1.3 gate): the email proof was SPENT by the set (single use, in the same transaction): a second write under it is a 403 with nothing written
+  assertEquals((await sessionRow(m.hash))!.otp_proof_until, null, "the proof was spent by the set");
+  const spent = await setPin(m, "5028");
+  assertEquals(spent.status, 403, "a second PIN write under the SAME proof is refused");
+  assertEquals(await errCode(spent), "forbidden");
+  assertEquals((await pinRow(m.uid))!.verifier, stored.verifier, "unchanged by the refused write");
+  // with a FRESH proof, a second PIN set on a live PIN is refused (change needs the current PIN)
+  await proveMailbox(m, makeOtp(() => m.hash));
   const again = await setPin(m, "5028");
   assertEquals(again.status, 409);
   assertEquals(await errCode(again), "pin_already_set");
@@ -283,6 +290,8 @@ Deno.test("PA-21: a CHANGE needs the email proof AND the current PIN: a wrong cu
   const m = await newMember("chg");
   await proveMailbox(m, makeOtp(() => m.hash));
   assertEquals((await setPin(m, "7391")).status, 200);
+  // the set spent the proof (MEDIUM-1): the change needs a proof of its own
+  await proveMailbox(m, makeOtp(() => m.hash));
   const salt = newPinSalt();
   const change = (current: string, next: string, s = salt) =>
     (async () => call("POST", "pin/change", { token: m.token, body: { currentDerived: current, derived: await derivePinKeyB64u(next, s, ITER), salt: toB64u(s), iterations: ITER } }))();
@@ -292,10 +301,17 @@ Deno.test("PA-21: a CHANGE needs the email proof AND the current PIN: a wrong cu
   assertEquals(wrongRes.status, 403);
   assertEquals(await errCode(wrongRes), "pin_wrong");
   assertEquals((await pinRow(m.uid))!.failed_count, 1, "the wrong CURRENT key was counted and the count COMMITTED (read from another connection)");
+  assert((await sessionRow(m.hash))!.otp_proof_until instanceof Date, "MEDIUM-1 (decision): a wrong current key does NOT spend the proof (the lockout bounds that guess)");
   const okRes = await change(await derivePinKeyB64u("7391", curSalt, p.iterations), "5028");
   assertEquals(okRes.status, 200, await okRes.clone().text());
   assertEquals((await pinRow(m.uid))!.failed_count, 0);
   assertEquals((await pinRow(m.uid))!.verifier, await expectedVerifier(m.uid, await derivePinKey("5028", salt, ITER)));
+  // MEDIUM-1: the successful change SPENT the proof: one email proof, one PIN write. A second change under it is a 403 and writes nothing.
+  assertEquals((await sessionRow(m.hash))!.otp_proof_until, null, "the change spent the proof");
+  const second = await change(await derivePinKeyB64u("5028", salt, ITER), "6173");
+  assertEquals(second.status, 403, "a second change under the SAME proof is refused");
+  assertEquals(await errCode(second), "forbidden");
+  assertEquals((await pinRow(m.uid))!.verifier, await expectedVerifier(m.uid, await derivePinKey("5028", salt, ITER)), "the refused second change wrote nothing");
   assertEquals((await stepUp(m, "7391")).status, 403, "the old PIN is dead");
   assertEquals((await stepUp(m, "5028")).status, 200, "the new PIN verifies");
 });
@@ -430,6 +446,17 @@ Deno.test("OTP proof: a GoTrue session older than a minute is refused (and still
 // =============================================================================================================================================================
 // deploy faults and the shape of the request
 // =============================================================================================================================================================
+
+Deno.test("N3 (S1.3 gate): the email-proof sender asks GoTrue for shouldCreateUser: false (a proof never creates an account), and a GoTrue error THROWS", DT, async () => {
+  const seen: Array<{ email: string; options: { shouldCreateUser: boolean } }> = [];
+  const send = makePartnerEmailOtpSender(() => ({ auth: { signInWithOtp: (args) => { seen.push(args); return Promise.resolve({ error: null }); } } }));
+  await send("member@example.test");
+  assertEquals(seen, [{ email: "member@example.test", options: { shouldCreateUser: false } }], "exactly one send, to the given address, with shouldCreateUser false");
+  const failing = makePartnerEmailOtpSender(() => ({ auth: { signInWithOtp: () => Promise.resolve({ error: { status: 429 } }) } }));
+  let threw = false;
+  try { await failing("member@example.test"); } catch { threw = true; }
+  assert(threw, "a GoTrue error is thrown (the handler answers a constant 500)");
+});
 
 Deno.test("a missing PIN pepper is a deploy fault: 503 with no detail, never a pass, and the lockout counter does not move", DT, async () => {
   const m = await newMember("nopepper");

@@ -36,6 +36,8 @@
 #   8. THE STEP-UP PIN UNDER CONCURRENCY (S1.3, PA-18): TWENTY concurrent WRONG derived keys for one member evaluate at most five (here exactly three: the third starts the 30 s backoff, the other seventeen are refused
 #      `retry_after` without being evaluated); with the PIN one failure from locking and no backoff running, twenty concurrent wrong keys lock it ONCE (one `locked` audit row, nineteen plain `locked`). Without the
 #      row lock (`FOR UPDATE` in private.partner_pin_attempt) every call reads the same count and evaluates, so both cases fail.
+#   9. SAME-SESSION CONCURRENCY (S1.3 gate LOW-1): eight parallel CORRECT verifies on ONE freshly-seen session all answer ok and none deadlocks. Under class A0 each call took the session row FOR SHARE and then
+#      UPDATEd it (the grant): two FOR SHARE holders that both upgrade deadlock. Class A0_WRITE takes FOR NO KEY UPDATE up front, so the calls queue. 9b: the same for four deliberately overlapping session locks (class SESSION).
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the signin concurrency step, against the same throwaway cluster and database.)
@@ -647,6 +649,53 @@ pin_run 5 "$GOOD8"
 T8C="$(pin_tally 5)"
 if [ "$T8C" != "wrong=0 retry=0 locked=5 other=0" ]; then fail "8c: the CORRECT key on a locked PIN was not refused as locked: $T8C"
 else echo "PASS: the correct key on a locked PIN is refused (locked) on every concurrent attempt"; fi
+
+# ---------------------------------------------------------------------------
+# 9. SAME-SESSION CONCURRENCY (S1.3 gate LOW-1): N parallel CORRECT verifies on ONE session
+# ---------------------------------------------------------------------------
+# The session was last seen a moment ago, so partner_authorize does not bump last_seen_at: under class A0 it took the session row FOR SHARE and the verify definer then UPDATEd the row (pin_grant_until). Two FOR
+# SHARE holders that both upgrade DEADLOCK (the gate saw 2 or 3 of 4 parallel verifies die with 40P01). Class A0_WRITE takes FOR NO KEY UPDATE up front, so the calls queue on the lock instead. Every call must answer
+# ok, and no call may report a deadlock. Three rounds of eight, because a deadlock needs the calls to overlap and one round can miss.
+echo "tools/db/test-partner-serialisation.sh: 9. parallel correct PIN verifies on one session"
+for round in 1 2 3; do
+  seed_pin8 0 NULL
+  hx "UPDATE app.partner_session SET last_seen_at = now() WHERE id = '$S8'"
+  pin_run 8 "$GOOD8"
+  OK9=0; OTHER9=0; DEAD9=0
+  for i in $(seq 1 8); do
+    st="$(status_of "$OUT_DIR/pin_$i.out")"
+    if [ "$st" = "ok|0" ]; then OK9=$((OK9 + 1)); else OTHER9=$((OTHER9 + 1)); echo "  verify $i (round $round): '${st}' $(head -c 300 "$OUT_DIR/pin_$i.err")" >&2; fi
+    if grep -qi "deadlock" "$OUT_DIR/pin_$i.err" 2>/dev/null; then DEAD9=$((DEAD9 + 1)); fi
+  done
+  if [ "$DEAD9" -ne 0 ] || [ "$OK9" -ne 8 ]; then fail "9 (round $round): eight parallel correct verifies on one session gave ok=$OK9 other=$OTHER9 deadlocks=$DEAD9, expected ok=8 and no deadlock (partner_authorize must lock the session row FOR NO KEY UPDATE up front for a definer that writes it)"; break; fi
+done
+if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 8 parallel correct verifies on one session -> all ok, no deadlock (A0_WRITE locks the session row FOR NO KEY UPDATE up front)"; fi
+# 9b. the same shape on the two SESSION-class writers (S1.2's sign-out and lock): the lock clears a standing PIN grant, an UPDATE of the session row. A lock is too quick for a plain race to overlap, so the overlap is
+# MADE: each of four sessions first authorizes (class SESSION, through the planted action definer: it takes the row lock and keeps it to commit), sleeps, and only then calls the real lock definer, which UPDATEs the
+# row. Under FOR SHARE all four hold a share when the first UPDATE asks for the row (deadlock); under FOR NO KEY UPDATE the second session waits at its authorize and never holds a share.
+lock_sql() { # $1 = seconds to hold the row lock between the authorize and the lock's write
+  printf '%s\n' "BEGIN;" "SET LOCAL ROLE edge_partner;" "SELECT private.bind_partner_session('$H8');" "SELECT 'authorized:' || private.zz24s_action('fac_x', 'SESSION');" "SELECT pg_sleep($1);" \
+    "SELECT private.partner_session_lock_for_partner();" "SELECT 'status:locked';" "COMMIT;"
+}
+for round in 1 2 3; do
+  seed_pin8 0 NULL
+  hx "UPDATE app.partner_session SET last_seen_at = now() WHERE id = '$S8'"
+  pin_run 1 "$GOOD8"
+  if [ "$(status_of "$OUT_DIR/pin_1.out")" != "ok|0" ]; then fail "9b (round $round): the seeding verify was not ok: '$(status_of "$OUT_DIR/pin_1.out")'"; break; fi
+  pids=()
+  for i in 1 2 3 4; do
+    lock_sql 0.6 | edge "ser_lock_$i" >"$OUT_DIR/lock_$i.out" 2>"$OUT_DIR/lock_$i.err" &
+    pids+=($!)
+  done
+  set +e; for pid in "${pids[@]}"; do wait "$pid"; done; set -e
+  OKL=0; DEADL=0
+  for i in 1 2 3 4; do
+    [ "$(status_of "$OUT_DIR/lock_$i.out")" = "locked" ] && OKL=$((OKL + 1)) || echo "  lock $i (round $round): $(head -c 300 "$OUT_DIR/lock_$i.err")" >&2
+    if grep -qi "deadlock" "$OUT_DIR/lock_$i.err" 2>/dev/null; then DEADL=$((DEADL + 1)); fi
+  done
+  if [ "$DEADL" -ne 0 ] || [ "$OKL" -ne 4 ]; then fail "9b (round $round): four overlapping session locks gave ok=$OKL deadlocks=$DEADL (class SESSION must lock the session row FOR NO KEY UPDATE up front)"; break; fi
+done
+if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 4 overlapping session locks (each clearing a standing PIN grant) -> all ok, no deadlock"; fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "tools/db/test-partner-serialisation.sh: FAILED" >&2
