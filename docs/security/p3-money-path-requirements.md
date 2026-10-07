@@ -1822,13 +1822,7 @@ less: a `failed` grade joins row 2, an `unattestable` grade joins row 3 (§7.5 "
 outcome called refused**. The app-review demo account is
 answered **403** before any reward is read (§4.7.7), so it cannot probe for ids either.
 
-> **Tracked gap, P4.2 pre-submission item (not built, deliberately): review-account behaviours 2 and 3 of build plan §7.8 "Apple 2.1".** The plan says
-> the `app-review` account "audits every sign-in, and is disabled outside submission windows". What exists: the `app.app_review_demo_account`
-> table (0007), the 403 above, the partner-route refusal, and the account's own-row read. What does **not** exist: (a) an audit record written
-> on every sign-in of that account, and (b) any mechanism that disables the account outside a submission window (a flag, an expiry or a
-> scheduled job), and (c) a provisioning procedure for the row (the owner steps in `docs/owner/apple-setup-runbook.md`, Step 4.3, are manual).
-> These must be built or explicitly waived by the owner before the App Store submission (M2); until then the account stays enabled once created,
-> so **remove its row or disable its Auth user by hand after each review window**.
+> **Built (migration 0051), no longer a tracked gap: review-account behaviours 2 and 3 of build plan §7.8 "Apple 2.1".** The `app-review` account "audits every sign-in, and is disabled outside submission windows": admin-controlled submission windows (`app.app_review_window`), a per-session `audit_log` row, a binder backstop, and the scan and activation definers refusing it (so it also receives no marker credit). Design and tests: `docs/security/review-account-design.md`; owner procedure: `docs/owner/review-account-procedure.md`. **Never delete the account's row to disable it** (that makes it an ordinary player whose tokens keep working): `close` is the off switch, `retire` replaces the account. A working `sync` schedule or a `close` after every review is a deploy precondition before the first window.
 
 The handler sees only three small interfaces (`IosPort`: `verifyAssertion`, `readBits`, `setBit0`; `AndroidPort`:
 `verifyIntegrity` **only**; plus `Repo#rewards`). `null` for a platform means "not configured". Android has **no vendor

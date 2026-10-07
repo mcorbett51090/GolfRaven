@@ -86,7 +86,7 @@ SELECT is((SELECT i.indisunique AND pg_get_expr(i.indexprs, i.indrelid) = 'true'
 SET ROLE service_role;
 BEGIN;
 SELECT throws_ok($$INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, '23505', NULL, 'a SECOND review account is refused (23505)');
-SELECT lives_ok($$DELETE FROM app.app_review_demo_account; INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, 'replacing the review account is delete-then-insert (the documented way)');
+SELECT lives_ok($$DELETE FROM app.app_review_demo_account; INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, 'replacing the review account is delete-then-insert at the database (the tool''s retire bans the old Auth user first, then does this)');
 ROLLBACK;
 RESET ROLE;
 

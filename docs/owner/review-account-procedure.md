@@ -15,6 +15,18 @@ The database refuses the account the instant a window ends, but **GoTrue keeps i
 
 Details and the reasoning: `docs/security/review-account-design.md` section 2.
 
+**One review account per Supabase project.** There is exactly one (a unique index), in each project: `gr-staging` for the dry run and `gr-prod` for the real one. Do the whole procedure **twice**, staging first with a staging-only reviewer address, then production. The two accounts, windows and Auth bans are independent.
+
+**Never delete the review-account row to switch it off.** Deleting the row turns the account into an ordinary player: the database stops refusing it a window, a reward is no longer refused, and its tokens keep working. **`close` is the off switch** (and `sync` keeps it off). To REPLACE the account use `retire` (section 6), which bans the old Auth user first.
+
+**Before you deploy 0051 to a project**, check that it holds at most one review-account row, because 0051's unique index fails the migration otherwise (and a failed migration is a failed deploy):
+
+```sql
+select count(*) as review_accounts from app.app_review_demo_account;   -- must be 0 or 1
+-- if it is more than 1: keep the one real reviewer, and for each other row ban its Auth user, then delete the row
+select user_id from app.app_review_demo_account order by user_id;
+```
+
 ## What you need, and where it lives (never in git: this repository is public)
 
 | Value | Where | Notes |
@@ -34,8 +46,8 @@ printf '%s\n' "$REVIEWER_ADDRESS" | bash tools/review-account/review-account.sh 
 
 It creates the Auth user (born banned), marks it the review account (`app.app_review_demo_account`) and leaves it **banned and closed**. Re-running it with the same address is harmless. What it refuses, by design:
 
-- **An address that already has an Auth user.** A typo in the address must not turn a real player into the review account. Use a fresh address. If you created the Auth user for this purpose and it has never been used, pass `--adopt`: the tool then checks that it has no evidence, plays, rewards, offer codes, entitlements, marker credits, purchases or devices, and is neither a partner member nor an admin.
-- **A second review account.** There is exactly one (a unique index). To replace it, delete the old row first (`delete from app.app_review_demo_account;` as `service_role`), then provision the new address.
+- **An address that already has an Auth user.** A typo in the address must not turn a real player into the review account. Use a fresh address. If you created the Auth user for this purpose and it has never been used, pass `--adopt`: the tool then checks that it has **never signed in** (`auth.users.last_sign_in_at` is empty), has no evidence, plays, rewards, offer codes, entitlements, marker credits, purchases, devices, push tokens, bookings, achievements, attestations or fraud signals, and is neither a partner member nor an admin.
+- **A second review account.** There is exactly one per project (a unique index). To replace it use `retire` (section 6), then provision the new address.
 - **A partner member or an admin** (the review account has no partner scope).
 
 ## 2. Open a window around a submission
@@ -73,14 +85,28 @@ Field names `[unverified — training knowledge]`.
 - **Contact** details are your own; they are not in this repository.
 - Open the window (step 2) before pressing **Submit for Review**.
 
-## 5. Verify
+## 5. Verify, and on which build
 
-1. Before opening: sign in as the reviewer on a TestFlight build. Expect no code (banned) or, if the ban was not set, a 403 `review_account_disabled` on the first request.
+Which Supabase project a build talks to is set by the public `EXPO_PUBLIC_*` values in that profile's EAS environment, **not** by `apps/mobile/eas.json` (it carries none, and no staging profile). The real `eas.json` has three profiles: `development` (dev client, internal), `preview` (internal distribution, production attest environment) and `production` (store). So:
+
+- **Staging dry run:** a **`preview`** build, its EAS environment pointed at `gr-staging`, installed through internal distribution on a registered device `[unverified: ad hoc registration]`. Run steps 1 to 4 below against `gr-staging` with the staging reviewer.
+- **Real reviewer path:** the **`production`** build, pointed at `gr-prod`, installed from **TestFlight**: it is the binary Apple reviews. Run steps 1 to 4 against `gr-prod` with the production reviewer, **with a window open**, before you submit. (The earlier assumption that a TestFlight build points at staging does not hold for this profile set: if you also want a staging TestFlight build, that is a decision for you to make, because `eas.json` has no profile for it.)
+
+1. Before opening: sign in as the reviewer on that build. Expect no code (banned) or, if the ban was not set, a 403 `review_account_disabled` on the first request.
 2. After `open`: sign in; the app works. Wallet activation (flag on) answers 403 `forbidden`.
 3. `select action, subject_id, created_at from app.audit_log where action like 'review_account.%' order by created_at` (service role): one `session_allowed` row per session, plus any `session_refused` rows from before the window.
 4. After `close`: the next request is 403 `review_account_disabled`.
 
-## 6. If something goes wrong
+## 6. Replace the review account (`retire`)
+
+```shell
+bash tools/review-account/review-account.sh retire
+printf '%s\n' "$NEW_REVIEWER_ADDRESS" | bash tools/review-account/review-account.sh provision
+```
+
+`retire` **bans the old Auth user first** and only then removes its row, so the old account is never an ordinary player with a live token. (Deleting the row by hand and leaving the Auth user alone does exactly that, until its token expires and its refresh token is revoked: do not.) If you cannot run the tool, ban the Auth user in the dashboard before you delete the row.
+
+## 7. If something goes wrong
 
 | Symptom | Likely cause | Fix |
 |---|---|---|

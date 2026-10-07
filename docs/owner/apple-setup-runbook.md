@@ -546,31 +546,26 @@ Blocked on Step 1 (the App ID must exist to select it).
   `supabase/tests/integration/rewards-activate.deno.test.ts:239-251`); the partner-route refusal
   (`docs/security/partner-auth-design.md:211`); and an own-row read for the actor
   (`supabase/migrations/0031_edge_role_policies.sql:468`).
-- **What the repo does not have:** a provisioning script or procedure for creating the demo row; any mechanism that
-  "audits every sign-in" or "disables outside submission windows". A search of `supabase/functions`,
-  `apps/mobile/src` and `docs` found only the table, the refusals and tests. Those two plan behaviours are
-  **unbuilt** and are tracked as a P4.2 pre-submission item (Repo inconsistencies, item 6;
-  `docs/security/p3-money-path-requirements.md`, the "Tracked gap" note under the activation handler).
+- **What the repo has now (migration 0051, `docs/security/review-account-design.md`):** admin-controlled **submission windows**
+  (`app.app_review_window`): the account works only while a window is open and the database refuses it the instant the window ends;
+  **every sign-in is audited** (one `audit_log` row per session); the account can receive **no** marker credit, purchase or reward
+  (the scan and activation definers refuse it); there is **one** review account per project (unique index); and an owner tool,
+  `tools/review-account/review-account.sh` (`provision`, `open`, `close`, `sync`, `retire`, `status`), that does the Auth side too.
+  **The owner procedure is `docs/owner/review-account-procedure.md`: follow that, not the older manual steps this section used to carry.**
+  In particular: **do not sign the reviewer in first, do not insert the row by hand, and never delete the row to disable the account**:
+  deleting it turns the account into an ordinary player whose tokens keep working. **`close` is the off switch** (and a schedule
+  running `sync`, or a `close` after every review, is a deploy precondition before the first window: the procedure says why).
 - **Which project:** the real reviewer account lives in the **production** project (Apple reviews the store build, which
   points at production). A TestFlight build points at **staging** (plan `02-build-plan.md:456`), so it cannot see a
   production-only demo row. Do the steps below **twice**: first against `gr-staging` with a staging-only reviewer address
   for a dry run on TestFlight, then against production for the real one.
-- **Owner steps, when the staging project and mail provider exist** (do not do these in the repo; run steps 2 and 3 once
-  per project as described above):
-  1. Choose a dedicated, monitored mailbox for the reviewer account. Keep the address out of the repo.
-  2. Sign that address in once through the app's email-OTP flow (`apps/mobile/src/auth/supabase-auth.ts:210-213`)
-     against the project in question (staging for the dry run, production for the real account) so an Auth user exists.
-  3. As a service-role/admin database role, insert that user's id into `app.app_review_demo_account`
-     (`0007_private_helpers.sql:23-25`; `service_role` holds INSERT on it, `supabase/migrations/0009_grants_revokes.sql:56`). The row is what makes the account a demo account.
-  4. In App Store Connect, App Review Information, give the reviewer the sign-in instructions and a note that the
-     code goes to the monitored inbox, and that guest browse works with no account (plan `02-build-plan.md:1872`)
-     `[unverified — training knowledge: the exact field names]`.
-  5. After the review window, remove the row or disable the Auth user, since "disabled outside submission windows"
-     is not automated.
+- **Owner steps:** all in `docs/owner/review-account-procedure.md`, once per project (staging for the dry run, production for the real
+  account): provision, open a window before you submit, close it after the review, and what to put in App Review Information
+  (step 4 of the procedure; the field names stay `[unverified — training knowledge]`). Replace the account with `retire`, never by deleting the row.
 - **Blocked on:** Supabase production project, custom SMTP (checklist §7), and a submitted build.
-- **Verify:** sign in as the staging reviewer on a TestFlight build (staging); Wallet activation, if flagged on, answers
-  403 `forbidden` (`activate-handler.ts:271`). Repeat on a production-pointed build for the real reviewer account
-  before submission.
+- **Verify:** step 5 of the procedure: the staging dry run on a **`preview`** build pointed at `gr-staging`, and the real path on the
+  **`production`** build (the one Apple reviews, installed from TestFlight) pointed at `gr-prod`, with a window open. Wallet activation,
+  if flagged on, answers 403 `forbidden` (`activate-handler.ts`).
 
 ### 4.4 Privacy ("nutrition") label inputs
 
@@ -609,10 +604,10 @@ compliance question about encryption `[unverified — training knowledge; the ap
 
 ### 5.1 Facts about this repo
 
-- **There is no `eas.json`** anywhere in the repo (checked in this worktree: no `eas.json` at the root or in
-  `apps/mobile/`). `apps/mobile/README.md:458-461` says the same: it "needs an Expo account and `eas.json`, neither of
-  which exist in this skeleton yet — `eas build:configure` sets that up". `apps/mobile/package.json:8` says "no EAS
-  build or expo export in CI yet (real store builds are P4.2)", and `apps/mobile/README.md:159` repeats it.
+- **`apps/mobile/eas.json` exists** (a scaffold, added with the review-account work): three profiles, `development`, `preview`
+  and `production`, each setting `GOLFRAVEN_APP_ATTEST_ENV`, and nothing else that is an identifier or a secret. `apps/mobile/package.json`
+  still says "no EAS build or expo export in CI yet (real store builds are P4.2)". The Expo project id, the Apple ids and every
+  `EXPO_PUBLIC_*` value are still yours to set (the README's "EAS build profiles" section).
 - `apps/mobile/app.json` has no EAS project ID, no `ios.buildNumber`, and `"version": "0.0.0"` (`app.json:6`). The
   store needs a real marketing version and an incrementing build number `[unverified — training knowledge: EAS can
   auto-increment]`.
@@ -620,23 +615,26 @@ compliance question about encryption `[unverified — training knowledge; the ap
   (`apps/mobile/README.md:78`; `app.plugin.js:11-13`). Per-profile values therefore come from `eas.json` /
   EAS environment variables, not from a config file.
 
-### 5.2 What `eas.json` needs (no values invented)
+### 5.2 What `eas.json` has, and what you still set
 
-Create it with `eas build:configure` from `apps/mobile/` after you have an Expo account and have linked the project
-`[unverified — training knowledge on current EAS CLI behaviour]`. The repo tells you which settings must differ per
-profile; it does not tell you any values:
+Link the project with `eas init` from `apps/mobile/` after you have an Expo account `[unverified — training knowledge on current EAS CLI
+behaviour]`; it writes the project id into `app.json`. The three real profiles (the file is `apps/mobile/eas.json`; the table below is
+that file, plus what each profile's EAS environment must carry):
 
 | Profile (name is yours)               | `GOLFRAVEN_APP_ATTEST_ENV`                | Distribution                                  | Public `EXPO_PUBLIC_*` values it needs                                                                                           | Points at server project |
 | ------------------------------------- | ----------------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| development (device, dev client)      | `development`                             | internal / ad hoc                             | the staging project's, `apps/mobile/README.md:84-90`                                                                              | a project whose `GR_APPLE_APPATTEST_ENV` is `development` |
-| staging (TestFlight)                  | unset or `production`                     | store (TestFlight)                            | the staging project's                                                                                                              | `gr-staging` with `production` |
-| production (App Store)                | unset or `production`                     | store                                         | the production project's                                                                                                           | `gr-prod` with `production` |
+| `development` (dev client)            | `development`                             | `internal`, `developmentClient: true`         | the staging project's, `apps/mobile/README.md:84-90`                                                                              | a project whose `GR_APPLE_APPATTEST_ENV` is `development` |
+| `preview`                             | `production`                              | `internal` (ad hoc; **not** TestFlight)       | the staging project's, for the dry run                                                                                             | `gr-staging` with `production` |
+| `production` (store)                  | `production`                              | `store` (TestFlight and the App Store)        | the production project's                                                                                                           | `gr-prod` with `production` |
+
+There is **no staging store profile**: a TestFlight build comes from `production` and points wherever its EAS environment points. The earlier
+assumption in this runbook that a TestFlight build points at staging is therefore a decision for you, not a fact about the repo.
 
 - `GOLFRAVEN_APP_ATTEST_ENV` is **build time only**, not `EXPO_PUBLIC_*`, and never in the bundle
   (`apps/mobile/README.md:90`). Set it in the profile's `env` block `[unverified — training knowledge: that the
   profile's env block is passed to the build's process environment, which expo prebuild and the plugin read]`.
-  If you instead leave it unset the plugin defaults to `production` (`app.plugin.js:18-19`), which is correct for
-  both store profiles; set it explicitly anyway so the profile documents itself.
+  It is set explicitly in every profile of `eas.json` (the plugin's default, if it were unset, is `production`,
+  `app.plugin.js:18-19`), and `apps/mobile/test/eas-profiles.test.ts` pins that.
 - `EXPO_PUBLIC_*` values are **public by design** (`apps/mobile/README.md:92`); only the anon/publishable Supabase key
   is allowed, and a `service_role` or `sb_secret_` key is refused at parse time and by the pre-install guard
   (`apps/mobile/README.md:88`, `:160-162`).
@@ -728,7 +726,7 @@ and fix the table.
 | P10 | Auth client-secret JWT is not about to expire     | `<password manager CLI: print the JWT> | node tools/apple/check-siwa-secret-expiry.mjs` (stdin form; never put the JWT in an env-var prefix or argument)                                                                                                                                                                                | Exit 0, "more than 30 days"                                                                                                   | Exit 1: re-mint (Step 2.4); exit 2: you gave it no input                                                                                                                                                         |
 | P11 | Private relay mail is delivered                   | A test Apple ID with Hide My Email signs in; an OTP email is sent to that account                                                                                                                                                                                      | The mail arrives at the `@privaterelay.appleid.com` address                                                                    | Sender domain not registered with Apple, or SPF/DKIM not aligned `[unverified — training knowledge]`                                                                                                              |
 | P12 | App Store Connect and TestFlight are wired        | Build processes; install from TestFlight on a physical iPhone                                                                                                                                                                                                         | "Ready to test"; the app launches                                                                                              | Processing errors are reported in App Store Connect; a missing entitlement points back to Step 1.2 `[unverified — training knowledge]`                                                                                                              |
-| P13 | Review account cannot receive a reward            | Sign in as the reviewer **on the project the build points at** (a TestFlight build points at staging, so do the dry run with a staging reviewer account created the same way, Step 4.3 steps 2-3 against `gr-staging`; the real reviewer account is checked on a build pointed at production); attempt a Wallet activation (flag on)                                                                                                                                                                                                         | 403 `forbidden` (`activate-handler.ts:271`)                                                                                    | The `app.app_review_demo_account` row is missing **in that project** (4.3)                                                                                                                                                           |
+| P13 | Review account cannot receive a reward            | Sign in as the reviewer **on the project the build points at**, with a submission window open (`docs/owner/review-account-procedure.md` step 5: the staging dry run on a `preview` build against `gr-staging`; the real account on the `production` build, installed from TestFlight, against `gr-prod`); attempt a Wallet activation (flag on)                                                                                                                                                                                                         | 403 `forbidden` (`activate-handler.ts:271`)                                                                                    | No window is open, or the `app.app_review_demo_account` row is missing **in that project** (`provision`, then `open`; 4.3)                                                                                                                                                           |
 
 ---
 
@@ -743,7 +741,7 @@ and fix the table.
 | Android: bundle reservation, Play Integrity, Data Safety form                  | **Google Play organisation account** (checklist §4) and Google Cloud project                                                                                                           | checklist `:45-54`; `apps/mobile/README.md:277`, `:281`                                                  |
 | App Attest and DeviceCheck verified on a device                               | Check-in and Wallet flags flipped in a test build (engineering), a physical iPhone, Steps 3.2-3.4 done. The native module has never been compiled or run                                | `apps/mobile/README.md:282`, `:426-431`                                                                  |
 | App Attest root accepted for production                                       | The Step 3.2 human fingerprint comparison                                                                                                                                              | `apple-app-attest-root.ts:13-16`                                                                         |
-| EAS builds                                                                    | An Expo account and an `eas.json` (does not exist), a real version and build number                                                                                                    | `apps/mobile/README.md:458-461`                                                                          |
+| EAS builds                                                                    | An Expo account (`eas.json` exists as a scaffold), a real version and build number                                                                                                    | `apps/mobile/README.md:458-461`                                                                          |
 | Push notifications (APNs key)                                                 | `expo-notifications` is not installed; an owner decision on push credentials                                                                                                           | `apps/mobile/src/push/index.ts:4-8`                                                                      |
 | HealthKit / Health declarations on iOS                                        | Counsel L7 sign-off before the first HealthKit read; nothing HealthKit-related is built                                                                                                | plan `02-build-plan.md:2790`; `policy-scan.ts:62-67`                                                     |
 | Native Apple sign-in not auto-linking by email                                | The P4 spike decision on GoTrue linking (not an Apple task)                                                                                                                            | `p3-money-path-requirements.md:3033-3040`                                                                |
@@ -762,11 +760,11 @@ Written first against the code as it was at `cbd9c2b`; the "Status" column recor
 | 3  | The SIWA and DeviceCheck/Play PEM parsers disagreed on a one-line literal-`\n` key                                                                                                                                                                                                                                                        | **Fixed**: one shared parser, `supabase/functions/_shared/pem.ts`, used by SIWA, DeviceCheck and Play Integrity; tests `pem-shared.test.ts`, `devicecheck-egress.test.ts`, `apple-config.deno.test.ts`                                                          |
 | 4  | `loadRewardsAttestationConfig` did not trim (a trailing newline on `GR_APPLE_DEVICECHECK_ENV` silently meant "unconfigured")                                                                                                                                                                                                              | **Fixed**: trims like the other loaders, refuses whitespace inside the team/bundle id, requires a non-blank PEM; `apple-config.deno.test.ts`                                                                                                                    |
 | 5  | "K2" is overloaded: the plan's landing-page experiment vs the App Attest root fingerprint check                                                                                                                                                                                                                                           | **Renamed** everywhere it is the root check: "App Attest root fingerprint check (follow-up K2 of the App Attest work)"                                                                                                                                          |
-| 6  | Two plan behaviours for the review account are unbuilt: "audits every sign-in" and "disabled outside submission windows" (plan `02-build-plan.md:1871`); also no provisioning procedure                                                                                                                                                  | **Tracked, deliberately not built**: a "Tracked gap, P4.2 pre-submission item" note in `p3-money-path-requirements.md` and Step 4.3 above. Until built, remove the demo row or disable its Auth user by hand after each review window                            |
+| 6  | Two plan behaviours for the review account were unbuilt: "audits every sign-in" and "disabled outside submission windows" (plan `02-build-plan.md:1871`); also no provisioning procedure | **Built** in migration 0051 and `tools/review-account/review-account.sh`; the owner procedure is `docs/owner/review-account-procedure.md`. **Never delete the demo row to disable the account (that makes it an ordinary player): `close` is the off switch; `retire` replaces it** |
 | 7  | The DeviceCheck client used the bare platform `fetch`: no host allow-list, no `redirect: "error"` (the SIWA path has both via `signin/safe-fetch.ts`). `appleid.apple.com` is the only Apple host on any in-code allow-list; no Supabase-side outbound allow-list exists in the repo (`supabase/config.toml` has none); `docs/owner/network-unblock.md` is about the development container's proxy and lists no Apple host | **Fixed for DeviceCheck**: exact-host allow-list (`api.devicecheck.apple.com`, `api.development.devicecheck.apple.com`), `redirect: "error"`, refused redirects, existing per-call timeout; `devicecheck-egress.test.ts`. The Play Integrity adapter still uses the bare `fetch`: tracked as follow-up K11 in `p3-money-path-requirements.md`, not built |
 | 8  | `.gitignore` did not exclude Apple credential file types                                                                                                                                                                                                                                                                                  | **Fixed**: `*.p8`, `AuthKey_*.p8`, `*.p12`, `*.mobileprovision`, `*.cer`, `credentials.json`. gitleaks' default private-key rule confirmed to flag a committed key block in four forms; nothing loosened                                                        |
 | 9  | No operator script minted the six-month client-secret JWT, only the expiry checker existed                                                                                                                                                                                                                                                | **Fixed**: `tools/apple/mint-siwa-client-secret.mjs` (Step 2.4); `mint-siwa-client-secret.test.ts`                                                                                                                                                              |
-| 10 | `apps/mobile/app.json` has no EAS project ID, no iOS build number, and version `0.0.0`; there is no `eas.json`                                                                                                                                                                                                                            | **Open** (Step 5.1): an owner/engineering step when EAS is set up                                                                                                                                                                                              |
+| 10 | `apps/mobile/app.json` has no EAS project ID, no iOS build number, and version `0.0.0`; `eas.json` exists as a scaffold (profiles only; the project id and `EXPO_PUBLIC_*` values are yours)                                                                                                                                                                                                                            | **Open** (Step 5.1): an owner/engineering step when EAS is set up                                                                                                                                                                                              |
 
 ## Everything in this runbook that is `[unverified — training knowledge]`
 

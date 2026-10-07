@@ -79,7 +79,7 @@ CREATE POLICY pd_read_review_window ON app.app_review_window FOR SELECT TO priva
 -- (The owner tool refuses to provision a second one with its own message first; this is the floor beneath it.)
 CREATE UNIQUE INDEX app_review_demo_account_single ON app.app_review_demo_account ((true));
 COMMENT ON INDEX app.app_review_demo_account_single IS
-  '0051. At most one app-review account may exist (plan line 1871: "One app-review account"). To replace it, DELETE the old row first.';
+  '0051. At most one app-review account may exist (plan line 1871: "One app-review account"). To replace it: ban its Auth user first, then delete its row (tools/review-account/review-account.sh retire). Never delete the row alone: that leaves an ordinary player with live tokens.';
 
 -- ============================================================================
 -- 2. One audit row per (account, session, outcome), as a database fact
