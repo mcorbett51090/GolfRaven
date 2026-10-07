@@ -74,6 +74,12 @@ jobs:
         # `pnpm-lock.yaml`. `--with-deps` also installs the OS-level shared
         # libraries `ubuntu-latest` doesn't ship by default.
         #
+        # `apps/partners` (S7a) uses this SAME install: its `test` script also runs a Playwright suite
+        # (`vitest.e2e.config.ts`: the built bundle under its real CSP, a Chromium virtual WebAuthn
+        # authenticator) and applies the same rule (`test/e2e/support.ts`, `launchOrSkip`): under
+        # `CI=true` a launch failure is a failure, `GOLFRAVEN_E2E_SKIP=1` opts out deliberately. It needs
+        # no step of its own: `@playwright/test` is pinned to the same 1.56.1, so one Chromium serves both.
+        #
         # `run-e2e.mjs` still probes for a launchable browser first, but
         # now under `CI=true` (set automatically by GitHub Actions on every
         # runner — never has to be set explicitly here) a launch FAILURE is

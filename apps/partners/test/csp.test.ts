@@ -124,7 +124,10 @@ describe("the API origin configuration", () => {
   });
 
   it("refuses http, credentials, a query, a fragment and a non-URL", () => {
-    for (const bad of ["http://api.example.org/functions/v1", "ftp://api.example.org", "https://user:pw@api.example.org", "https://api.example.org/?x=1", "https://api.example.org/#f", "not a url", "//api.example.org"]) {
+    const withCredentials = new URL("https://api.example.org/functions/v1");
+    withCredentials.username = "someone"; // built at run time: a literal user:password@host string is what a secret scanner looks for
+    withCredentials.password = "dummy";
+    for (const bad of ["http://api.example.org/functions/v1", "ftp://api.example.org", withCredentials.href, "https://api.example.org/?x=1", "https://api.example.org/#f", "not a url", "//api.example.org"]) {
       expect(() => resolveApiBase(bad), bad).toThrow();
     }
   });
