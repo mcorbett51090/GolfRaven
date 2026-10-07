@@ -17,6 +17,10 @@
 --      authenticated Edge Function already passes through.
 --   4. private.bind_actor_internal (redefined from 0047, ONE added check): a kind = 'user' binding of a review account OUTSIDE a window is refused (42501). This is the
 --      BACKSTOP in the database: an Edge path that forgot the gate above still cannot open an actor-bound transaction for a disabled review account.
+--   4b. THE REVIEW ACCOUNT RECEIVES NOTHING: the four edge_actor-executable definers that create a purchase / credit or hand a reward to its holder (marker_scan_for_actor,
+--      marker_cosignal_attach_for_actor, activate_offer_code_for_actor, activate_entitlement_for_actor) are redefined as their current definitions plus ONE block that refuses the review
+--      account (a returned status 'review_account' for the two marker functions, 42501 for the two activations); the migration asserts in the catalogue that nothing else changed.
+--   4c. ONE review account: a unique index on a constant over app.app_review_demo_account.
 --   5. A partial UNIQUE index on app.audit_log that makes "one row per session" a database fact (the gate catches its unique_violation; no ON CONFLICT arbiter is read).
 --   6. Registries: function_inventory, definer_policy_allowlist (+ the checked-in fixture twin).
 --

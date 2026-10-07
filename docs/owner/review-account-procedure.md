@@ -6,24 +6,37 @@ The review account is **closed by default**. It works only while a submission wi
 
 Everything about Supabase Auth, App Store Connect and EAS below is `[unverified — training knowledge]` unless it cites this repository: none of it could be exercised here (no hosted project, no Apple account).
 
+## Before the first submission window: a deploy precondition
+
+The database refuses the account the instant a window ends, but **GoTrue keeps issuing codes and tokens until the account is banned**, and a token reads the whole `api.*` catalogue (the live offer list and other players' public handles) directly from PostgREST. So, **before you open the first window**, one of these must exist and have been seen to work once:
+
+- **(a)** a schedule that runs `review-account.sh sync` at least every 15 minutes (a Supabase cron, a GitHub Actions schedule or a machine you control; nothing in this repository schedules it `[unverified]`), **or**
+- **(b)** your own standing rule to run `review-account.sh close` the moment a review ends.
+
+Details and the reasoning: `docs/security/review-account-design.md` section 2.
+
 ## What you need, and where it lives (never in git: this repository is public)
 
 | Value | Where | Notes |
 |---|---|---|
-| The reviewer mailbox address | `REVIEW_ACCOUNT_EMAIL` in your shell, or one line on standard input | A dedicated, monitored mailbox. The tool never takes it as an argument and never prints it |
+| The reviewer mailbox address | `REVIEW_ACCOUNT_EMAIL` in your shell, or one line on standard input | A dedicated, monitored mailbox. The tool never takes it as an argument, never prints it, hands it to `psql` and `jq` on standard input only (so it is on no command line), unsets it before starting any child, and keeps the Auth response (which names it) out of every file |
 | Database connection | the standard libpq variables (`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE`, `PGPASSWORD`) of the **production** project | The login must be allowed to `SET ROLE service_role` |
-| Auth admin API | `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` of the production project | The key goes to `curl` on standard input, never on a command line. Use `GOLFRAVEN_REVIEW_AUTH=skip` to act on the database only and ban by hand in the dashboard instead |
+| Auth admin API | `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` of the production project | `SUPABASE_URL` must be exactly `https://<host>`: userinfo, a path and look-alike hosts are refused. The key goes to `curl` on standard input, never on a command line, and is removed from the environment before any child starts. Use `GOLFRAVEN_REVIEW_AUTH=skip` to act on the database only and ban by hand in the dashboard instead |
 | `jq`, `curl`, `psql` | on your `PATH` | |
 
 ## 1. Provision (once)
 
-Prerequisite: the production Supabase project, custom SMTP (so the OTP reaches the mailbox), migration `0051` applied.
+Prerequisite: the production Supabase project, custom SMTP (so the OTP reaches the mailbox), migration `0051` applied, and the deploy precondition above. Do **not** sign the address in beforehand: the tool creates the Auth user itself.
 
 ```shell
 printf '%s\n' "$REVIEWER_ADDRESS" | bash tools/review-account/review-account.sh provision
 ```
 
-It creates the Auth user if the address has none (born banned), marks it the review account (`app.app_review_demo_account`), refuses an address that is a partner member or an admin, and leaves the account **banned and closed**. Re-running it is harmless.
+It creates the Auth user (born banned), marks it the review account (`app.app_review_demo_account`) and leaves it **banned and closed**. Re-running it with the same address is harmless. What it refuses, by design:
+
+- **An address that already has an Auth user.** A typo in the address must not turn a real player into the review account. Use a fresh address. If you created the Auth user for this purpose and it has never been used, pass `--adopt`: the tool then checks that it has no evidence, plays, rewards, offer codes, entitlements, marker credits, purchases or devices, and is neither a partner member nor an admin.
+- **A second review account.** There is exactly one (a unique index). To replace it, delete the old row first (`delete from app.app_review_demo_account;` as `service_role`), then provision the new address.
+- **A partner member or an admin** (the review account has no partner scope).
 
 ## 2. Open a window around a submission
 
@@ -39,7 +52,7 @@ bash tools/review-account/review-account.sh open --hours 72 --note "build 1.0.0 
 bash tools/review-account/review-account.sh close
 ```
 
-The database refuses the account from that instant (a request answers 403 `review_account_disabled`); the tool then bans the Auth user. A window that simply runs out is also refused by the database at its end instant, but **GoTrue keeps issuing codes until the ban is set**, so also run
+The database refuses the account from that instant (a request answers 403 `review_account_disabled`); the tool then bans the Auth user. **`close` ends the windows that are open now and leaves FUTURE windows in place:** the database will enable the account again when one starts, while GoTrue stays banned until the next `sync` or `open`, which fails closed (the account cannot get a code in the meantime). Delete a future window by hand if you do not want it. A window that simply runs out is also refused by the database at its end instant, but **GoTrue keeps issuing codes until the ban is set**, so also run
 
 ```shell
 bash tools/review-account/review-account.sh sync

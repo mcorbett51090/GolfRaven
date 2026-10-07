@@ -520,7 +520,7 @@ async function reviewAccountGate(uid: string, sessionId: string | null): Promise
   //     made no request, so this is the --adopt corner only) and it costs at most that account's first-session audit row; the database backstop (private.bind_actor_internal) does not read this cache
   //     and refuses the account outside a window regardless;
   //   - a cached entry never outlives the process, and the map is bounded (cleared when full).
-  const now = Date.now();
+  const now = reviewGateNow();
   const cachedUntil = reviewGateNegativeCache.get(uid);
   if (cachedUntil !== undefined && cachedUntil > now) return "not_review";
   reviewGateDbCalls += 1;
@@ -543,6 +543,7 @@ const REVIEW_GATE_NEGATIVE_TTL_MS = 30_000;
 const REVIEW_GATE_NEGATIVE_MAX = 5_000;
 const reviewGateNegativeCache = new Map<string, number>();
 let reviewGateDbCalls = 0;
+let reviewGateNow: () => number = () => Date.now();
 
 /** Test hooks (the integration suite measures the gate's overhead with and without the negative cache, and starts every case from an empty one). */
 export function resetReviewGateCacheForTests(): void {
@@ -550,6 +551,10 @@ export function resetReviewGateCacheForTests(): void {
 }
 export function reviewGateDbCallsForTests(): number {
   return reviewGateDbCalls;
+}
+/** Test hook: the clock the negative cache reads (null restores the real one), so a test can prove the TTL without sleeping 30 seconds. */
+export function setReviewGateClockForTests(now: (() => number) | null): void {
+  reviewGateNow = now ?? (() => Date.now());
 }
 
 // THE SERVICE-ROLE KEY: the two places it is still read (the lint's privileged-file pass allows exactly these two functions, and nothing else).

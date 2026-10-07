@@ -17,7 +17,7 @@
 
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawOwnerSql } from "./_helpers.ts";
-import { getActorFromRequest, resetReviewGateCacheForTests, reviewGateDbCallsForTests, withOwnership } from "../../functions/_shared/privileged.ts";
+import { getActorFromRequest, resetReviewGateCacheForTests, reviewGateDbCallsForTests, setReviewGateClockForTests, withOwnership } from "../../functions/_shared/privileged.ts";
 import { errorResponse, handleRequest, HttpError } from "../../functions/_shared/http.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
@@ -303,6 +303,29 @@ Deno.test("LOW-4: the gate costs one transaction per ordinary account per 30 s, 
     assertEquals((await auditRows(rv)).filter((r) => r.action === "review_account.session_allowed").length, 1, "and still audited once per session");
   } finally {
     await dropWindow(w);
+  }
+});
+
+Deno.test("LOW-4: the negative cache expires: an ordinary account is asked again after 30 s (a fake clock; not before)", DT, async () => {
+  await noWindowsAtAll();
+  resetReviewGateCacheForTests();
+  const uid = freshUuid();
+  await createTestUser(uid, `rv-ttl-${uid.slice(0, 8)}`);
+  let t = 1_000_000;
+  setReviewGateClockForTests(() => t);
+  try {
+    const c0 = reviewGateDbCallsForTests();
+    assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200);
+    assertEquals(reviewGateDbCallsForTests() - c0, 1);
+    t += 29_000;
+    assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200);
+    assertEquals(reviewGateDbCallsForTests() - c0, 1, "still remembered after 29 s");
+    t += 2_000; // 31 s after the first answer
+    assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200);
+    assertEquals(reviewGateDbCallsForTests() - c0, 2, "asked again after 31 s");
+  } finally {
+    setReviewGateClockForTests(null);
+    resetReviewGateCacheForTests();
   }
 });
 
