@@ -1,5 +1,8 @@
 # supabase/tests/fixtures/partner_session_class_functions.txt
 #
 # verify-function-inventory check 14 (a3): the *_for_partner functions that may call private.partner_authorize with class SESSION or PEEK (a live session, no scope, no aal gate: sign-out,
-# lock, GET session). One `schema.name(identity args)` per line; '#' lines are comments. EMPTY today: S1.2 adds its session routes here, after review. Every other *_for_partner function acts on
+# lock, GET session). One `schema.name(identity args)` per line; '#' lines are comments. S1.2 (0049) added its three session routes here, after review: GET session (PEEK), sign-out and lock (SESSION). Every other *_for_partner function acts on
 # an object and must use A0, A0_KEEPALIVE, A1, A2 or A3 (a literal) with a facility or trail argument: a class-SESSION call is a scope no-op.
+private.partner_whoami_for_partner()
+private.partner_session_revoke_for_partner()
+private.partner_session_lock_for_partner()

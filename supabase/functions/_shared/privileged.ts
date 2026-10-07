@@ -68,6 +68,22 @@ import postgres from "postgres";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { Errors, HttpError } from "./http.ts";
 import { makeSelfCheckGate, type SelfCheckGate } from "./edge-selfcheck-gate.ts";
+import {
+  type ChallengeIssue,
+  type CredentialLookup,
+  type MintInput,
+  type MintResult,
+  type PartnerDb,
+  type PartnerMintTx,
+  type PartnerSessionTx,
+  PartnerAuthorityRefused,
+  PartnerNotConfigured,
+  PartnerSessionRefused,
+  type ReauthCredential,
+  type ReauthInput,
+  type RpConfig,
+} from "./partner/ports.ts";
+import { parseAllowedOrigin } from "./partner/cors.ts";
 
 import type { OwnReward, RewardsRepo } from "./rewards/types.ts";
 import type { RewardsAttestationConfig } from "./rewards/production-ports.ts";
@@ -314,28 +330,48 @@ export function delegateBind(ref: DelegateRef, expectedUid: string): ScopedBind 
 }
 
 /**
+ * The partner lane's binding (partner-auth design 4.2, slice S1.2): `private.bind_partner_session(sha256(token))`, run as `edge_partner`. It binds NO uid the caller supplies: `expectedUid` is null,
+ * because the handler never names a person (the session names the member, in the database). The Edge keeps only the HASH of the token; the raw token never reaches this function.
+ */
+export function partnerBind(tokenHash: string): ScopedBind {
+  return { expectedUid: null, run: (trx) => trx`select private.bind_partner_session(${tokenHash})` };
+}
+
+/**
  * THE one way an edge-mode transaction is opened (design §6): in order,
- *   1. `SET LOCAL ROLE edge_actor | edge_system | edge_signin_minter` (the session user, `edge_gateway`, may SET into each; the minter kind is for the email-proof
- *      minter only, design §12.1);
+ *   1. `SET LOCAL ROLE edge_actor | edge_system | edge_signin_minter | edge_partner | edge_partner_minter` (the session user, `edge_gateway`, may SET into each; the two minter kinds are for the
+ *      email-proof minter and the partner sign-in minter only, design §12.1 and partner design 4.4);
  *   2. the three timeouts (`statement`, `lock`, and `transaction` where PG17+ has it);
  *   3. the bind (`private.bind_actor(uid)`; the system kind binds nothing; the DELEGATE kind starts as `edge_system`, calls a delegate
- *      binder, and only then switches to `edge_actor`: `bind_delegate_*` is `edge_system`-only, and the work that follows is the owner's);
+ *      binder, and only then switches to `edge_actor`: `bind_delegate_*` is `edge_system`-only, and the work that follows is the owner's;
+ *      the PARTNER kind runs `private.bind_partner_session(hash)` as `edge_partner`);
  *   4. an assertion that `current_user` is the expected role, that role is neither SUPERUSER nor
- *      BYPASSRLS, and (actor / delegate kinds) `private.actor_uid()` equals the expected uid.
+ *      BYPASSRLS, and (actor / delegate kinds) `private.actor_uid()` equals the expected uid; for the partner kind, that `private.partner_binding_kind()` reads back as 'partner'.
  * Any failure throws before `op` runs. The self-check has already passed on this pool (and repeats, see `edgeChecked`).
  */
-export async function openScopedTx<T>(kind: "actor" | "system" | "delegate" | "signin_mint", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
+export async function openScopedTx<T>(kind: "actor" | "system" | "delegate" | "signin_mint" | "partner" | "partner_mint", bind: ScopedBind, op: (trx: TxSql) => Promise<T>): Promise<T> {
   await edgeChecked();
   const db = edgeSql();
   const txTimeoutSupported = await supportsTransactionTimeout(db);
   // `signin_mint` (migration 0041) is the ONE kind that runs as `edge_signin_minter`: the only role holding EXECUTE on private.signin_record_email_proof. It binds
   // nothing (the definer refuses inside an actor-bound transaction), and the privileged lint (privileged-mint-scope) lets only `signinEmailProofs` ask for it.
-  const role = kind === "system" ? "edge_system" : kind === "signin_mint" ? "edge_signin_minter" : "edge_actor";
+  // `partner_mint` (migration 0048) is the same shape for `edge_partner_minter` (the sign-in mint): it binds nothing, and the lint lets only `withPartnerMint` ask for it.
+  // `partner` runs as `edge_partner`: no table privilege, `bind_partner_session` is its one way in, and a bind is REQUIRED (a partner transaction that binds nothing could call nothing useful).
+  const role =
+    kind === "system" ? "edge_system"
+    : kind === "signin_mint" ? "edge_signin_minter"
+    : kind === "partner" ? "edge_partner"
+    : kind === "partner_mint" ? "edge_partner_minter"
+    : "edge_actor";
   if (kind === "signin_mint" && (bind.run !== undefined || bind.expectedUid !== null)) throw new Error("openScopedTx: the signin_mint kind binds no actor (the minter refuses inside an actor-bound transaction)");
+  if (kind === "partner_mint" && (bind.run !== undefined || bind.expectedUid !== null)) throw new Error("openScopedTx: the partner_mint kind binds no actor (the minter refuses inside a bound transaction)");
+  if (kind === "partner" && (bind.run === undefined || bind.expectedUid !== null)) throw new Error("openScopedTx: the partner kind binds a SESSION (a bind is required) and names no actor uid (the handler never supplies one)");
   return await (db.begin(async (trx: TxSql) => {
     // Literal SQL text (no `${...}`): SET LOCAL takes no bind parameter — see the note above STATEMENT_TIMEOUT.
     if (kind === "actor") await trx`set local role edge_actor`;
     else if (kind === "signin_mint") await trx`set local role edge_signin_minter`;
+    else if (kind === "partner") await trx`set local role edge_partner`;
+    else if (kind === "partner_mint") await trx`set local role edge_partner_minter`;
     else await trx`set local role edge_system`;
     await trx`set local statement_timeout = '10s'`;
     await trx`set local lock_timeout = '5s'`;
@@ -344,7 +380,20 @@ export async function openScopedTx<T>(kind: "actor" | "system" | "delegate" | "s
     // A delegate acts as the owner it just bound: from here on the transaction is edge_actor's (the binding stays: it is keyed on the
     // backend and the transaction, not on the role).
     if (kind === "delegate") await trx`set local role edge_actor`;
-    if (kind !== "system" && kind !== "signin_mint") {
+    if (kind === "partner") {
+      // The post-bind assertion of design 4.2 (R2-L3): the transaction runs as edge_partner (so no edge_actor privilege exists in it), the role is neither SUPERUSER nor BYPASSRLS, and the binding reads
+      // back as kind 'partner' through the one read-only helper edge_partner may execute. It deliberately does NOT call private.actor_uid(): that function is edge_actor's alone (0030:568), and
+      // "the user lane sees no actor" is enforced where it can be, inside private.bind_partner_session, which checks from the row it just wrote that actor_uid() is NULL and the kind is 'partner'.
+      // The role is checked FIRST, in a statement of its own: under any other role `private.partner_binding_kind()` is not even executable, and the refusal must name the role, not a permission.
+      const check = await trx`
+        select current_user::text as u,
+               (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged`;
+      const c = check[0];
+      if (c?.u !== role) throw new Error(`openScopedTx: expected current_user = '${role}' after SET LOCAL ROLE, got '${c?.u}'`);
+      if (c?.privileged !== false) throw new Error(`openScopedTx: role '${role}' is SUPERUSER or BYPASSRLS — refusing to run`);
+      const bound = await trx`select private.partner_binding_kind() as kind`;
+      if (bound[0]?.kind !== "partner") throw new Error(`openScopedTx: the partner binding kind is '${bound[0]?.kind ?? null}', expected 'partner' — refusing to run`);
+    } else if (kind !== "system" && kind !== "signin_mint" && kind !== "partner_mint") {
       const check = await trx`
         select current_user::text as u,
                (select r.rolsuper or r.rolbypassrls from pg_catalog.pg_roles r where r.rolname = current_user) as privileged,
@@ -430,6 +479,10 @@ export async function getActorFromRequest(req: Request): Promise<Actor | null> {
   if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) return null;
   const token = authHeader.slice(authHeader.indexOf(" ") + 1).trim();
   if (!token) return null;
+  // PA-11 (partner design 4.2, N5): a PARTNER session token (`gr_ps_`) or an invite token (`gr_inv_`) is never an identity of the player lane, and it must never be sent to a third party: it is refused HERE, before
+  // the environment is read and before any client exists, so no request to GoTrue is ever made with it. (Case-insensitively: a mangled partner token is still not a Supabase JWT.)
+  const lowered = token.toLowerCase();
+  if (lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_")) return null;
 
   const url = Deno.env.get("SUPABASE_URL");
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
@@ -3452,3 +3505,175 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
     },
   };
 }
+
+// ============================================================================
+// PARTNER LANE (S1.2): docs/security/partner-auth-design.md 4.2 / 4.4 / 4.5 / 8. BEGIN
+// ============================================================================
+// The partner (staff) lane's two kinds of transaction, and nothing else. The handler (`_shared/partner/session-handler.ts`, pure) sees only the PORTS in `_shared/partner/ports.ts`; this section is
+// where they meet the database. No `console` appears in it (PA-11; supabase/tests/unit/partner-no-console.test.ts scans everything between the BEGIN and END markers, and the partner modules).
+//
+//   withPartnerMint(op)        ONE transaction as `edge_partner_minter` (kind "partner_mint", no binding): the stateless sign-in challenge, the relying-party read, the credential lookup, the failure counter and
+//                              the mint. It COMMITS whenever `op` returns, whatever status the database answered: every refusal is a status row, so the alarm rows, the burned nonce and the failure counter commit.
+//   withPartnerSession(h, op)  ONE transaction as `edge_partner` (kind "partner"): `bind_partner_session(h)`, the post-bind assertion, then `_for_partner` definers only.
+//   hitRateLimitForPartner     one hit of a per-member bucket, in its OWN short transaction (committed before any request transaction opens: the rule of `hitRateLimitForActor`).
+// Errors are mapped here and nowhere else: 28000 from the binder is `PartnerSessionRefused` (the ONE 401), 42501 from a definer is `PartnerAuthorityRefused` (403), 55000 (no relying-party row, no Vault
+// key) is `PartnerNotConfigured` (a bare 503). Anything else propagates and rolls back.
+
+/** The SQLSTATE of a postgres.js error, or "". */
+function partnerPgCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : "";
+}
+
+function mapPartnerDbError(err: unknown): never {
+  const code = partnerPgCode(err);
+  if (code === "28000") throw new PartnerSessionRefused();
+  if (code === "42501") throw new PartnerAuthorityRefused();
+  if (code === "55000") throw new PartnerNotConfigured();
+  throw err;
+}
+
+const bytesOf = (v: unknown): Uint8Array => new Uint8Array(v as ArrayLike<number>);
+
+function buildPartnerMintTx(trx: TxSql): PartnerMintTx {
+  return {
+    async rpConfig(): Promise<RpConfig> {
+      const rows = await trx`select o_rp_id, o_origin from private.partner_rp_config_read()`;
+      const r = rows[0];
+      if (typeof r?.o_rp_id !== "string" || typeof r?.o_origin !== "string") throw new PartnerNotConfigured();
+      return { rpId: r.o_rp_id, origin: r.o_origin };
+    },
+    async issueChallenge(): Promise<ChallengeIssue> {
+      const rows = await trx`select o_nonce, o_exp::text as o_exp, o_mac from private.partner_challenge_issue_sign_in()`;
+      const r = rows[0];
+      if (r === undefined) throw new Error("partner_challenge_issue_sign_in returned no row");
+      return { nonce: bytesOf(r.o_nonce), exp: Number(r.o_exp), mac: bytesOf(r.o_mac) };
+    },
+    async lookupCredential(credentialId: Uint8Array): Promise<CredentialLookup> {
+      const rows = await trx`
+        select o_status, o_credential_id::text as o_credential_id, o_user_id::text as o_user_id, o_alg::int as o_alg, o_public_key, o_sign_count::text as o_sign_count
+        from private.partner_credential_lookup(${credentialId}::bytea)`;
+      const r = rows[0];
+      if (r?.o_status === "ok") {
+        return { status: "ok", credential: { id: String(r.o_credential_id), userId: String(r.o_user_id), alg: Number(r.o_alg), publicKey: bytesOf(r.o_public_key), signCount: Number(r.o_sign_count) } };
+      }
+      return { status: r?.o_status === "cooldown" ? "cooldown" : "unknown" };
+    },
+    async recordFailure(credentialId: Uint8Array): Promise<"counted" | "cooldown" | "unknown"> {
+      const rows = await trx`select o_status from private.partner_sign_in_failure_record(${credentialId}::bytea)`;
+      const status = rows[0]?.o_status;
+      return status === "counted" || status === "cooldown" ? status : "unknown";
+    },
+    async mint(input: MintInput): Promise<MintResult> {
+      const rows = await trx`
+        select o_status, o_aal::int as o_aal, o_expires_at
+        from private.partner_session_mint(
+          ${input.tokenHash}::text, ${input.credentialId}::bytea, ${input.nonce}::bytea, ${String(input.exp)}::bigint, ${input.mac}::bytea,
+          ${input.authenticatorData}::bytea, ${input.clientDataJson}::bytea, ${input.signature}::bytea)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string") throw new Error("partner_session_mint returned no status");
+      return { status: r.o_status, aal: r.o_aal === null || r.o_aal === undefined ? null : Number(r.o_aal), expiresAt: r.o_expires_at instanceof Date ? r.o_expires_at.toISOString() : null };
+    },
+  };
+}
+
+function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
+  return {
+    async whoami(): Promise<unknown> {
+      const rows = await trx`select private.partner_whoami_for_partner() as info`;
+      return rows[0]?.info ?? null;
+    },
+    async signOut(): Promise<void> {
+      await trx`select private.partner_session_revoke_for_partner()`;
+    },
+    async lock(): Promise<void> {
+      await trx`select private.partner_session_lock_for_partner()`;
+    },
+    async reauthOptions(): Promise<ChallengeIssue & { rp: RpConfig }> {
+      const rows = await trx`select o_nonce, o_exp::text as o_exp, o_mac, o_rp_id, o_origin from private.partner_session_reauth_options_for_partner()`;
+      const r = rows[0];
+      if (r === undefined) throw new Error("partner_session_reauth_options_for_partner returned no row");
+      return { nonce: bytesOf(r.o_nonce), exp: Number(r.o_exp), mac: bytesOf(r.o_mac), rp: { rpId: String(r.o_rp_id), origin: String(r.o_origin) } };
+    },
+    async reauthCredential(credentialId: Uint8Array): Promise<ReauthCredential | null> {
+      const rows = await trx`
+        select o_credential_id::text as o_credential_id, o_user_id::text as o_user_id, o_alg::int as o_alg, o_public_key, o_sign_count::text as o_sign_count, o_rp_id, o_origin
+        from private.partner_session_reauth_credential_for_partner(${credentialId}::bytea)`;
+      const r = rows[0];
+      if (r === undefined) return null;
+      return {
+        id: String(r.o_credential_id),
+        userId: String(r.o_user_id),
+        alg: Number(r.o_alg),
+        publicKey: bytesOf(r.o_public_key),
+        signCount: Number(r.o_sign_count),
+        rp: { rpId: String(r.o_rp_id), origin: String(r.o_origin) },
+      };
+    },
+    async reauth(input: ReauthInput): Promise<{ status: string; reauthUntil: string | null }> {
+      const rows = await trx`
+        select o_status, o_reauth_until
+        from private.partner_session_reauth_for_partner(
+          ${input.credentialId}::bytea, ${input.nonce}::bytea, ${String(input.exp)}::bigint, ${input.mac}::bytea,
+          ${input.authenticatorData}::bytea, ${input.clientDataJson}::bytea, ${input.signature}::bytea)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string") throw new Error("partner_session_reauth_for_partner returned no status");
+      return { status: r.o_status, reauthUntil: r.o_reauth_until instanceof Date ? r.o_reauth_until.toISOString() : null };
+    },
+  };
+}
+
+/** The partner sign-in minter's transaction (kind "partner_mint": the ONE caller of that kind, the lint's `privileged-mint-scope` rule keeps it so). */
+export async function withPartnerMint<T>(op: (m: PartnerMintTx) => Promise<T>): Promise<T> {
+  try {
+    return await openScopedTx("partner_mint", { expectedUid: null }, (trx) => op(buildPartnerMintTx(trx)));
+  } catch (err) {
+    return mapPartnerDbError(err);
+  }
+}
+
+const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
+
+/** A transaction as `edge_partner`, bound to the session whose token hash this is. A malformed hash is refused without a database round trip, with the same error as an unknown one. */
+export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx) => Promise<T>): Promise<T> {
+  if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
+  try {
+    return await openScopedTx("partner", partnerBind(tokenHash), (trx) => op(buildPartnerSessionTx(trx)));
+  } catch (err) {
+    return mapPartnerDbError(err);
+  }
+}
+
+/** One hit of `private.hit_partner_rate_limit` in its OWN short transaction, committed before the request's own transaction opens; the decision is made here from the returned count (the database never raises over the cap, 0020). */
+export async function hitRateLimitForPartner(tokenHash: string, bucketKey: string, windowSeconds: number, max: number): Promise<{ ok: boolean; retryAfterSeconds: number }> {
+  if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
+  let count: number;
+  try {
+    count = await openScopedTx("partner", partnerBind(tokenHash), async (trx) => {
+      const rows = await trx`select private.hit_partner_rate_limit(${bucketKey}, ${windowSeconds + " seconds"}::interval, ${max}::int) as count`;
+      return Number(rows[0]?.count ?? 0);
+    });
+  } catch (err) {
+    return mapPartnerDbError(err);
+  }
+  return count > max ? { ok: false, retryAfterSeconds: windowSeconds } : { ok: true, retryAfterSeconds: 0 };
+}
+
+/** The partner database port the `partner-session` entrypoint hands the pure handler. */
+export const partnerDb: PartnerDb = {
+  withMint: withPartnerMint,
+  withSession: withPartnerSession,
+  hitRateLimit: hitRateLimitForPartner,
+};
+
+/**
+ * The ONE origin the partner lane allows (partner design 4.6): `GR_PARTNER_ORIGIN`, an exact https origin. It lives in the environment, not in `app.partner_rp_config`, because `OPTIONS` must answer
+ * without opening a database connection (PA-10). The handler compares it with `partner_rp_config.origin` on every database path and answers 503 on a mismatch, so the two copies cannot drift apart.
+ * Unset: null (the lane then refuses every request that carries an Origin, and every database path answers 503). Malformed: throws, at boot, rather than run with an origin nobody meant.
+ */
+export function loadPartnerCorsOrigin(): string | null {
+  return parseAllowedOrigin(Deno.env.get("GR_PARTNER_ORIGIN"));
+}
+// ============================================================================
+// PARTNER LANE (S1.2) END
+// ============================================================================

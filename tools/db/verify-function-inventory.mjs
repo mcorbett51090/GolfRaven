@@ -420,7 +420,7 @@ const policyFunctionRows = psqlJsonRows(`
   SELECT row_to_json(t) FROM (
     SELECT pn.nspname || '.' || pc.relname || '.' || pol.polname AS policy,
            fn.nspname || '.' || fp.proname AS function_name,
-           fp.prosrc AS prosrc
+           CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END AS prosrc
     FROM pg_policy pol
     JOIN pg_class pc ON pc.oid = pol.polrelid
     JOIN pg_namespace pn ON pn.oid = pc.relnamespace
@@ -428,7 +428,8 @@ const policyFunctionRows = psqlJsonRows(`
     JOIN pg_proc fp ON fp.oid = d.refobjid
     JOIN pg_namespace fn ON fn.oid = fp.pronamespace
     WHERE pn.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND fp.prosrc ILIKE '%current_setting(%'
+      AND fp.prokind IN ('f', 'p')
+      AND pg_get_functiondef(fp.oid) ~* '\\mcurrent_setting\\s*\\('
   ) t
 `);
 for (const { policy, function_name: functionName, prosrc } of policyFunctionRows) {
@@ -786,7 +787,7 @@ FROM (
   FROM fam f
 ) c
 WHERE c.cls IS NULL
-   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY[]::text[] /* end_session_class_functions */)))
+   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY['private.partner_whoami_for_partner()', 'private.partner_session_revoke_for_partner()', 'private.partner_session_lock_for_partner()'] /* end_session_class_functions */)))
 UNION ALL
 SELECT '(b) an edge_actor-executable definer outside the *_for_partner family evaluates partner scope: ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -801,7 +802,7 @@ WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f'
   AND p.proname NOT LIKE '%\\_for\\_partner'
   AND (regexp_replace(p.prosrc, '((?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*))|(''(?:[^'']|'''')*'')', ' \\2', 'g') ~ '''partner'''
        OR regexp_replace(p.prosrc, '((?:/\\*(?:[^*]|\\*+[^*/])*\\*+/)|(?:--[^\\n]*))|(''(?:[^'']|'''')*'')', ' \\2', 'g') ~* '\\m(actor_binding|partner_binding(_kind|_session)?)\\M')
-  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (/* kind_readers */ ARRAY['private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.actor_uid()', 'private.bind_actor_internal(p_uid uuid, p_kind text)', 'private.bind_partner_session(p_token_hash text)', 'private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)', 'private.course_pin_attempt_for_actor(p_facility_id text, p_pin text, p_at timestamp with time zone)', 'private.course_qr_public_key_for_actor(p_kid text, p_purpose text)', 'private.delete_my_data_for_actor()', 'private.export_my_data_for_actor()', 'private.marker_cosignal_attach_for_actor(p_facility_id text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash text, p_qr_kid text, p_pin text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.offline_code_bound_staff()', 'private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)', 'private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)', 'private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)', 'private.partner_authority_revoke_sessions()', 'private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.partner_binding_session()', 'private.partner_challenge_issue_sign_in()', 'private.partner_pin_grant_consume()', 'private.partner_session_mint(p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)', 'private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)', 'private.signin_bound_user(p_who text)', 'private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)'] /* end_kind_readers */)
+  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (/* kind_readers */ ARRAY['private.actor_uid()', 'private.bind_actor_internal(p_uid uuid, p_kind text)', 'private.bind_partner_session(p_token_hash text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.partner_binding_session()', 'private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)', 'private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)', 'private.partner_authority_revoke_sessions()', 'private.partner_pin_grant_consume()', 'private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)', 'private.delete_my_data_for_actor()', 'private.export_my_data_for_actor()', 'private.offline_code_bound_staff()', 'private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)', 'private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)', 'private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)', 'private.signin_bound_user(p_who text)', 'private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)', 'private.course_pin_attempt_for_actor(p_facility_id text, p_pin text, p_at timestamp with time zone)', 'private.course_qr_public_key_for_actor(p_kid text, p_purpose text)', 'private.marker_cosignal_attach_for_actor(p_facility_id text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash text, p_qr_kid text, p_pin text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.partner_challenge_issue_sign_in()', 'private.partner_session_mint(p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)', 'private.hit_partner_rate_limit(p_bucket_key text, p_window interval, p_max integer)', 'private.partner_credential_lookup(p_credential_id bytea)', 'private.partner_sign_in_failure_record(p_credential_id bytea)', 'private.partner_reauth_apply(p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)', 'private.partner_reauth_clear()'] /* end_kind_readers */)
 UNION ALL
 SELECT '(d) a *_for_partner function is EXECUTE-able by edge_actor, edge_system or PUBLIC (the partner lane is edge_partner alone): ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -827,8 +828,9 @@ WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND has
   FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
 ), win AS (
-  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e LIKE '%current_setting(%'
-    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%'))
+  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e ~* '\\mcurrent_setting\\s*\\(' OR x.e ~* '\\mpg_settings\\M'
+    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass
+      AND (CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\\mcurrent_setting\\s*\\(' OR CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\\mpg_settings\\M')))
 ), trail AS (
   SELECT w.nspname, w.relname, w.polname, w.part, left(w.e, length(w.e) - length(t.tail)) AS prefix
   FROM win w JOIN tails t ON right(w.e, length(t.tail)) = t.tail

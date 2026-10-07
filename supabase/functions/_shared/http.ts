@@ -104,6 +104,13 @@ export async function readJsonBody(req: Request): Promise<unknown> {
   if (!contentType.toLowerCase().includes("application/json")) {
     throw Errors.unsupportedMediaType();
   }
+  return await readCappedJsonBody(req);
+}
+
+/** Everything `readJsonBody` does AFTER its media-type check: the declared-length fast reject, the running 64 KB cap over the stream, the fatal UTF-8 decode and the JSON parse
+ * (413 / 400). Extracted unchanged (partner auth S1.2) so the partner lane's `readPartnerJsonBody` (`_shared/partner/http.ts`: the EXACT media type, 4.6) shares the one
+ * size-cap implementation instead of copying it; `readJsonBody`'s own behaviour is byte for byte what it was. The caller has already decided the media type is acceptable. */
+export async function readCappedJsonBody(req: Request): Promise<unknown> {
   const declaredLength = req.headers.get("content-length");
   if (declaredLength !== null) {
     const n = Number(declaredLength);
@@ -179,7 +186,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
  * is itself made SAFE by this round's other fix (rate-limit hits happen
  * before the transaction, and replays are read-only), not by this
  * timeout pretending to cancel anything. */
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+export async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(Errors.serviceUnavailable(`request exceeded ${ms}ms`)), ms);

@@ -397,6 +397,7 @@ jobs:
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
+            supabase/functions/partner-session/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -455,6 +456,7 @@ jobs:
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
+            supabase/functions/partner-session/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -470,7 +472,8 @@ jobs:
         run: |
           set -euo pipefail
           deno cache --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen \
-            supabase/tests/deno-unit/partner-webauthn.deno.test.ts
+            supabase/tests/deno-unit/partner-webauthn.deno.test.ts \
+            supabase/tests/deno-unit/partner-session-handler.deno.test.ts
           deno test --config supabase/functions/deno.json --lock=supabase/tests/deno.lock --frozen --cached-only --deny-net \
             supabase/tests/deno-unit/
 
@@ -531,6 +534,7 @@ jobs:
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
+            supabase/functions/partner-session/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts 2>&1)
           TAMPER_EXIT=$?
