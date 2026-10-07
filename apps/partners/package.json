@@ -2,10 +2,19 @@
   "name": "@golfraven/partners",
   "private": true,
   "version": "0.0.0",
-  "description": "Staff/operator/admin portal PWA (build plan §3.1 row H). Placeholder — no build work before P5.",
+  "type": "module",
+  "description": "Staff/operator/admin portal PWA (build plan §3.1 row H). S7a: shell, passkey sign-in, session. Plain TypeScript bundled by esbuild into a static, strict-CSP bundle.",
   "scripts": {
-    "build": "echo \"@golfraven/partners: nothing to build yet (placeholder before P5, build plan §3.1 row H)\"",
-    "typecheck": "echo \"@golfraven/partners: no TypeScript yet (placeholder before P5)\"",
-    "test": "echo \"@golfraven/partners: no tests yet (placeholder before P5)\""
+    "build": "node ./scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "vitest run && node ./scripts/run-e2e.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@types/node": "26.6.2",
+    "csp_evaluator": "1.1.8",
+    "esbuild": "0.27.7",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1"
   }
 }
