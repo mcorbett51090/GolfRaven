@@ -1822,6 +1822,14 @@ less: a `failed` grade joins row 2, an `unattestable` grade joins row 3 (§7.5 "
 outcome called refused**. The app-review demo account is
 answered **403** before any reward is read (§4.7.7), so it cannot probe for ids either.
 
+> **Tracked gap, P4.2 pre-submission item (not built, deliberately): review-account behaviours 2 and 3 of build plan §7.8 "Apple 2.1".** The plan says
+> the `app-review` account "audits every sign-in, and is disabled outside submission windows". What exists: the `app.app_review_demo_account`
+> table (0007), the 403 above, the partner-route refusal, and the account's own-row read. What does **not** exist: (a) an audit record written
+> on every sign-in of that account, and (b) any mechanism that disables the account outside a submission window (a flag, an expiry or a
+> scheduled job), and (c) a provisioning procedure for the row (the owner steps in `docs/owner/apple-setup-runbook.md`, Step 4.3, are manual).
+> These must be built or explicitly waived by the owner before the App Store submission (M2); until then the account stays enabled once created,
+> so **remove its row or disable its Auth user by hand after each review window**.
+
 The handler sees only three small interfaces (`IosPort`: `verifyAssertion`, `readBits`, `setBit0`; `AndroidPort`:
 `verifyIntegrity` **only**; plus `Repo#rewards`). `null` for a platform means "not configured". Android has **no vendor
 persistent-bit port**: whether Play Integrity device recall exists is spike A20 `[unverified]`, and a port that reported
@@ -2678,6 +2686,9 @@ Apple's App Attestation Root CA is **pinned in code** (`apple-app-attest-root.ts
 (`attest-key-isolation.test.ts`): `createAttestationVerifier` is built only by `devices-attest-key/index.ts`; `trustAnchorDer` is assigned
 exactly once outside the verifier, in `privileged.ts`, from the pinned constant; no source mentions an anchor/root environment variable;
 the Deno suite sets plausible variable names and shows the anchor does not move.
+**`GR_APPLE_APPATTEST_ROOT` and `GR_APPLE_TRUST_ANCHOR` are NOT variables** (they are the "plausible names" that suite sets to prove they are
+ignored; an operator who sets them changes nothing). Do not create them as secrets. The root is pinned bytes, and the only human step is the
+"App Attest root fingerprint check" (follow-up K2 of the App Attest work, below).
 
 - **Provenance `[unverified against a second source]`.** Fetched 2026-10-02 from
   `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem` by an agent whose outbound TLS passes through a
@@ -2685,7 +2696,8 @@ the Deno suite sets plausible variable names and shows the anchor does not move.
   `CN=Apple App Attestation Root CA, O=Apple Inc., ST=California`; EC P-384, `ecdsa-with-SHA384`; valid 2020-03-18 .. 2045-03-15; serial
   `0B:F3:BE:0E:F1:CD:D2:E0:FB:8C:6E:72:1F:62:17:98`; SHA-256 of the DER
   `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`. **Before this ships, a human compares that
-  fingerprint with the one Apple publishes (or fetches the URL from a clean machine) and confirms they are equal** (follow-up K2). A unit
+  fingerprint with the one Apple publishes (or fetches the URL from a clean machine) and confirms they are equal** (the **App Attest root fingerprint check**, follow-up K2 of the App Attest work, "Accepted follow-ups" below; it is
+**not** the K2 landing-page experiment of build plan §10). A unit
   test pins the SHA-256 of the embedded bytes to the constant and checks the certificate parses, is a CA, is self-signed and signs itself;
   it cannot tell you the constant was right to begin with.
 
@@ -2845,7 +2857,8 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
   `authdata_malformed` (flags), `attestation_bad_structure` (extra `attStmt` keys). Then repeat with a production-environment build
   (TestFlight) against a `production` deployment, then run an activation with the registered key (this also exercises the assertion verifier's
   own unverified layout, F1). The same run settles the string-binding contract above and the activation proposal.
-- **K2. Compare the pinned root's fingerprint with Apple's published one** (provenance above).
+- **K2. App Attest root fingerprint check: compare the pinned root's fingerprint with Apple's published one** (provenance above). K2 of the
+  App Attest work, **not** the K2 landing-page experiment of build plan §10 (a different K2). Owner procedure: `docs/owner/apple-setup-runbook.md`, Step 3.2.
 - **K3. The `receipt` is ignored.** It could feed Apple's fraud-metric endpoint; not built.
 - **K4. One key per device row; a second account on the same install needs a new key.** Apple allows `attestKey` once per key, so two
   accounts cannot register the SAME key, and `app.device_link_signals` (which links device rows by `attest_key_id`) therefore does not link
