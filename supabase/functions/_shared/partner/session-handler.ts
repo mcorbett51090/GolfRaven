@@ -12,6 +12,12 @@
 //   POST lock             clears every step-up grant now (the session stays live)
 //   POST reauth/options   a reauth challenge bound to the session
 //   POST reauth           { challengeToken, credential }: a fresh passkey assertion by a credential of THE SESSION'S person (PA-27) sets reauth_until
+//   GET  pin              the PBKDF2 inputs (salt, iterations) the browser derives the PIN key with, or `unset` / `must_change` / `locked` (S1.3)
+//   POST step-up/pin      { derived }: the browser-derived key (never the PIN); on `ok` the session holds a single-use PIN grant (60 s). `wrong`, `locked` and `retry_after` are RETURNED statuses: the counter commits
+//   POST pin/set          { derived, salt, iterations }: the first PIN, or the replacement after a reset; only inside an enrolment window or after an email proof (403 otherwise)
+//   POST pin/change       { currentDerived, derived, salt, iterations }: replace a live PIN (needs the current one)
+//   POST otp-proof/start  {}: mails a one-time code to the member's OWN address (3 a member an hour)
+//   POST otp-proof/verify { code }: proves the mailbox through GoTrue (anon key) and records the proof on the session (5 attempts a member an hour); the GoTrue session is closed AFTER the proof is recorded
 //
 // THE ORDER, for every request: (1) the Origin check, before routing and for every method (a foreign Origin is a 403 whatever CORS does); (2) `OPTIONS` is answered here, with no port touched;
 // (3) the route and method (404 / 405); (4) for a session route, the bearer: exactly `gr_ps_` + 43 characters, else the ONE 401 with no port touched (a Supabase JWT, any other bearer and no
@@ -28,25 +34,45 @@ import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauth
 import {
   type AssertionVerifier,
   type ChallengeIssue,
+  type EmailOtpPort,
   type PartnerDb,
+  type PinWriteResult,
   PartnerAuthorityRefused,
+  PartnerConflict,
   PartnerNotConfigured,
   PartnerSessionRefused,
   type RpConfig,
 } from "./ports.ts";
-import { parseEmptyBody, parseReauthBody, parseVerifyBody, uuidToBytes, type VerifyRequest } from "./session-shape.ts";
+import {
+  parseEmptyBody,
+  parseOtpVerifyBody,
+  parsePinChangeBody,
+  parsePinSetBody,
+  parsePinVerifyBody,
+  parseReauthBody,
+  parseVerifyBody,
+  uuidToBytes,
+  type VerifyRequest,
+} from "./session-shape.ts";
 import { type NewSessionToken, partnerTokenFromHeader, sha256Hex, toB64u } from "./token.ts";
 
 export const PARTNER_SESSION_FUNCTION = "partner-session";
 /** Design 8: reauth is 10 attempts per member per hour (a hard, member-keyed bucket). */
 export const REAUTH_PER_MEMBER_PER_HOUR = 10;
 export const REAUTH_BUCKET = "partner-reauth:member";
+/** Design 8: the email OTP of the proof is 3 sends and 5 verification attempts per member per hour (hard, member-keyed buckets, each hit in its own short transaction that commits). */
+export const OTP_SEND_PER_MEMBER_PER_HOUR = 3;
+export const OTP_SEND_BUCKET = "partner-otp-send:member";
+export const OTP_VERIFY_PER_MEMBER_PER_HOUR = 5;
+export const OTP_VERIFY_BUCKET = "partner-otp-verify:member";
 
 export interface PartnerSessionDeps {
   readonly db: PartnerDb;
   /** The one allowed origin (privileged.ts#loadPartnerCorsOrigin), or null when none is configured (every request that carries an Origin is then refused). */
   readonly allowedOrigin: string | null;
   readonly webauthn: AssertionVerifier;
+  /** The email OTP of the step-up proof (GoTrue, anon key). */
+  readonly otp: EmailOtpPort;
   readonly nowMs: () => number;
   readonly newSessionToken: () => Promise<NewSessionToken>;
   readonly timeoutMs?: number;
@@ -60,6 +86,12 @@ const ROUTE_METHODS: Readonly<Record<string, "GET" | "POST">> = {
   lock: "POST",
   "reauth/options": "POST",
   reauth: "POST",
+  pin: "GET",
+  "step-up/pin": "POST",
+  "pin/set": "POST",
+  "pin/change": "POST",
+  "otp-proof/start": "POST",
+  "otp-proof/verify": "POST",
 };
 
 /** The route of a request URL: the path after the function name (`/partner-session/verify`, `/functions/v1/partner-session/verify`) or, with no function name in the path, the whole path. */
@@ -126,12 +158,25 @@ export async function handlePartnerSessionRequest(req: Request, deps: PartnerSes
           }
           case "reauth/options":
             return await handleReauthOptions(req, deps, decision, tokenHash!);
-          default:
+          case "reauth":
             return await handleReauth(req, deps, decision, tokenHash!);
+          case "pin":
+            return await handlePinParams(deps, decision, tokenHash!);
+          case "step-up/pin":
+            return await handlePinVerify(req, deps, decision, tokenHash!);
+          case "pin/set":
+            return await handlePinSet(req, deps, decision, tokenHash!);
+          case "pin/change":
+            return await handlePinChange(req, deps, decision, tokenHash!);
+          case "otp-proof/start":
+            return await handleOtpStart(req, deps, decision, tokenHash!);
+          default:
+            return await handleOtpVerify(req, deps, decision, tokenHash!);
         }
       } catch (err) {
         if (err instanceof PartnerSessionRefused) return unauthenticated(decision);
         if (err instanceof PartnerAuthorityRefused) return partnerError(decision, 403, "forbidden", "forbidden");
+        if (err instanceof PartnerConflict) return partnerError(decision, 409, "conflict", "conflict");
         if (err instanceof PartnerNotConfigured) return partnerError(decision, 503, "service_unavailable", "partner sign-in is not available");
         throw err;
       }
@@ -263,4 +308,116 @@ async function handleReauth(req: Request, deps: PartnerSessionDeps, decision: De
 /** Every reauth refusal is this ONE 403 (a 401 would tell the client its SESSION is dead): a wrong person's passkey, a wrong origin, a replay, an expired challenge ... are indistinguishable. */
 function reauthRefused(decision: Decision): Response {
   return partnerError(decision, 403, "reauth_refused", "reauthentication failed");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// The step-up PIN (S1.3, design 6.3). The request bodies carry the BROWSER-DERIVED key (32 bytes, base64url), never the PIN: the Edge validates length and encoding (session-shape.ts) and nothing else.
+// A refusal the database makes (`wrong`, `locked`, `retry_after`, ...) is a RETURNED status, so the transaction COMMITS and the failure counter with it (the 0020 lesson); the response is built AFTER it.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function handlePinParams(deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const p = await deps.db.withSession(tokenHash, (s) => s.pinParams());
+  if (p.state !== "ok") return partnerOk(decision, 200, { state: p.state });
+  return partnerOk(decision, 200, { state: "ok", salt: toB64u(p.salt), iterations: p.iterations, retryAfterSeconds: p.retryAfterSeconds });
+}
+
+async function handlePinVerify(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parsePinVerifyBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const r = await deps.db.withSession(tokenHash, (s) => s.pinVerify(parsed.value.derived));
+  switch (r.status) {
+    case "ok":
+      return partnerOk(decision, 200, { grantExpiresAt: r.grantUntil });
+    case "wrong":
+      return partnerError(decision, 403, "pin_wrong", "that PIN is not correct");
+    case "retry_after":
+      return partnerError(decision, 429, "pin_backoff", "too many attempts: wait before trying again", { "retry-after": String(Math.max(1, r.retryAfterSeconds)) });
+    case "locked":
+      return partnerError(decision, 403, "pin_locked", "this PIN is locked: ask a manager to reset it");
+    case "unset":
+      return partnerError(decision, 409, "pin_not_set", "no PIN is set");
+    default:
+      return partnerError(decision, 409, "pin_must_change", "set a new PIN");
+  }
+}
+
+function pinWriteResponse(decision: Decision, r: PinWriteResult, okBody: unknown): Response {
+  switch (r.status) {
+    case "ok":
+      return partnerOk(decision, 200, okBody);
+    case "already_set":
+      return partnerError(decision, 409, "pin_already_set", "a PIN is already set: change it instead");
+    case "no_pin":
+    case "unset":
+      return partnerError(decision, 409, "pin_not_set", "no PIN is set");
+    case "must_change":
+      return partnerError(decision, 409, "pin_must_change", "set a new PIN");
+    case "wrong":
+      return partnerError(decision, 403, "pin_wrong", "that PIN is not correct");
+    case "retry_after":
+      return partnerError(decision, 429, "pin_backoff", "too many attempts: wait before trying again", { "retry-after": String(Math.max(1, r.retryAfterSeconds)) });
+    default:
+      return partnerError(decision, 403, "pin_locked", "this PIN is locked: ask a manager to reset it");
+  }
+}
+
+async function handlePinSet(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parsePinSetBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const r = await deps.db.withSession(tokenHash, (s) => s.pinSet(parsed.value));
+  return pinWriteResponse(decision, r, { set: true });
+}
+
+async function handlePinChange(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parsePinChangeBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const r = await deps.db.withSession(tokenHash, (s) => s.pinChange(parsed.value));
+  return pinWriteResponse(decision, r, { changed: true });
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// The email proof (6.1, 6.3). A GoTrue call is NEVER made while a database transaction is open: the member's address is read in one transaction, the vendor is called with none open, and the proof is
+// recorded in a second one. The GoTrue session verifyOtp creates is closed AFTER the proof is recorded, on every path (the order E19 uses). Every refusal of the code is the one 403.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function handleOtpStart(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  await emptyBody(req);
+  const limit = await deps.db.hitRateLimit(tokenHash, OTP_SEND_BUCKET, 3600, OTP_SEND_PER_MEMBER_PER_HOUR);
+  if (!limit.ok) return partnerError(decision, 429, "rate_limited", "too many codes requested", { "retry-after": String(limit.retryAfterSeconds) });
+  const email = await deps.db.withSession(tokenHash, (s) => s.otpTarget());
+  if (email === null) return partnerError(decision, 409, "otp_unavailable", "this account has no email address to send a code to");
+  await deps.otp.send(email);
+  return partnerOk(decision, 200, { sent: true });
+}
+
+async function handleOtpVerify(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseOtpVerifyBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const limit = await deps.db.hitRateLimit(tokenHash, OTP_VERIFY_BUCKET, 3600, OTP_VERIFY_PER_MEMBER_PER_HOUR);
+  if (!limit.ok) return partnerError(decision, 429, "rate_limited", "too many attempts", { "retry-after": String(limit.retryAfterSeconds) });
+  const email = await deps.db.withSession(tokenHash, (s) => s.otpTarget());
+  if (email === null) return otpRefused(decision);
+  const proven = await deps.otp.verify(email, parsed.value.code);
+  if (!proven.ok) return otpRefused(decision);
+  try {
+    if (proven.sessionId === null) return otpRefused(decision);
+    const sessionId = proven.sessionId;
+    let r: { readonly status: "ok" | "refused"; readonly otpProofUntil: string | null };
+    try {
+      r = await deps.db.withSession(tokenHash, (s) => s.otpProof(sessionId));
+    } catch (err) {
+      // the UNIQUE index: this GoTrue session already proved another proof (one GoTrue session proves at most one)
+      if (err instanceof PartnerConflict) return otpRefused(decision);
+      throw err;
+    }
+    if (r.status !== "ok" || r.otpProofUntil === null) return otpRefused(decision);
+    return partnerOk(decision, 200, { otpProofUntil: r.otpProofUntil });
+  } finally {
+    await proven.closeSession();
+  }
+}
+
+/** Every refusal of the emailed code (wrong, expired, no session to bind, a stale or reused GoTrue session) is this ONE 403. */
+function otpRefused(decision: Decision): Response {
+  return partnerError(decision, 403, "otp_refused", "that code was not accepted");
 }

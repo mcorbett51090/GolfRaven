@@ -11,13 +11,18 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { handlePartnerSessionRequest, type PartnerSessionDeps } from "../../functions/_shared/partner/session-handler.ts";
-import type { CredentialLookup, MintInput, PartnerDb, PartnerMintTx, RpConfig } from "../../functions/_shared/partner/ports.ts";
+import type { CredentialLookup, EmailOtpPort, MintInput, PartnerDb, PartnerMintTx, RpConfig } from "../../functions/_shared/partner/ports.ts";
 import { assertionVerifier } from "../../functions/_shared/partner/webauthn-port.ts";
 import { newPartnerSessionToken, toB64u } from "../../functions/_shared/partner/token.ts";
 import { uuidToBytes } from "../../functions/_shared/partner/session-shape.ts";
 import { type AssertOptions, SoftwareAuthenticator } from "./software-authenticator.ts";
 
 const RP: RpConfig = { rpId: "partners.example.test", origin: "https://partners.example.test" };
+/** The sign-in cells never reach the email proof (S1.3): a call to it is a failure of the test, not a fake answer. */
+const NO_OTP: EmailOtpPort = {
+  send: () => Promise.reject(new Error("the sign-in suite must not send an email")),
+  verify: () => Promise.reject(new Error("the sign-in suite must not verify an email code")),
+};
 const USER_ID = "00000000-0000-0000-0000-1000000000a1";
 const NOW = Date.UTC(2030, 0, 1, 12, 0, 0);
 
@@ -88,7 +93,7 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
     withSession: () => Promise.reject(new Error("not used")),
     hitRateLimit: () => Promise.reject(new Error("not used")),
   };
-  m.deps = { db, allowedOrigin: RP.origin, webauthn: assertionVerifier, nowMs: () => NOW, newSessionToken: newPartnerSessionToken };
+  m.deps = { db, allowedOrigin: RP.origin, webauthn: assertionVerifier, otp: NO_OTP, nowMs: () => NOW, newSessionToken: newPartnerSessionToken };
   return m;
 }
 

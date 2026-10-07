@@ -8,12 +8,18 @@ import {
   type AssertionVerifier,
   type ChallengeIssue,
   type CredentialLookup,
+  type EmailOtpPort,
   type MintInput,
   type MintResult,
   type PartnerDb,
   type PartnerMintTx,
   type PartnerSessionTx,
   PartnerSessionRefused,
+  type PinChangeInput,
+  type PinParams,
+  type PinSetInput,
+  type PinVerifyResult,
+  type PinWriteResult,
   type ReauthCredential,
   type ReauthInput,
   type RpConfig,
@@ -71,6 +77,17 @@ export interface Fakes {
   readonly verifyRequests: VerifyAssertionRequest[];
   readonly sessionHashes: string[];
   readonly rateLimitHits: Array<{ hash: string; bucket: string; windowSeconds: number; max: number }>;
+  /** what the PIN and proof ports were handed (S1.3) */
+  readonly pinVerifyInputs: Uint8Array[];
+  readonly pinSetInputs: PinSetInput[];
+  readonly pinChangeInputs: PinChangeInput[];
+  readonly otpSent: string[];
+  readonly otpVerified: Array<{ email: string; code: string }>;
+  readonly otpProofSessionIds: string[];
+  /** how many GoTrue sessions the fake OTP port has closed */
+  readonly otpClosed: { count: number };
+  /** the number of database transactions OPEN at the moment each GoTrue call was made (it must always be 0: a vendor call is never made inside a transaction) */
+  readonly openTxAtOtpCall: number[];
   /** knobs */
   state: {
     rp: RpConfig;
@@ -83,6 +100,15 @@ export interface Fakes {
     rateLimitOk: boolean;
     whoami: unknown;
     throwIn: string | null;
+    pinParams: PinParams;
+    pinVerify: PinVerifyResult;
+    pinWrite: PinWriteResult;
+    otpEmail: string | null;
+    otpProofStatus: "ok" | "refused";
+    otpVerifyOk: boolean;
+    otpSessionId: string | null;
+    otpProofThrows: Error | null;
+    otpSendThrows: boolean;
   };
 }
 
@@ -94,6 +120,15 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
   const verifyRequests: VerifyAssertionRequest[] = [];
   const sessionHashes: string[] = [];
   const rateLimitHits: Fakes["rateLimitHits"] = [];
+  const pinVerifyInputs: Uint8Array[] = [];
+  const pinSetInputs: PinSetInput[] = [];
+  const pinChangeInputs: PinChangeInput[] = [];
+  const otpSent: string[] = [];
+  const otpVerified: Array<{ email: string; code: string }> = [];
+  const otpProofSessionIds: string[] = [];
+  const otpClosed = { count: 0 };
+  const openTxAtOtpCall: number[] = [];
+  const open = { count: 0 };
   const state: Fakes["state"] = {
     rp: RP,
     lookup: { status: "ok", credential: { id: "11111111-1111-1111-1111-111111111111", userId: USER_ID, alg: -7, publicKey: bytes(77, 6), signCount: 4 } },
@@ -105,6 +140,15 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     rateLimitOk: true,
     whoami: { userId: USER_ID, aal: 1 },
     throwIn: null,
+    pinParams: { state: "ok", salt: bytes(16, 8), iterations: 600000, retryAfterSeconds: 0 },
+    pinVerify: { status: "ok", retryAfterSeconds: 0, grantUntil: "2030-01-01T12:01:00.000Z" },
+    pinWrite: { status: "ok", retryAfterSeconds: 0 },
+    otpEmail: "staff@example.test",
+    otpProofStatus: "ok",
+    otpVerifyOk: true,
+    otpSessionId: "22222222-2222-2222-2222-222222222222",
+    otpProofThrows: null,
+    otpSendThrows: false,
     ...over,
   };
   const maybeThrow = (where: string) => {
@@ -158,6 +202,35 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       calls.push("session.reauthCredential");
       return state.reauthCredential;
     },
+    async pinParams() {
+      calls.push("session.pinParams");
+      return state.pinParams;
+    },
+    async pinVerify(derived: Uint8Array) {
+      calls.push("session.pinVerify");
+      pinVerifyInputs.push(derived);
+      return state.pinVerify;
+    },
+    async pinSet(input: PinSetInput) {
+      calls.push("session.pinSet");
+      pinSetInputs.push(input);
+      return state.pinWrite;
+    },
+    async pinChange(input: PinChangeInput) {
+      calls.push("session.pinChange");
+      pinChangeInputs.push(input);
+      return state.pinWrite;
+    },
+    async otpTarget() {
+      calls.push("session.otpTarget");
+      return state.otpEmail;
+    },
+    async otpProof(gotrueSessionId: string) {
+      calls.push("session.otpProof");
+      otpProofSessionIds.push(gotrueSessionId);
+      if (state.otpProofThrows !== null) throw state.otpProofThrows;
+      return state.otpProofStatus === "ok" ? { status: "ok" as const, otpProofUntil: "2030-01-01T12:10:00.000Z" } : { status: "refused" as const, otpProofUntil: null };
+    },
     async reauth(input: ReauthInput) {
       calls.push("session.reauth");
       reauthInputs.push(input);
@@ -181,11 +254,13 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       sessionHashes.push(hash);
       if (state.bindRefused) throw new PartnerSessionRefused();
       let committed = false;
+      open.count += 1;
       try {
         const r = await op(sessionTx);
         committed = true;
         return r;
       } finally {
+        open.count -= 1;
         tx.push({ kind: "session", committed });
       }
     },
@@ -207,11 +282,36 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       return state.verify;
     },
   };
+  const otp: EmailOtpPort = {
+    async send(email) {
+      calls.push("otp.send");
+      openTxAtOtpCall.push(open.count);
+      otpSent.push(email);
+      if (state.otpSendThrows) throw new Error("mailer down: secret provider text");
+    },
+    async verify(email, code) {
+      calls.push("otp.verify");
+      openTxAtOtpCall.push(open.count);
+      otpVerified.push({ email, code });
+      if (!state.otpVerifyOk) return { ok: false as const };
+      return {
+        ok: true as const,
+        userId: USER_ID,
+        sessionId: state.otpSessionId,
+        async closeSession() {
+          calls.push("otp.closeSession");
+          openTxAtOtpCall.push(open.count);
+          otpClosed.count += 1;
+        },
+      };
+    },
+  };
   let tokenCount = 0;
   const deps: PartnerSessionDeps = {
     db,
     allowedOrigin,
     webauthn,
+    otp,
     nowMs: () => NOW_MS,
     newSessionToken: async () => {
       tokenCount += 1;
@@ -220,7 +320,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       return { token, hash };
     },
   };
-  return { deps, calls, tx, mintInputs, reauthInputs, verifyRequests, sessionHashes, rateLimitHits, state };
+  return { deps, calls, tx, mintInputs, reauthInputs, verifyRequests, sessionHashes, rateLimitHits, pinVerifyInputs, pinSetInputs, pinChangeInputs, otpSent, otpVerified, otpProofSessionIds, otpClosed, openTxAtOtpCall, state };
 }
 
 /** A partner session token (well-formed) and its sha256. */

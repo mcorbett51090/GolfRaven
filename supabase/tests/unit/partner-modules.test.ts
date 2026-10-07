@@ -214,7 +214,7 @@ function partnerFiles(): string[] {
 describe("PA-11: the partner modules never log", () => {
   it("finds the modules it is meant to scan", () => {
     const names = partnerFiles().map((p) => p.split("/").slice(-2).join("/"));
-    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts"]) expect(names).toContain(n);
+    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts"]) expect(names).toContain(n);
   });
 
   it("no `console` identifier appears anywhere in code (comments and strings aside) in the partner modules, the function entrypoint or the partner lane section of privileged.ts", () => {
@@ -231,6 +231,32 @@ describe("PA-11: the partner modules never log", () => {
     expect(code('console.log("x")')).toMatch(/\bconsole\b/);
     expect(code("globalThis.console.error(1)")).toMatch(/\bconsole\b/);
     expect(code('// console.log(1)\n/* console.log(2) */ const s = "console.log(3)"; const t = `console.log(4)`;')).not.toMatch(/\bconsole\b/);
+  });
+});
+
+describe("S1.3: the PIN never reaches the Edge, and the contract is importable by a browser", () => {
+  const dir = join(FUNCTIONS, "_shared", "partner");
+  const imports = (file: string): string[] => [...readFileSync(join(dir, file), "utf8").matchAll(/^\s*(?:import|export)\b[^;]*?\bfrom\s+"([^"]+)"/gm)].map((m) => m[1]!);
+
+  it("pin-contract.ts imports only ./token.ts, and pin-deny-list.ts and pin-vectors.ts import nothing: the same files run in a browser, in Deno and in Node", () => {
+    expect(imports("pin-contract.ts")).toEqual(["./token.ts"]);
+    expect(imports("pin-deny-list.ts")).toEqual([]);
+    expect(imports("pin-vectors.ts")).toEqual([]);
+    expect(imports("token.ts")).toEqual([]);
+  });
+
+  it("only pin-contract.ts runs PBKDF2: no other partner module derives a key, and neither the handler nor the body parsers import the derivation (the Edge handles derived BYTES, never a PIN)", () => {
+    for (const f of readdirSync(dir).filter((x) => x.endsWith(".ts") && x !== "pin-contract.ts")) {
+      expect(code(readFileSync(join(dir, f), "utf8")), f).not.toMatch(/deriveBits|PBKDF2|derivePinKey/);
+    }
+    for (const f of ["session-handler.ts", "session-shape.ts", "ports.ts"]) expect(imports(f).filter((i) => i.includes("pin-deny-list") || i.includes("pin-vectors")), f).toEqual([]);
+    expect(code(readFileSync(join(dir, "session-shape.ts"), "utf8"))).not.toMatch(/derivePinKey|pinRejection|isWellFormedPin/);
+  });
+
+  it("no request shape, port method or handler names a field `pin` (the bodies carry `derived`, `currentDerived`, `salt`, `iterations` and `code` only)", () => {
+    for (const f of ["session-handler.ts", "session-shape.ts", "ports.ts"]) {
+      expect(code(readFileSync(join(dir, f), "utf8")), f).not.toMatch(/\.pin\b|\bpin\s*:\s*string|\bpin\s*\?\s*:|\(pin\b/);
+    }
   });
 });
 

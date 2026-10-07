@@ -1,7 +1,7 @@
 // supabase/functions/_shared/partner/http.ts
 //
 // The partner lane's HTTP helpers (docs/security/partner-auth-design.md 4.6, PA-10, PA-11). Pure: no environment, no database, no logging (PA-11: there is no `console` anywhere in the partner modules,
-// and the source scan in supabase/tests/unit/partner-no-console.test.ts keeps it so).
+// and the source scan in supabase/tests/unit/partner-modules.test.ts keeps it so).
 //
 //   * `readPartnerJsonBody`: the media type must be EXACTLY `application/json` (a `charset=utf-8` parameter allowed), anything else 415, BEFORE the body is read. The existing `readJsonBody` accepts any content
 //     type that merely CONTAINS `application/json` (`text/plain; x=application/json` is a CORS "simple" request that needs no preflight); it is left alone and the partner lane never calls it.

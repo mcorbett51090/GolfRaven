@@ -71,14 +71,23 @@ import { makeSelfCheckGate, type SelfCheckGate } from "./edge-selfcheck-gate.ts"
 import {
   type ChallengeIssue,
   type CredentialLookup,
+  type EmailOtpPort,
   type MintInput,
   type MintResult,
   type PartnerDb,
   type PartnerMintTx,
   type PartnerSessionTx,
   PartnerAuthorityRefused,
+  PartnerConflict,
   PartnerNotConfigured,
   PartnerSessionRefused,
+  type PinChangeInput,
+  type PinCheckStatus,
+  type PinParams,
+  type PinSetInput,
+  type PinVerifyResult,
+  type PinWriteResult,
+  type PinWriteStatus,
   type ReauthCredential,
   type ReauthInput,
   type RpConfig,
@@ -3484,14 +3493,15 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
 // PARTNER LANE (S1.2): docs/security/partner-auth-design.md 4.2 / 4.4 / 4.5 / 8. BEGIN
 // ============================================================================
 // The partner (staff) lane's two kinds of transaction, and nothing else. The handler (`_shared/partner/session-handler.ts`, pure) sees only the PORTS in `_shared/partner/ports.ts`; this section is
-// where they meet the database. No `console` appears in it (PA-11; supabase/tests/unit/partner-no-console.test.ts scans everything between the BEGIN and END markers, and the partner modules).
+// where they meet the database. No `console` appears in it (PA-11; supabase/tests/unit/partner-modules.test.ts scans everything between the BEGIN and END markers, and the partner modules).
 //
 //   withPartnerMint(op)        ONE transaction as `edge_partner_minter` (kind "partner_mint", no binding): the stateless sign-in challenge, the relying-party read, the credential lookup, the failure counter and
 //                              the mint. It COMMITS whenever `op` returns, whatever status the database answered: every refusal is a status row, so the alarm rows, the burned nonce and the failure counter commit.
 //   withPartnerSession(h, op)  ONE transaction as `edge_partner` (kind "partner"): `bind_partner_session(h)`, the post-bind assertion, then `_for_partner` definers only.
 //   hitRateLimitForPartner     one hit of a per-member bucket, in its OWN short transaction (committed before any request transaction opens: the rule of `hitRateLimitForActor`).
 // Errors are mapped here and nowhere else: 28000 from the binder is `PartnerSessionRefused` (the ONE 401), 42501 from a definer is `PartnerAuthorityRefused` (403), 55000 (no relying-party row, no Vault
-// key) is `PartnerNotConfigured` (a bare 503). Anything else propagates and rolls back.
+// key: the challenge key or the PIN pepper) is `PartnerNotConfigured` (a bare 503), 23505 (a unique index: a GoTrue session that already proved another proof) is `PartnerConflict`. Anything else propagates and
+// rolls back.
 
 /** The SQLSTATE of a postgres.js error, or "". */
 function partnerPgCode(err: unknown): string {
@@ -3504,6 +3514,7 @@ function mapPartnerDbError(err: unknown): never {
   if (code === "28000") throw new PartnerSessionRefused();
   if (code === "42501") throw new PartnerAuthorityRefused();
   if (code === "55000") throw new PartnerNotConfigured();
+  if (code === "23505") throw new PartnerConflict();
   throw err;
 }
 
@@ -3551,6 +3562,17 @@ function buildPartnerMintTx(trx: TxSql): PartnerMintTx {
   };
 }
 
+const PIN_CHECK_STATUSES: ReadonlySet<string> = new Set(["ok", "wrong", "locked", "retry_after", "unset", "must_change"]);
+function isPinCheckStatus(v: unknown): v is PinCheckStatus {
+  return typeof v === "string" && PIN_CHECK_STATUSES.has(v);
+}
+const PIN_WRITE_STATUSES: ReadonlySet<string> = new Set(["ok", "already_set", "no_pin", "must_change", "wrong", "locked", "retry_after", "unset"]);
+function pinWriteResult(r: Record<string, unknown> | undefined, fn: string): PinWriteResult {
+  const status = r?.o_status;
+  if (typeof status !== "string" || !PIN_WRITE_STATUSES.has(status)) throw new Error(`${fn} returned no usable status`);
+  return { status: status as PinWriteStatus, retryAfterSeconds: Number(r?.o_retry_after ?? 0) };
+}
+
 function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
   return {
     async whoami(): Promise<unknown> {
@@ -3583,6 +3605,40 @@ function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
         signCount: Number(r.o_sign_count),
         rp: { rpId: String(r.o_rp_id), origin: String(r.o_origin) },
       };
+    },
+    async pinParams(): Promise<PinParams> {
+      const rows = await trx`select o_status, o_salt, o_iterations::int as o_iterations, o_retry_after::int as o_retry_after from private.partner_pin_params_for_partner()`;
+      const r = rows[0];
+      if (r?.o_status === "ok") return { state: "ok", salt: bytesOf(r.o_salt), iterations: Number(r.o_iterations), retryAfterSeconds: Number(r.o_retry_after) };
+      if (r?.o_status === "unset" || r?.o_status === "must_change" || r?.o_status === "locked") return { state: r.o_status };
+      throw new Error("partner_pin_params_for_partner returned no usable status");
+    },
+    async pinVerify(derived: Uint8Array): Promise<PinVerifyResult> {
+      const rows = await trx`select o_status, o_retry_after::int as o_retry_after, o_grant_until from private.partner_pin_verify_for_partner(${derived}::bytea)`;
+      const r = rows[0];
+      if (!isPinCheckStatus(r?.o_status)) throw new Error("partner_pin_verify_for_partner returned no usable status");
+      return { status: r.o_status, retryAfterSeconds: Number(r.o_retry_after ?? 0), grantUntil: r.o_grant_until instanceof Date ? r.o_grant_until.toISOString() : null };
+    },
+    async pinSet(input: PinSetInput): Promise<PinWriteResult> {
+      const rows = await trx`select o_status, o_retry_after::int as o_retry_after from private.partner_pin_set_for_partner(${input.derived}::bytea, ${input.salt}::bytea, ${input.iterations}::int)`;
+      return pinWriteResult(rows[0], "partner_pin_set_for_partner");
+    },
+    async pinChange(input: PinChangeInput): Promise<PinWriteResult> {
+      const rows = await trx`
+        select o_status, o_retry_after::int as o_retry_after
+        from private.partner_pin_change_for_partner(${input.current}::bytea, ${input.derived}::bytea, ${input.salt}::bytea, ${input.iterations}::int)`;
+      return pinWriteResult(rows[0], "partner_pin_change_for_partner");
+    },
+    async otpTarget(): Promise<string | null> {
+      const rows = await trx`select o_email from private.partner_session_otp_target_for_partner()`;
+      const email = rows[0]?.o_email;
+      return typeof email === "string" && email !== "" ? email : null;
+    },
+    async otpProof(gotrueSessionId: string): Promise<{ status: "ok" | "refused"; otpProofUntil: string | null }> {
+      const rows = await trx`select o_status, o_otp_proof_until from private.partner_session_otp_proof_for_partner(${gotrueSessionId}::uuid)`;
+      const r = rows[0];
+      if (r?.o_status === "ok" && r.o_otp_proof_until instanceof Date) return { status: "ok", otpProofUntil: r.o_otp_proof_until.toISOString() };
+      return { status: "refused", otpProofUntil: null };
     },
     async reauth(input: ReauthInput): Promise<{ status: string; reauthUntil: string | null }> {
       const rows = await trx`
@@ -3639,6 +3695,34 @@ export const partnerDb: PartnerDb = {
   withSession: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
 };
+
+/** The anon-key Auth client's one call the partner proof needs to SEND a one-time code: the email OTP, to an account that already exists (a proof never creates one). */
+export interface OtpSendClient {
+  auth: { signInWithOtp(args: { email: string; options: { shouldCreateUser: boolean } }): Promise<{ error: { status?: number } | null }> };
+}
+
+/** Builds the sender over a client factory (the real one below; a recording fake in the integration suite). A failure THROWS (the handler answers a constant 500: nothing about the account or the mailer is shown). */
+export function makePartnerEmailOtpSender(newClient: () => OtpSendClient): (email: string) => Promise<void> {
+  return async (email: string): Promise<void> => {
+    const { error } = await newClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+    if (error) throw new Error("supabase auth signInWithOtp failed");
+  };
+}
+
+const sendPartnerEmailOtp = makePartnerEmailOtpSender(() => {
+  const url = Deno.env.get("SUPABASE_URL");
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
+  if (!url || !anonKey) throw new Error("privileged.ts: SUPABASE_URL/SUPABASE_ANON_KEY are not set in this environment");
+  return createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } }) as unknown as OtpSendClient;
+});
+
+/** Builds the proof's email-OTP port over a sender and a verifier (the real ones below; recording fakes in the integration suite). */
+export function makePartnerEmailOtp(send: (email: string) => Promise<void>, verifier: { verify(email: string, code: string): ReturnType<EmailOtpPort["verify"]> }): EmailOtpPort {
+  return { send, verify: (email, code) => verifier.verify(email, code) };
+}
+
+/** The partner proof's email OTP: GoTrue with the ANON key, as the player flow does it (E19). The code is mailed to the member's OWN address only (the handler takes it from the database, never from the client). */
+export const partnerEmailOtp: EmailOtpPort = makePartnerEmailOtp(sendPartnerEmailOtp, supabaseEmailOtpVerifier);
 
 /**
  * The ONE origin the partner lane allows (partner design 4.6): `GR_PARTNER_ORIGIN`, an exact https origin. It lives in the environment, not in `app.partner_rp_config`, because `OPTIONS` must answer
