@@ -195,11 +195,26 @@ describe("POST pin/set and pin/change", () => {
       { salt: SALT, iterations: 600000 },
     ];
     for (const b of badSet) expect((await post("pin/set", b, f)).status, JSON.stringify(b)).toBe(400);
-    const badChange: unknown[] = [changeBody({ currentDerived: "1234" }), changeBody({ currentDerived: undefined }), changeBody({ currentDerived: toB64u(bytes(31)) }), changeBody({ iterations: 5 }), changeBody({ x: 1 })];
+    const badChange: unknown[] = [changeBody({ currentDerived: "1234" }), changeBody({ currentDerived: undefined }), changeBody({ currentDerived: toB64u(bytes(31)) }), changeBody({ iterations: 5 }), changeBody({ x: 1 }),
+      // N5 (S1.3 gate): an extra `pin` key beside otherwise VALID derived keys (a client that also sends the PIN): the route's contract is "unknown keys are rejected", so it is a 400 before any work
+      changeBody({ pin: "7391" })];
     for (const b of badChange) expect((await post("pin/change", b, f)).status, JSON.stringify(b)).toBe(400);
     expect(f.calls).toEqual([]);
     // the edges are accepted
     for (const iterations of [210000, 1000000]) expect((await post("pin/set", setBody({ iterations }), makeFakes())).status).toBe(200);
+  });
+
+  it("N5: an extra `pin` key on pin/change (and on pin/set, step-up/pin) is refused 400 even beside valid keys; the same body without it is 200", async () => {
+    for (const [path, mk] of [["pin/change", changeBody], ["pin/set", setBody]] as const) {
+      const f = makeFakes();
+      const res = await post(path, mk({ pin: "7391" }), f);
+      expect(res.status, path).toBe(400);
+      expect(f.calls, path).toEqual([]);
+      expect((await post(path, mk(), makeFakes())).status, path).toBe(200);
+    }
+    const f = makeFakes();
+    expect((await post("step-up/pin", { derived: DERIVED, pin: "7391" }, f)).status).toBe(400);
+    expect(f.calls).toEqual([]);
   });
 
   it("every status has its answer and the transaction COMMITS (a wrong current key of a change is counted by the database and the count commits)", async () => {

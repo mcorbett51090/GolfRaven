@@ -14,7 +14,7 @@
 //   repeated  all four digits equal (0000, 7777), or a repeated pair (1212, 6969), or two doubled digits (1122, 3344)
 //   run       four consecutive ascending or descending digits (0123, 1234, 6789, 3210, 9876)
 //   year      1900 to 2099 (a birth year, this year)
-//   date      a valid MMDD calendar date (0101 to 1231, February to the 29th)
+//   date      a valid MMDD OR DDMM calendar date (0101 to 1231 month-first, 0101 to 3112 day-first; February to the 29th): a day-first date is as guessable as a month-first one (S1.3 gate N4)
 //   common    a member of PIN_DENY_LIST
 //
 // THE LIST was assembled by the author from published four-digit-PIN frequency studies and the usual keypad patterns, from training knowledge: `[unverified - training knowledge]`. It is deliberately a superset of what the
@@ -40,6 +40,11 @@ export const PIN_DENY_LIST: readonly string[] = Object.freeze([
 const DENY_SET: ReadonlySet<string> = new Set(PIN_DENY_LIST);
 const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const; // February to the 29th: a leap-year date is a date
 
+/** True when `month` and `day` are a calendar date (February to the 29th). */
+function isCalendarDate(month: number, day: number): boolean {
+  return month >= 1 && month <= 12 && day >= 1 && day <= DAYS_IN_MONTH[month - 1]!;
+}
+
 /** Why this PIN is not acceptable, or null when it is. */
 export function pinRejection(pin: unknown): PinRejection | null {
   if (typeof pin !== "string" || !/^[0-9]{4}$/.test(pin)) return "format";
@@ -49,9 +54,9 @@ export function pinRejection(pin: unknown): PinRejection | null {
   if ((step === 1 || step === -1) && d[2] - d[1] === step && d[3] - d[2] === step) return "run";
   const n = Number(pin);
   if (n >= 1900 && n <= 2099) return "year";
-  const month = Number(pin.slice(0, 2));
-  const day = Number(pin.slice(2));
-  if (month >= 1 && month <= 12 && day >= 1 && day <= DAYS_IN_MONTH[month - 1]!) return "date";
+  const first = Number(pin.slice(0, 2));
+  const second = Number(pin.slice(2));
+  if (isCalendarDate(first, second) || isCalendarDate(second, first)) return "date"; // MMDD, then DDMM
   if (DENY_SET.has(pin)) return "common";
   return null;
 }

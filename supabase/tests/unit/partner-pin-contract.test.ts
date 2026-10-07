@@ -150,7 +150,18 @@ describe("the PIN rules and the deny-list (enforced where the PIN is typed: the 
 
   it("date: a valid MMDD (February to the 29th), and not an invalid one", () => {
     for (const p of ["0105", "0229", "1231", "0430", "0630", "0731", "1015"]) expect(pinRejection(p), p).toBe("date");
-    for (const p of ["0230", "0431", "0631", "0931", "1131", "1301", "0001", "0100", "1232"]) expect(pinRejection(p), p).not.toBe("date");
+    for (const p of ["0230", "0431", "0631", "0931", "1131", "0001", "0100", "1232", "3232"]) expect(pinRejection(p), p).not.toBe("date");
+  });
+
+  it("date (N4, S1.3 gate): a valid DDMM is refused too, both edges of the day range and of the month", () => {
+    // day-first dates that are NOT valid month-first dates: the day is above 12 or the month-first reading is impossible
+    for (const p of ["1301", "2512", "3112", "3001", "2902", "1503", "2706", "3103", "3010", "3011"]) expect(pinRejection(p), p).toBe("date");
+    // not a DDMM either: month 00 or above 12, day 00 or past the month's length (30 or 31 February, 31 April)
+    for (const p of ["3002", "3102", "3104", "3106", "3109", "3111", "0013", "3213", "2413", "0000"]) expect(pinRejection(p), p).not.toBe("date");
+    // a PIN valid month-first AND day-first is, of course, refused; one valid in neither reading stays available to the date rule
+    expect(pinRejection("0112")).toBe("date");
+    expect(pinRejection("1312")).toBe("date");
+    expect(pinRejection("3913")).not.toBe("date");
   });
 
   it("format: anything that is not four ASCII digits", () => {
