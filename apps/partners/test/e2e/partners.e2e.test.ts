@@ -414,7 +414,10 @@ suite("apps/partners in Chromium", () => {
       await w.page.route(`${apiOrigin}/**`, (route) => route.abort());
       await w.page.getByTestId("sign-out").click();
       await w.page.locator('[data-screen="signed-out"]').waitFor();
-      expect(await textOf(w.page.getByTestId("notice"))).toContain("could not be reached");
+      // The wipe is immediate (MEDIUM-2): the screen is signed-out with "You are signed out." at once, and the
+      // honest offline notice replaces it only when the aborted request settles. Wait for that, never race it.
+      expect(await w.page.getByTestId("session-fields").count()).toBe(0);
+      await w.page.getByTestId("notice").filter({ hasText: "could not be reached" }).waitFor({ timeout: 5000 });
       expect(await w.page.getByTestId("session-fields").count()).toBe(0);
     });
   });
@@ -623,7 +626,7 @@ suite("apps/partners in Chromium", () => {
       await w.page.route(`${apiOrigin}/functions/v1/partner-session/session`, (route) => route.abort());
       await w.page.getByTestId("sign-in").click();
       await w.page.locator('[data-screen="signed-out"]').waitFor();
-      expect(await textOf(w.page.getByTestId("notice"))).toContain("Could not reach the server");
+      await w.page.getByTestId("notice").filter({ hasText: "Could not reach the server" }).waitFor({ timeout: 5000 });
       await expect.poll(() => server.state.revokedSessions.size).toBe(1);
       expect(server.state.signOutCalls).toBe(1);
       expect(await heapContains(w.page, server.issuedTokens[0]!)).toBe(false);
