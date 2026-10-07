@@ -1822,6 +1822,14 @@ less: a `failed` grade joins row 2, an `unattestable` grade joins row 3 (§7.5 "
 outcome called refused**. The app-review demo account is
 answered **403** before any reward is read (§4.7.7), so it cannot probe for ids either.
 
+> **Tracked gap, P4.2 pre-submission item (not built, deliberately): review-account behaviours 2 and 3 of build plan §7.8 "Apple 2.1".** The plan says
+> the `app-review` account "audits every sign-in, and is disabled outside submission windows". What exists: the `app.app_review_demo_account`
+> table (0007), the 403 above, the partner-route refusal, and the account's own-row read. What does **not** exist: (a) an audit record written
+> on every sign-in of that account, and (b) any mechanism that disables the account outside a submission window (a flag, an expiry or a
+> scheduled job), and (c) a provisioning procedure for the row (the owner steps in `docs/owner/apple-setup-runbook.md`, Step 4.3, are manual).
+> These must be built or explicitly waived by the owner before the App Store submission (M2); until then the account stays enabled once created,
+> so **remove its row or disable its Auth user by hand after each review window**.
+
 The handler sees only three small interfaces (`IosPort`: `verifyAssertion`, `readBits`, `setBit0`; `AndroidPort`:
 `verifyIntegrity` **only**; plus `Repo#rewards`). `null` for a platform means "not configured". Android has **no vendor
 persistent-bit port**: whether Play Integrity device recall exists is spike A20 `[unverified]`, and a port that reported
@@ -2678,6 +2686,9 @@ Apple's App Attestation Root CA is **pinned in code** (`apple-app-attest-root.ts
 (`attest-key-isolation.test.ts`): `createAttestationVerifier` is built only by `devices-attest-key/index.ts`; `trustAnchorDer` is assigned
 exactly once outside the verifier, in `privileged.ts`, from the pinned constant; no source mentions an anchor/root environment variable;
 the Deno suite sets plausible variable names and shows the anchor does not move.
+**`GR_APPLE_APPATTEST_ROOT` and `GR_APPLE_TRUST_ANCHOR` are NOT variables** (they are the "plausible names" that suite sets to prove they are
+ignored; an operator who sets them changes nothing). Do not create them as secrets. The root is pinned bytes, and the only human step is the
+"App Attest root fingerprint check" (follow-up K2 of the App Attest work, below).
 
 - **Provenance `[unverified against a second source]`.** Fetched 2026-10-02 from
   `https://www.apple.com/certificateauthority/Apple_App_Attestation_Root_CA.pem` by an agent whose outbound TLS passes through a
@@ -2685,7 +2696,8 @@ the Deno suite sets plausible variable names and shows the anchor does not move.
   `CN=Apple App Attestation Root CA, O=Apple Inc., ST=California`; EC P-384, `ecdsa-with-SHA384`; valid 2020-03-18 .. 2045-03-15; serial
   `0B:F3:BE:0E:F1:CD:D2:E0:FB:8C:6E:72:1F:62:17:98`; SHA-256 of the DER
   `1C:B9:82:3B:A2:8B:A6:AD:2D:33:A0:06:94:1D:E2:AE:4F:51:3E:F1:D4:E8:31:B9:F7:E0:FA:7B:62:42:C9:32`. **Before this ships, a human compares that
-  fingerprint with the one Apple publishes (or fetches the URL from a clean machine) and confirms they are equal** (follow-up K2). A unit
+  fingerprint with the one Apple publishes (or fetches the URL from a clean machine) and confirms they are equal** (the **App Attest root fingerprint check**, follow-up K2 of the App Attest work, "Accepted follow-ups" below; it is
+**not** the K2 landing-page experiment of build plan §10). A unit
   test pins the SHA-256 of the embedded bytes to the constant and checks the certificate parses, is a CA, is self-signed and signs itself;
   it cannot tell you the constant was right to begin with.
 
@@ -2845,7 +2857,8 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
   `authdata_malformed` (flags), `attestation_bad_structure` (extra `attStmt` keys). Then repeat with a production-environment build
   (TestFlight) against a `production` deployment, then run an activation with the registered key (this also exercises the assertion verifier's
   own unverified layout, F1). The same run settles the string-binding contract above and the activation proposal.
-- **K2. Compare the pinned root's fingerprint with Apple's published one** (provenance above).
+- **K2. App Attest root fingerprint check: compare the pinned root's fingerprint with Apple's published one** (provenance above). K2 of the
+  App Attest work, **not** the K2 landing-page experiment of build plan §10 (a different K2). Owner procedure: `docs/owner/apple-setup-runbook.md`, Step 3.2.
 - **K3. The `receipt` is ignored.** It could feed Apple's fraud-metric endpoint; not built.
 - **K4. One key per device row; a second account on the same install needs a new key.** Apple allows `attestKey` once per key, so two
   accounts cannot register the SAME key, and `app.device_link_signals` (which links device rows by `attest_key_id`) therefore does not link
@@ -2858,6 +2871,15 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **K10. Certificate-validity skew is ±5 minutes** (clock skew between this server and Apple's issuance). Apple's credential certificates
   are believed short-lived `[unverified]`; if the live run shows a leaf already expired at attestation time, this is the knob and the
   reason code is `chain_validity`.
+- **K11. Play Integrity egress is unguarded (tracked follow-up, not built; the security gate ruled it not a blocker for the Apple work).** The
+  Google adapter (`_shared/rewards/play-integrity-client.ts`: the OAuth token POST at `:79`, the `decodeIntegrityToken` POST at `:113`) calls the
+  bare platform `fetch` through `VendorHttp`: no exact-host allow-list and no `redirect: "error"`. A redirect (307/308) would be followed with the
+  request body replayed, and that body is the signed service-account assertion (token POST) or the integrity token (decode POST), to whatever
+  host the redirect names. The hosts are fixed in code (`https://oauth2.googleapis.com/token` and
+  `https://playintegrity.googleapis.com/...`), so exploitation needs a redirect from Google itself; it is a defence-in-depth gap, not a live hole.
+  The DeviceCheck client already has the guard (`devicecheck-client.ts`, `devicecheck-egress.test.ts`) and `VendorHttp.fetch` already carries the
+  optional `redirect` field, so the fix is the same shape: an allow-list of the two Google hosts, `redirect: "error"`, a redirected-response
+  refusal, and the same tests. Do before the first Android release build.
 
 ## O12 — Sign in with Apple, server side (2026-10-02): `me-signin-methods`, the provider-grant revocation on deletion
 
@@ -2973,16 +2995,16 @@ the Apple provider; give it the Services ID / bundle id as the client id, the te
 2. Set the four `GR_APPLE_*` function secrets; configure Supabase Auth's Apple provider (above). Register the custom SMTP domain with Apple's
    private relay `[unverified; A78]`.
 3. Create the KEK in Vault: one 32-byte key, base64, named `siwa_token_kek_v1` (e.g. `select vault.create_secret(encode(gen_random_bytes(32),
-   'base64'), 'siwa_token_kek_v1')` `[unverified — Vault's creation API]`). **Never delete a `siwa_token_kek_*` secret while any
+   'base64'), 'siwa_token_kek_v1')` `[unverified — Vault's creation API; and the schema `gen_random_bytes` lives in, possibly `extensions.gen_random_bytes`]`; generated inside the database, SQL editor only, never `psql -c`, see `edge-role-design.md` item 8). **Never delete a `siwa_token_kek_*` secret while any
    `signin_provider_token` or pending queue row still names its id; there is no re-wrap job yet, so until there is one a KEK is never retired.**
-4. Schedule `signin-revocation-drain` (e.g. every 5 minutes, `POST` with `Authorization: Bearer <service-role key>`).
+4. Schedule `signin-revocation-drain` (e.g. every 5 minutes, `POST` with `Authorization: Bearer <service-role key>`). The scheduler must read the key from Vault or its own secret store at run time (the `pg_cron` + `pg_net` pattern in `edge-role-design.md` deploy item 5); never write the key literally into a `cron.job` command or any other stored job text, which would keep it in plaintext.
 5. **Run migration 0035 on a real Supabase branch first** and check the two `[unverified]` database assumptions below.
 6. Calendar the client-secret re-mint, and run the expiry check monthly (next section).
 
 ### The monthly client-secret expiry check (§4.8)
 
-`APPLE_SIWA_CLIENT_SECRET_JWT=<the secret pasted into Supabase Auth> node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]` (or the JWT
-on stdin). Exit **0** if more than 30 days remain; exit **1** if it is expired, expires within 30 days, is malformed or has no `exp` (it never
+`<print the secret pasted into Supabase Auth> | node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]` (the JWT on **stdin**, preferred: an
+`APPLE_SIWA_CLIENT_SECRET_JWT=<jwt>` env-var prefix also works but leaves the secret in shell history). Exit **0** if more than 30 days remain; exit **1** if it is expired, expires within 30 days, is malformed or has no `exp` (it never
 passes by default); exit 2 with no input. It prints when the secret expires, never the secret. Plain Node, no dependencies; the decision logic
 is mirrored in `_shared/signin/secret-expiry.ts` and one unit test runs both against the same fixtures. **Not wired to a scheduler**: a
 scheduled job needs the JWT as a secret in some CI or cron environment, which is an operator decision (the server's own secrets are 10
@@ -3320,7 +3342,7 @@ The runbook additions in design section 15 (item 0 deploy order's isolate-recycl
 
 `private.purge_signin_email_proofs()` (and its siblings) delete with `DELETE ... WHERE id IN (SELECT id ... LIMIT 5000)` under RLS. When `pg_class` carries stale statistics for the table (a vacuum that truncated it left it estimated at about one row), the planner can choose a Nested Loop Semi Join that re-runs the `LIMIT` subquery per outer row: 5,003 freshly inserted rows took 26.9 s instead of about 30 ms and hit the harness's 10 s statement timeout. The `retention-purge` Deno test works around it with `ANALYZE` (P5 S1.1b), which is a property of the test, not of production: a production table that has been loaded for a while has been analyzed by autovacuum, but the dependence is real and is not closed here.
 
-**Not fixed in S1.1b** (0040 is immutable and the slice's brief did not include it). The fix, for a later migration that redefines the purge definers: take the batch **once**, materialised, so the plan cannot re-run it per row:
+**Closed by migration `0050_db_hygiene.sql`** (see "As built: DB hygiene" in `partner-auth-design.md`): all six batched purge definers now take the batch once; the shape below was measured on stale statistics (4.2 s against 5.4 s / 118.8 s for the old shape) and replaced by an array batch (13 to 69 ms); the test-side `ANALYZE` is gone; the InitPlan NIT was applied. **Not fixed in S1.1b** (0040 is immutable and the slice's brief did not include it). The fix, for a later migration that redefines the purge definers: take the batch **once**, materialised, so the plan cannot re-run it per row:
 
 ```sql
 WITH b AS MATERIALIZED (SELECT id FROM private.signin_email_proof WHERE <predicate> ORDER BY <key> LIMIT 5000)
@@ -3937,7 +3959,7 @@ New policies (22, `pd_marker_scan_*`) are keyed on the actor binding, never a se
 | A purchase credited with no presence | `credited` only with an attested, challenge-bound fix inside a `play-verified` polygon plus 50 m | unit (drift test against the scorer's own predicate), Deno (a far fix, a simulated fix) |
 | A claimed co-signal that is not the bound user's, not this fix, not this facility, a different grade or date, or already used | the database reads the evidence row back (`marker_cosignal_check`) and refuses: `invalid_cosignal` / `fix_already_used` | pgTAP, one must-fail cell per check against real evidence rows; Deno |
 | A PIN rotation turning queued honest scans into wrong guesses | the PIN is judged at the fix's instant: its date, the epoch live then (`course_pin_epoch_log`), the pepper then (`course_pin_pepper_previous`, effective time from the operator-written `app.course_pin_pepper_epoch`, never Vault timestamps); a valid-for-its-instant PIN is never counted | pgTAP (scan dated yesterday + rotation today + upload = ok, nothing counted; two rotations in a day; a rotated-out PIN tried for a later instant IS counted; a previous pepper without an epoch row is never used), Deno |
-| A leaked PIN or pepper after an alarm or compromise rotation | **residual, not closed**: back-dating a fix inside the check-in challenge's window (a prefetched challenge lives 24 h) keeps the OLD epoch's PIN, and while a previous pepper exists the previous pepper, verifying for up to about 24 h after the rotation; an instant after the rotation is judged under the new epoch. **A compromise rotation keeps no previous pepper and writes no epoch row** | pgTAP (an old epoch's PIN at a later instant is wrong) |
+| A leaked PIN or pepper after an alarm or compromise rotation | **residual, not closed**: back-dating a fix inside the check-in challenge's window (a prefetched challenge lives 24 h) keeps the OLD epoch's PIN, and while a previous pepper exists the previous pepper, verifying for up to about 24 h after the rotation; an instant after the rotation is judged under the new epoch. **A compromise rotation keeps no previous pepper and writes no epoch row; if the leaked secret was `course_pin_pepper_previous`, it must be deleted from Vault** (a leftover old pepper becomes a standing second key as soon as any later rotation writes an epoch row) | pgTAP (an old epoch's PIN at a later instant is wrong) |
 | A photographed rotating token burned days later, or a client choosing the PIN date | the instant is the fix's only for a **qualifying** fix, else now; the database refuses a `p_at` far from now without a co-signal | unit, pgTAP, Deno |
 | `marker_scan_for_actor` used as an uncounted PIN oracle | it refuses (`42501`) a printed-QR scan without the same-transaction PIN-gate proof **for the same instant**, and consumes the proof | pgTAP (no gate, other facility, other date, other instant, other actor, ended transaction, a replaced proof, a second scan on one gate), Deno |
 | The PIN proof outliving its transaction (an actor id at rest on a pooled backend) | deleted by the scan and by a deferred constraint trigger at COMMIT; the table is empty at rest | pgTAP C0 (a real-commit read as the owner with a positive control), Deno (committed gate with no scan, committed scan, refused scan) |

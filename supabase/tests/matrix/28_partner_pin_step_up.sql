@@ -181,7 +181,7 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.par
               OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), pg_get_expr(pol.polwithcheck, pol.polrelid)) NOT LIKE '%partner_binding_user()%')), 0,
   'the OR rule: every verifier policy is TO partner_pin_verifier alone, keyed on the BINDING''s user and reads no settable GUC (nothing here can be planted)');
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.partner_pin'::regclass AND pol.polname LIKE 'pd\_%'
-           AND (pol.polroles <> ARRAY['private_definer'::regrole::oid] OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') NOT LIKE '%AND (private.partner_binding_kind() IS DISTINCT FROM ''partner''::text))')), 0,
+           AND (pol.polroles <> ARRAY['private_definer'::regrole::oid] OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') NOT LIKE '%AND (( SELECT private.partner_binding_kind() AS partner_binding_kind) IS DISTINCT FROM ''partner''::text))')), 0,
   'the delete_my_data window pair on the PIN table carries the partner conjunct as its top-level trailing AND (check 15)');
 SELECT is((has_column_privilege('private_definer', 'app.partner_session', 'pin_grant_until', 'UPDATE'), has_column_privilege('partner_pin_verifier', 'app.partner_session', 'pin_grant_until', 'UPDATE'),
            has_column_privilege('partner_reauth_verifier', 'app.partner_session', 'pin_grant_until', 'UPDATE'), has_column_privilege('edge_partner', 'app.partner_session', 'pin_grant_until', 'UPDATE'))::text, '(f,t,f,f)',

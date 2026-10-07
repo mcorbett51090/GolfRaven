@@ -243,9 +243,9 @@ CREATE POLICY ppv_update_partner_pin ON app.partner_pin FOR UPDATE TO partner_pi
 -- window is CLOSED, so a planted app.delete_my_data.target_user_id cannot make another person's PIN row readable or deletable by a definer a partner transaction reaches (check 15). Nothing else.
 GRANT SELECT (user_id), DELETE ON app.partner_pin TO private_definer;
 CREATE POLICY pd_delete_partner_pin_user_id ON app.partner_pin
-  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+  FOR DELETE TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner');
 CREATE POLICY pd_delete_partner_pin_user_id_r ON app.partner_pin
-  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+  FOR SELECT TO private_definer USING (user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner');
 
 -- ============================================================================
 -- 4. The verifier-owned definers (R5-L1: the ROLE that owns the writer of pin_grant_until / of the verifier IS the verification fact)
