@@ -189,9 +189,12 @@ SELECT is((SELECT array_agg(pol.polname::text || ':' || pol.polcmd::text ORDER B
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.partner_sign_in_failure'::regclass AND pol.polname NOT LIKE 'zz27%'
            AND (pol.polroles <> ARRAY['partner_session_issuer'::regrole::oid] OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') ~* 'current_setting|pg_settings' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') ~* 'current_setting|pg_settings')), 0,
   'the OR rule: every policy on the new table is TO partner_session_issuer alone and reads no settable GUC (nothing here can be planted)');
+-- the registry is readable by service_role only (RLS): the restricted harness role is not a superuser, so the cell reads it as service_role, as matrix 26 does
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('partner_rp_config_read', 'partner_credential_lookup', 'partner_sign_in_failure_record', 'partner_reauth_credential_read', 'partner_reauth_check',
   'partner_reauth_apply', 'partner_reauth_clear', 'hit_partner_rate_limit', 'partner_whoami_for_partner', 'partner_session_revoke_for_partner', 'partner_session_lock_for_partner',
   'partner_session_reauth_options_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner')), 14, 'registry: all 14 new functions have a function_inventory row');
+SELECT tests.clear_actor();
 
 -- ----------------------------------------------------------------------------
 -- 2. Check 14 (a) behavioural cells: every `_for_partner` definer raises 42501 with no scope. No binding at all, and a USER binding (PA-3 (ii)), for each of the six; and, for the three class-A0 ones, an
