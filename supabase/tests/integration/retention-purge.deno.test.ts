@@ -423,15 +423,101 @@ async function seedBacklog(): Promise<{ liveProof: string; livePending: string; 
         perform set_config('app.signin.proof_id', '', true);
       end $d$`);
   });
-  // ANALYZE what was just bulk-loaded, as autovacuum would in a database that has been running for a while. Without it the planner works from whatever pg_class says about the table, and after an
-  // earlier file's rolled-back bulk insert that is "148 pages, 1 tuple" (a vacuum that could not truncate, e.g. because a concurrent session held the xmin horizon at that moment): it then estimates the
-  // 5003 new rows as ONE row, picks a nested loop for the purge's `DELETE ... WHERE id IN (SELECT ... LIMIT 5000)` and runs it in O(n^2), past the 10 s statement timeout. Which state the template database
-  // is in depends on when autovacuum happened to run during the pgTAP and concurrency steps, so the suite must not depend on it.
-  await rawOwnerSql().unsafe("analyze private.signin_email_proof, private.signin_revocation_queue, private.consumed_nonce, private.rate_limit_bucket");
+  // No ANALYZE here, deliberately. The S1.1b slice added one because the 0040 purges (`DELETE ... WHERE id IN (SELECT ... LIMIT 5000)`) ran in O(n^2) when pg_class held stale statistics (a vacuum that could
+  // not truncate leaves "148 pages, 0 tuples"). Since 0050 the definers take their batch once and no longer depend on the plan, so the suite does not depend on which state autovacuum left the template
+  // database in; the cell "0050: stale planner statistics ..." below builds exactly that state on purpose and pins it.
   return { liveProof, livePending, liveNonce, liveBucket };
 }
 
 const BOUNDED_CLASSES = ["signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets"] as const;
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+// 2c. 0050 (S1.1b gate L-4): the batched purges do not depend on the planner's statistics
+// ---------------------------------------------------------------------------------------------------------------------------------------------
+
+const STALE_TABLES = ["private.signin_email_proof", "private.signin_revocation_queue", "private.consumed_nonce", "private.rate_limit_bucket"] as const;
+
+/**
+ * Put the four backlog tables into the state the S1.1b gate found them in, WITHOUT an ANALYZE: load a backlog, delete it, VACUUM (TRUNCATE false) (a vacuum that could not truncate, made deterministic:
+ * the pages stay, pg_class says "N pages, 0 tuples"), then load the backlog again. The planner now estimates 5003 fresh rows as one row. Autovacuum is switched off on the four tables for the duration
+ * so it cannot repair the statistics under the test; the returned function puts that back.
+ */
+async function makeStatsStale(): Promise<() => Promise<void>> {
+  const owner = rawOwnerSql();
+  for (const t of STALE_TABLES) await owner.unsafe(`alter table ${t} set (autovacuum_enabled = false)`);
+  const restore = async () => {
+    for (const t of STALE_TABLES) await owner.unsafe(`alter table ${t} reset (autovacuum_enabled)`);
+  };
+  try {
+    await seedBacklog();
+    await asDefiner(async (sql) => {
+      await sql`delete from private.consumed_nonce where coalesce(expires_at, consumed_at) < now() - interval '7 days'`;
+      await sql`delete from private.rate_limit_bucket where window_start < now() - interval '2 days'`;
+      await sql`delete from private.signin_revocation_queue where status <> 'pending' and completed_at < now() - interval '30 days'`;
+      await sql`select set_config('app.signin.proof_purge', 'on', true)`;
+      await sql`delete from private.signin_email_proof where expires_at < now() - interval '1 hour'`;
+    });
+    await owner.unsafe(`vacuum (truncate false) ${STALE_TABLES.join(", ")}`);
+    await seedBacklog();
+    return restore;
+  } catch (e) {
+    await restore();
+    throw e;
+  }
+}
+
+/** The 0040 / 0041 statement shapes, verbatim, as private_definer (the role the definers run as). Each is the whole body of the purge, which is a single DELETE. */
+const OLD_PURGE_SHAPES: Record<(typeof BOUNDED_CLASSES)[number], string> = {
+  consumed_nonce: `delete from private.consumed_nonce n where n.nonce_hash in (select s.nonce_hash from private.consumed_nonce s where coalesce(s.expires_at, s.consumed_at) < now() - interval '7 days' limit 5000)`,
+  rate_limit_buckets: `delete from private.rate_limit_bucket b where (b.bucket_key, b.window_start) in (select s.bucket_key, s.window_start from private.rate_limit_bucket s where s.window_start < now() - interval '2 days' limit 5000)`,
+  signin_email_proofs: `delete from private.signin_email_proof p where p.id in (select s.id from private.signin_email_proof s where s.expires_at < now() - interval '1 hour' order by s.expires_at, s.id limit 5000)`,
+  signin_revocation_queue: `delete from private.signin_revocation_queue q where q.id in (select s.id from private.signin_revocation_queue s where s.status <> 'pending' and s.completed_at < now() - interval '30 days' limit 5000)`,
+};
+const STALE_BUDGET_MS = 1000;
+class StatementFinished extends Error {}
+
+retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched purge is fast, and the 0040 statement shape is NOT (positive control); the whole backlog is still cleared", async () => {
+  const restore = await makeStatsStale();
+  try {
+    // the precondition: the planner really is misled (a test that passed because autovacuum had repaired the statistics would prove nothing)
+    for (const t of STALE_TABLES) {
+      const [schema, rel] = t.split(".");
+      const stat = await rawCount(`select c.reltuples::int as n from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = '${schema}' and c.relname = '${rel}'`);
+      assert(stat < 1000, `${t} is estimated at ${stat} tuples (the 5003 loaded rows must be unaccounted for): the statistics are not stale`);
+    }
+    // positive control: the old shape cannot finish inside the budget on these statistics. (Each runs in its own transaction and is rolled back whatever happens.)
+    for (const name of BOUNDED_CLASSES) {
+      const outcome = await asDefiner(async (sql) => {
+        await sql.unsafe(`set local statement_timeout = '${STALE_BUDGET_MS}ms'`);
+        if (name === "signin_email_proofs") await sql`select set_config('app.signin.proof_purge', 'on', true)`;
+        const t0 = Date.now();
+        try {
+          await sql.unsafe(OLD_PURGE_SHAPES[name]);
+        } catch (e) {
+          if ((e as { code?: string }).code === "57014") return "cancelled"; // the statement timeout: the transaction is aborted and ends in a rollback
+          throw e;
+        }
+        throw new StatementFinished(`finished in ${Date.now() - t0} ms`); // never commit the old shape's deletes
+      }).catch((e) => (e instanceof StatementFinished ? e.message : `error ${String(e)}`));
+      assertEquals(outcome, "cancelled", `positive control: the 0040 shape of ${name} was not cancelled inside ${STALE_BUDGET_MS} ms on stale statistics (${outcome}), so this fixture no longer reproduces the pathology`);
+    }
+    // the 0050 definers: one full batch of each, timed
+    const steps = retentionPurgeSteps();
+    for (const name of BOUNDED_CLASSES) {
+      const st = steps.find((x) => x.name === name)!;
+      const t0 = Date.now();
+      const n = await st.runBatch();
+      const ms = Date.now() - t0;
+      console.log(`0050 stale statistics: ${name} removed ${n} rows in ${ms} ms`);
+      assertEquals(n, RETENTION_DEFINER_BATCH_ROWS, `${name}: a full batch`);
+      assert(ms < STALE_BUDGET_MS, `${name} took ${ms} ms on stale statistics (budget ${STALE_BUDGET_MS} ms)`);
+    }
+    const r = await run(realDeps({ hitRateLimit: unlimited }));
+    for (const name of BOUNDED_CLASSES) assertEquals(stepOf(r, name).status, "done", `${name}: ${JSON.stringify(stepOf(r, name))}`);
+  } finally {
+    await restore();
+  }
+});
 
 retentionTest("0040: a backlog larger than one batch is cleared over SEVERAL batches by one run, for each of the four SQL-bounded steps; a live row of each survives", async () => {
   const live = await seedBacklog();
