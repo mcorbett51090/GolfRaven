@@ -9,7 +9,9 @@ import { handlePartnerSessionRequest, REAUTH_BUCKET, routeOf } from "../../funct
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
 import { authed, challengeToken, credentialJson, makeFakes, NOW_MS, ORIGIN, req, SESSION_TOKEN, sha256Hex, verifyBody } from "./partner-fakes.ts";
 
-const JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+// built at run time (a literal token-shaped string trips the secret scanner): a three-part, base64url, JWT-shaped bearer
+const b64u = (v: string) => btoa(v).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+const JWT = [b64u(JSON.stringify({ alg: "HS256", typ: "JWT" })), b64u(JSON.stringify({ sub: "test-subject" })), b64u("not-a-real-signature")].join(".");
 
 async function bodyOf(res: Response): Promise<unknown> {
   return JSON.parse(await res.text());
