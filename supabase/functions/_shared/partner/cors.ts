@@ -12,7 +12,7 @@
 //   * the allowed origin gets `Access-Control-Allow-Origin: <that origin>`, `Vary: Origin`, no credentials mode (the token is a header, never a cookie), and `Access-Control-Allow-Methods`
 //     for GET, POST, PATCH and DELETE (plus OPTIONS). Any other origin gets NO CORS header;
 //   * the allowed origin's responses also carry `Access-Control-Expose-Headers: Retry-After` and nothing else: a cross-origin page can read only the CORS-safelisted response headers unless
-//     the server names more, and `Retry-After` (a 429) is the one non-safelisted header the partner lane sends that the page needs (S7a finding, design doc 19.6).
+//     the server names more, and `Retry-After` (a 429) is the one non-safelisted header the partner lane sends that the page needs (S7a finding, design doc 20.6).
 
 /** The methods a preflight advertises (4.6: "GET, POST, PATCH, DELETE, OPTIONS"). */
 export const PARTNER_ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";

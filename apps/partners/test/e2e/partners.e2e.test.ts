@@ -363,7 +363,7 @@ suite("apps/partners in Chromium", () => {
   });
 
   describe("lock and sign-out clear state", () => {
-    it("lock: back to sign-in with the locked notice, nothing of the session left on screen, and the session REVOKED on the server: the old token gets 401 (design 19.4)", async () => {
+    it("lock: back to sign-in with the locked notice, nothing of the session left on screen, and the session REVOKED on the server: the old token gets 401 (design 20.4)", async () => {
       const w = await open();
       await signIn(w);
       const token = server.issuedTokens[0]!;

@@ -143,7 +143,7 @@ describe("session routes against the real handler", () => {
     expect(raw.status).toBe(401);
   });
 
-  it("lock REVOKES the session on the real handler (design 19.4 ruling): the client wipes, the server marks it revoked, and the OLD token then gets the uniform 401", async () => {
+  it("lock REVOKES the session on the real handler (design 20.4 ruling): the client wipes, the server marks it revoked, and the OLD token then gets the uniform 401", async () => {
     const w = await signedIn();
     const token = w.server.issuedTokens[0]!;
     await w.api.lock();

@@ -22,7 +22,7 @@
  * soon as `fetch` has been called, so a request that never answers neither keeps the screen up nor keeps the token in memory.
  * Every request carries a timeout (REQUEST_TIMEOUT_MS), and a wipe aborts every authenticated request still in flight.
  * `lock()` REVOKES the session (it is a sign-out with the "locked" wording): a copied-out token is dead at once, not at its idle
- * expiry (design 19.4).
+ * expiry (design 20.4).
  *
  * THE BEARER GOES ONLY TO PARTNER FUNCTIONS: `call()` refuses any function name that is not in `partner-functions.json`, the
  * same list the build turns into the CSP's `connect-src` entries.
@@ -93,7 +93,7 @@ export interface PartnerApi {
   /** `POST sign-out`: revokes the session on the server. The token is wiped (and the listeners told) BEFORE the request is sent, and the request uses a copy. */
   signOut(opts?: EndOptions): Promise<void>;
   /**
-   * Lock: wipes the token and tells the listeners at once, then REVOKES the session with `POST sign-out` (design 19.4: lock must revoke, so a token copied
+   * Lock: wipes the token and tells the listeners at once, then REVOKES the session with `POST sign-out` (design 20.4: lock must revoke, so a token copied
    * out of the page is dead immediately). The wording differs from sign-out (the reason is "locked"); the wire request is the same.
    */
   lock(opts?: EndOptions): Promise<void>;

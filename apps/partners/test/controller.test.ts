@@ -173,7 +173,7 @@ describe("lock and sign-out clear state", () => {
     expect(JSON.stringify(controller.getState())).not.toContain("memberships");
   });
 
-  it("lock: signed-out with the 'locked' notice, the token wiped AND the session revoked on the server (design 19.4)", async () => {
+  it("lock: signed-out with the 'locked' notice, the token wiped AND the session revoked on the server (design 20.4)", async () => {
     const { controller, w, api } = setup();
     await controller.signIn();
     await controller.lock();
@@ -291,7 +291,7 @@ function gate(match: (url: string, method: string) => boolean, opts: { abortable
 }
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
-describe("lock and sign-out are immediate (MEDIUM-2) and lock revokes (design 19.4)", () => {
+describe("lock and sign-out are immediate (MEDIUM-2) and lock revokes (design 20.4)", () => {
   it.each([
     ["lock", "locked", "lock-offline"],
     ["signOut", "signed-out", "sign-out-offline"],
@@ -310,7 +310,7 @@ describe("lock and sign-out are immediate (MEDIUM-2) and lock revokes (design 19
     expect(screens(states)).toEqual(["signed-out", "signed-out"]);
   });
 
-  it("lock sends POST sign-out with the old token, and the server revokes that session; the old token is then refused (design 19.4)", async () => {
+  it("lock sends POST sign-out with the old token, and the server revokes that session; the old token is then refused (design 20.4)", async () => {
     const { controller, w } = setup();
     await controller.signIn();
     const token = w.server.issuedTokens[0]!;

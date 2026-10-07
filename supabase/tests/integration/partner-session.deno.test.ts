@@ -19,7 +19,7 @@ import { handlePartnerSessionRequest, type PartnerSessionDeps } from "../../func
 import { assertionVerifier } from "../../functions/_shared/partner/webauthn-port.ts";
 import { parseChallengeToken, uuidToBytes } from "../../functions/_shared/partner/session-shape.ts";
 import { newPartnerSessionToken, sha256Hex, toB64u } from "../../functions/_shared/partner/token.ts";
-import type { AssertionVerifier, PartnerDb } from "../../functions/_shared/partner/ports.ts";
+import type { AssertionVerifier, EmailOtpPort, PartnerDb } from "../../functions/_shared/partner/ports.ts";
 import {
   getActorFromRequest,
   loadPartnerCorsOrigin,
@@ -57,10 +57,17 @@ async function enrol(uid: string, alg: "ES256" | "RS256" = "ES256", storedCount 
   return auth;
 }
 
+// The sign-in suite never reaches the email proof (S1.3's suite is partner-pin.deno.test.ts): a call to it is a failure of the test.
+const NO_OTP: EmailOtpPort = {
+  send: () => Promise.reject(new Error("the sign-in suite must not send an email")),
+  verify: () => Promise.reject(new Error("the sign-in suite must not verify an email code")),
+};
+
 const baseDeps = (over: Partial<PartnerSessionDeps> = {}): PartnerSessionDeps => ({
   db: partnerDb,
   allowedOrigin: RP.origin,
   webauthn: assertionVerifier,
+  otp: NO_OTP,
   nowMs: () => Date.now(),
   newSessionToken: newPartnerSessionToken,
   ...over,
@@ -206,7 +213,11 @@ Deno.test("PA-11: a Supabase JWT sent to the partner function is 401 on every se
   // built at run time (a literal token-shaped string trips the secret scanner)
   const b64u = (v: string) => btoa(v).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
   const jwt = [b64u(JSON.stringify({ alg: "HS256", typ: "JWT" })), b64u(JSON.stringify({ sub: "test-subject", role: "authenticated" })), b64u("not-a-real-signature")].join(".");
-  for (const [method, path] of [["GET", "session"], ["POST", "sign-out"], ["POST", "lock"], ["POST", "reauth/options"], ["POST", "reauth"]] as const) {
+  for (const [method, path] of [
+    ["GET", "session"], ["POST", "sign-out"], ["POST", "lock"], ["POST", "reauth/options"], ["POST", "reauth"],
+    // S1.3: the step-up PIN and the email proof are session routes too
+    ["GET", "pin"], ["POST", "step-up/pin"], ["POST", "pin/set"], ["POST", "pin/change"], ["POST", "otp-proof/start"], ["POST", "otp-proof/verify"],
+  ] as const) {
     const res = await call(method, path, { headers: bearer(jwt), body: method === "POST" ? {} : undefined, deps: baseDeps({ db: counting }) });
     assertEquals(res.status, 401, `${method} ${path}`);
     assertEquals(await res.text(), UNIFORM_401);
@@ -533,7 +544,7 @@ Deno.test("PA-13b: inside a real partner transaction the role is edge_partner an
   );
   assertEquals(
     names[0]!.n,
-    "bind_partner_session,hit_partner_rate_limit,partner_binding,partner_binding_kind,partner_session_lock_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_whoami_for_partner",
+    "bind_partner_session,hit_partner_rate_limit,partner_binding,partner_binding_kind,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_whoami_for_partner",
   );
 });
 

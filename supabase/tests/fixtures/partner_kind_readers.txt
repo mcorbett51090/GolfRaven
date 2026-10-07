@@ -47,3 +47,12 @@ private.partner_credential_lookup(p_credential_id bytea)
 private.partner_sign_in_failure_record(p_credential_id bytea)
 private.partner_reauth_apply(p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)
 private.partner_reauth_clear()
+# 0052 (partner step-up PIN, S1.3): outside the *_for_partner family, five functions read the binding. partner_binding_user is the policy predicate of partner_pin_verifier (it returns the bound partner
+# user and nothing else). partner_pin_verify_apply, partner_pin_set_apply and partner_pin_params_read are owned by partner_pin_verifier (R5-L1) and take the person and the session from the binding: they are reachable only from
+# partner_pin_verify_for_partner / partner_pin_set_for_partner / partner_pin_change_for_partner / partner_pin_params_for_partner, which begin with private.partner_authorize, and the role can write nothing but
+# pin_grant_until of its own bound session and the partner_pin row of its own bound person. partner_pin_grant_consume_fresh is the A2 twin of partner_pin_grant_consume (called by partner_authorize only).
+private.partner_binding_user()
+private.partner_pin_verify_apply(p_derived bytea)
+private.partner_pin_set_apply(p_mode text, p_derived bytea, p_salt bytea, p_iterations integer, p_current bytea)
+private.partner_pin_params_read()
+private.partner_pin_grant_consume_fresh(p_max_age_seconds integer)
