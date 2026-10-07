@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="%CSP_META%" />
+    <title>partners e2e harness</title>
+    <link rel="stylesheet" href="%STYLE%" />
+    <script type="module" src="%SCRIPT%"></script>
+  </head>
+  <body>
+    <main>
+      <h1>e2e harness</h1>
+      <p>Built only for the Playwright suite (GOLFRAVEN_PARTNERS_E2E=1). Never part of a production build.</p>
+      <div class="actions">
+        <button id="sign-in" type="button">sign in</button>
+        <button id="reauth" type="button">reauth</button>
+        <button id="session" type="button">session</button>
+        <button id="forget" type="button">forget</button>
+      </div>
+      <pre id="out" data-testid="out"></pre>
+    </main>
+  </body>
+</html>
