@@ -19,15 +19,32 @@ const MIG = join(import.meta.dirname, "..", "..", "migrations");
 const read = (f: string) => readFileSync(join(MIG, f), "utf8");
 const files = readdirSync(MIG).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort();
 
+/** Every CREATE [OR REPLACE] FUNCTION in `sql`, with ANY dollar-quote tag (`$$`, `$fn$`, `$body$`, ...): the body runs from the opening tag to the next occurrence of the SAME tag. */
 function functionsOf(sql: string): Array<{ name: string; text: string }> {
   const out: Array<{ name: string; text: string }> = [];
   const re = /CREATE (?:OR REPLACE )?FUNCTION ([a-z_]+\.[a-z_0-9]+)\(/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(sql))) {
-    const end = sql.indexOf("\n$$;", m.index);
-    if (end > -1) out.push({ name: m[1]!, text: sql.slice(m.index, end + 4) });
+    const open = /\bAS\s+(\$[A-Za-z_0-9]*\$)/.exec(sql.slice(m.index));
+    if (!open) continue;
+    const tag = open[1]!;
+    const bodyStart = m.index + open.index + open[0].length;
+    const close = sql.indexOf(tag, bodyStart);
+    if (close === -1) continue;
+    let end = close + tag.length;
+    if (sql[end] === ";") end += 1;
+    out.push({ name: m[1]!, text: sql.slice(m.index, end) });
   }
   return out;
+}
+
+/** The text with SQL comments (`-- ...` and block comments) removed: a MENTION in a comment is not a refusal. */
+function withoutSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, "").replace(/--[^\n]*/g, "");
+}
+/** Does the function CALL private.is_demo_account (outside comments)? */
+function refusesReviewAccount(fnText: string): boolean {
+  return /\bis_demo_account\s*\(/.test(withoutSqlComments(fnText));
 }
 
 // CREATION of a row (an INSERT): the point where a reward, credit or purchase comes into being. (Updates move or void an existing row; delete_my_data and the activation helpers do, and are not minters.)
@@ -111,23 +128,31 @@ describe("every writer of rewards, offers, entitlements and credits refuses the 
 
   // The functions AFTER 0051: the ratchet. Empty today, and that is the point: the day a migration adds a minter it must carry the refusal.
   const EXEMPT: Record<string, string> = {};
-  it("a migration after 0051 that writes those tables from a function carries is_demo_account in that function, or is exempted here with a reason", () => {
+  it("a migration after 0051 that writes those tables from a function CALLS is_demo_account in that function (a mention in a comment does not count), or is exempted here with a reason", () => {
     const after = files.filter((f) => f > "0051_review_account_window.sql" && !f.startsWith("0051"));
     const offenders: string[] = [];
     for (const f of after) {
       for (const fn of functionsOf(read(f))) {
         if (!WRITES.test(fn.text)) continue;
-        if (fn.text.includes("is_demo_account") || fn.name in EXEMPT) continue;
+        if (refusesReviewAccount(fn.text) || fn.name in EXEMPT) continue;
         offenders.push(`${f}: ${fn.name}`);
       }
     }
     expect(offenders, "S3 / S5 / S6 condition: a minter of offers, entitlements, credits or purchases must refuse private.is_demo_account(<the bound uid>) in the database").toEqual([]);
   });
 
-  it("the detector is not vacuous: it flags a writer without the refusal and passes one with it", () => {
-    const bad = "CREATE FUNCTION private.mint_x(p uuid)\nRETURNS void AS $$\nBEGIN\n  INSERT INTO app.offer_code (id) VALUES (p);\nEND;\n$$;";
-    const good = bad.replace("BEGIN\n", "BEGIN\n  IF private.is_demo_account(p) THEN RETURN; END IF;\n");
-    expect(functionsOf(bad).filter((f) => WRITES.test(f.text) && !f.text.includes("is_demo_account"))).toHaveLength(1);
-    expect(functionsOf(good).filter((f) => WRITES.test(f.text) && !f.text.includes("is_demo_account"))).toHaveLength(0);
+  it("the detector is not vacuous: it flags a writer without the refusal and passes one with it, for any dollar-quote tag, and a comment-only mention is NOT a refusal", () => {
+    const flagged = (sql: string) => functionsOf(sql).filter((f) => WRITES.test(f.text) && !refusesReviewAccount(f.text)).length;
+    for (const tag of ["$$", "$fn$", "$body$", "$_x1$"]) {
+      const bad = `CREATE FUNCTION private.mint_x(p uuid)\nRETURNS void AS ${tag}\nBEGIN\n  INSERT INTO app.offer_code (id) VALUES (p);\nEND;\n${tag} LANGUAGE plpgsql;`;
+      expect(functionsOf(bad), tag).toHaveLength(1);
+      expect(flagged(bad), `${tag}: a writer with no refusal is flagged`).toBe(1);
+      expect(flagged(bad.replace("BEGIN\n", "BEGIN\n  IF private.is_demo_account(p) THEN RETURN; END IF;\n")), `${tag}: with the refusal it passes`).toBe(0);
+      expect(flagged(bad.replace("BEGIN\n", "BEGIN\n  -- must call private.is_demo_account(p) one day\n")), `${tag}: a line-comment mention is not a refusal`).toBe(1);
+      expect(flagged(bad.replace("BEGIN\n", "BEGIN\n  /* IF private.is_demo_account(p) THEN RETURN; END IF; */\n")), `${tag}: a block-comment mention is not a refusal`).toBe(1);
+    }
+    // a body that contains a different dollar-quote tag inside does not end early
+    const nested = "CREATE FUNCTION private.mint_y(p uuid)\nRETURNS void AS $outer$\nBEGIN\n  EXECUTE $inner$ select 1 $inner$;\n  INSERT INTO app.entitlement (id) VALUES (p);\nEND;\n$outer$;";
+    expect(flagged(nested)).toBe(1);
   });
 });
