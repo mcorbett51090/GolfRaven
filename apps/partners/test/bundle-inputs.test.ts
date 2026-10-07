@@ -3,7 +3,7 @@
  * see a side-effect `import "pkg"`, a dynamic `import("pkg")`, a `require("pkg")` or an `export * from "pkg"`. The bundler's list of inputs sees every
  * one of them, because it had to read each file to build the output. These cells run a real esbuild over temp-dir fixtures and over the real build.
  */
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
@@ -72,6 +72,38 @@ describe("checkBundleInputs on fixtures: every way of pulling a package in is ca
     expect(checkBundleInputs(mf)).toEqual(["test/e2e/harness/harness.ts: is outside src/"]);
     expect(checkBundleInputs(mf, { harness: true })).toEqual([]);
     expect(checkBundleInputs({ inputs: { "node_modules/x/test/e2e/harness/a.js": {} } }, { harness: true })).toHaveLength(1);
+  });
+});
+
+describe("the build itself fails on a package import (the check is wired in, not just available)", () => {
+  /** A scratch copy of this package's buildable files (src/, index.html, public/), so the build can be pointed at a source that imports a package. */
+  async function project(name: string, extraMain: string): Promise<string> {
+    const dir = join(scratch, name);
+    const pkg = new URL("..", import.meta.url).pathname;
+    await mkdir(dir, { recursive: true });
+    await cp(join(pkg, "src"), join(dir, "src"), { recursive: true });
+    await cp(join(pkg, "public"), join(dir, "public"), { recursive: true });
+    await cp(join(pkg, "index.html"), join(dir, "index.html"));
+    await mkdir(join(dir, "node_modules", "pkg"), { recursive: true });
+    await writeFile(join(dir, "node_modules", "pkg", "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", main: "index.js" }));
+    await writeFile(join(dir, "node_modules", "pkg", "index.js"), "globalThis.__pkg_ran = true;\n");
+    if (extraMain !== "") await appendFile(join(dir, "src", "main.ts"), extraMain);
+    return dir;
+  }
+  const env = { GOLFRAVEN_PARTNERS_API_BASE: "https://abc123.example.org/functions/v1" };
+
+  it("control: an unmodified copy of the package builds", async () => {
+    const root = await project("build-ok", "");
+    const r = await buildPartners({ dist: join(root, "dist"), env, root });
+    expect(r.inputs.every((i) => i.startsWith("src/"))).toBe(true);
+  });
+
+  it.each([
+    ["a side-effect import", `\nimport "pkg";\n`],
+    ["a dynamic import", `\nvoid import("pkg");\n`],
+  ])("%s of a package makes the build fail with the offending input named", async (name, extra) => {
+    const root = await project(`build-bad-${name.replace(/\W+/g, "-")}`, extra);
+    await expect(buildPartners({ dist: join(root, "dist"), env, root })).rejects.toThrow(/bundle inputs outside src\/:\n\s+node_modules\/pkg\/index\.js: comes from node_modules/);
   });
 });
 

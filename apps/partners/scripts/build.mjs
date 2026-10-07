@@ -21,13 +21,13 @@ import { buildCsp, buildHeadersFile } from "./lib/csp.mjs";
 import { checkBundleInputs } from "./lib/inputs.mjs";
 import { scanDist } from "./lib/scan-output.mjs";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 /**
- * @param {{ dist: string, env?: NodeJS.ProcessEnv }} opts
+ * @param {{ dist: string, env?: NodeJS.ProcessEnv, root?: string }} opts `root`: the project to build (default: this package; the tests point it at a temp copy)
  * @returns {Promise<{ apiBase: string, apiOrigin: string, files: string[], inputs: string[] }>}
  */
-export async function buildPartners({ dist, env = process.env }) {
+export async function buildPartners({ dist, env = process.env, root = packageRoot }) {
   const e2e = env["GOLFRAVEN_PARTNERS_E2E"] === "1";
   const production = env["GOLFRAVEN_ENV"] === "production";
   // the e2e switch adds a test harness page and accepts a loopback http API: neither may ever be part of a production build
@@ -93,7 +93,7 @@ export async function buildPartners({ dist, env = process.env }) {
 
 const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1];
 if (isMain) {
-  const dist = process.env["DIST_DIR"] ?? process.argv[2] ?? join(root, "dist");
+  const dist = process.env["DIST_DIR"] ?? process.argv[2] ?? join(packageRoot, "dist");
   const r = await buildPartners({ dist });
   console.log(`partners: built ${dist} (API ${r.apiBase})`);
 }
