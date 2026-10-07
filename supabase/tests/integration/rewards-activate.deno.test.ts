@@ -239,6 +239,8 @@ Deno.test("§4.7.7: player A activating player B's offer code or entitlement is 
 Deno.test("§4.7.7: the app-review demo account is refused (403) before any reward is read, and nothing changes", DT, async () => {
   const demo = await freshUser("demo");
   await adminSql()`set role service_role`;
+  // 0051: at most ONE review account exists (unique index), so this test's account replaces whichever exists (this suite runs on its own clone of the database)
+  await adminSql()`delete from app.app_review_demo_account`;
   await adminSql()`insert into app.app_review_demo_account (user_id) values (${demo.uid})`;
   // 0051: the review account is DISABLED outside a submission window (it cannot even be bound), so the reward refusal is proven INSIDE one: the account can sign in and
   // still cannot receive a reward (AT 14). The window is this test's own and is removed in `finally`.

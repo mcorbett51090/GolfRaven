@@ -1625,6 +1625,7 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'g_th');
 RESET ROLE;
 SET LOCAL ROLE service_role;
+DELETE FROM app.app_review_demo_account; -- 0051: at most one review account; this savepoint is rolled back, which puts the seeded one back
 INSERT INTO app.app_review_demo_account (user_id) VALUES ('00000000-0000-0000-0000-1000000000a1');
 RESET ROLE;
 SET LOCAL ROLE edge_partner;

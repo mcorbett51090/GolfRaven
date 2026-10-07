@@ -8,7 +8,7 @@
 -- 29f removes everything this file seeds. Re-runnable on one cluster.
 
 \set QUIET 1
-SELECT plan(43);
+SELECT plan(46);
 
 SET ROLE service_role;
 BEGIN;
@@ -19,6 +19,7 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO app.profile (user_id, handle) VALUES
   ('29510000-0000-0000-0000-0000000000a0', 'rev29_r'),
   ('29510000-0000-0000-0000-0000000000b0', 'rev29_n');
+DELETE FROM app.app_review_demo_account; -- the harness's seeded review account is put back in 29f (at most ONE exists: 0051)
 INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000a0');
 INSERT INTO app.app_review_window (id, starts_at, ends_at, note) VALUES
   ('29510000-0000-0000-0000-00000000f001', now() - interval '3 days', now() - interval '2 days', 'matrix 29 past'),
@@ -77,6 +78,17 @@ SELECT is((SELECT pg_get_userbyid(p.proowner) FROM pg_proc p WHERE p.oid = 'priv
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%review_window_open_at%'), 1, 'the binder carries the window backstop');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%p_kind = ''user'' AND private.is_demo_account(p_uid) AND NOT private.review_window_open_at%'), 1, 'the backstop applies to the user kind only (a system delegate is the system acting on one queued row, not a sign-in)');
 SELECT is((SELECT indisunique AND indpred IS NOT NULL FROM pg_index WHERE indexrelid = 'app.audit_log_review_session_once'::regclass), true, 'one audit row per (account, session, outcome) is a partial unique index (a database fact)');
+
+-- ============================================================================
+-- 3b. ONE review account (plan line 1871: "One app-review account"), as a database fact
+-- ============================================================================
+SELECT is((SELECT i.indisunique AND pg_get_expr(i.indexprs, i.indrelid) = 'true' FROM pg_index i WHERE i.indexrelid = 'app.app_review_demo_account_single'::regclass), true, 'a unique index on a constant allows at most one review-account row');
+SET ROLE service_role;
+BEGIN;
+SELECT throws_ok($$INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, '23505', NULL, 'a SECOND review account is refused (23505)');
+SELECT lives_ok($$DELETE FROM app.app_review_demo_account; INSERT INTO app.app_review_demo_account (user_id) VALUES ('29510000-0000-0000-0000-0000000000b0')$$, 'replacing the review account is delete-then-insert (the documented way)');
+ROLLBACK;
+RESET ROLE;
 
 -- ============================================================================
 -- 4. The restrictions the review account already had, pinned (service_role asks the predicates; nothing here widens anything)

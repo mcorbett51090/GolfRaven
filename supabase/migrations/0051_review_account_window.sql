@@ -3,7 +3,7 @@
 -- The App Store review account (Apple guideline 2.1; build plan "FM-16.1": "One `app-review` account ... It has no partner scope, can receive no offer or special
 -- marker, audits every sign-in, and is disabled outside submission windows"; AT 14: "The review account can sign in and cannot receive a reward"). The repository had
 -- the table (app.app_review_demo_account, 0007), the 403 on reward activation and the partner-route refusal. It did NOT have the last two behaviours of the sentence
--- above. This migration builds them. Migrations 0001-0048 are untouched.
+-- above. This migration builds them. Migrations 0001-0049 are untouched.
 --
 -- WHAT THIS ADDS
 --   1. app.app_review_window: the admin-controlled SUBMISSION WINDOWS. One row is one half-open interval [starts_at, ends_at). The review account is ENABLED while
@@ -67,6 +67,15 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON app.app_review_window TO service_role;
 -- The helper's owner reads the table. A policy for private_definer (FORCE RLS applies to the owner role of a definer too): USING (true) on a table with no personal data.
 GRANT SELECT ON app.app_review_window TO private_definer;
 CREATE POLICY pd_read_review_window ON app.app_review_window FOR SELECT TO private_definer USING (true);
+
+-- ============================================================================
+-- 1b. ONE review account, as a database fact
+-- ============================================================================
+-- "One `app-review` account" (plan line 1871). A second row would be a second account that a window enables; the unique index on a constant makes a second INSERT a 23505.
+-- (The owner tool refuses to provision a second one with its own message first; this is the floor beneath it.)
+CREATE UNIQUE INDEX app_review_demo_account_single ON app.app_review_demo_account ((true));
+COMMENT ON INDEX app.app_review_demo_account_single IS
+  '0051. At most one app-review account may exist (plan line 1871: "One app-review account"). To replace it, DELETE the old row first.';
 
 -- ============================================================================
 -- 2. One audit row per (account, session, outcome), as a database fact

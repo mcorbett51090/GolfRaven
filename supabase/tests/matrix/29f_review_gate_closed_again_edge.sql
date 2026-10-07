@@ -31,5 +31,6 @@ SET ROLE service_role;
 BEGIN;
 DELETE FROM app.app_review_window WHERE id::text LIKE '29510000-%';
 SELECT count(private.delete_my_data(u)) FROM unnest(ARRAY['29510000-0000-0000-0000-0000000000a0', '29510000-0000-0000-0000-0000000000b0']::uuid[]) AS u;
+INSERT INTO app.app_review_demo_account (user_id) VALUES ('00000000-0000-0000-0000-5000000000e0') ON CONFLICT DO NOTHING; -- the harness's own review account (helpers.sql), put back
 COMMIT;
 RESET ROLE;

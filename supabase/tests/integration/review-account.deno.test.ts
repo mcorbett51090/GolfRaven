@@ -62,6 +62,8 @@ async function reviewUser(label: string): Promise<string> {
   const uid = freshUuid();
   await createTestUser(uid, `rv-${label}-${uid.slice(0, 8)}`);
   await ensureServiceRole();
+  // at most ONE review account exists (0051, unique index): this test's replaces the previous one (the earlier account becomes an ordinary one)
+  await adminSql()`delete from app.app_review_demo_account`;
   await adminSql()`insert into app.app_review_demo_account (user_id) values (${uid})`;
   return uid;
 }
