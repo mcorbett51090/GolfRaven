@@ -30,6 +30,13 @@
 #        6f  the 60-per-hour limit under concurrency: 8 concurrent mints at 58 sessions give exactly 2 ok and 6 rate_limited (60 sessions), a mint seen waiting on the credential row in pg_locks.
 #      The audit_log rows these write cannot be deleted (the table is insert-only by trigger); the other rows are removed by the EXIT trap.
 #
+#   7. THE SIGN-IN FAILURE COUNTER UNDER CONCURRENCY (S1.3, the S1.2 gate's L1): THIRTY parallel private.partner_sign_in_failure_record calls for one credential count EXACTLY FOUR and answer `cooldown` to the other
+#      twenty-six (the 5th failure starts the cooldown). Without the row lock (`FOR UPDATE`) concurrent calls read the same count and lose updates, so the case fails. The burst limit this leaves is stated in the design,
+#      18.9: N concurrent forgeries are ALL VERIFIED before the cooldown applies (a CPU-only cost), because the cooldown is read by the lookup that precedes the verification.
+#   8. THE STEP-UP PIN UNDER CONCURRENCY (S1.3, PA-18): TWENTY concurrent WRONG derived keys for one member evaluate at most five (here exactly three: the third starts the 30 s backoff, the other seventeen are refused
+#      `retry_after` without being evaluated); with the PIN one failure from locking and no backoff running, twenty concurrent wrong keys lock it ONCE (one `locked` audit row, nineteen plain `locked`). Without the
+#      row lock (`FOR UPDATE` in private.partner_pin_attempt) every call reads the same count and evaluates, so both cases fail.
+#
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the signin concurrency step, against the same throwaway cluster and database.)
 # No secret: ids are synthetic; the session token hashes are random per run and the edge login is trust-authenticated in this cluster. Re-runnable: everything it
@@ -88,6 +95,9 @@ cleanup() {
   revoke_temp_grants app.partner_auth_challenge app.partner_auth_alarm app.partner_rp_config
   hx "DROP POLICY IF EXISTS zz24s_cred ON app.partner_credential; DROP POLICY IF EXISTS zz24s_sess ON app.partner_session; " 2>/dev/null
   revoke_temp_grants app.partner_credential app.partner_session
+  hx "DELETE FROM app.partner_sign_in_failure WHERE credential_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_pin WHERE user_id::text LIKE 'ee24f000-%';" 2>/dev/null
+  hx "DROP POLICY IF EXISTS zz27s_fail ON app.partner_sign_in_failure; DROP POLICY IF EXISTS zz28s_pin ON app.partner_pin;" 2>/dev/null
+  revoke_temp_grants app.partner_sign_in_failure app.partner_pin
   rm -rf "$OUT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -528,6 +538,115 @@ if [ -n "${A_SIG[f1]:-}" ]; then
   elif [ "$FSESS" != "60" ]; then fail "6f: the credential ended at $FSESS sessions in the hour, expected exactly 60"
   else echo "PASS: 8 concurrent mints at 58 sessions -> a concurrent mint waited on the credential row, exactly 2 ok and 6 rate_limited, the credential ends at exactly 60 (S0-L5 under concurrency)"; fi
 fi
+
+
+# ---------------------------------------------------------------------------
+# 7. THE SIGN-IN FAILURE COUNTER UNDER CONCURRENCY (the S1.2 gate's L1). Thirty parallel failures of ONE credential: exactly 4 `counted`, the 5th starts the cooldown, the other 26 are `cooldown`.
+#    Every transaction stays open for 0.1 s after the call, so without the row lock all thirty overlap and read the same count (lost updates: far more than 4 `counted`).
+# ---------------------------------------------------------------------------
+echo "tools/db/test-partner-serialisation.sh: 7. thirty parallel sign-in failures of one credential"
+MU7="ee26f000-0000-0000-0000-0000000000b7"; CRED7="ee26f000-0000-0000-0000-0000000000c7"
+CID7="$(printf '%s' "ser7-$$-$RANDOM" | md5sum | cut -d' ' -f1)$(printf '%s' "ser7b-$$-$RANDOM" | md5sum | cut -d' ' -f1)"
+hx "GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_sign_in_failure TO CURRENT_USER;
+    DROP POLICY IF EXISTS zz27s_fail ON app.partner_sign_in_failure; CREATE POLICY zz27s_fail ON app.partner_sign_in_failure FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+    SET ROLE service_role; INSERT INTO auth.users (id, email) VALUES ('$MU7', 'mint7@partner.test') ON CONFLICT (id) DO NOTHING; RESET ROLE;
+    INSERT INTO app.partner_credential (id, user_id, credential_id, public_key, alg) VALUES ('$CRED7', '$MU7', decode('$CID7', 'hex'), decode(md5('ser7k') || md5('ser7kb'), 'hex'), -7);"
+fail_sql() { # $1 = hold open (seconds) after the call
+  printf '%s\n' "BEGIN;" "SET LOCAL ROLE edge_partner_minter;" "SELECT 'status:' || o_status FROM private.partner_sign_in_failure_record('\\x$CID7');" "SELECT pg_sleep($1);" "COMMIT;"
+}
+FPIDS=()
+for i in $(seq 1 30); do
+  fail_sql 0.1 | edge "ser_l1_$i" >"$OUT_DIR/l1_$i.out" 2>"$OUT_DIR/l1_$i.err" &
+  FPIDS+=($!)
+done
+set +e; for pid in "${FPIDS[@]}"; do wait "$pid"; done; set -e
+L1_COUNTED=0; L1_COOL=0; L1_OTHER=0
+for i in $(seq 1 30); do
+  st="$(status_of "$OUT_DIR/l1_$i.out")"
+  case "$st" in counted) L1_COUNTED=$((L1_COUNTED + 1));; cooldown) L1_COOL=$((L1_COOL + 1));; *) L1_OTHER=$((L1_OTHER + 1)); echo "  failure $i: '${st}' $(head -c 300 "$OUT_DIR/l1_$i.err")" >&2;; esac
+done
+L1_ROW="$(hq "SELECT failed_count || ',' || (cooldown_until IS NOT NULL)::text FROM app.partner_sign_in_failure WHERE credential_id = '$CRED7'")"
+if [ "$L1_COUNTED" -ne 4 ] || [ "$L1_COOL" -ne 26 ] || [ "$L1_OTHER" -ne 0 ]; then fail "7: thirty parallel failures of one credential gave counted=$L1_COUNTED cooldown=$L1_COOL other=$L1_OTHER, expected 4 / 26 / 0"
+elif [ "$L1_ROW" != "0,true" ]; then fail "7: expected the cooldown running with the counter reset to 0 (the 5th started it), got '$L1_ROW'"
+else echo "PASS: 30 parallel sign-in failures of one credential -> exactly 4 counted and 26 cooldown; the cooldown is running (the row lock serialises the counter, S1.2 gate L1)"; fi
+
+# ---------------------------------------------------------------------------
+# 8. THE STEP-UP PIN UNDER CONCURRENCY (PA-18)
+# ---------------------------------------------------------------------------
+echo "tools/db/test-partner-serialisation.sh: 8. twenty concurrent wrong PIN keys"
+ORG8="ee24f000-0000-0000-0000-0000000000a8"; U8="ee24f000-0000-0000-0000-0000000000b8"; C8="ee24f000-0000-0000-0000-0000000000c8"; S8="ee24f000-0000-0000-0000-0000000000d8"
+H8="$(printf '%s' "ser8-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
+GOOD8="$(printf '11%.0s' $(seq 1 32))"; BAD8="$(printf '22%.0s' $(seq 1 32))"
+hx "SET ROLE service_role;
+    INSERT INTO auth.users (id, email) VALUES ('$U8', 'ser8@partner.test') ON CONFLICT (id) DO NOTHING;
+    INSERT INTO app.partner_org (id, kind, name) VALUES ('$ORG8', 'facility', 'ser org 8');
+    INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('$ORG8', 'fac_x');
+    INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$U8', '$ORG8', 'staff');
+    RESET ROLE;
+    INSERT INTO app.partner_credential (id, user_id, credential_id, public_key, alg) VALUES ('$C8', '$U8', decode(md5('ser-c8') || md5('ser-cb8'), 'hex'), decode(md5('ser-k8') || md5('ser-kb8'), 'hex'), -7);
+    ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+    INSERT INTO app.partner_session (id, token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind, mint_nonce_hash, mint_authenticator_data, mint_client_data_json, mint_signature)
+    VALUES ('$S8', '$H8', '$U8', '$C8', 1, now() - interval '1 hour', now(), now() + interval '8 hours', 'sign_in', decode(md5('ser-n8') || md5('ser-nb8'), 'hex'), decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'));
+    SET CONSTRAINTS ALL IMMEDIATE;
+    ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_pin TO CURRENT_USER;
+    DROP POLICY IF EXISTS zz28s_pin ON app.partner_pin; CREATE POLICY zz28s_pin ON app.partner_pin FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+    DROP POLICY IF EXISTS zz26s_audit ON app.audit_log; CREATE POLICY zz26s_audit ON app.audit_log FOR SELECT TO CURRENT_USER USING (true);"
+seed_pin8() { # $1 = failed_count, $2 = next_attempt_at SQL (a timestamptz expression or NULL)
+  hx "DELETE FROM app.partner_pin WHERE user_id = '$U8';
+      INSERT INTO app.partner_pin (user_id, salt, iterations, verifier, failed_count, failed_today, failed_day, next_attempt_at)
+      SELECT '$U8', decode(repeat('0a', 16), 'hex'), 600000,
+             public.hmac(convert_to('golfraven/partner-pin/v1', 'UTF8') || decode('00', 'hex') || decode(replace('$U8', '-', ''), 'hex') || decode('$GOOD8', 'hex'), convert_to(s.decrypted_secret, 'UTF8'), 'sha256'),
+             $1, $1, (clock_timestamp() AT TIME ZONE 'UTC')::date, $2
+      FROM vault.decrypted_secrets s WHERE s.name = 'partner_pin_pepper';"
+}
+pin_sql() { # $1 = derived hex, $2 = hold open (seconds) after the call
+  printf '%s\n' "BEGIN;" "SET LOCAL ROLE edge_partner;" "SELECT private.bind_partner_session('$H8');" \
+    "SELECT 'status:' || o_status || '|' || o_retry_after FROM private.partner_pin_verify_for_partner('\\x$1');" "SELECT pg_sleep($2);" "COMMIT;"
+}
+pin_run() { # $1 = how many concurrent calls, $2 = derived hex, prints nothing; outputs in $OUT_DIR/pin_<i>.out
+  local n=$1 i; local pids=()
+  for i in $(seq 1 "$n"); do
+    pin_sql "$2" 0.1 | edge "ser_pin_$i" >"$OUT_DIR/pin_$i.out" 2>"$OUT_DIR/pin_$i.err" &
+    pids+=($!)
+  done
+  set +e; for pid in "${pids[@]}"; do wait "$pid"; done; set -e
+}
+pin_tally() { # $1 = count; echoes "wrong=a retry=b locked=c other=d"
+  local n=$1 i st w=0 r=0 l=0 o=0
+  for i in $(seq 1 "$n"); do
+    st="$(status_of "$OUT_DIR/pin_$i.out")"
+    case "$st" in wrong\|*) w=$((w + 1));; retry_after\|*) r=$((r + 1));; locked\|*) l=$((l + 1));; *) o=$((o + 1)); echo "  pin call $i: '${st}' $(head -c 300 "$OUT_DIR/pin_$i.err")" >&2;; esac
+  done
+  echo "wrong=$w retry=$r locked=$l other=$o"
+}
+# 8a. a fresh PIN, twenty concurrent WRONG keys: at most five evaluated (exactly three, then the 30 s backoff)
+seed_pin8 0 NULL
+PIN_AUD0=$(hq "SELECT count(*) FROM app.audit_log WHERE subject_id = '$U8' AND action = 'partner.pin.wrong'")
+pin_run 20 "$BAD8"
+T8A="$(pin_tally 20)"
+ROW8A="$(hq "SELECT failed_count || ',' || (locked_at IS NOT NULL)::text || ',' || (next_attempt_at IS NOT NULL)::text FROM app.partner_pin WHERE user_id = '$U8'")"
+AUD8A=$(( $(hq "SELECT count(*) FROM app.audit_log WHERE subject_id = '$U8' AND action = 'partner.pin.wrong'") - PIN_AUD0 ))
+if [ "$T8A" != "wrong=3 retry=17 locked=0 other=0" ]; then fail "8a: twenty concurrent wrong keys gave $T8A, expected exactly wrong=3 retry=17 locked=0 (at most five evaluated: the third starts the backoff)"
+elif [ "$ROW8A" != "3,false,true" ]; then fail "8a: expected the counter at 3, not locked, a backoff running; got '$ROW8A'"
+elif [ "$AUD8A" != "3" ]; then fail "8a: expected exactly three audit rows for the three evaluated wrong keys, got $AUD8A"
+else echo "PASS: 20 concurrent wrong PIN keys -> exactly 3 evaluated (wrong), 17 refused retry_after without being evaluated; the counter is 3 and committed, a backoff is running (PA-18, FOR UPDATE on the PIN row)"; fi
+# 8b. one failure from the lock and no backoff running: twenty concurrent wrong keys lock the PIN ONCE
+seed_pin8 4 NULL
+LOCK_AUD0=$(hq "SELECT count(*) FROM app.audit_log WHERE subject_id = '$U8' AND action = 'partner.pin.locked'")
+pin_run 20 "$BAD8"
+T8B="$(pin_tally 20)"
+ROW8B="$(hq "SELECT failed_count || ',' || (locked_at IS NOT NULL)::text FROM app.partner_pin WHERE user_id = '$U8'")"
+AUD8B=$(( $(hq "SELECT count(*) FROM app.audit_log WHERE subject_id = '$U8' AND action = 'partner.pin.locked'") - LOCK_AUD0 ))
+if [ "$T8B" != "wrong=0 retry=0 locked=20 other=0" ]; then fail "8b: expected all twenty answers locked (the one evaluated wrong key locks; the rest are refused locked), got $T8B"
+elif [ "$ROW8B" != "5,true" ]; then fail "8b: expected the counter at 5 and the PIN locked, got '$ROW8B'"
+elif [ "$AUD8B" != "1" ]; then fail "8b: the lock must be recorded ONCE (one partner.pin.locked audit row), got $AUD8B"
+else echo "PASS: 20 concurrent wrong keys one failure from the lock -> the PIN locks exactly once (one lock audit row), the counter ends at 5, every answer is locked"; fi
+# 8c. the CORRECT key is refused once locked, even concurrently
+pin_run 5 "$GOOD8"
+T8C="$(pin_tally 5)"
+if [ "$T8C" != "wrong=0 retry=0 locked=5 other=0" ]; then fail "8c: the CORRECT key on a locked PIN was not refused as locked: $T8C"
+else echo "PASS: the correct key on a locked PIN is refused (locked) on every concurrent attempt"; fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "tools/db/test-partner-serialisation.sh: FAILED" >&2
