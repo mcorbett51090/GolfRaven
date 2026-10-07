@@ -86,17 +86,24 @@ support is `[unverified]` and an unsupporting browser ignores both directives, l
 Errors are `PartnerApiError` with a closed `kind`: `unauthenticated` (401, the one answer for a dead session and a refused sign-in),
 `reauth_refused` (403 on `POST reauth`: the session is alive), `forbidden` (403), `unsupported_media_type` (415), `rate_limited` (429),
 `bad_request`, `not_found`, `unavailable` (503), `server`, `network`, `malformed_response`. A 401 on an authenticated call wipes the token
-before the caller sees the error. **`Retry-After` on a 429 is not readable by a cross-origin page**: the S1.2 server does not send
-`Access-Control-Expose-Headers`, so `retryAfterSeconds` is `null` in a real browser (the server does send the header; a follow-up should expose
-it, see the design doc). The UI then shows a generic wait message.
+before the caller sees the error. `Retry-After` on a 429 is read when the browser lets the page see it: the partner CORS helper sends
+`Access-Control-Expose-Headers: Retry-After` (and only that), so `retryAfterSeconds` is the server's value in a real cross-origin browser; it is
+`null` only if a deployment drops the header, and the UI then shows a generic wait message.
 
 ## Sign-in, lock, sign-out, reauth
 
 - **Sign-in**: `POST options`, `navigator.credentials.get` with the server's options, `POST verify`, then `GET session`. The page **refuses
   options that weaken the ceremony**: `userVerification` must be `required` and `allowCredentials` must be empty (usernameless,
   discoverable credentials), or it never calls the browser.
-- **Lock**: tells the server (`POST lock`, which clears every step-up grant), then **wipes the token** and shows sign-in. The server session is
-  not revoked and lives until its idle expiry; with no token held it cannot be used. Use sign-out to revoke.
+- **Lock**: sends `POST lock`, then **wipes the token whether or not that request succeeded**, and shows sign-in with a "Locked" notice.
+  Resuming needs a new passkey tap and opens a **new** session. On the server (`partner_session_lock_for_partner`, 0049) lock clears, for that
+  session only, the **PIN grant**, the **reauth window** and the **email OTP proof**, and counts as activity (it advances `last_seen_at`, which
+  restarts the idle clock). It does **not** revoke the session: the server session **survives until its idle or absolute expiry** (30 min / 8 h
+  for staff, shorter for operator and admin, `[proposed]`), with no holder. **Sign-out is the revoke.** On a shared shop iPad that difference
+  matters: a locked session is still a valid bearer, so a token copied before the lock (the in-memory token is stealable by a script on the
+  page; the CSP mitigates that and does not remove it) stays usable for up to the idle window, with step-up grants cleared. Use **sign-out at
+  the end of a shift** and lock between customers. Whether lock should also revoke is an open decision for the gate (design doc 19.4); the
+  behaviour is as built.
 - **Sign-out**: `POST sign-out` (revokes the session), and the token is wiped even when the request fails (the UI says so honestly).
 - **Reauth** (`src/auth/reauth.ts`, `reauthWithPasskey(api, { credentials })`): `POST reauth/options`, a fresh assertion, `POST reauth`; opens
   the server's 5-minute window. Exported for the screens that need it (adding a credential, A2 actions); S7a has no screen of its own for it.

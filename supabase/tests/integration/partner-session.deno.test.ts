@@ -156,6 +156,7 @@ Deno.test("PA-10: OPTIONS never opens a database connection (a counting database
     assertEquals(res.status, 204);
     assertEquals(res.headers.get("access-control-allow-origin"), RP.origin);
     assert((res.headers.get("access-control-allow-methods") ?? "").includes(method));
+    assertEquals(res.headers.get("access-control-expose-headers"), "Retry-After");
   }
   for (const [method, path] of [["POST", "verify"], ["GET", "session"], ["OPTIONS", "options"], ["POST", "unknown"]] as const) {
     const res = await call(method, path, { headers: { origin: "https://evil.example.test" }, body: method === "POST" ? {} : undefined, deps });
@@ -489,6 +490,7 @@ Deno.test("reauth (design 8): 10 attempts per member per hour, then 429; the hit
     if (res.status === 429 && firstLimited < 0) {
       firstLimited = i;
       assertEquals(res.headers.get("retry-after"), "3600");
+      assertEquals(res.headers.get("access-control-expose-headers"), "Retry-After"); // a cross-origin page can read it
     }
   }
   assert(firstLimited > 0 && firstLimited <= 11, `the limit applied (first 429 at attempt ${firstLimited})`);

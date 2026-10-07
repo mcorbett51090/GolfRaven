@@ -10,7 +10,9 @@
 //   * a request whose `Origin` is anything but the allowed one is refused 403 by THE SERVER, for every method, before routing, whatever the browser does with CORS: this is what stops a
 //     "simple" cross-site request (a form POST, a `text/plain` fetch) that never preflights;
 //   * the allowed origin gets `Access-Control-Allow-Origin: <that origin>`, `Vary: Origin`, no credentials mode (the token is a header, never a cookie), and `Access-Control-Allow-Methods`
-//     for GET, POST, PATCH and DELETE (plus OPTIONS). Any other origin gets NO CORS header.
+//     for GET, POST, PATCH and DELETE (plus OPTIONS). Any other origin gets NO CORS header;
+//   * the allowed origin's responses also carry `Access-Control-Expose-Headers: Retry-After` and nothing else: a cross-origin page can read only the CORS-safelisted response headers unless
+//     the server names more, and `Retry-After` (a 429) is the one non-safelisted header the partner lane sends that the page needs (S7a finding, design doc 19.6).
 
 /** The methods a preflight advertises (4.6: "GET, POST, PATCH, DELETE, OPTIONS"). */
 export const PARTNER_ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
@@ -18,6 +20,8 @@ export const PARTNER_ALLOWED_METHODS = "GET, POST, PATCH, DELETE, OPTIONS";
 export const PARTNER_ALLOWED_HEADERS = "authorization, content-type, x-gr-pop";
 /** A short preflight cache (seconds): a changed origin or method list is picked up within ten minutes. */
 export const PARTNER_PREFLIGHT_MAX_AGE_SECONDS = 600;
+/** The ONE response header a cross-origin page may read beyond the CORS-safelisted ones: `Retry-After` on a 429. Exposing more would hand the page headers it has no use for. */
+export const PARTNER_EXPOSED_HEADERS = "Retry-After";
 
 export type OriginDecision =
   /** No `Origin` header at all. */
@@ -44,7 +48,10 @@ export function baseHeaders(decision: OriginDecision): Headers {
   h.set("cache-control", "no-store");
   h.set("vary", "Origin");
   h.set("x-content-type-options", "nosniff");
-  if (decision.kind === "allowed") h.set("access-control-allow-origin", decision.origin);
+  if (decision.kind === "allowed") {
+    h.set("access-control-allow-origin", decision.origin);
+    h.set("access-control-expose-headers", PARTNER_EXPOSED_HEADERS);
+  }
   return h;
 }
 

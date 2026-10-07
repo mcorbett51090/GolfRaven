@@ -212,18 +212,17 @@ describe("reauth helper against the real handler", () => {
     expect(w.api.hasSession()).toBe(false);
   });
 
-  it("the rate limit is a 429; Retry-After is NOT readable across origins (the S1.2 server exposes no headers), so retryAfterSeconds is null", async () => {
+  it("the rate limit is a 429 and the page CAN read Retry-After across origins (the server exposes exactly that header)", async () => {
     const w = makeWorld();
     await signInWithPasskey(w.api, deps(w));
     w.server.state.reauthLimit = 0;
     const e = await apiErr(reauthWithPasskey(w.api, deps(w)));
     expect(e.kind).toBe("rate_limited");
-    expect(e.retryAfterSeconds).toBeNull();
-    // the server DID send it; only the missing Access-Control-Expose-Headers hides it from a cross-origin page
+    expect(e.retryAfterSeconds).toBe(1800);
     const sent = w.server.log.filter((l) => l.path.endsWith("/partner-session/reauth")).at(-1)!;
     const raw = await w.server.handler(new Request("https://api.example.test/functions/v1/partner-session/reauth", { method: "POST", headers: { authorization: `Bearer ${w.server.issuedTokens[0]}`, "content-type": "application/json", origin: PAGE_ORIGIN }, body: sent.body }));
     expect(raw.status).toBe(429);
     expect(raw.headers.get("retry-after")).toBe("1800");
-    expect(raw.headers.get("access-control-expose-headers")).toBeNull();
+    expect(raw.headers.get("access-control-expose-headers")).toBe("Retry-After");
   });
 });

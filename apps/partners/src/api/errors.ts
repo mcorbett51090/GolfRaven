@@ -67,9 +67,9 @@ export function kindForStatus(status: number, code: string | null): ApiErrorKind
 
 /**
  * `Retry-After` as whole seconds: delta-seconds, or an HTTP date (RFC 9110 10.2.3) measured from `nowMs`. `null` when absent
- * or unparseable. NOTE: across origins the browser hides this header unless the server lists it in
- * `Access-Control-Expose-Headers`; the S1.2 server does not (design doc 'As built: S7a'), so on the real deployment this is
- * `null` and the UI shows a generic wait message.
+ * or unparseable. Across origins the browser hides this header unless the server lists it in `Access-Control-Expose-Headers`;
+ * the partner CORS helper does (`_shared/partner/cors.ts`, S7a follow-up), so the page can read it on a 429. A server that did
+ * not would leave this `null` and the UI would show a generic wait message.
  */
 export function parseRetryAfter(value: string | null, nowMs: number): number | null {
   if (value === null) return null;

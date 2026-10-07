@@ -77,6 +77,31 @@ describe("PA-10: CORS and the server-side Origin refusal", () => {
     expect((await handlePartnerSessionRequest(req("POST", "options", { body: {} }), f.deps)).status).toBe(503);
   });
 
+  it("the allowed origin's responses expose Retry-After and NOTHING else to a cross-origin page; a foreign origin or no origin gets no Expose header (S7a finding)", async () => {
+    const f = makeFakes();
+    const fromAllowed = [
+      await handlePartnerSessionRequest(req("POST", "options", { headers: { origin: ORIGIN }, body: {} }), f.deps), // 200
+      await handlePartnerSessionRequest(req("GET", "session", { headers: { origin: ORIGIN } }), f.deps), // 401
+      await handlePartnerSessionRequest(req("POST", "verify", { headers: { origin: ORIGIN }, raw: "{}", }), f.deps), // 400
+      await handlePartnerSessionRequest(req("POST", "options", { headers: { origin: ORIGIN, "content-type": "text/plain" }, raw: "{}" }), f.deps), // 415
+      await handlePartnerSessionRequest(req("OPTIONS", "verify", { headers: { origin: ORIGIN } }), f.deps), // 204
+    ];
+    expect(fromAllowed.map((r) => r.status)).toEqual([200, 401, 400, 415, 204]);
+    for (const r of fromAllowed) expect(r.headers.get("access-control-expose-headers"), String(r.status)).toBe("Retry-After");
+    const limited = makeFakes({ rateLimitOk: false });
+    const r429 = await handlePartnerSessionRequest(req("POST", "reauth", { headers: authed(), body: { challengeToken: challengeToken(), credential: credentialJson() } }), limited.deps);
+    expect(r429.status).toBe(429);
+    expect(r429.headers.get("retry-after")).toBe("3600");
+    expect(r429.headers.get("access-control-expose-headers")).toBe("Retry-After");
+    // the header the page is told it may read is the header the response carries
+    expect(r429.headers.get("access-control-expose-headers")!.toLowerCase()).toBe("retry-after");
+    // nobody else gets it
+    const foreign = await handlePartnerSessionRequest(req("POST", "options", { headers: { origin: "https://evil.example.test" }, body: {} }), f.deps);
+    const none = await handlePartnerSessionRequest(req("POST", "options", { body: {} }), f.deps);
+    expect(foreign.headers.get("access-control-expose-headers")).toBeNull();
+    expect(none.headers.get("access-control-expose-headers")).toBeNull();
+  });
+
   it("every response carries Cache-Control: no-store and Vary: Origin; the allowed origin's responses carry its CORS header", async () => {
     const f = makeFakes();
     const ok = await handlePartnerSessionRequest(req("POST", "options", { headers: { origin: ORIGIN }, body: {} }), f.deps);

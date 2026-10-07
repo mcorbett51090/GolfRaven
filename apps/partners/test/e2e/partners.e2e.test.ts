@@ -403,12 +403,12 @@ suite("apps/partners in Chromium", () => {
       expect(server.log).toEqual([]);
     });
 
-    it("the 429 is mapped, and Retry-After is NOT readable by the page across origins (the S1.2 server does not expose it)", async () => {
+    it("the 429 is mapped, and the page READS Retry-After across origins (the server exposes exactly that header)", async () => {
       const w = await open("/harness.html");
       await click(w, "sign-in");
       server.state.reauthLimit = 0;
       const r = await click(w, "reauth");
-      expect(r).toMatchObject({ ok: false, kind: "rate_limited", status: 429, retryAfterSeconds: null });
+      expect(r).toMatchObject({ ok: false, kind: "rate_limited", status: 429, retryAfterSeconds: 1800 });
     });
   });
 });
