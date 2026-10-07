@@ -72,7 +72,9 @@ ok "provision refuses an admin (no partner scope)"
 
 # 3. open
 for bad in 0 1441 abc "" "-3"; do
-  if bash "$TOOL" open --hours "$bad" >/dev/null 2>&1; then fail "open accepted --hours '$bad'"; fi
+  if OUT="$(bash "$TOOL" open --hours "$bad" 2>&1)"; then fail "open accepted --hours '$bad'"; fi
+  # refused by the TOOL (its own message), not merely by the database CHECK behind it
+  case "$OUT" in *"--hours"*) ;; *) fail "open --hours '$bad' was not refused by the tool's own check: $OUT" ;; esac
 done
 if bash "$TOOL" open --hours 2 --note "rev-tool-test x@y.test" >/dev/null 2>&1; then fail "open accepted an address in the note"; fi
 [ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "f" ] || fail "a refused open still opened a window"
@@ -114,8 +116,10 @@ CURL_BIN="$STUB" SUPABASE_URL="https://example.test" SUPABASE_SERVICE_ROLE_KEY="
 grep -q 'ban_duration.*none' "$STUB_STDIN" || fail "open did not clear the ban"
 CURL_BIN="$STUB" SUPABASE_URL="https://example.test" SUPABASE_SERVICE_ROLE_KEY="$KEY" bash "$TOOL" close >/dev/null 2>&1 || fail "close with the Auth call failed"
 [ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "f" ] || fail "close left the window open (Auth mode)"
-if SUPABASE_URL="http://example.test" SUPABASE_SERVICE_ROLE_KEY="$KEY" bash "$TOOL" sync >/dev/null 2>&1; then fail "sync accepted a plain-http remote URL"; fi
-if SUPABASE_URL="https://example.test" bash "$TOOL" sync >/dev/null 2>&1; then fail "sync ran with no service key"; fi
+if OUT="$(CURL_BIN="$STUB" SUPABASE_URL="http://example.test" SUPABASE_SERVICE_ROLE_KEY="$KEY" bash "$TOOL" sync 2>&1)"; then fail "sync accepted a plain-http remote URL"; fi
+case "$OUT" in *"must be https"*) ;; *) fail "the plain-http refusal was not the URL check: $OUT" ;; esac
+if OUT="$(CURL_BIN="$STUB" SUPABASE_URL="https://example.test" bash "$TOOL" sync 2>&1)"; then fail "sync ran with no service key"; fi
+case "$OUT" in *"SUPABASE_SERVICE_ROLE_KEY is not set"*) ;; *) fail "the missing-key refusal was not the key check: $OUT" ;; esac
 ok "Auth calls: closed sync bans (876000h), open clears (none), PUT per account; the key is on curl's stdin only and never printed; remote http and a missing key are refused"
 
 # 6. status
