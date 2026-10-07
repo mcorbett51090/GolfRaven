@@ -2997,7 +2997,7 @@ the Apple provider; give it the Services ID / bundle id as the client id, the te
 3. Create the KEK in Vault: one 32-byte key, base64, named `siwa_token_kek_v1` (e.g. `select vault.create_secret(encode(gen_random_bytes(32),
    'base64'), 'siwa_token_kek_v1')` `[unverified — Vault's creation API; and the schema `gen_random_bytes` lives in, possibly `extensions.gen_random_bytes`]`; generated inside the database, SQL editor only, never `psql -c`, see `edge-role-design.md` item 8). **Never delete a `siwa_token_kek_*` secret while any
    `signin_provider_token` or pending queue row still names its id; there is no re-wrap job yet, so until there is one a KEK is never retired.**
-4. Schedule `signin-revocation-drain` (e.g. every 5 minutes, `POST` with `Authorization: Bearer <service-role key>`).
+4. Schedule `signin-revocation-drain` (e.g. every 5 minutes, `POST` with `Authorization: Bearer <service-role key>`). The scheduler must read the key from Vault or its own secret store at run time (the `pg_cron` + `pg_net` pattern in `edge-role-design.md` deploy item 5); never write the key literally into a `cron.job` command or any other stored job text, which would keep it in plaintext.
 5. **Run migration 0035 on a real Supabase branch first** and check the two `[unverified]` database assumptions below.
 6. Calendar the client-secret re-mint, and run the expiry check monthly (next section).
 
