@@ -70,6 +70,8 @@ describe("the DeviceCheck host allow-list", () => {
       "https://evil.test/#@api.devicecheck.apple.com",
       "https://evil.test/?h=api.devicecheck.apple.com",
       "https://user:pw@api.devicecheck.apple.com/v1/query_two_bits",
+      "https://user@api.devicecheck.apple.com/v1/query_two_bits", // username only
+      "https://:pw@api.devicecheck.apple.com/v1/query_two_bits", // password only
       "https://api.devicecheck.apple.com:8443/v1/query_two_bits",
       "http://api.devicecheck.apple.com/v1/query_two_bits",
       "ftp://api.devicecheck.apple.com/v1/query_two_bits",
@@ -111,6 +113,22 @@ describe("the DeviceCheck client's egress behaviour", () => {
     expect(h.calls).toEqual([]);
   });
 
+  it("checks the host BEFORE anything is signed: a refused host never reads the clock (the JWT's `iat`) or draws a transaction id, whatever the key", async () => {
+    const evil = { production: "https://evil.test", development: "https://evil.test" };
+    for (const privateKeyPem of [p8, "not a pem at all"]) {
+      let clock = 0;
+      let uuid = 0;
+      const h = http({ nowMs: () => (clock++, 1_780_000_000_000), randomUuid: () => (uuid++, "00000000-0000-4000-8000-000000000001") });
+      // a refused host wins over an unusable key: Unavailable (host), not NotConfigured (key), and neither signing nor the request happens
+      await expect(createDeviceCheckClient(cfg({ privateKeyPem }), h, evil).queryTwoBits("dG9rZW4=")).rejects.toBeInstanceOf(VendorUnavailableError);
+      expect([clock, uuid, h.calls.length]).toEqual([0, 0, 0]);
+    }
+    // and for an allowed host the clock IS read (the guard above is observing something real)
+    let clock = 0;
+    await createDeviceCheckClient(cfg(), http({ nowMs: () => (clock++, 1_780_000_000_000) })).queryTwoBits("dG9rZW4=");
+    expect(clock).toBeGreaterThan(0);
+  });
+
   it("refuses a redirect: a rejected fetch (redirect:\"error\"), a flagged redirected response and a 3xx are all unavailable, never read as a body", async () => {
     const redirected = new Response('{"bit0":false,"bit1":false}', { status: 200 });
     Object.defineProperty(redirected, "redirected", { value: true });
@@ -123,6 +141,20 @@ describe("the DeviceCheck client's egress behaviour", () => {
       const c = createDeviceCheckClient(cfg(), http({ respond }));
       await expect(c.queryTwoBits("dG9rZW4=")).rejects.toBeInstanceOf(VendorUnavailableError);
     }
+  });
+
+  it("a response flagged redirected is refused for BOTH calls even when its body is valid (a followed redirect is never trusted as an answer)", async () => {
+    const flagged = () => {
+      const r = new Response('{"bit0":true,"bit1":false,"last_update_time":"2026-10"}', { status: 200 });
+      Object.defineProperty(r, "redirected", { value: true });
+      return Promise.resolve(r);
+    };
+    const c = createDeviceCheckClient(cfg(), http({ respond: flagged }));
+    await expect(c.queryTwoBits("dG9rZW4=")).rejects.toBeInstanceOf(VendorUnavailableError);
+    await expect(c.updateTwoBits("dG9rZW4=", { bit0: true, bit1: false })).rejects.toBeInstanceOf(VendorUnavailableError);
+    // the control: the same body, not flagged, is read normally
+    const ok = createDeviceCheckClient(cfg(), http({ respond: () => Promise.resolve(new Response('{"bit0":true,"bit1":false,"last_update_time":"2026-10"}', { status: 200 })) }));
+    expect((await ok.queryTwoBits("dG9rZW4=")).bit0).toBe(true);
   });
 
   it("is time-bounded: a hanging call is aborted at timeoutMs and reported as unavailable", async () => {
@@ -151,10 +183,35 @@ describe("the DeviceCheck client's egress behaviour", () => {
       }
     };
     walk(root);
-    const sites = files.flatMap((f) => [...readFileSync(f, "utf8").matchAll(/createDeviceCheckClient\(([^)]*)\)/g)].map((m) => ({ f, args: m[1]! })));
+    // Balanced-parenthesis scan: finds every `createDeviceCheckClient(` and counts the TOP-LEVEL arguments of that call (nested calls, arrays,
+    // objects and template literals with commas inside do not add arguments). Its bound: it does not parse strings or comments, so an unbalanced
+    // parenthesis inside a string literal in an argument could mislead it; no such call exists, and the self-test below proves the counter on shapes.
+    const topLevelArgs = (src: string, open: number): number => {
+      let depth = 0;
+      let args = 0;
+      let seen = false;
+      for (let i = open; i < src.length; i++) {
+        const ch = src[i]!;
+        if (ch === "(" || ch === "[" || ch === "{") {
+          if (depth++ === 0 && ch === "(") continue;
+        } else if (ch === ")" || ch === "]" || ch === "}") {
+          if (--depth === 0) return seen ? args + 1 : 0;
+        } else if (ch === "," && depth === 1) args++;
+        if (depth >= 1 && !/\s/.test(ch) && !(depth === 1 && ch === ",")) seen = true;
+      }
+      return -1;
+    };
+    expect(topLevelArgs("f(a, g(b, c), [d, e])", 1)).toBe(3);
+    expect(topLevelArgs("f(apple, http, hosts)", 1)).toBe(3);
+    expect(topLevelArgs("f(a, { x: 1, y: (2, 3) })", 1)).toBe(2);
+    expect(topLevelArgs("f()", 1)).toBe(0);
+    const sites = files.flatMap((f) => {
+      const src = readFileSync(f, "utf8");
+      return [...src.matchAll(/createDeviceCheckClient\(/g)].map((m) => ({ f, args: topLevelArgs(src, m.index! + m[0].length - 1) }));
+    });
     const calls = sites.filter((s) => !s.f.endsWith("devicecheck-client.ts"));
     expect(calls.length).toBeGreaterThan(0);
-    for (const s of calls) expect(s.args.split(",").length, `${s.f}: ${s.args}`).toBe(2);
+    for (const s of calls) expect(s.args, s.f).toBe(2);
   });
 });
 

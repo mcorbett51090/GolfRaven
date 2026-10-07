@@ -21,10 +21,27 @@ const IDS = ["--team-id", "TEAMX", "--key-id", "KEYX", "--client-id", "com.examp
 const FENCE = "-".repeat(5);
 const block = (body: string) => `${FENCE}BEGIN PRIVATE KEY${FENCE}\n${body}\n${FENCE}END PRIVATE KEY${FENCE}\n`;
 
+// A preload that WRAPS every write-capable `fs` / `fs/promises` function and prints `WRITE-ATTEMPT <name>` to stderr before calling the original.
+// The permission model denies a write, but a tool could swallow that error in a try/catch; this spy sees the ATTEMPT either way. Read-only opens pass.
+const SPY = `
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+const readOnly = (flags) => flags === undefined || flags === null || flags === "r" || flags === "rs" || (typeof flags === "number" && (flags & 3) === 0 && (flags & (64 | 512 | 1024)) === 0);
+const ALWAYS = ["writeFileSync","writeFile","appendFileSync","appendFile","createWriteStream","mkdirSync","mkdir","mkdtempSync","mkdtemp","rmSync","rm","unlinkSync","unlink","renameSync","rename","copyFileSync","copyFile","truncateSync","truncate","writeSync","write","symlinkSync","symlink","utimesSync","chmodSync","chmod","cpSync","cp"];
+const OPEN = ["openSync","open"];
+for (const [mod, name] of [[fs, "fs"], [fsp, "fsp"]]) {
+  for (const fn of ALWAYS) if (typeof mod[fn] === "function") { const o = mod[fn]; mod[fn] = function (...a) { process.stderr.write("WRITE-ATTEMPT " + name + "." + fn + "\\n"); return o.apply(this, a); }; }
+  for (const fn of OPEN) if (typeof mod[fn] === "function") { const o = mod[fn]; mod[fn] = function (...a) { if (!readOnly(a[1])) process.stderr.write("WRITE-ATTEMPT " + name + "." + fn + "\\n"); return o.apply(this, a); }; }
+}
+syncBuiltinESMExports();
+`;
+
 let dir: string;
 let pem: string;
 let publicKey: CryptoKey;
 let keyFile: string;
+let spyFile: string;
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "apple-mint-test-"));
   const kp = (await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"])) as CryptoKeyPair;
@@ -32,6 +49,8 @@ beforeAll(async () => {
   pem = block(toB64(new Uint8Array(await crypto.subtle.exportKey("pkcs8", kp.privateKey))).replace(/(.{64})/g, "$1\n"));
   keyFile = join(dir, "AuthKey_TEST.p8");
   writeFileSync(keyFile, pem);
+  spyFile = join(dir, "write-spy.mjs");
+  writeFileSync(spyFile, SPY);
 }, 30_000);
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -41,8 +60,8 @@ interface Run {
   stderr: string;
 }
 // Run under Node's permission model: read anywhere, WRITE NOWHERE. If the tool tried to write a file, spawn a process or open a worker, it would be denied.
-function run(args: string[], input?: string): Run {
-  const r = spawnSync(process.execPath, ["--permission", "--allow-fs-read=*", TOOL, ...args], { input, encoding: "utf8", cwd: dir, env: { ...process.env, TMPDIR: dir } });
+function run(args: string[], input?: string, nodeArgs: string[] = []): Run {
+  const r = spawnSync(process.execPath, ["--permission", "--allow-fs-read=*", ...nodeArgs, TOOL, ...args], { input, encoding: "utf8", cwd: dir, env: { ...process.env, TMPDIR: dir } });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -105,6 +124,39 @@ describe("minting", () => {
   });
 });
 
+describe("no write is even ATTEMPTED (a swallowed denied write would not show in the exit code)", () => {
+  const spied = (args: string[], input?: string) => run(args, input, ["--import", spyFile]);
+
+  it("the spy itself works: a write wrapped in a swallowing try/catch is still reported (control)", () => {
+    const script = join(dir, "swallow.mjs");
+    writeFileSync(script, 'import fs from "node:fs"; try { fs.writeFileSync("x.txt", "y"); } catch {}\nimport fsp from "node:fs/promises"; try { await fsp.open("y.txt", "w"); } catch {}\n');
+    const r = spawnSync(process.execPath, ["--permission", "--allow-fs-read=*", "--import", spyFile, script], { encoding: "utf8", cwd: dir });
+    expect(r.status).toBe(0); // the denied writes were swallowed
+    expect(r.stderr).toContain("WRITE-ATTEMPT fs.writeFileSync");
+    expect(r.stderr).toContain("WRITE-ATTEMPT fsp.open");
+  });
+
+  it("minting from a file, from stdin, and every failure path attempts no write", () => {
+    const runs = [
+      spied([...IDS, "--key-file", keyFile]),
+      spied([...IDS, "--key-file", "-"], pem),
+      spied([...IDS, "--key-file", "-"], "garbage"),
+      spied([...IDS, "--key-file", join(dir, "nope.p8")]),
+      spied([...IDS, "--key-file", keyFile, "--lifetime-days", "999"]),
+      spied([...IDS, "--key", "x"]),
+    ];
+    expect(runs.map((r) => r.status)).toEqual([0, 0, 1, 2, 2, 2]);
+    for (const r of runs) expect(r.stderr).not.toContain("WRITE-ATTEMPT");
+  });
+
+  it("the only fs import is `readFileSync` (no fs/promises, no require, no other node:fs name)", () => {
+    const src = readFileSync(TOOL, "utf8").replace(/\/\/.*$/gm, "");
+    expect([...src.matchAll(/^import .* from "([^"]+)";/gm)].map((m) => m[1])).toEqual(["node:fs"]);
+    expect(src).toContain('import { readFileSync } from "node:fs";');
+    expect(src).not.toMatch(/fs\/promises|require\(|process\.binding|\bfs\.|node:(?!fs")/);
+  });
+});
+
 describe("the lifetime cap", () => {
   it("accepts up to 180 days and REFUSES more (exit 2, nothing minted), not clamping it", () => {
     expect(run([...IDS, "--key-file", keyFile, "--lifetime-days", "180"]).status).toBe(0);
@@ -135,6 +187,10 @@ describe("the key never travels on the command line", () => {
     for (const opt of ["--private-key", "--key", "--key-pem", "--p8"]) {
       const r = run([...IDS, opt, "abc"]);
       expect([opt, r.status, r.stdout]).toEqual([opt, 2, ""]);
+      expect(r.stderr, opt).toContain(`unknown option ${opt}`);
+      // the same option with the key file supplied still fails: it is unknown, not merely redundant
+      expect(run([...IDS, "--key-file", keyFile, opt, "abc"]).status, `${opt} with a key file`).toBe(2);
+      expect(run([...IDS, "--key-file", keyFile, `${opt}=abc`]).stderr, `${opt}=`).toContain(`unknown option ${opt}`);
     }
   });
 });

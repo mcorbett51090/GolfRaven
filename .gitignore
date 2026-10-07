@@ -58,6 +58,9 @@ AuthKey_*.p8
 *.p12
 *.mobileprovision
 *.cer
+*.pem
+*.jks
+*.keystore
 credentials.json
 
 # OS

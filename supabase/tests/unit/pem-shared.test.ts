@@ -56,4 +56,34 @@ describe("the shared PKCS#8 PEM parser", () => {
       for (const parse of [shared, viaSignin, viaRewards]) expect(parse(b), JSON.stringify(b).slice(0, 40)).toBeNull();
     }
   });
+
+  it("is STRICT base64: unpadded, non-canonical trailing bits, a body that passes the character class but not atob, and Unicode whitespace are all null", () => {
+    // Synthetic bodies (the parser does not look inside the DER): 4 bytes = "AQIDBA==" (two pad), 5 bytes = "AQIDBAU=" (one pad).
+    expect(Array.from(shared(block("PRIVATE KEY", "AQIDBA==")) ?? [])).toEqual([1, 2, 3, 4]);
+    expect(Array.from(shared(block("PRIVATE KEY", "AQIDBAU=")) ?? [])).toEqual([1, 2, 3, 4, 5]);
+    for (const [name, body] of [
+      ["unpadded (two missing)", "AQIDBA"],
+      ["unpadded (one missing)", "AQIDBAU"],
+      ["non-zero trailing bits, two pad", "AQIDBB=="],
+      ["non-zero trailing bits, one pad", "AQIDBAV="],
+    ] as const) {
+      expect(shared(block("PRIVATE KEY", body)), name).toBeNull();
+    }
+    const body = toB64(der);
+    // passes `[A-Za-z0-9+/=]+` but is not decodable: length 1 mod 4, an `=` in the middle, only padding
+    for (const notBase64 of ["AAAAA", "A=AA", "====", "AA==AA==", "AAA"]) expect(shared(block("PRIVATE KEY", notBase64)), notBase64).toBeNull();
+    // Unicode whitespace (NBSP, line separator, ideographic space) is not whitespace here: inside the body or around the block
+    for (const ws of ["\u00a0", "\u2028", "\u3000", "\u000b", "\u000c"]) {
+      expect(shared(block("PRIVATE KEY", `${body.slice(0, 8)}${ws}${body.slice(8)}`)), `inside ${JSON.stringify(ws)}`).toBeNull();
+      expect(shared(`${ws}${pem}`), `leading ${JSON.stringify(ws)}`).toBeNull();
+      expect(shared(`${pem}${ws}`), `trailing ${JSON.stringify(ws)}`).toBeNull();
+    }
+  });
+
+  it("returns null (never throws) for a non-string", () => {
+    for (const v of [undefined, null, 0, 42, {}, [], true, Symbol.iterator, new Uint8Array([1, 2, 3])]) {
+      for (const parse of [shared, viaSignin, viaRewards]) expect(() => parse(v as unknown as string), String(typeof v)).not.toThrow();
+      expect(shared(v as unknown as string)).toBeNull();
+    }
+  });
 });
