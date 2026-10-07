@@ -514,6 +514,17 @@ describe("the database's own refusals of a co-signal and the rotating token's ki
     expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w2), jti: seedToken(w2) }), w2.repo, deps))).toMatchObject({ status: 409, code: "fix_already_used" });
   });
 
+  it("0051: the database's review_account refusal (record and co-signal intake) is a 403 forbidden, never a 500 and never a success", async () => {
+    const w = await world();
+    const t = await seedRotating(w);
+    w.ms.recordOverride = { status: "review_account" };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps))).toMatchObject({ status: 403, code: "forbidden" });
+    w.ms.recordOverride = null;
+    const w2 = await world();
+    w2.ms.attachOverride = { status: "review_account" };
+    expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w2), jti: seedToken(w2) }), w2.repo, deps))).toMatchObject({ status: 403, code: "forbidden" });
+  });
+
   it("a fix that qualified at the read-only check but whose token a concurrent request consumed first is a 409 fix_not_consumable, with nothing written (the scan never goes on at the fix's time without a counted co-signal)", async () => {
     const w = await world();
     const t = await seedRotating(w);

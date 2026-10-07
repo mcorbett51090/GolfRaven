@@ -502,7 +502,68 @@ export async function getActorFromRequest(req: Request): Promise<Actor | null> {
   });
   const { data, error } = await client.auth.getUser(token);
   if (error || !data?.user) return null;
+  // 0051: THE one choke point every authenticated Edge Function passes through, so the app-review account's gate lives here. For an ordinary account the gate
+  // answers `not_review` and writes nothing; for the review account it writes ONE audit row per GoTrue session (first request under each new session id, with the
+  // refusal outcome too) and answers `disabled` outside a submission window, which is a 403 and never reaches a handler. The database refuses to bind the account
+  // outside a window as well (private.bind_actor_internal), so a path that skipped this call still fails closed.
+  const verdict = await reviewAccountGate(data.user.id, sessionIdOfAccessToken(token));
+  if (verdict === "disabled") throw new HttpError(403, REVIEW_ACCOUNT_DISABLED_CODE, "this account is not enabled right now");
   return { uid: data.user.id, role: "authenticated" };
+}
+
+/** The 403 code a disabled review account receives (0051). Stable: the mobile app and the runbook name it. */
+export const REVIEW_ACCOUNT_DISABLED_CODE = "review_account_disabled";
+
+/**
+ * 0051: asks the database whether `uid` is the App Store review account and whether a submission window is open, recording the session's audit row on the way
+ * (`private.review_account_gate`: one row per (account, GoTrue session, outcome), committed WITH a refusal because the function returns a status and never raises
+ * over the outcome, the 0020 lesson). Its own short transaction as `edge_system` (the only role holding EXECUTE), run BEFORE any request transaction opens, so it
+ * never holds a second pooled connection from inside one (the hitRateLimitForActor ordering rule). `sessionId` is the `session_id` claim of the already-verified
+ * token; the database canonicalises it or treats anything else as an unknown session.
+ */
+async function reviewAccountGate(uid: string, sessionId: string | null): Promise<"not_review" | "allowed" | "disabled"> {
+  // The overhead of the gate is one short `edge_system` transaction (about eight statements: begin, role, three timeouts, the role check, the call, commit), which for EVERY authenticated request
+  // is too much to pay to learn that the caller is an ordinary player. So the answer "not a review account" (and ONLY that answer) is remembered in this process for REVIEW_GATE_NEGATIVE_TTL_MS:
+  //   - `allowed` and `disabled` are NEVER cached: the review account is asked on every request (a window's end is exact, and every session is audited);
+  //   - what a stale `not_review` can do is bounded: it only matters for an account that BECAME the review account less than the TTL ago (provisioning marks a fresh, banned account, which has
+  //     made no request, so this is the --adopt corner only) and it costs at most that account's first-session audit row; the database backstop (private.bind_actor_internal) does not read this cache
+  //     and refuses the account outside a window regardless;
+  //   - a cached entry never outlives the process, and the map is bounded (cleared when full).
+  const now = reviewGateNow();
+  const cachedUntil = reviewGateNegativeCache.get(uid);
+  if (cachedUntil !== undefined && cachedUntil > now) return "not_review";
+  reviewGateDbCalls += 1;
+  const verdict = await openScopedTx("system", { expectedUid: null }, async (trx) => {
+    const rows = await trx`select private.review_account_gate(${uid}::uuid, ${sessionId}::text) as verdict`;
+    return rows[0]?.verdict;
+  });
+  // anything but the three known answers fails CLOSED (an unexpected value must never read as "fine")
+  if (verdict === "not_review" || verdict === "allowed") {
+    if (verdict === "not_review") {
+      if (reviewGateNegativeCache.size >= REVIEW_GATE_NEGATIVE_MAX) reviewGateNegativeCache.clear();
+      reviewGateNegativeCache.set(uid, now + REVIEW_GATE_NEGATIVE_TTL_MS);
+    }
+    return verdict;
+  }
+  return "disabled";
+}
+
+const REVIEW_GATE_NEGATIVE_TTL_MS = 30_000;
+const REVIEW_GATE_NEGATIVE_MAX = 5_000;
+const reviewGateNegativeCache = new Map<string, number>();
+let reviewGateDbCalls = 0;
+let reviewGateNow: () => number = () => Date.now();
+
+/** Test hooks (the integration suite measures the gate's overhead with and without the negative cache, and starts every case from an empty one). */
+export function resetReviewGateCacheForTests(): void {
+  reviewGateNegativeCache.clear();
+}
+export function reviewGateDbCallsForTests(): number {
+  return reviewGateDbCalls;
+}
+/** Test hook: the clock the negative cache reads (null restores the real one), so a test can prove the TTL without sleeping 30 seconds. */
+export function setReviewGateClockForTests(now: (() => number) | null): void {
+  reviewGateNow = now ?? (() => Date.now());
 }
 
 // THE SERVICE-ROLE KEY: the two places it is still read (the lint's privileged-file pass allows exactly these two functions, and nothing else).
@@ -3401,6 +3462,7 @@ const MARKER_SCAN_REFUSALS: ReadonlySet<string> = new Set([
   "duplicate",
   "cosignal_invalid",
   "cosignal_used",
+  "review_account",
 ]);
 
 const PURCHASE_STATUSES: ReadonlySet<string> = new Set(["valid", "pending", "held_review"]);
@@ -3486,7 +3548,7 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
       }
       const first = rows[0];
       const status = String(first?.o_result);
-      if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used") return { status };
+      if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used" || status === "review_account") return { status };
       if (status !== "attached") throw new Error("markerScan.attachCosignal: private.marker_cosignal_attach_for_actor returned an unexpected result");
       return { status: "attached", purchases: rows.map(toPurchaseView) };
     },
