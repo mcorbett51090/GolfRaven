@@ -60,8 +60,15 @@ export async function listen(server: Server): Promise<Listening> {
   };
 }
 
+export interface StaticOptions {
+  /** pathname -> a file of `dist` served in its place (e.g. a second URL for the same page), under the headers that match the ALIAS pathname */
+  readonly alias?: Record<string, string>;
+  /** pathname -> headers added on top (a header listed here replaces the generated one of the same name) */
+  readonly extraHeaders?: Record<string, Record<string, string>>;
+}
+
 /** A static server for `dist()`, resolved on every request (the port must be known before the bundle is built, because the API origin is baked into it). */
-export function staticServer(dist: () => string | null, extra: Record<string, string> = {}): Server {
+export function staticServer(dist: () => string | null, extra: Record<string, string> = {}, opts: StaticOptions = {}): Server {
   return createServer((req, res) => {
     void (async () => {
       try {
@@ -77,13 +84,17 @@ export function staticServer(dist: () => string | null, extra: Record<string, st
           return;
         }
         let pathname = decodeURIComponent(url.pathname);
+        pathname = opts.alias?.[pathname] ?? pathname;
         if (pathname.endsWith("/")) pathname += "index.html";
         if (pathname.includes("..")) throw new Error("bad path");
         const file = join(root, pathname);
         if (!(await stat(file)).isFile()) throw new Error("not a file");
         const body = await readFile(file);
         const blocks = parseHeaders(await readFile(join(root, "_headers"), "utf8"));
-        res.writeHead(200, { "Content-Type": MIME[extname(file)] ?? "application/octet-stream", ...headersFor(blocks, url.pathname) });
+        const generated = headersFor(blocks, url.pathname);
+        const over = opts.extraHeaders?.[url.pathname] ?? {};
+        const merged = Object.fromEntries([...Object.entries(generated).filter(([k]) => !Object.keys(over).some((o) => o.toLowerCase() === k.toLowerCase())), ...Object.entries(over)]);
+        res.writeHead(200, { "Content-Type": MIME[extname(file)] ?? "application/octet-stream", ...merged });
         res.end(body);
       } catch {
         res.writeHead(404);
@@ -91,6 +102,17 @@ export function staticServer(dist: () => string | null, extra: Record<string, st
       }
     })();
   });
+}
+
+/**
+ * Chromium with the back/forward cache ENABLED. Two things stand between Playwright's default launch and a bfcache restore, and both hide exactly the bug the
+ * MEDIUM-1 cells are about:
+ *   - Playwright passes `--disable-back-forward-cache` (so `goBack()` is predictable): `ignoreDefaultArgs` removes that one switch;
+ *   - `headless: true` runs the chromium-headless-shell build, which reports `BackForwardCacheDisabledForDelegate` (observed, Playwright 1.56.1 / chromium-1194):
+ *     `channel: "chromium"` runs the full Chromium in its new headless mode, where the cache works.
+ */
+export async function launchWithBackForwardCache(): Promise<Browser> {
+  return await chromium.launch({ channel: "chromium", args: ["--no-sandbox"], ignoreDefaultArgs: ["--disable-back-forward-cache"] });
 }
 
 /** Launches Chromium, or explains why it could not. Under CI a launch failure is a failure; elsewhere it is a skip (the repo's rule, apps/site/scripts/run-e2e.mjs). */

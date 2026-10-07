@@ -70,6 +70,12 @@ export interface FakeServer {
     /** answer every `options` call with 503 */
     unavailable: boolean;
     reauthUntil: string | null;
+    /** routes (the part after `/partner-session/`, e.g. "sign-out", "session") whose non-preflight requests are received, logged and then NEVER ANSWERED until reset() */
+    hang: Set<string>;
+    /** route -> ms: the handler runs (the server's state changes) and the RESPONSE is held back this long */
+    delayAfter: Record<string, number>;
+    /** when set, every `options` call is answered 429 with this Retry-After (seconds) */
+    optionsRetryAfter: number | null;
   };
   /** the sha256 hex of every LIVE (not revoked) session token */
   sessions(): string[];
@@ -90,7 +96,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
   const sessions = new Map<string, { userId: string; createdAt: Date }>();
   const log: LoggedRequest[] = [];
   const issuedTokens: string[] = [];
-  const state: FakeServer["state"] = { revokedSessions: new Set(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null };
+  const state: FakeServer["state"] = { revokedSessions: new Set(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null, hang: new Set(), delayAfter: {}, optionsRetryAfter: null };
+  const held: Array<() => void> = [];
   let signCount = 0;
 
   const issue = (sessionHash: string | null): ChallengeIssue => {
@@ -244,10 +251,25 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       referer: req.headers.get("referer"),
       body,
     });
+    const route = new URL(req.url).pathname.split("/partner-session/")[1] ?? "";
+    if (req.method !== "OPTIONS" && state.hang.has(route)) {
+      return await new Promise<Response>((resolve) => {
+        held.push(() => resolve(new Response(null, { status: 503 })));
+      });
+    }
+    if (state.optionsRetryAfter !== null && route === "options" && req.method === "POST") {
+      return new Response(JSON.stringify({ error: { code: "rate_limited", message: "too many attempts" } }), {
+        status: 429,
+        headers: { "content-type": "application/json", "access-control-allow-origin": opts.pageOrigin, "access-control-expose-headers": "Retry-After", "retry-after": String(state.optionsRetryAfter), vary: "Origin" },
+      });
+    }
     if (state.unavailable && new URL(req.url).pathname.endsWith("/options") && req.method === "POST") {
       return new Response(JSON.stringify({ error: { code: "service_unavailable", message: "partner sign-in is not available" } }), { status: 503, headers: { "content-type": "application/json", "access-control-allow-origin": opts.pageOrigin, vary: "Origin" } });
     }
-    return await innerHandler(req);
+    const res = await innerHandler(req);
+    const delay = req.method === "OPTIONS" ? undefined : state.delayAfter[route];
+    if (delay !== undefined) await new Promise((r) => setTimeout(r, delay));
+    return res;
   };
 
   return {
@@ -262,7 +284,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       log.length = 0;
       issuedTokens.length = 0;
       signCount = 0;
-      Object.assign(state, { revokedSessions: new Set<string>(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null });
+      for (const release of held.splice(0)) release();
+      Object.assign(state, { revokedSessions: new Set<string>(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null, hang: new Set<string>(), delayAfter: {}, optionsRetryAfter: null });
     },
     killAllSessions: () => {
       for (const h of sessions.keys()) state.revokedSessions.add(h);
