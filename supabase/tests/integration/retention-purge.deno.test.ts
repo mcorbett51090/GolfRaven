@@ -474,7 +474,8 @@ const OLD_PURGE_SHAPES: Record<(typeof BOUNDED_CLASSES)[number], string> = {
   signin_revocation_queue: `delete from private.signin_revocation_queue q where q.id in (select s.id from private.signin_revocation_queue s where s.status <> 'pending' and s.completed_at < now() - interval '30 days' limit 5000)`,
 };
 const STALE_BUDGET_MS = 1000;
-class StatementFinished extends Error {}
+/** Thrown after each run of an old statement shape so the surrounding transaction ALWAYS rolls back. */
+class OldShapeRan extends Error {}
 
 retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched purge is fast, and the 0040 statement shape is NOT (positive control); the whole backlog is still cleared", async () => {
   const restore = await makeStatsStale();
@@ -487,19 +488,32 @@ retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched pur
     }
     // positive control: the old shape cannot finish inside the budget on these statistics. (Each runs in its own transaction and is rolled back whatever happens.)
     for (const name of BOUNDED_CLASSES) {
-      const outcome = await asDefiner(async (sql) => {
-        await sql.unsafe(`set local statement_timeout = '${STALE_BUDGET_MS}ms'`);
+      let result = "not run";
+      let nestedLoop = false;
+      await asDefiner(async (sql) => {
         if (name === "signin_email_proofs") await sql`select set_config('app.signin.proof_purge', 'on', true)`;
+        const plan = (await sql.unsafe(`explain ${OLD_PURGE_SHAPES[name]}`)).map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
+        nestedLoop = /Nested Loop/.test(plan) && /Semi Join/.test(plan);
+        await sql.unsafe(`set local statement_timeout = '${STALE_BUDGET_MS}ms'`);
         const t0 = Date.now();
         try {
           await sql.unsafe(OLD_PURGE_SHAPES[name]);
+          result = `finished in ${Date.now() - t0} ms`;
         } catch (e) {
-          if ((e as { code?: string }).code === "57014") return "cancelled"; // the statement timeout: the transaction is aborted and ends in a rollback
-          throw e;
+          result = (e as { code?: string }).code === "57014" ? "cancelled" : `error ${String(e)}`; // 57014: the statement timeout
         }
-        throw new StatementFinished(`finished in ${Date.now() - t0} ms`); // never commit the old shape's deletes
-      }).catch((e) => (e instanceof StatementFinished ? e.message : `error ${String(e)}`));
-      assertEquals(outcome, "cancelled", `positive control: the 0040 shape of ${name} was not cancelled inside ${STALE_BUDGET_MS} ms on stale statistics (${outcome}), so this fixture no longer reproduces the pathology`);
+        throw new OldShapeRan(); // never commit the old shape's deletes: the transaction always rolls back
+      }).catch((e) => {
+        if (!(e instanceof OldShapeRan) && result === "cancelled") return; // the driver may surface the cancelled statement's own error at ROLLBACK
+        if (!(e instanceof OldShapeRan)) throw e;
+      });
+      console.log(`0050 stale statistics: the 0040 shape of ${name}: ${result}${nestedLoop ? " (planned as a Nested Loop Semi Join)" : ""}`);
+      // The sign-in proof table is the one the S1.1b gate measured (26.9 s) and the one whose old shape sorts the batch per outer row: it MUST be cancelled, or this fixture no longer reproduces the pathology.
+      // The other three are logged: how slow the old shape is on them depends on their row width and index (a revocation-queue batch finishes in about half a second), so they are evidence, not a gate.
+      if (name === "signin_email_proofs") {
+        assert(nestedLoop, `${name}: the old shape is not planned as a Nested Loop Semi Join on these statistics`);
+        assertEquals(result, "cancelled", `positive control: the 0040 shape of ${name} was not cancelled inside ${STALE_BUDGET_MS} ms on stale statistics, so this fixture no longer reproduces the pathology`);
+      }
     }
     // the 0050 definers: one full batch of each, timed
     const steps = retentionPurgeSteps();
