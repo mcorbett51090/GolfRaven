@@ -7,8 +7,8 @@
 // with Apple `.p8`, valid for at most six months): the server's own per-request secrets are 10 minutes long and cannot expire on
 // anyone. Nothing in this repo can read that dashboard setting, so the check takes the JWT as input.
 //
-//   APPLE_SIWA_CLIENT_SECRET_JWT=<jwt> node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]
-//   printf '%s' "$JWT" | node tools/apple/check-siwa-secret-expiry.mjs
+//   <print the stored JWT, e.g. your password manager's CLI> | node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]     (preferred: stdin)
+//   APPLE_SIWA_CLIENT_SECRET_JWT=<jwt> node tools/apple/check-siwa-secret-expiry.mjs   (works, but an env-var prefix puts the secret in your shell history)
 //
 // Exit 0: more than --warn-days left.  Exit 1: expired, expiring within --warn-days, malformed, or no `exp` (it never passes by
 // default).  Exit 2: no input at all.  The JWT is a secret: it is read, never printed, and never written anywhere.

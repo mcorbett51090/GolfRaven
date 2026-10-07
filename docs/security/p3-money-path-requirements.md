@@ -2871,6 +2871,15 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **K10. Certificate-validity skew is ±5 minutes** (clock skew between this server and Apple's issuance). Apple's credential certificates
   are believed short-lived `[unverified]`; if the live run shows a leaf already expired at attestation time, this is the knob and the
   reason code is `chain_validity`.
+- **K11. Play Integrity egress is unguarded (tracked follow-up, not built; the security gate ruled it not a blocker for the Apple work).** The
+  Google adapter (`_shared/rewards/play-integrity-client.ts`: the OAuth token POST at `:79`, the `decodeIntegrityToken` POST at `:113`) calls the
+  bare platform `fetch` through `VendorHttp`: no exact-host allow-list and no `redirect: "error"`. A redirect (307/308) would be followed with the
+  request body replayed, and that body is the signed service-account assertion (token POST) or the integrity token (decode POST), to whatever
+  host the redirect names. The hosts are fixed in code (`https://oauth2.googleapis.com/token` and
+  `https://playintegrity.googleapis.com/...`), so exploitation needs a redirect from Google itself; it is a defence-in-depth gap, not a live hole.
+  The DeviceCheck client already has the guard (`devicecheck-client.ts`, `devicecheck-egress.test.ts`) and `VendorHttp.fetch` already carries the
+  optional `redirect` field, so the fix is the same shape: an allow-list of the two Google hosts, `redirect: "error"`, a redirected-response
+  refusal, and the same tests. Do before the first Android release build.
 
 ## O12 — Sign in with Apple, server side (2026-10-02): `me-signin-methods`, the provider-grant revocation on deletion
 
@@ -2994,8 +3003,8 @@ the Apple provider; give it the Services ID / bundle id as the client id, the te
 
 ### The monthly client-secret expiry check (§4.8)
 
-`APPLE_SIWA_CLIENT_SECRET_JWT=<the secret pasted into Supabase Auth> node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]` (or the JWT
-on stdin). Exit **0** if more than 30 days remain; exit **1** if it is expired, expires within 30 days, is malformed or has no `exp` (it never
+`<print the secret pasted into Supabase Auth> | node tools/apple/check-siwa-secret-expiry.mjs [--warn-days 30]` (the JWT on **stdin**, preferred: an
+`APPLE_SIWA_CLIENT_SECRET_JWT=<jwt>` env-var prefix also works but leaves the secret in shell history). Exit **0** if more than 30 days remain; exit **1** if it is expired, expires within 30 days, is malformed or has no `exp` (it never
 passes by default); exit 2 with no input. It prints when the secret expires, never the secret. Plain Node, no dependencies; the decision logic
 is mirrored in `_shared/signin/secret-expiry.ts` and one unit test runs both against the same fixtures. **Not wired to a scheduler**: a
 scheduled job needs the JWT as a secret in some CI or cron environment, which is an operator decision (the server's own secrets are 10
