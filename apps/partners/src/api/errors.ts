@@ -75,6 +75,8 @@ export function parseRetryAfter(value: string | null, nowMs: number): number | n
   if (value === null) return null;
   const v = value.trim();
   if (/^[0-9]{1,9}$/.test(v)) return Number(v);
+  // an HTTP-date always carries day and month names; without letters it is not one (Date.parse would read "-5" or "1.5" as some year)
+  if (!/[A-Za-z]{3}/.test(v)) return null;
   const at = Date.parse(v);
   if (Number.isNaN(at)) return null;
   return Math.max(0, Math.ceil((at - nowMs) / 1000));

@@ -18,7 +18,7 @@ async function run(label: string, fn: () => Promise<Record<string, unknown>>): P
   try {
     out.textContent = JSON.stringify({ label, ok: true, ...(await fn()) });
   } catch (e) {
-    out.textContent = JSON.stringify(isPartnerApiError(e) ? { label, ok: false, kind: e.kind, status: e.status, code: e.code } : { label, ok: false, kind: "other", name: e instanceof Error ? e.name : "unknown" });
+    out.textContent = JSON.stringify(isPartnerApiError(e) ? { label, ok: false, kind: e.kind, status: e.status, code: e.code, retryAfterSeconds: e.retryAfterSeconds } : { label, ok: false, kind: "other", name: e instanceof Error ? e.name : "unknown" });
   }
 }
 

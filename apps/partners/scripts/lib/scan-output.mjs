@@ -39,7 +39,7 @@ const JS_RULES = /** @type {Array<[string, RegExp]>} */ ([
   ["credentials include", /credentials\s*:\s*["'`](?:include|same-origin)["'`]/],
 ]);
 
-const URL_RE = /\b(?:https?:)?\/\/[A-Za-z0-9.-]+(?::\d+)?/g;
+const URL_RE = /(?:https?:)?\/\/[A-Za-z0-9.-]+(?::\d+)?/g;
 /** Namespace identifiers that are not network origins. */
 const NON_NETWORK = new Set(["http://www.w3.org"]);
 

@@ -3,11 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Staff/operator/admin portal PWA (build plan §3.1 row H). S7a: shell, passkey sign-in, session. Plain TypeScript bundled by esbuild into a static, strict-CSP bundle.",
+  "description": "Staff/operator/admin portal PWA (build plan \u00a73.1 row H). S7a: shell, passkey sign-in, session. Plain TypeScript bundled by esbuild into a static, strict-CSP bundle.",
   "scripts": {
     "build": "node ./scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json",
-    "test": "vitest run && node ./scripts/run-e2e.mjs"
+    "test": "vitest run && vitest run --config vitest.e2e.config.ts",
+    "test:unit": "vitest run",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
