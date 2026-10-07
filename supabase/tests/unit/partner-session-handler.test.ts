@@ -7,11 +7,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handlePartnerSessionRequest, REAUTH_BUCKET, routeOf } from "../../functions/_shared/partner/session-handler.ts";
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
-import { authed, challengeToken, credentialJson, makeFakes, NOW_MS, ORIGIN, req, SESSION_TOKEN, sha256Hex, verifyBody } from "./partner-fakes.ts";
+import { authed, challengeToken, credentialJson, makeFakes, NOW_MS, ORIGIN, req, SESSION_TOKEN, sha256Hex, USER_ID as USER_ID_FOR_L4, verifyBody } from "./partner-fakes.ts";
 
 // built at run time (a literal token-shaped string trips the secret scanner): a three-part, base64url, JWT-shaped bearer
 const b64u = (v: string) => btoa(v).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 const JWT = [b64u(JSON.stringify({ alg: "HS256", typ: "JWT" })), b64u(JSON.stringify({ sub: "test-subject" })), b64u("not-a-real-signature")].join(".");
+
+const DERIVED_FOR_LOG = btoa(String.fromCharCode(...new Uint8Array(32).fill(17))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+const SALT_FOR_LOG = btoa(String.fromCharCode(...new Uint8Array(16).fill(51))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 
 async function bodyOf(res: Response): Promise<unknown> {
   return JSON.parse(await res.text());
@@ -137,7 +140,11 @@ describe("routing", () => {
 });
 
 describe("PA-11: a Supabase JWT (or any foreign bearer) is the ONE 401 on every session route, and nothing is touched", () => {
-  const sessionRoutes: Array<[string, string]> = [["GET", "session"], ["POST", "sign-out"], ["POST", "lock"], ["POST", "reauth/options"], ["POST", "reauth"]];
+  const sessionRoutes: Array<[string, string]> = [
+    ["GET", "session"], ["POST", "sign-out"], ["POST", "lock"], ["POST", "reauth/options"], ["POST", "reauth"],
+    // S1.3: the step-up PIN and the email proof are session routes too
+    ["GET", "pin"], ["POST", "step-up/pin"], ["POST", "pin/set"], ["POST", "pin/change"], ["POST", "otp-proof/start"], ["POST", "otp-proof/verify"],
+  ];
   it("a JWT, a wrong-length partner token, a wrong prefix, another scheme and no header are all refused identically", async () => {
     const f = makeFakes();
     const bearers: Array<string | null> = [
@@ -188,6 +195,64 @@ describe("POST options", () => {
     expect(res.status).toBe(503);
     expect(f.tx).toEqual([{ kind: "mint", committed: false }]);
     expect(f.calls).not.toContain("mint.issueChallenge");
+  });
+});
+
+describe("L4 (S1.2 gate): assertSameOrigin runs on the challenge-using routes, and refuses a GR_PARTNER_ORIGIN / partner_rp_config mismatch on verify and on reauth", () => {
+  // The check is on the routes that USE a challenge and so read the relying party (options, verify, reauth/options, reauth); it is NOT on every database path (sign-out, lock, GET session and the PIN
+  // routes read no relying party). Each cell below fails if the check is removed from its route (the mutants E18 and E19).
+  const OTHER = { rpId: "partners.example.test", origin: "https://other.example.test" };
+
+  it("verify: the database's origin differs from the configured one: 503, a rollback, and NOTHING is looked up, verified or minted", async () => {
+    const f = makeFakes({ rp: OTHER });
+    const res = await handlePartnerSessionRequest(req("POST", "verify", { body: verifyBody() }), f.deps);
+    expect(res.status).toBe(503);
+    expect(await bodyOf(res)).toEqual({ error: { code: "service_unavailable", message: "partner sign-in is not available" } });
+    expect(f.calls).toEqual(["db.withMint", "mint.rpConfig"]);
+    expect(f.tx).toEqual([{ kind: "mint", committed: false }]);
+    expect(f.mintInputs).toHaveLength(0);
+  });
+
+  it("verify: with NO origin configured at all (a request that carries no Origin header still reaches the database path) the answer is the same 503", async () => {
+    const f = makeFakes({}, null);
+    const res = await handlePartnerSessionRequest(req("POST", "verify", { body: verifyBody() }), f.deps);
+    expect(res.status).toBe(503);
+    expect(f.calls).toEqual(["db.withMint", "mint.rpConfig"]);
+    expect(f.mintInputs).toHaveLength(0);
+  });
+
+  it("verify control: the same request with matching origins mints (so the refusals above are the mismatch, not the route)", async () => {
+    const f = makeFakes();
+    expect((await handlePartnerSessionRequest(req("POST", "verify", { body: verifyBody() }), f.deps)).status).toBe(201);
+  });
+
+  it("reauth: the database's origin (on the credential read) differs from the configured one: 503, a rollback, the assertion is NEVER verified and the reauth definer is never called", async () => {
+    const f = makeFakes({ reauthCredential: { id: "11111111-1111-1111-1111-111111111111", userId: USER_ID_FOR_L4, alg: -7, publicKey: new Uint8Array(77).fill(6), signCount: 4, rp: OTHER } });
+    const res = await handlePartnerSessionRequest(req("POST", "reauth", { headers: authed(), body: { challengeToken: challengeToken(), credential: credentialJson() } }), f.deps);
+    expect(res.status).toBe(503);
+    expect(f.calls).toEqual(["db.hitRateLimit", "db.withSession", "session.reauthCredential"]);
+    expect(f.tx).toEqual([{ kind: "session", committed: false }]);
+    expect(f.reauthInputs).toHaveLength(0);
+  });
+
+  it("reauth: with NO origin configured the same 503 (a non-browser request carries no Origin, so it reaches the database path)", async () => {
+    const f = makeFakes({}, null);
+    const res = await handlePartnerSessionRequest(req("POST", "reauth", { headers: { authorization: `Bearer ${SESSION_TOKEN}` }, body: { challengeToken: challengeToken(), credential: credentialJson() } }), f.deps);
+    expect(res.status).toBe(503);
+    expect(f.calls).toEqual(["db.hitRateLimit", "db.withSession", "session.reauthCredential"]);
+    expect(f.reauthInputs).toHaveLength(0);
+  });
+
+  it("reauth control: matching origins reauthenticate", async () => {
+    const f = makeFakes();
+    expect((await handlePartnerSessionRequest(req("POST", "reauth", { headers: authed(), body: { challengeToken: challengeToken(), credential: credentialJson() } }), f.deps)).status).toBe(200);
+  });
+
+  it("the routes that read no relying party do NOT run the check (the doc's old wording, `every database path`, was wrong): GET session, sign-out, lock and the PIN routes work whatever the configured origin", async () => {
+    const f = makeFakes({ rp: OTHER }, null);
+    expect((await handlePartnerSessionRequest(req("GET", "session", { headers: { authorization: `Bearer ${SESSION_TOKEN}` } }), f.deps)).status).toBe(200);
+    expect((await handlePartnerSessionRequest(req("POST", "lock", { headers: { authorization: `Bearer ${SESSION_TOKEN}` }, body: {} }), f.deps)).status).toBe(200);
+    expect((await handlePartnerSessionRequest(req("GET", "pin", { headers: { authorization: `Bearer ${SESSION_TOKEN}` } }), f.deps)).status).toBe(200);
   });
 });
 
@@ -427,6 +492,16 @@ describe("PA-11: nothing is ever logged", () => {
       [{}, "POST", "nope", {}, {}],
       [{}, "OPTIONS", "verify", { origin: ORIGIN }, undefined],
       [{}, "GET", "session", { origin: "https://evil.example.test" }, undefined],
+      // S1.3: the PIN and email-proof routes, happy and refused
+      [{}, "GET", "pin", authed(), undefined],
+      [{}, "POST", "step-up/pin", authed(), { derived: DERIVED_FOR_LOG }],
+      [{ pinVerify: { status: "wrong", retryAfterSeconds: 30, grantUntil: null } }, "POST", "step-up/pin", authed(), { derived: DERIVED_FOR_LOG }],
+      [{ pinWrite: { status: "locked", retryAfterSeconds: 0 } }, "POST", "pin/set", authed(), { derived: DERIVED_FOR_LOG, salt: SALT_FOR_LOG, iterations: 600000 }],
+      [{}, "POST", "pin/change", authed(), { currentDerived: DERIVED_FOR_LOG, derived: DERIVED_FOR_LOG, salt: SALT_FOR_LOG, iterations: 600000 }],
+      [{}, "POST", "otp-proof/start", authed(), {}],
+      [{ otpSendThrows: true }, "POST", "otp-proof/start", authed(), {}],
+      [{}, "POST", "otp-proof/verify", authed(), { code: "123456" }],
+      [{ otpVerifyOk: false }, "POST", "otp-proof/verify", authed(), { code: "123456" }],
     ];
     for (const [state, method, path, headers, body] of matrix) {
       const f = makeFakes(state);
