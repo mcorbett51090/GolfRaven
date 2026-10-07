@@ -22,6 +22,7 @@
 
 import { NotConfiguredError } from "./errors.ts";
 import { toBase64Url, utf8 } from "./bytes.ts";
+import { pkcs8PemToDer } from "../pem.ts";
 
 export interface AppleSecretConfig {
   teamId: string;
@@ -38,25 +39,9 @@ export interface ClientSecretMinter {
 export const CLIENT_SECRET_TTL_SECONDS = 600;
 export const CLIENT_SECRET_REMINT_BEFORE_SECONDS = 120;
 
-// The block markers are assembled at run time so no source line carries a literal PEM header (a secret scanner reads one as a
-// leaked private key, correctly in general and wrongly here).
-const PEM_FENCE = "-".repeat(5);
-const PKCS8_PEM = new RegExp(`^\\s*${PEM_FENCE}BEGIN PRIVATE KEY${PEM_FENCE}([A-Za-z0-9+/=\\s]+)${PEM_FENCE}END PRIVATE KEY${PEM_FENCE}\\s*$`);
-
-/** PEM (PKCS#8) -> DER; `null` unless it is exactly one well-formed PRIVATE KEY block. */
-export function pkcs8PemToDer(pem: string): Uint8Array | null {
-  const normalised = pem.replace(/\\n/g, "\n");
-  const m = PKCS8_PEM.exec(normalised);
-  if (!m) return null;
-  try {
-    const bin = atob(m[1]!.replace(/\s+/g, ""));
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out.length > 0 ? out : null;
-  } catch {
-    return null;
-  }
-}
+// The PKCS#8 PEM parser is shared with the DeviceCheck and Play Integrity adapters (../pem.ts), so every key this server reads from the
+// environment is accepted in exactly the same forms. Re-exported here because this module's tests and callers name it from here.
+export { pkcs8PemToDer };
 
 export function isCompleteAppleSecretConfig(c: AppleSecretConfig | null | undefined): c is AppleSecretConfig {
   return !!c && c.teamId.trim() !== "" && c.clientId.trim() !== "" && c.keyId.trim() !== "" && c.privateKeyPem.trim() !== "";
