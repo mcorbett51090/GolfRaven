@@ -50,6 +50,19 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 
+# Apple / store signing credentials. None of these is ever committed: the Sign in with Apple and DeviceCheck `.p8` keys live in a vault and in
+# Supabase Edge Function secrets, signing material in EAS credential storage or a vault (docs/owner/apple-setup-runbook.md, "Secrets"). gitleaks
+# (default `private-key` rule, .gitleaks.toml) is the backstop that flags a committed key block; this is the first line.
+*.p8
+AuthKey_*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.pem
+*.jks
+*.keystore
+credentials.json
+
 # OS
 .DS_Store
 Thumbs.db

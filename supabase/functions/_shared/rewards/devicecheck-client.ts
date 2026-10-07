@@ -65,6 +65,22 @@ const HOSTS: Record<DeviceCheckConfig["environment"], string> = {
   development: "https://api.development.devicecheck.apple.com",
 };
 
+/** The ONLY hosts a DeviceCheck call may reach: the exact production and development API hosts, lowercase. */
+export const DEVICECHECK_ALLOWED_HOSTS: readonly string[] = ["api.devicecheck.apple.com", "api.development.devicecheck.apple.com"];
+
+/** True only for an `https` URL with no userinfo and no explicit port whose HOSTNAME (parsed, never pattern-matched, so
+ * `https://api.devicecheck.apple.com.evil.test/` and `https://evil.test/#@api.devicecheck.apple.com` are refused) is on the allow-list.
+ * The same shape of check the sign-in modules apply to Apple and Google (`signin/safe-fetch.ts`). */
+export function isAllowedDeviceCheckUrl(rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  return url.protocol === "https:" && url.username === "" && url.password === "" && url.port === "" && DEVICECHECK_ALLOWED_HOSTS.includes(url.hostname.toLowerCase());
+}
+
 const BAD_TOKEN_BODY_RE = /device[\s_-]*token/i;
 const NEVER_SET_RE = /^\s*failed to find bit state\.?\s*$/i;
 const LAST_UPDATE_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -79,11 +95,18 @@ export function isCompleteDeviceCheckConfig(c: DeviceCheckConfig | null): c is D
   );
 }
 
-export function createDeviceCheckClient(config: DeviceCheckConfig | null, http: VendorHttp): DeviceCheckClient {
+/** `hosts` exists ONLY so a test can prove the call-site allow-list check refuses a host that is not on the list; production wiring never
+ * passes it (`devicecheck-egress.test.ts` pins that every call site in `supabase/functions` passes exactly two arguments). */
+export function createDeviceCheckClient(config: DeviceCheckConfig | null, http: VendorHttp, hosts: Record<DeviceCheckConfig["environment"], string> = HOSTS): DeviceCheckClient {
   const notConfigured = (why: string) => new VendorNotConfiguredError(`DeviceCheck is not configured: ${why}`);
 
   async function call(path: "/v1/query_two_bits" | "/v1/update_two_bits", payload: Record<string, unknown>): Promise<string> {
     if (!isCompleteDeviceCheckConfig(config)) throw notConfigured("team id, key id, private key and environment are all required");
+    // EGRESS GUARD (same protections as the sign-in modules' safe-fetch.ts): the host must be one of the two exact DeviceCheck hosts, checked
+    // before a JWT is signed; a redirect is REFUSED rather than followed (it would be a way to leave the allow-list after the check, with the
+    // JWT in the request); and every call carries a wall-clock bound (`http.timeoutMs`).
+    const url = `${hosts[config.environment]}${path}`;
+    if (!isAllowedDeviceCheckUrl(url)) throw new VendorUnavailableError(`DeviceCheck ${path}: host not allowed`);
     const der = pemToDer(config.privateKeyPem);
     if (!der) throw notConfigured("the private key is not a PKCS#8 PEM");
     let jwt: string;
@@ -94,15 +117,20 @@ export function createDeviceCheckClient(config: DeviceCheckConfig | null, http: 
     }
     let res: Response;
     try {
-      res = await http.fetch(`${HOSTS[config.environment]}${path}`, {
+      res = await http.fetch(url, {
         method: "POST",
         headers: { authorization: `Bearer ${jwt}`, "content-type": "application/json" },
         body: JSON.stringify({ ...payload, transaction_id: http.randomUuid(), timestamp: http.nowMs() }),
         signal: AbortSignal.timeout(http.timeoutMs),
+        redirect: "error",
       });
     } catch {
-      // Network failure or our own timeout. Never log the token or the JWT.
+      // Network failure, a refused redirect, or our own timeout. Never log the token or the JWT.
       throw new VendorUnavailableError(`DeviceCheck ${path} did not complete`);
+    }
+    if (res.redirected) {
+      await res.body?.cancel().catch(() => {});
+      throw new VendorUnavailableError(`DeviceCheck ${path} was redirected`);
     }
     const text = await res.text().catch(() => "");
     if (res.status === 200) return text;

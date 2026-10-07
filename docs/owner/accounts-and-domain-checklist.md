@@ -40,6 +40,8 @@ both require a D-U-N-S number as part of verification.
 
 **P0 acceptance test satisfied:** AT(5) (organisation store accounts in the entity's name, or dated pending).
 
+**Runbook:** next steps once this account is active: `docs/owner/apple-setup-runbook.md`, Steps 1 and 4 (status above is unchanged).
+
 ## 4. Google Play organisation developer account
 
 **What:** Open an **organisation** Google Play developer account in the name of the P0 legal entity (O20). If
@@ -62,6 +64,8 @@ committed to the repo).
 
 **P0 acceptance test satisfied:** AT(5) explicitly names this: "…incl. the Sign in with Apple key and Google
 OAuth client" (P0 DoD, plan §15).
+
+**Runbook:** where the key, key ID and Services ID go, and what is blocked on Q1 and Q7: `docs/owner/apple-setup-runbook.md`, Step 2 (status above is unchanged).
 
 ## 6. Google OAuth client
 
@@ -105,6 +109,8 @@ accounts.
 
 **P0 acceptance test satisfied:** Not separately numbered in §10 P0 AT(1)–(6), but listed as a P0 non-gating
 deliverable ("Bundle IDs reserved," plan §10 P0).
+
+**Runbook:** the Apple half (App ID, then the App Store Connect record): `docs/owner/apple-setup-runbook.md`, Steps 1.2, 1.3 and 4.1 (status above is unchanged).
 
 ## 9. Supabase project (region per the plan)
 
