@@ -5,7 +5,7 @@ It listens on 127.0.0.1 (an ephemeral port, written to --portfile), records ever
 as one JSON object per line, and answers like the admin API is assumed to (`[unverified]`: no hosted project here):
   POST /auth/v1/admin/users        creates an auth.users row (id, email) in the harness database and answers 200 {"id": ..., "email": ...}
   PUT  /auth/v1/admin/users/<id>   answers 200 {} (or 500 while the file named by --fail-file exists)
-On every PUT it also records what the DATABASE says at that instant (is a review window open?), which is how the test proves the ORDER: an unban must come after the window is written, a ban
+On every PUT it also records what the DATABASE says at that instant (is a review window open? how many review-account rows exist?), which is how the test proves the ORDER: an unban must come after the window is written, a ban
 after it ended. The database is reached with `psql` on stdin (standard PG* environment), as service_role. Nothing here is used by the product.
 """
 import argparse, json, os, subprocess, sys, uuid
@@ -68,7 +68,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         body = self._body()
         window_open = psql("SELECT private.review_window_open_at(clock_timestamp())")
-        self._record(body, {"window_open_at_call": window_open})
+        rows = psql("SELECT count(*) FROM app.app_review_demo_account")
+        self._record(body, {"window_open_at_call": window_open, "demo_rows_at_call": rows})
         if self.fail_file and os.path.exists(self.fail_file):
             return self._send(500, {"msg": "forced failure"})
         self._send(200, {})

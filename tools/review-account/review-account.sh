@@ -6,8 +6,10 @@
 #
 #   provision [--adopt]  create the Auth user (born BANNED), mark it the review account (app.app_review_demo_account), keep it banned until a window opens.
 #                        An address that ALREADY has an Auth user is refused (a typo must not turn a real player into the review account), unless it is already the review
-#                        account (idempotent) or you pass --adopt AND the account has never been used (no evidence, play, reward, offer code, marker credit or purchase, no
-#                        device, no partner role, not an admin). At most ONE review account exists (a unique index): a different one is refused until you delete the old row.
+#                        account (idempotent) or you pass --adopt AND the account has never been used (it has never signed in; no evidence, play, reward, offer code, entitlement,
+#                        marker credit, purchase, device, push token, booking, achievement, attestation or fraud signal; no partner role; not an admin). At most ONE review account exists (a unique index): a different one is refused until you delete the old row.
+#   retire               REPLACE the review account: ban its Auth user FIRST (so it cannot get a token), then delete its row. Never delete the row on its own: that turns the account
+#                        into an ordinary player whose tokens still work. Then `provision` the new address. (`close` is the off switch; `retire` is for replacing the account.)
 #   open --hours N       open a window [now, now + N hours) (N = 1..1440, the database refuses more than 60 days) and clear the Auth ban        [--note TEXT]
 #   close                end every OPEN window NOW (the database refuses the account from that instant) and ban the Auth user. Future windows are left in place: the database
 #                        would enable the account when one starts, while GoTrue stays banned until the next `sync` or `open`, which fails closed.
@@ -86,6 +88,9 @@ read_email() {
   e="${e%$'\r'}"
   [ -n "$e" ] || die "no address given"
   [ "${#e}" -le 254 ] || die "the address is too long"
+  # `[:print:]` depends on the locale (a UTF-8 locale accepts non-ASCII letters), so this check runs under LC_ALL=C (the shell re-reads the locale on assignment; `local` puts it back on return):
+  # printable ASCII, no spaces. The address is never handed to a child process for it.
+  local LC_ALL=C
   case "$e" in *[![:print:]]*|*" "*) die "the address must be printable ASCII with no spaces" ;; esac
   printf '%s' "$e" | grep -Eq '^[^@]+@[^@]+\.[^@]+$' || die "that does not look like an email address"
   EMAIL="$e"
@@ -155,13 +160,13 @@ case "$CMD" in
     else
       # (2) at most ONE review account
       other="$(printf '%s\n' "SELECT count(*) FROM app.app_review_demo_account" | sql)" || die "database read failed"
-      [ "$other" = "0" ] || die "a different review account already exists (at most one is allowed): delete its row from app.app_review_demo_account first if you mean to replace it"
+      [ "$other" = "0" ] || die "a different review account already exists (at most one is allowed). To replace it run the retire command first (it bans the old Auth user, then removes the row; see the header). Never delete the row by hand: that leaves the old account an ordinary player"
       # (3) an address that already has an Auth user is never converted by accident
       uid="$(printf '%s\n' "SELECT id FROM auth.users WHERE lower(email) = lower($L) ORDER BY created_at LIMIT 1" | sql)" || die "database read failed"
       if [ -n "$uid" ]; then
         [ "$ADOPT" = "1" ] || die "an Auth user with that address already exists. Refusing to turn an existing account into the review account (a typo would convert a real player). Pass --adopt only if it was created for this purpose and has never been used"
-        used="$(printf '%s\n' "SELECT (EXISTS (SELECT 1 FROM app.evidence WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.play WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.offer_code WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.entitlement WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.marker_credit WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.purchase_evidence WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.device WHERE user_id = :'u'))" | sql -v u="$uid")" || die "database read failed"
-        [ "$used" = "f" ] || die "--adopt refused: that account has been used (evidence, plays, rewards, credits, purchases or devices exist). Use a fresh address"
+        used="$(printf '%s\n' "SELECT (EXISTS (SELECT 1 FROM app.evidence WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.play WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.offer_code WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.entitlement WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.marker_credit WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.purchase_evidence WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.device WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.push_token WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.booking WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.user_achievement WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.attestation WHERE player_user_id = :'u' OR staff_user_id = :'u') OR EXISTS (SELECT 1 FROM app.fraud_signal WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM auth.users WHERE id = :'u' AND last_sign_in_at IS NOT NULL))" | sql -v u="$uid")" || die "database read failed"
+        [ "$used" = "f" ] || die "--adopt refused: that account has been used (it has signed in, or evidence, plays, rewards, credits, purchases, devices, push tokens, bookings, achievements, attestations or fraud signals exist). Use a fresh address"
       else
         body="$(printf '%s' "$EMAIL" | jq -Rsc --arg d "$BAN_DURATION" '{email: ., email_confirm: true, ban_duration: $d}')" || die "could not build the request"
         st="$(auth_call POST /auth/v1/admin/users "$body")" || die "creating the Auth user failed"
@@ -183,6 +188,16 @@ case "$CMD" in
     fi
     unset EMAIL L
     do_sync
+    ;;
+  retire)
+    uids="$(review_uids)" || die "could not list the review accounts from the database"
+    [ -n "$uids" ] || die "there is no review account to retire"
+    while IFS= read -r uid; do
+      [ -n "$uid" ] || continue
+      ban_user "$uid" banned   # FIRST: no token can be minted for it from here on
+      printf '%s\n' "DELETE FROM app.app_review_demo_account WHERE user_id = :'u'" | sql -v u="$uid" >/dev/null || die "the Auth user is banned but its row could not be removed"
+      printf 'review-account.sh: review account %s... banned in Auth and retired (its row is removed); provision the new address next\n' "$(short "$uid")"
+    done <<< "$uids"
     ;;
   open)
     printf '%s' "$HOURS" | grep -Eq '^[0-9]+$' || die "open needs --hours N (a whole number of hours, 1 to 1440)"

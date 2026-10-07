@@ -144,6 +144,15 @@ case "$OUT" in *"has been used"*) ;; *) fail "the --adopt refusal was not the us
 [ "$(demo_count)" = "0" ] && [ "$(nlog)" = "$N0" ] || fail "a refused adopt still wrote or called something"
 ok "--adopt refuses an account that has been used"
 
+# a never-used-looking account that HAS signed in (auth.users.last_sign_in_at) is refused too: no table row of ours is needed to tell it is a real person
+SI_EMAIL="rev-tool-signedin-$RND@example.test"; ALL_ADDRESSES+=("$SI_EMAIL")
+SI_UID="$(mkuser "$SI_EMAIL")"
+psql_q "UPDATE auth.users SET last_sign_in_at = now() WHERE id = '$SI_UID'" >/dev/null
+if OUT="$(printf '%s\n' "$SI_EMAIL" | run_tool provision --adopt 2>&1)"; then fail "--adopt converted an account that has SIGNED IN"; fi
+case "$OUT" in *"has been used"*) ;; *) fail "the refusal was not the used-account check: $OUT" ;; esac
+[ "$(demo_count)" = "0" ] && [ "$(nlog)" = "$N0" ] || fail "a refused adopt of a signed-in account still wrote or called something"
+ok "--adopt refuses an account whose auth.users.last_sign_in_at is set"
+
 PM_UID="$(mkuser "$PM_EMAIL")"
 psql_q "INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$PM_UID', '10000000-0000-0000-0000-000000000001', 'staff')" >/dev/null
 if OUT="$(printf '%s\n' "$PM_EMAIL" | run_tool provision --adopt 2>&1)"; then fail "--adopt converted a PARTNER MEMBER"; fi
@@ -228,6 +237,24 @@ case "$OUT" in *"HTTP 500"*) ;; *) fail "the Auth failure was not reported: $OUT
 rm -f "$WORK/fail"
 run_tool close >/dev/null 2>&1 || fail "close after the failure failed"
 ok "an Auth failure exits non-zero and is reported (HTTP status only, no key); the window had been written first, so the failure leaves GoTrue banned: the safe direction"
+
+# ============================================================================ 5b. retire = ban FIRST, then remove the row
+[ "$(demo_count)" = "1" ] || fail "no review account to retire in the test"
+N0="$(nlog)"
+OUT="$(run_tool retire 2>&1)" || fail "retire failed: $OUT"
+no_secrets "$OUT" retire
+R="$(nth "$N0" 1)"
+[ "$(reqs_since "$N0" | wc -l | tr -d ' ')" = "1" ] && jqe "$R" '.method == "PUT" and .path == ("/auth/v1/admin/users/" + $u) and (.body_raw | fromjson) == {ban_duration: "876000h"}' --arg u "$UID1" || fail "retire must make exactly one ban call for the old account"
+jqe "$R" '.demo_rows_at_call == "1"' || fail "ORDER: the old account was banned AFTER its row was removed (it must be banned first, so it is never an ordinary player with a live token)"
+[ "$(demo_count)" = "0" ] || fail "retire left the row"
+if OUT="$(run_tool retire 2>&1)"; then fail "retire with no review account succeeded"; fi
+case "$OUT" in *"no review account to retire"*) ;; *) fail "retire with nothing to retire did not say so: $OUT" ;; esac
+ok "retire: bans the old Auth user FIRST (the row still exists at that instant), then removes the row; nothing to retire is an error"
+# the "at most one" refusal names it
+OUT="$(printf '%s\n' "$ADOPT_EMAIL" | run_tool provision --adopt 2>&1)" || fail "re-provision after retire failed: $OUT"
+UID1="$(psql_q "SELECT user_id FROM app.app_review_demo_account")"
+if OUT="$(printf '%s\n' "$PLAYER_EMAIL" | run_tool provision 2>&1)"; then fail "a second review account was provisioned"; fi
+case "$OUT" in *"run the retire command"*) ;; *) fail "the one-account refusal does not point at retire: $OUT" ;; esac
 
 # ============================================================================ 6. the URL, exactly
 BAD_URLS=("http://example.test" "https://user:pw@example.test" "https://example.test/path" "https://example.test:99999x" "https://" "https://exa mple.test" "ftp://example.test"
