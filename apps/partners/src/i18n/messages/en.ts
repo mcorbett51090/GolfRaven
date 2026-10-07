@@ -1,0 +1,67 @@
+/**
+ * English UI strings: the source catalogue and the type of every key. `fr-CA.ts` is checked against this file's keys at compile time AND by
+ * `test/i18n.test.ts` (same keys, same `{placeholders}`, no empty strings). Plural forms are written `base.one` / `base.other`.
+ */
+export const en = {
+  "app.name": "GolfRaven Partners",
+  "app.loading": "Loading…",
+  "lang.toggle": "Français",
+  "lang.toggle.label": "Switch language to French",
+
+  "signIn.title": "Staff sign-in",
+  "signIn.lead": "Sign in with your passkey. Your device will ask for your fingerprint, face or passcode.",
+  "signIn.button": "Sign in with passkey",
+  "signIn.busy": "Waiting for your passkey…",
+  "signIn.cancel": "Cancel",
+
+  "notice.locked": "Locked. Sign in again with your passkey to continue.",
+  "notice.signedOut": "You are signed out.",
+  "notice.expired": "Your session has ended. Sign in again.",
+  "notice.signOutOffline": "You are signed out on this device, but the server could not be reached. The session will end on its own.",
+  "notice.lockOffline": "This device is locked, but the server could not be reached to end your session. Sign in again to continue.",
+
+  "error.cancelled": "The passkey prompt was cancelled or timed out. Try again.",
+  "error.webauthnUnsupported": "This browser cannot use passkeys. Open this page in an up-to-date browser.",
+  "error.webauthnFailed": "The passkey could not be used. Try again.",
+  "error.badOptions": "The server sent a sign-in request this page will not accept. Try again later.",
+  "error.signInFailed": "Sign-in failed. Check that you are using your own passkey and try again.",
+  "error.sessionEnded": "Your session has ended. Sign in again.",
+  "error.forbidden": "You do not have access to this.",
+  "error.rateLimited": "Too many attempts. Wait a while and try again.",
+  "error.rateLimited.wait": "Too many attempts. Try again in {seconds} s.",
+  "error.unavailable": "Partner sign-in is not available right now.",
+  "error.network": "Could not reach the server. Check your connection and try again.",
+  "error.generic": "Something went wrong. Try again.",
+
+  "home.title": "Signed in",
+  "home.reloadNote": "Reloading this page signs you out and needs your passkey again. That is by design.",
+  "home.session.title": "This session",
+  "home.field.assurance": "Assurance level",
+  "home.field.assurance.value": "{aal} (this access needs {required})",
+  "home.field.signedInAt": "Signed in",
+  "home.field.lastActive": "Last active",
+  "home.field.idleExpires": "Idle timeout",
+  "home.field.expires": "Session ends",
+  "home.field.admin": "Administrator",
+  "common.yes": "Yes",
+  "common.no": "No",
+  "home.roles.title": "Roles",
+  "home.roles.none": "No active roles.",
+  "home.roles.scope": "{facilities}, {trails}",
+  "home.facilities.one": "{count} facility",
+  "home.facilities.other": "{count} facilities",
+  "home.trails.one": "{count} trail",
+  "home.trails.other": "{count} trails",
+  "role.staff": "Staff",
+  "role.manager": "Manager",
+  "role.operator": "Operator",
+  "home.aalLow": "This access needs a second factor that is not available in this version yet. Most screens will stay closed until it is.",
+  "home.refresh": "Refresh",
+  "home.lock": "Lock",
+  "home.lock.hint": "Lock clears this device's access. You need your passkey to continue.",
+  "home.signOut": "Sign out",
+  "home.later": "Attestation, course QR, hand-over and stock screens arrive in later versions.",
+  "home.busy": "Working…",
+} as const;
+
+export type MessageKey = keyof typeof en;

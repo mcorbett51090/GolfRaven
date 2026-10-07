@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>csp inline probe</title>
+    <style>
+      body {
+        background: rgb(255, 0, 0);
+      }
+    </style>
+    <script>
+      window.__inline = 1;
+    </script>
+  </head>
+  <body>
+    <img id="broken" src="/__probe/missing.png" onerror="window.__handler = 1" alt="" />
+    <a id="js" href="javascript:window.__js = 1">js</a>
+  </body>
+</html>
