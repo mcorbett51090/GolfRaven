@@ -156,7 +156,7 @@ see "What is gated"), and never commit a private key.
   `versions.json` signed by a separate key so no verifier check is masked by another), the cache manager on both the
   memory and `node:sqlite` stores (anti-rollback, races, force-update), the fetch limits, the outbox, i18n parity, the age
   gate, policy scans.
-- `pnpm build` — no-op; there is no EAS build or `expo export` in CI yet.
+- `pnpm build` — no-op; there is no EAS build or `expo export` in CI yet (`eas.json` is a scaffold, see "EAS build profiles" below).
 - `pnpm export:ios` / `pnpm export:android` — `expo export` behind `scripts/check-public-env.mjs`, which refuses (exit 1, names the variable, never
   prints the value) a secret-shaped key (`service_role` JWT, `sb_secret_…`) or an unusable anon key in any `EXPO_PUBLIC_*` variable, in `process.env` or
   the `.env*` files, because Metro inlines those values into the bundle. The same guard is EAS Build's `eas-build-pre-install` hook. A bare
@@ -201,6 +201,22 @@ see "What is gated"), and never commit a private key.
   Delete the generated `android/` and `ios/` afterwards (they are gitignored).
 - This package needs `pnpm -r build` first: it imports the built `dist/` of `@golfraven/catalog` (types) and
   `@golfraven/catalog-tools`.
+
+## EAS build profiles (`eas.json`)
+
+`eas.json` is a scaffold: three profiles, no credentials, no identifiers. Everything about EAS's own behaviour below is `[unverified — training knowledge]`: it can only be exercised by a real `eas build`, which needs an Expo account and Apple credentials that are not in this repository.
+
+| Profile | For | `GOLFRAVEN_APP_ATTEST_ENV` | Distribution |
+|---|---|---|---|
+| `development` | a dev-client build on a real device (App Attest does not run on a simulator, see below) | `development` | `internal`, `developmentClient: true`; Android as an APK |
+| `preview` | an internal test build of the release configuration (TestFlight-style testing, QA) | `production` | `internal`; Android as an APK |
+| `production` | the store build | `production` | `store`, `autoIncrement: true` |
+
+- **Why that variable and where it is read.** `modules/golfraven-attest/app.plugin.js` reads the build-time variable `GOLFRAVEN_APP_ATTEST_ENV` and writes it into the iOS entitlement `com.apple.developer.devicecheck.appattest-environment`; unset it is `production`, any other value fails the prebuild. A key attested in one environment does not verify as the other at the server, so a `development` build must talk to a deployment whose `GR_APPLE_APPATTEST_ENV` is `development`, and the `preview` and `production` profiles to one set to `production`. **It is an EAS build variable, never an `EXPO_PUBLIC_*` one** (those are inlined into the bundle, and the plugin does not read them). `test/eas-profiles.test.ts` pins this for every profile: the value is `development` or `production`, never missing, and never in a public variable.
+- **What is deliberately not in the file.** No `EXPO_PUBLIC_*` value (the Supabase URL, the anon key and the API base URL are set in the EAS environment for each profile, not committed), no `submit` block, no Apple or Expo identifier, no secret. `test/eas-profiles.test.ts` fails on an id-shaped string or any `ascAppId` / `appleId` / `appleTeamId` / `projectId` key. The EAS **project id** is written to `app.json` (`expo.extra.eas.projectId`) by `eas init` and the Apple ids by `eas submit` or the dashboard: placeholders for the owner to fill: `<EAS_PROJECT_ID>`, `<TEAM_ID>`, `<ASC_APP_ID>`, `<APPLE_ID>`. Do not commit the Apple ids to this public repository; keep them in your own notes and in EAS credential storage.
+- **The pre-install guard.** EAS Build runs the package script `eas-build-pre-install` (`package.json`), which is `scripts/check-public-env.mjs`: it refuses a secret-shaped `EXPO_PUBLIC_*` value before the build starts `[unverified: that EAS runs a script of that name; it is EAS's documented hook name]`. It does not know what an Apple `.p8` is, so do not put one in any EAS environment variable.
+- **Review account.** The App Store review account only works inside a submission window the owner opens: `docs/owner/review-account-procedure.md`. Open it before submitting the `production` build.
+- Not decided here: `cli.version` (`>= 16.0.0`) and `appVersionSource: remote` are the values `eas build:configure` writes today `[unverified]`; change them to whatever the installed `eas-cli` writes.
 
 ## Plan vs server: contract mismatches found in P4.2b-1 (the server wins)
 
@@ -456,8 +472,8 @@ elapsed days... then an Android pass"). Exact steps:
      connected via USB (developer mode + USB debugging on) or an emulator
      running, and the Android SDK installed locally; or
    - an EAS development build: `eas build --profile development --platform android`
-     (needs an Expo account and `eas.json`, neither of which exist in this
-     skeleton yet — `eas build:configure` sets that up), then install the
+     (needs an Expo account; `eas.json` exists, see "EAS build profiles" above,
+     and `eas init` links the project), then install the
      resulting APK on the phone.
 2. **Record at least one real golf round** with Garmin Connect Mobile (or
    another Health-Connect-writing golf app) so Health Connect actually has
