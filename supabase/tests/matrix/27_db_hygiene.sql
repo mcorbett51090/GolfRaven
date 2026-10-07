@@ -5,7 +5,7 @@
 -- supabase/tests/integration/retention-purge.deno.test.ts. The behaviour of each purge (bounds, floors, grants, counts) stays proved where it always was: matrices 16 and 20.
 -- Every group is its own BEGIN ... ROLLBACK; no secret: the peppers are filler built at run time, the vectors were computed OUTSIDE the database (see 24_course_qr_marker_scan.sql).
 
-SELECT plan(35);
+SELECT plan(38);
 
 -- ----------------------------------------------------------------------------
 -- 1. The six purge definers: identity, owner and exposure unchanged; the batch is taken once
@@ -39,6 +39,21 @@ SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p W
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND p.proacl::text ~ '(^\{|,)=X/'), 0, 'PUBLIC has EXECUTE on none of the six');
 -- the registry rows are untouched by 0050 (the notes name 0033 / 0040 / 0041, never 0050)
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE schema_name = 'private' AND function_name LIKE 'purge\_%' AND note LIKE '%0050%'), 0, 'private.function_inventory is unchanged for the purges: 0050 rewrote bodies only');
+
+-- the composite-key purge deletes by the WHOLE key: an expired window and the current window of the SAME bucket key are two rows, and only the expired one goes
+BEGIN;
+SET LOCAL ROLE private_definer;
+INSERT INTO private.rate_limit_bucket (bucket_key, window_start, count) VALUES ('m27:composite', now() - interval '5 days', 1), ('m27:composite', now(), 1);
+RESET ROLE;
+GRANT edge_system TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
+SET LOCAL ROLE edge_system;
+SELECT cmp_ok(private.purge_rate_limit_buckets(), '>=', 1, 'composite key: the purge removes the expired window of a bucket key');
+RESET ROLE;
+SET LOCAL ROLE private_definer;
+SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key = 'm27:composite' AND window_start > now() - interval '1 hour'), 1, 'composite key: ... and the CURRENT window of the same bucket key survives (it is a different primary key)');
+SELECT is((SELECT count(*)::int FROM private.rate_limit_bucket WHERE bucket_key = 'm27:composite'), 1, 'composite key: ... and the expired one is gone');
+RESET ROLE;
+ROLLBACK;
 
 -- ----------------------------------------------------------------------------
 -- 2. The InitPlan form of the partner-binding conjunct
