@@ -170,7 +170,26 @@ describe("migration 0051", () => {
     expect(code).toContain("ALTER TABLE app.app_review_window FORCE ROW LEVEL SECURITY;");
     expect(code).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON app.app_review_window TO service_role;");
   });
-  it("the binder backstop refuses only the user kind, outside a window", () => {
-    expect(code).toContain("IF p_kind = 'user' AND private.is_demo_account(p_uid) AND NOT private.review_window_open_at(clock_timestamp()) THEN");
+  it("the binder backstop refuses only the user kind: a RETIRED account always, any other review account outside a window", () => {
+    expect(code).toContain("IF p_kind = 'user' AND private.is_demo_account(p_uid) THEN");
+    const at = code.indexOf("IF p_kind = 'user' AND private.is_demo_account(p_uid) THEN");
+    const retired = code.indexOf("the review account is retired", at);
+    const window = code.indexOf("IF NOT private.review_window_open_at(clock_timestamp()) THEN", at);
+    expect(retired).toBeGreaterThan(at);
+    expect(window).toBeGreaterThan(retired); // retired is judged first, and independently of any window
+    expect(code.slice(at, retired)).toContain("retired_at IS NOT NULL");
   });
+  it("the gate refuses a RETIRED account always (the window is not even consulted for it), and a retired row stays a review account", () => {
+    expect(gate).toContain("v_retired := EXISTS (SELECT 1 FROM app.app_review_demo_account d WHERE d.user_id = p_uid AND d.retired_at IS NOT NULL);");
+    expect(gate).toContain("v_open := NOT v_retired AND private.review_window_open_at(clock_timestamp());");
+    expect(code).not.toMatch(/CREATE OR REPLACE FUNCTION private\.is_demo_account/); // is_demo_account (0007) is untouched: true for a retired row
+  });
+  it("retired is one-way and the row is kept while its Auth user exists (the guard), and the unique index is over ACTIVE rows", () => {
+    expect(code).toContain("CREATE UNIQUE INDEX app_review_demo_account_single ON app.app_review_demo_account ((true)) WHERE retired_at IS NULL;");
+    expect(code).toContain("NEW.retired_at IS DISTINCT FROM OLD.retired_at OR NEW.user_id IS DISTINCT FROM OLD.user_id");
+    expect(code).toContain("OLD.retired_at IS NOT NULL AND EXISTS (SELECT 1 FROM auth.users u WHERE u.id = OLD.user_id)");
+    expect(code).toContain("BEFORE UPDATE OR DELETE ON app.app_review_demo_account");
+    expect(code).not.toMatch(/GRANT[^;]*review_account_retire_guard/);
+  });
+
 });

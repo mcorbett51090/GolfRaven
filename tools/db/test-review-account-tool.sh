@@ -59,7 +59,9 @@ LISTENER_PID=""
 cleanup() {
   [ -z "$LISTENER_PID" ] || kill "$LISTENER_PID" 2>/dev/null || true
   psql_o "GRANT SELECT, INSERT, UPDATE, DELETE ON app.app_review_demo_account TO service_role" >/dev/null 2>&1 || true
-  psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account; DELETE FROM app.partner_member WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test'); DELETE FROM app.admin_user WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test'); DELETE FROM app.device WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test');" >/dev/null 2>&1 || true
+  psql_o "ALTER TABLE app.app_review_demo_account DISABLE TRIGGER review_account_retire_guard_trg" >/dev/null 2>&1 || true   # a retired row is kept while its Auth user exists; this harness cannot delete auth.users
+  psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account; DELETE FROM app.partner_member WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test'); DELETE FROM app.admin_user WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test'); DELETE FROM app.push_token WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test'); DELETE FROM app.device WHERE user_id IN (SELECT id FROM auth.users WHERE email LIKE 'rev-tool-%@example.test');" >/dev/null 2>&1 || true
+  psql_o "ALTER TABLE app.app_review_demo_account ENABLE TRIGGER review_account_retire_guard_trg" >/dev/null 2>&1 || true
   if [ -n "${ORIG_DEMO:-}" ]; then
     IFS=',' read -ra OU <<< "$ORIG_DEMO"
     for u in "${OU[@]}"; do psql_q "INSERT INTO app.app_review_demo_account (user_id) VALUES ('$u') ON CONFLICT DO NOTHING" >/dev/null 2>&1 || true; done
@@ -80,7 +82,9 @@ EOF
   chmod +x "$WORK/wrap/$name"
 done
 
+psql_o "ALTER TABLE app.app_review_demo_account DISABLE TRIGGER review_account_retire_guard_trg"
 psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account;" >/dev/null
+psql_o "ALTER TABLE app.app_review_demo_account ENABLE TRIGGER review_account_retire_guard_trg"
 [ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "f" ] || fail "a window is open before the proof starts"
 
 # ---- the listener (a real HTTP server), started before PATH is changed so its own psql is the real one
@@ -101,7 +105,8 @@ no_secrets() { # TEXT label
   case "$1" in *"$KEY"*) fail "$2 printed the service key" ;; esac
   for a in "${ALL_ADDRESSES[@]}"; do case "$1" in *"$a"*) fail "$2 printed an address" ;; esac; done
 }
-demo_count() { psql_q "SELECT count(*) FROM app.app_review_demo_account"; }
+demo_count() { psql_q "SELECT count(*) FROM app.app_review_demo_account WHERE retired_at IS NULL"; }   # ACTIVE accounts
+retired_count() { psql_q "SELECT count(*) FROM app.app_review_demo_account WHERE retired_at IS NOT NULL"; }
 mkuser() { psql_q "INSERT INTO auth.users (id, email) VALUES (gen_random_uuid(), '$1') RETURNING id" | head -1; }
 
 # ============================================================================ 1. provision a NEW address
@@ -109,7 +114,7 @@ N0="$(nlog)"
 OUT="$(printf '%s\n' "$NEW_EMAIL" | run_tool provision 2>&1)" || fail "provision failed: $OUT"
 no_secrets "$OUT" provision
 [ "$(demo_count)" = "1" ] || fail "provision did not mark the review account"
-UID1="$(psql_q "SELECT user_id FROM app.app_review_demo_account")"
+UID1="$(psql_q "SELECT user_id FROM app.app_review_demo_account WHERE retired_at IS NULL")"
 [ "$(reqs_since "$N0" | wc -l | tr -d ' ')" = "2" ] || fail "provision made $(reqs_since "$N0" | wc -l) Auth calls, expected 2 (create, ban)"
 R1="$(nth "$N0" 1)"; R2="$(nth "$N0" 2)"
 jqe "$R1" '.method == "POST" and .path == "/auth/v1/admin/users" and .authorization == ("Bearer " + $k) and .apikey == $k and .content_type == "application/json"' --arg k "$KEY" || fail "the create call has the wrong method, path or headers: $R1"
@@ -123,6 +128,13 @@ OUT="$(printf '%s\n' "$NEW_EMAIL" | run_tool provision 2>&1)" || fail "second pr
 jqe "$(nth "$N0" 1)" '.method == "PUT"' || fail "re-provision did not just ban"
 [ "$(demo_count)" = "1" ] || fail "re-provision made a second row"
 ok "provision is idempotent on the same address (no second create)"
+
+# a non-ASCII address is refused even under a UTF-8 locale (where [:print:] would accept an accented letter): the check runs under LC_ALL=C
+N0="$(nlog)"
+if OUT="$(printf 'ren\303\251-%s@example.test\n' "$RND" | LC_ALL=C.utf8 run_tool provision 2>&1)"; then fail "a non-ASCII address was accepted under a UTF-8 locale"; fi
+case "$OUT" in *"printable ASCII"*) ;; *) fail "the non-ASCII refusal was not the ASCII check: $OUT" ;; esac
+[ "$(nlog)" = "$N0" ] || fail "an Auth call was made for a refused non-ASCII address"
+ok "a non-ASCII address is refused under a UTF-8 locale (the printable check runs under LC_ALL=C)"
 
 # ============================================================================ 2. one account; never convert an existing user; --adopt guards
 PLAYER_UID="$(mkuser "$PLAYER_EMAIL")"
@@ -153,6 +165,16 @@ case "$OUT" in *"has been used"*) ;; *) fail "the refusal was not the used-accou
 [ "$(demo_count)" = "0" ] && [ "$(nlog)" = "$N0" ] || fail "a refused adopt of a signed-in account still wrote or called something"
 ok "--adopt refuses an account whose auth.users.last_sign_in_at is set"
 
+# a push token with NO device of the account's own (app.push_token's device FK only needs SOME device: here the player's, above): the push_token clause alone must refuse it
+PT_EMAIL="rev-tool-push-$RND@example.test"; ALL_ADDRESSES+=("$PT_EMAIL")
+PT_UID="$(mkuser "$PT_EMAIL")"
+psql_q "INSERT INTO app.push_token (user_id, device_id, expo_token) SELECT '$PT_UID', id, 'ExponentPushToken[rev-tool-test]' FROM app.device WHERE user_id = '$PLAYER_UID' LIMIT 1" >/dev/null
+[ "$(psql_q "SELECT count(*) FROM app.push_token WHERE user_id = '$PT_UID'")" = "1" ] && [ "$(psql_q "SELECT count(*) FROM app.device WHERE user_id = '$PT_UID'")" = "0" ] || fail "the push-token fixture is wrong (it must have a token and no device of its own)"
+if OUT="$(printf '%s\n' "$PT_EMAIL" | run_tool provision --adopt 2>&1)"; then fail "--adopt converted an account that holds a PUSH TOKEN"; fi
+case "$OUT" in *"has been used"*) ;; *) fail "the refusal was not the used-account check: $OUT" ;; esac
+[ "$(demo_count)" = "0" ] && [ "$(nlog)" = "$N0" ] || fail "a refused adopt of a push-token account still wrote or called something"
+ok "--adopt refuses an account that holds a push token (its own check, no device of its own needed)"
+
 PM_UID="$(mkuser "$PM_EMAIL")"
 psql_q "INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('$PM_UID', '10000000-0000-0000-0000-000000000001', 'staff')" >/dev/null
 if OUT="$(printf '%s\n' "$PM_EMAIL" | run_tool provision --adopt 2>&1)"; then fail "--adopt converted a PARTNER MEMBER"; fi
@@ -169,7 +191,7 @@ ok "--adopt refuses a partner member and an admin (no partner scope), with no Au
 ADOPT_UID="$(mkuser "$ADOPT_EMAIL")"
 OUT="$(REVIEW_ACCOUNT_EMAIL="$ADOPT_EMAIL" run_tool provision --adopt </dev/null 2>&1)" || fail "--adopt of a fresh account failed: $OUT"
 no_secrets "$OUT" "provision --adopt"
-[ "$(psql_q "SELECT user_id FROM app.app_review_demo_account")" = "$ADOPT_UID" ] || fail "the fresh account was not marked"
+[ "$(psql_q "SELECT user_id FROM app.app_review_demo_account WHERE retired_at IS NULL")" = "$ADOPT_UID" ] || fail "the fresh account was not marked"
 [ "$(reqs_since "$N0" | wc -l | tr -d ' ')" = "1" ] && jqe "$(nth "$N0" 1)" '.method == "PUT" and (.body_raw | fromjson) == {ban_duration: "876000h"}' || fail "--adopt of a fresh account must make exactly one ban call and no create"
 ok "--adopt of a fresh, unused account marks it and bans it (no create), address given through REVIEW_ACCOUNT_EMAIL"
 UID1="$ADOPT_UID"
@@ -238,23 +260,61 @@ rm -f "$WORK/fail"
 run_tool close >/dev/null 2>&1 || fail "close after the failure failed"
 ok "an Auth failure exits non-zero and is reported (HTTP status only, no key); the window had been written first, so the failure leaves GoTrue banned: the safe direction"
 
-# ============================================================================ 5b. retire = ban FIRST, then remove the row
-[ "$(demo_count)" = "1" ] || fail "no review account to retire in the test"
+# ============================================================================ 5b. retire = close, ban, mark retired: the row is NEVER deleted
+[ "$(demo_count)" = "1" ] || fail "no active review account to retire in the test"
+psql_q "INSERT INTO app.app_review_window (starts_at, ends_at, note) VALUES (now() - interval '1 minute', now() + interval '1 hour', 'rev-tool-test retire-open')" >/dev/null
+[ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "t" ] || fail "the retire proof needs an open window"
 N0="$(nlog)"
 OUT="$(run_tool retire 2>&1)" || fail "retire failed: $OUT"
 no_secrets "$OUT" retire
+case "$OUT" in *"is banned"*"KEPT"*) ;; *) fail "retire (api mode) did not report ban + kept row: $OUT" ;; esac
 R="$(nth "$N0" 1)"
 [ "$(reqs_since "$N0" | wc -l | tr -d ' ')" = "1" ] && jqe "$R" '.method == "PUT" and .path == ("/auth/v1/admin/users/" + $u) and (.body_raw | fromjson) == {ban_duration: "876000h"}' --arg u "$UID1" || fail "retire must make exactly one ban call for the old account"
-jqe "$R" '.demo_rows_at_call == "1"' || fail "ORDER: the old account was banned AFTER its row was removed (it must be banned first, so it is never an ordinary player with a live token)"
-[ "$(demo_count)" = "0" ] || fail "retire left the row"
-if OUT="$(run_tool retire 2>&1)"; then fail "retire with no review account succeeded"; fi
-case "$OUT" in *"no review account to retire"*) ;; *) fail "retire with nothing to retire did not say so: $OUT" ;; esac
-ok "retire: bans the old Auth user FIRST (the row still exists at that instant), then removes the row; nothing to retire is an error"
-# the "at most one" refusal names it
-OUT="$(printf '%s\n' "$ADOPT_EMAIL" | run_tool provision --adopt 2>&1)" || fail "re-provision after retire failed: $OUT"
-UID1="$(psql_q "SELECT user_id FROM app.app_review_demo_account")"
-if OUT="$(printf '%s\n' "$PLAYER_EMAIL" | run_tool provision 2>&1)"; then fail "a second review account was provisioned"; fi
+jqe "$R" '.window_open_at_call == "f"' || fail "ORDER: the ban arrived while a window was still open (retire must CLOSE first)"
+jqe "$R" '.demo_rows_at_call == "1" and .retired_rows_at_call == "0"' || fail "ORDER: at the ban the row must exist and not yet be retired (close, THEN ban, THEN mark retired)"
+[ "$(demo_count)" = "0" ] && [ "$(retired_count)" = "1" ] || fail "retire must leave the row, marked retired (and no active account)"
+[ "$(psql_q "SELECT count(*) FROM app.app_review_demo_account WHERE user_id = '$UID1' AND retired_at IS NOT NULL")" = "1" ] || fail "the retired row is not the old account's"
+[ "$(psql_q "SELECT private.is_demo_account('$UID1')")" = "t" ] || fail "a retired account must STAY a review account (is_demo_account)"
+[ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "f" ] || fail "retire left a window open"
+if OUT="$(run_tool retire 2>&1)"; then fail "retire with no active review account succeeded"; fi
+case "$OUT" in *"no active review account to retire"*) ;; *) fail "retire with nothing to retire did not say so: $OUT" ;; esac
+# a window OPEN and the retired account stays banned: sync never clears a retired account's ban
+psql_q "INSERT INTO app.app_review_window (starts_at, ends_at, note) VALUES (now() - interval '1 minute', now() + interval '1 hour', 'rev-tool-test retired-sync')" >/dev/null
+N0="$(nlog)"
+run_tool sync >/dev/null 2>&1 || fail "sync with a retired account failed"
+[ "$(reqs_since "$N0" | wc -l | tr -d ' ')" = "1" ] && jqe "$(nth "$N0" 1)" '(.body_raw | fromjson) == {ban_duration: "876000h"}' || fail "sync with a window OPEN must keep a retired account banned (one ban call, never 'none')"
+psql_q "DELETE FROM app.app_review_window WHERE note = 'rev-tool-test retired-sync'" >/dev/null
+# a retired address is never re-activated
+for flag in "" "--adopt"; do
+  if OUT="$(printf '%s\n' "$ADOPT_EMAIL" | run_tool provision $flag 2>&1)"; then fail "a RETIRED account was provisioned again ($flag)"; fi
+  case "$OUT" in *"RETIRED review account"*) ;; *) fail "the refusal of a retired address was not the retired check ($flag): $OUT" ;; esac
+done
+[ "$(demo_count)" = "0" ] || fail "a refused re-provision still made an active account"
+ok "retire: closes the open window, then bans the Auth user, then marks the row retired; the row is KEPT (is_demo_account true); sync keeps it banned while a window is open; a retired address cannot be provisioned again"
+
+# retire in skip mode: no Auth call is made, so it must NOT claim a ban, must say what to do by hand, and exits 3 with the database side done
+SKIP_EMAIL="rev-tool-skip-$RND@example.test"; ALL_ADDRESSES+=("$SKIP_EMAIL")
+SKIP_UID="$(mkuser "$SKIP_EMAIL")"
+printf '%s\n' "$SKIP_EMAIL" | run_tool provision --adopt >/dev/null 2>&1 || fail "could not provision the skip-mode account"
+N0="$(nlog)"
+set +e; OUT="$(GOLFRAVEN_REVIEW_AUTH=skip run_tool retire 2>&1)"; RC=$?; set -e
+[ "$RC" = "3" ] || fail "retire in skip mode must exit 3 (database done, Auth ban still to do by hand), got $RC: $OUT"
+case "$OUT" in *"ACTION REQUIRED"*"dashboard"*) ;; *) fail "retire in skip mode did not say what to do by hand: $OUT" ;; esac
+case "$OUT" in *"RETIRED IN THE DATABASE"*) ;; *) fail "retire in skip mode did not say the account is retired in the database: $OUT" ;; esac
+case "$(printf '%s' "$OUT" | tr 'A-Z' 'a-z')" in *banned*) fail "retire in skip mode printed the word banned: $OUT" ;; esac
+[ "$(nlog)" = "$N0" ] || fail "retire in skip mode made an Auth call"
+[ "$(psql_q "SELECT count(*) FROM app.app_review_demo_account WHERE user_id = '$SKIP_UID' AND retired_at IS NOT NULL")" = "1" ] || fail "retire in skip mode did not retire the row in the database"
+ok "retire in skip mode: retired in the database (row kept), says ACTION REQUIRED: ban in the dashboard, never claims a ban, makes no Auth call, exits 3"
+
+# an active account again for the sections below, through the api
+N0="$(nlog)"
+NEW2_EMAIL="rev-tool-new2-$RND@example.test"; ALL_ADDRESSES+=("$NEW2_EMAIL")
+OUT="$(printf '%s\n' "$NEW2_EMAIL" | run_tool provision 2>&1)" || fail "provision after retire failed: $OUT"
+UID1="$(psql_q "SELECT user_id FROM app.app_review_demo_account WHERE retired_at IS NULL")"
+[ "$(demo_count)" = "1" ] && [ "$(retired_count)" = "2" ] || fail "expected one active and two retired accounts"
+if OUT="$(printf '%s\n' "$PLAYER_EMAIL" | run_tool provision 2>&1)"; then fail "a second ACTIVE review account was provisioned"; fi
 case "$OUT" in *"run the retire command"*) ;; *) fail "the one-account refusal does not point at retire: $OUT" ;; esac
+ok "retired accounts do not count as the active one (a new account provisions); a second ACTIVE one is still refused and the refusal points at retire"
 
 # ============================================================================ 6. the URL, exactly
 BAD_URLS=("http://example.test" "https://user:pw@example.test" "https://example.test/path" "https://example.test:99999x" "https://" "https://exa mple.test" "ftp://example.test"

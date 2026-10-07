@@ -8,8 +8,11 @@
 #                        An address that ALREADY has an Auth user is refused (a typo must not turn a real player into the review account), unless it is already the review
 #                        account (idempotent) or you pass --adopt AND the account has never been used (it has never signed in; no evidence, play, reward, offer code, entitlement,
 #                        marker credit, purchase, device, push token, booking, achievement, attestation or fraud signal; no partner role; not an admin). At most ONE review account exists (a unique index): a different one is refused until you delete the old row.
-#   retire               REPLACE the review account: ban its Auth user FIRST (so it cannot get a token), then delete its row. Never delete the row on its own: that turns the account
-#                        into an ordinary player whose tokens still work. Then `provision` the new address. (`close` is the off switch; `retire` is for replacing the account.)
+#   retire               REPLACE the review account without turning the old one into an ordinary player. In order: (1) `close` (end every open window), (2) ban its Auth user, (3) mark
+#                        its row retired (retired_at). It NEVER deletes the row: a ban does not revoke an access token already issued, so for up to the token's life the old account would
+#                        be an ordinary player (no window gate, no reward or credit refusal) if its row went. A retired row keeps is_demo_account true and is refused by every request and every
+#                        window, always; it is one-way, and the database keeps the row while its Auth user exists. In GOLFRAVEN_REVIEW_AUTH=skip mode no ban is made: it retires in the
+#                        database, says plainly that YOU must ban the Auth user in the dashboard, and exits 3. Then `provision` the new address. (`close` is the off switch; `retire` replaces.)
 #   open --hours N       open a window [now, now + N hours) (N = 1..1440, the database refuses more than 60 days) and clear the Auth ban        [--note TEXT]
 #   close                end every OPEN window NOW (the database refuses the account from that instant) and ban the Auth user. Future windows are left in place: the database
 #                        would enable the account when one starts, while GoTrue stays banned until the next `sync` or `open`, which fails closed.
@@ -121,11 +124,13 @@ auth_call() {
   printf '%s' "${resp##*$'\n'}"
 }
 
-ban_user() { # UID banned|clear
+BAN_RESULT=""
+ban_user() { # UID banned|clear   (sets BAN_RESULT to "done" or "skipped": skip mode makes no call and must never be reported as a ban)
   local uid="$1" want="$2" body st
+  BAN_RESULT=""
   if [ "$want" = "banned" ]; then body="$(jq -nc --arg d "$BAN_DURATION" '{ban_duration:$d}')"; else body='{"ban_duration":"none"}'; fi
   st="$(auth_call PUT "/auth/v1/admin/users/$uid" "$body")"
-  case "$st" in 200|skipped) ;; *) die "the Auth admin call to set the ban failed (HTTP $st); the database side is unaffected" ;; esac
+  case "$st" in 200) BAN_RESULT="done" ;; skipped) BAN_RESULT="skipped" ;; *) die "the Auth admin call to set the ban failed (HTTP $st); the database side is unaffected" ;; esac
 }
 
 short() { printf '%s' "${1:0:8}"; }
@@ -133,19 +138,28 @@ short() { printf '%s' "${1:0:8}"; }
 # ---------------------------------------------------------------------------------------------------------------------
 # database reads. A failed read is FATAL (no process substitution, no swallowed status): a sync that cannot read the accounts must not look like "nothing to do".
 # ---------------------------------------------------------------------------------------------------------------------
-review_uids() { printf '%s\n' "SELECT user_id FROM app.app_review_demo_account ORDER BY user_id" | sql; }
+review_uids() { printf '%s\n' "SELECT user_id FROM app.app_review_demo_account WHERE retired_at IS NULL ORDER BY user_id" | sql; }
+retired_uids() { printf '%s\n' "SELECT user_id FROM app.app_review_demo_account WHERE retired_at IS NOT NULL ORDER BY user_id" | sql; }
+# end every window that is open NOW (the database refuses the review account from this instant); prints how many
+close_windows() { printf '%s\n' "WITH c AS (UPDATE app.app_review_window SET ends_at = now() WHERE starts_at < now() AND ends_at > now() RETURNING 1) SELECT count(*) FROM c" | sql; }
 window_open() { printf '%s\n' "SELECT private.review_window_open_at(clock_timestamp())" | sql; }
 
 do_sync() {
-  local open uids uid n=0
+  local open uids rets uid n=0
   open="$(window_open)" || die "could not read the window state from the database"
   case "$open" in t|f) ;; *) die "the database answered '$open' to 'is a window open'" ;; esac
   uids="$(review_uids)" || die "could not list the review accounts from the database"
+  rets="$(retired_uids)" || die "could not list the retired review accounts from the database"
   while IFS= read -r uid; do
     [ -n "$uid" ] || continue
     if [ "$open" = "t" ]; then ban_user "$uid" clear; else ban_user "$uid" banned; fi
     n=$((n + 1))
   done <<< "$uids"
+  # a RETIRED account stays banned for ever, window or no window
+  while IFS= read -r uid; do
+    [ -n "$uid" ] || continue
+    ban_user "$uid" banned
+  done <<< "$rets"
   printf 'review-account.sh: window %s; %s review account(s) %s\n' "$([ "$open" = t ] && echo OPEN || echo closed)" "$n" "$([ "$open" = t ] && echo 'cleared of the Auth ban' || echo 'banned in Auth')"
 }
 
@@ -154,16 +168,18 @@ case "$CMD" in
     read_email
     L="$(lit "$EMAIL")"
     # (1) is that address already THE review account?
-    same="$(printf '%s\n' "SELECT EXISTS (SELECT 1 FROM app.app_review_demo_account d JOIN auth.users u ON u.id = d.user_id WHERE lower(u.email) = lower($L))" | sql)" || die "database read failed"
+    same="$(printf '%s\n' "SELECT EXISTS (SELECT 1 FROM app.app_review_demo_account d JOIN auth.users u ON u.id = d.user_id WHERE lower(u.email) = lower($L) AND d.retired_at IS NULL)" | sql)" || die "database read failed"
     if [ "$same" = "t" ]; then
       printf 'review-account.sh: that address is already the review account (nothing to create)\n'
     else
       # (2) at most ONE review account
-      other="$(printf '%s\n' "SELECT count(*) FROM app.app_review_demo_account" | sql)" || die "database read failed"
-      [ "$other" = "0" ] || die "a different review account already exists (at most one is allowed). To replace it run the retire command first (it bans the old Auth user, then removes the row; see the header). Never delete the row by hand: that leaves the old account an ordinary player"
+      other="$(printf '%s\n' "SELECT count(*) FROM app.app_review_demo_account WHERE retired_at IS NULL" | sql)" || die "database read failed"
+      [ "$other" = "0" ] || die "a different ACTIVE review account already exists (at most one is allowed). To replace it run the retire command first (it closes the windows, bans the old Auth user and marks its row retired; see the header). Never delete the row: that leaves the old account an ordinary player"
       # (3) an address that already has an Auth user is never converted by accident
       uid="$(printf '%s\n' "SELECT id FROM auth.users WHERE lower(email) = lower($L) ORDER BY created_at LIMIT 1" | sql)" || die "database read failed"
       if [ -n "$uid" ]; then
+        ret="$(printf '%s\n' "SELECT EXISTS (SELECT 1 FROM app.app_review_demo_account WHERE user_id = :'u' AND retired_at IS NOT NULL)" | sql -v u="$uid")" || die "database read failed"
+        [ "$ret" = "f" ] || die "that address belongs to a RETIRED review account: a retired account is never re-activated. Use a fresh address"
         [ "$ADOPT" = "1" ] || die "an Auth user with that address already exists. Refusing to turn an existing account into the review account (a typo would convert a real player). Pass --adopt only if it was created for this purpose and has never been used"
         used="$(printf '%s\n' "SELECT (EXISTS (SELECT 1 FROM app.evidence WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.play WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.offer_code WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.entitlement WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.marker_credit WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.purchase_evidence WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.device WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.push_token WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.booking WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.user_achievement WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM app.attestation WHERE player_user_id = :'u' OR staff_user_id = :'u') OR EXISTS (SELECT 1 FROM app.fraud_signal WHERE user_id = :'u') OR EXISTS (SELECT 1 FROM auth.users WHERE id = :'u' AND last_sign_in_at IS NOT NULL))" | sql -v u="$uid")" || die "database read failed"
         [ "$used" = "f" ] || die "--adopt refused: that account has been used (it has signed in, or evidence, plays, rewards, credits, purchases, devices, push tokens, bookings, achievements, attestations or fraud signals exist). Use a fresh address"
@@ -191,13 +207,23 @@ case "$CMD" in
     ;;
   retire)
     uids="$(review_uids)" || die "could not list the review accounts from the database"
-    [ -n "$uids" ] || die "there is no review account to retire"
+    [ -n "$uids" ] || die "there is no active review account to retire"
     while IFS= read -r uid; do
       [ -n "$uid" ] || continue
-      ban_user "$uid" banned   # FIRST: no token can be minted for it from here on
-      printf '%s\n' "DELETE FROM app.app_review_demo_account WHERE user_id = :'u'" | sql -v u="$uid" >/dev/null || die "the Auth user is banned but its row could not be removed"
-      printf 'review-account.sh: review account %s... banned in Auth and retired (its row is removed); provision the new address next\n' "$(short "$uid")"
+      n="$(close_windows)" || die "could not end the open windows"                          # 1. close: the database refuses the account from this instant
+      ban_user "$uid" banned                                                                   # 2. ban in Auth (a failure stops here: nothing is retired yet)
+      printf '%s\n' "UPDATE app.app_review_demo_account SET retired_at = now() WHERE user_id = :'u' AND retired_at IS NULL" | sql -v u="$uid" >/dev/null || die "could not mark the account retired"   # 3. retired; never deleted
+      if [ "$BAN_RESULT" = "done" ]; then
+        printf 'review-account.sh: review account %s... retired: %s open window(s) ended, the Auth user is banned, the row is KEPT and marked retired (refused by every request and every window from now on). Provision the new address next\n' "$(short "$uid")" "$n"
+      else
+        {
+          printf 'review-account.sh: review account %s... RETIRED IN THE DATABASE: %s open window(s) ended, the row is KEPT and marked retired, and the database refuses it on every request and in every window.\n' "$(short "$uid")" "$n"
+          printf 'review-account.sh: ACTION REQUIRED: no Auth call was made (GOLFRAVEN_REVIEW_AUTH=skip), so the Auth user is NOT blocked from signing in. Ban that user in the Supabase dashboard NOW; until you do, GoTrue can still issue it tokens (the database refuses them on every Edge request, but direct PostgREST reads are not covered).\n'
+        } >&2
+        retire_manual=1
+      fi
     done <<< "$uids"
+    [ "${retire_manual:-0}" = "0" ] || exit 3
     ;;
   open)
     printf '%s' "$HOURS" | grep -Eq '^[0-9]+$' || die "open needs --hours N (a whole number of hours, 1 to 1440)"
@@ -211,7 +237,7 @@ case "$CMD" in
     do_sync
     ;;
   close)
-    n="$(printf '%s\n' "WITH c AS (UPDATE app.app_review_window SET ends_at = now() WHERE starts_at < now() AND ends_at > now() RETURNING 1) SELECT count(*) FROM c" | sql)" || die "could not end the open windows"
+    n="$(close_windows)" || die "could not end the open windows"
     printf 'review-account.sh: %s open window(s) ended now\n' "$n"
     do_sync
     ;;
@@ -219,7 +245,7 @@ case "$CMD" in
     do_sync
     ;;
   status)
-    printf '%s\n' "SELECT 'review accounts: ' || (SELECT count(*) FROM app.app_review_demo_account) || E'\nwindow open now: ' || private.review_window_open_at(clock_timestamp()) || E'\nopen windows: ' || (SELECT count(*) FROM app.app_review_window WHERE starts_at <= now() AND ends_at > now()) || E'\nfuture windows: ' || (SELECT count(*) FROM app.app_review_window WHERE starts_at > now()) || E'\npast windows: ' || (SELECT count(*) FROM app.app_review_window WHERE ends_at <= now())" | sql
+    printf '%s\n' "SELECT 'review accounts: ' || (SELECT count(*) FROM app.app_review_demo_account WHERE retired_at IS NULL) || ' active, ' || (SELECT count(*) FROM app.app_review_demo_account WHERE retired_at IS NOT NULL) || ' retired' || E'\nwindow open now: ' || private.review_window_open_at(clock_timestamp()) || E'\nopen windows: ' || (SELECT count(*) FROM app.app_review_window WHERE starts_at <= now() AND ends_at > now()) || E'\nfuture windows: ' || (SELECT count(*) FROM app.app_review_window WHERE starts_at > now()) || E'\npast windows: ' || (SELECT count(*) FROM app.app_review_window WHERE ends_at <= now())" | sql
     ;;
   *) usage ;;
 esac

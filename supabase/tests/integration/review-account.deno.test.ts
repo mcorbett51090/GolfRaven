@@ -66,7 +66,7 @@ async function reviewUser(label: string): Promise<string> {
   await createTestUser(uid, `rv-${label}-${uid.slice(0, 8)}`);
   await ensureServiceRole();
   // at most ONE review account exists (0051, unique index): this test's replaces the previous one (the earlier account becomes an ordinary one)
-  await adminSql()`delete from app.app_review_demo_account`;
+  await adminSql()`delete from app.app_review_demo_account where retired_at is null`;
   await adminSql()`insert into app.app_review_demo_account (user_id) values (${uid})`;
   return uid;
 }
@@ -156,6 +156,32 @@ Deno.test("review account: a window in the past or the future is not a window (o
   } finally {
     await dropWindow(past);
     await dropWindow(future);
+  }
+});
+
+Deno.test("a RETIRED review account is refused ALWAYS, with a window OPEN: a 403, an audit row, and no actor-bound transaction; retired cannot be undone", DT, async () => {
+  await noWindowsAtAll();
+  resetReviewGateCacheForTests();
+  const uid = await reviewUser("retired");
+  const w = await openWindow("-1 hour", "1 hour");
+  try {
+    await ensureServiceRole();
+    // control: while ACTIVE, the open window lets it through
+    assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200);
+    await adminSql()`update app.app_review_demo_account set retired_at = now() where user_id = ${uid}`;
+    const s1 = freshUuid();
+    const res = await entry(tokenFor(uid, s1));
+    assertEquals(res.status, 403);
+    assertEquals((await res.json()).error.code, "review_account_disabled");
+    const refused = (await auditRows(uid)).filter((r) => r.action === "review_account.session_refused" && r.subject_id === s1);
+    assertEquals(refused.length, 1, "the refusal is audited, the window being open");
+    await assertRejects(() => withOwnership({ uid, role: "authenticated" }, async () => "never reached"), Error); // the database binder refuses it too
+    // a retired account is still a review account, and its row cannot be revived or removed while its Auth user exists
+    assertEquals((await adminSql()`select private.is_demo_account(${uid}::uuid) as d`)[0]!.d, true);
+    await assertRejects(() => adminSql()`update app.app_review_demo_account set retired_at = null where user_id = ${uid}`, Error);
+    await assertRejects(() => adminSql()`delete from app.app_review_demo_account where user_id = ${uid}`, Error);
+  } finally {
+    await dropWindow(w);
   }
 });
 
@@ -336,7 +362,7 @@ Deno.test("the negative cache's bounded corner: an account that becomes the revi
   await createTestUser(uid, `rv-late-${uid.slice(0, 8)}`);
   assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200); // cached as an ordinary account
   await ensureServiceRole();
-  await adminSql()`delete from app.app_review_demo_account`;
+  await adminSql()`delete from app.app_review_demo_account where retired_at is null`;
   await adminSql()`insert into app.app_review_demo_account (user_id) values (${uid})`;
   assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200, "inside the TTL the gate is skipped (documented, bounded)");
   assertEquals((await auditRows(uid)).length, 0);

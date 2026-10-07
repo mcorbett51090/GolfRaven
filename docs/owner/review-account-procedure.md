@@ -17,13 +17,15 @@ Details and the reasoning: `docs/security/review-account-design.md` section 2.
 
 **One review account per Supabase project.** There is exactly one (a unique index), in each project: `gr-staging` for the dry run and `gr-prod` for the real one. Do the whole procedure **twice**, staging first with a staging-only reviewer address, then production. The two accounts, windows and Auth bans are independent.
 
-**Never delete the review-account row to switch it off.** Deleting the row turns the account into an ordinary player: the database stops refusing it a window, a reward is no longer refused, and its tokens keep working. **`close` is the off switch** (and `sync` keeps it off). To REPLACE the account use `retire` (section 6), which bans the old Auth user first.
+**Never delete the review-account row, to switch it off or to replace the account.** Deleting the row turns the account into an ordinary player: the database stops refusing it a window, a reward is no longer refused, and a token issued before any Auth ban keeps working until it expires (a ban does not revoke an issued token). **`close` is the off switch** (and `sync` keeps it off). To REPLACE the account use `retire` (section 6), which keeps the row and marks it retired.
 
-**Before you deploy 0051 to a project**, check that it holds at most one review-account row, because 0051's unique index fails the migration otherwise (and a failed migration is a failed deploy):
+**Before you deploy 0051 to a project**, check that it holds at most one review-account row, because 0051's unique index fails the migration otherwise (and a failed migration is a failed deploy). 0051 also adds `retired_at`, so `retire` exists only after the deploy:
 
 ```sql
 select count(*) as review_accounts from app.app_review_demo_account;   -- must be 0 or 1
--- if it is more than 1: keep the one real reviewer, and for each other row ban its Auth user, then delete the row
+-- if it is more than 1: keep the one real reviewer. For each OTHER row, delete that reviewer's Auth user in the dashboard: the foreign key removes
+-- its row with it, so nothing is left behind to be an ordinary player. (Do not delete only the row, and do not just ban the user: a ban does not revoke
+-- a token already issued.) After 0051 is applied, replace an account with `retire`, never by hand.
 select user_id from app.app_review_demo_account order by user_id;
 ```
 
@@ -104,7 +106,11 @@ bash tools/review-account/review-account.sh retire
 printf '%s\n' "$NEW_REVIEWER_ADDRESS" | bash tools/review-account/review-account.sh provision
 ```
 
-`retire` **bans the old Auth user first** and only then removes its row, so the old account is never an ordinary player with a live token. (Deleting the row by hand and leaving the Auth user alone does exactly that, until its token expires and its refresh token is revoked: do not.) If you cannot run the tool, ban the Auth user in the dashboard before you delete the row.
+`retire` does three things, in this order: **(1) `close`** (it ends every open window); **(2) bans the old Auth user**; **(3) marks the row retired** (`retired_at`). **It never deletes the row.** Why: a ban does not revoke an access token the old account already holds, so for up to that token's life the old account would be an ordinary player if its row went (no window gate, no reward or credit refusal). A retired row keeps the account a review account for every refusal, and the database refuses it on every request and in every window, whether or not one is open. Retired is one-way (the database refuses to clear it), and the row is kept while its Auth user exists; the only way it goes is deleting the Auth user (the foreign key cascades), which you do only when you are sure no token can be live. A retired account does not count as the active one, so `provision` accepts the new address; the retired address can never be provisioned again, and `sync` keeps a retired account's Auth user banned even while a window is open.
+
+In `GOLFRAVEN_REVIEW_AUTH=skip` mode `retire` makes no Auth call: it retires the row in the database (so the account is refused everywhere), **does not claim a ban**, prints `ACTION REQUIRED` telling you to ban the Auth user in the dashboard yourself, and **exits 3**. Do that ban before you relax: until you do, GoTrue can still issue it tokens, which the database refuses on every Edge request but direct PostgREST reads do not see.
+
+If you cannot run the tool at all, do the three steps by hand in this order: end the open windows, ban the Auth user in the dashboard, then `update app.app_review_demo_account set retired_at = now() where user_id = '<id>' and retired_at is null;` as `service_role`.
 
 ## 7. If something goes wrong
 

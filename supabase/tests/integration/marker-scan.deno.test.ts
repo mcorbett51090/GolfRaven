@@ -256,7 +256,7 @@ Deno.test("0051 (review MEDIUM-1): the app-review account's scan, with a qualify
   const r = await freshPlayer("rev"); // the review account
   const n = await freshPlayer("rev-n"); // an ordinary player, the control
   await ensureServiceRole();
-  await adminSql()`delete from app.app_review_demo_account`; // at most ONE review account exists
+  await adminSql()`delete from app.app_review_demo_account where retired_at is null`; // at most ONE review account exists
   await adminSql()`insert into app.app_review_demo_account (user_id) values (${r.uid})`;
   const w = await adminSql()`insert into app.app_review_window (starts_at, ends_at, note) values (now() - interval '1 hour', now() + interval '1 hour', 'marker-scan test') returning id`;
   try {
