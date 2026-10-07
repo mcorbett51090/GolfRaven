@@ -1713,7 +1713,7 @@ DROP POLICY zz15_closed ON app.zz15_t;
 -- (S1.1a gate LOW 2) the conjunct must be the TOP-LEVEL TRAILING AND: text that merely CONTAINS it does not close the window
 CREATE POLICY zz15_initplan ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner');
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_initplan') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: the InitPlan form of the conjunct is clean (control: accepted for a future policy and used by the two alarm policies of 0048; the 118 existing ones keep the direct call, see 17.3)');
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_initplan') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15: the InitPlan form of the conjunct is clean (control: accepted for a future policy, used by the two alarm policies of 0048 and, since 0050, by the 118 that 0047 section 8c closed; the direct call is still accepted too, see 17.3)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_initplan ON app.zz15_t;
 CREATE POLICY zz15_three ON app.zz15_t FOR SELECT TO private_definer USING (owner_id = nullif(current_setting('app.zz15.target', true), '')::uuid AND id > 0 AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
