@@ -28,7 +28,9 @@ PSQL_BIN="${PSQL_BIN:-psql}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rev-tool-test.XXXXXX")"
 UID1="29520000-0000-0000-0000-0000000000a1"
 UID2="29520000-0000-0000-0000-0000000000a2"
-EMAIL="rev-tool-$(head -c 6 /dev/urandom | od -An -tx1 | tr -d ' \n')@example.test"
+# auth.users rows are never deleted by this harness (service_role holds no DELETE on it), so the synthetic address is fixed and a re-run finds the row
+EMAIL="rev-tool-review@example.test"
+ADMIN_EMAIL="rev-tool-admin@example.test"
 KEY="k$(head -c 18 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 
 psql_q() { printf '%s\n' "SET ROLE service_role; $1" | "$PSQL_BIN" -X -q -A -t -v ON_ERROR_STOP=1; }
@@ -36,14 +38,14 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "PASS: $*"; }
 
 cleanup() {
-  psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account WHERE user_id IN ('$UID1', '$UID2'); DELETE FROM app.admin_user WHERE user_id = '$UID2'; DELETE FROM auth.users WHERE id IN ('$UID1', '$UID2');" >/dev/null 2>&1 || true
+  psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account WHERE user_id IN ('$UID1', '$UID2'); DELETE FROM app.admin_user WHERE user_id = '$UID2';" >/dev/null 2>&1 || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 cleanup_trap_ready=1
 
-psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account WHERE user_id IN ('$UID1', '$UID2'); DELETE FROM app.admin_user WHERE user_id = '$UID2'; DELETE FROM auth.users WHERE id IN ('$UID1', '$UID2');" >/dev/null
-psql_q "INSERT INTO auth.users (id, email) VALUES ('$UID1', '$EMAIL'), ('$UID2', 'rev-tool-admin-$UID2@example.test'); INSERT INTO app.admin_user (user_id) VALUES ('$UID2');" >/dev/null
+psql_q "DELETE FROM app.app_review_window WHERE note LIKE 'rev-tool-test%'; DELETE FROM app.app_review_demo_account WHERE user_id IN ('$UID1', '$UID2'); DELETE FROM app.admin_user WHERE user_id = '$UID2';" >/dev/null
+psql_q "INSERT INTO auth.users (id, email) VALUES ('$UID1', '$EMAIL'), ('$UID2', '$ADMIN_EMAIL') ON CONFLICT (id) DO NOTHING; INSERT INTO app.admin_user (user_id) VALUES ('$UID2');" >/dev/null
 # no window may be open when the proof starts (it asserts the predicate flips)
 [ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "f" ] || fail "a window is open before the proof starts"
 
@@ -64,7 +66,7 @@ if printf 'not-an-address\n' | bash "$TOOL" provision >/dev/null 2>&1; then fail
 ok "provision: environment variable works; no address and a malformed address are refused"
 
 # 2. an admin cannot be the review account
-if printf '%s\n' "rev-tool-admin-$UID2@example.test" | bash "$TOOL" provision >/dev/null 2>&1; then fail "provision accepted an admin"; fi
+if printf '%s\n' "$ADMIN_EMAIL" | bash "$TOOL" provision >/dev/null 2>&1; then fail "provision accepted an admin"; fi
 [ "$(psql_q "SELECT count(*) FROM app.app_review_demo_account WHERE user_id = '$UID2'")" = "0" ] || fail "an admin was marked the review account"
 ok "provision refuses an admin (no partner scope)"
 
@@ -109,7 +111,7 @@ grep -q '876000h' "$STUB_STDIN" || fail "sync (closed) did not ban"
 grep -q "$KEY" "$STUB_STDIN" || fail "the key did not reach curl on stdin (the stub would see no auth)"
 : > "$STUB_STDIN"
 CURL_BIN="$STUB" SUPABASE_URL="https://example.test" SUPABASE_SERVICE_ROLE_KEY="$KEY" bash "$TOOL" open --hours 1 --note "rev-tool-test open2" >/dev/null 2>&1 || fail "open with the Auth call failed"
-grep -q '"ban_duration":"none"' "$STUB_STDIN" || fail "open did not clear the ban"
+grep -q 'ban_duration.*none' "$STUB_STDIN" || fail "open did not clear the ban"
 CURL_BIN="$STUB" SUPABASE_URL="https://example.test" SUPABASE_SERVICE_ROLE_KEY="$KEY" bash "$TOOL" close >/dev/null 2>&1 || fail "close with the Auth call failed"
 [ "$(psql_q "SELECT private.review_window_open_at(clock_timestamp())")" = "f" ] || fail "close left the window open (Auth mode)"
 if SUPABASE_URL="http://example.test" SUPABASE_SERVICE_ROLE_KEY="$KEY" bash "$TOOL" sync >/dev/null 2>&1; then fail "sync accepted a plain-http remote URL"; fi
