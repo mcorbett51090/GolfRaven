@@ -1538,3 +1538,12 @@ Two honest limits of the evidence. The Node and Playwright cells overlap on purp
 - **The `fr-CA` strings** are drafted and not reviewed by a native speaker (the same status as the mobile catalogue).
 - **`@simplewebauthn/server`'s options shape** in the fake server was read from the library source in the Deno cache (14.0.3), not produced by running it under node.
 - **CI on a GitHub runner.** The Playwright suite uses the Chromium the existing job installs; that it passes there is `[unverified]` until the first CI run.
+
+### 19.10 Pre-gate follow-up: `Retry-After` exposed, lock documented, re-verification
+
+- **`Retry-After`** is now exposed (19.6): `_shared/partner/cors.ts` adds `Access-Control-Expose-Headers: Retry-After` (only that) to the allowed origin's responses. New cells: the handler unit cell (6 statuses carry it; a foreign origin and no origin do not), the Deno integration assertions (the preflight and the reauth 429), the node contract test, and the Playwright harness cell (the page now reads `retryAfterSeconds = 1800` in Chromium). Three mutants against it (header removed; extra headers exposed; exposed to every origin) are all killed.
+- **Lock** is documented precisely in 19.4 and the README. Behaviour is unchanged; the gate rules on it.
+- **Both harness modes**, sequentially, on a cluster of their own (`PGPORT=5623`, `H2_PGPORT=5624`): `HARNESS_MODE=superuser` and `HARNESS_MODE=restricted` each exit 0, 40 pgTAP files and **4126 tests PASS**, Deno integration **344 passed, 0 failed** (the 20 `partner-session` cells included), function-inventory check OK, service-role lint clean.
+- **Server unit suite** (`@golfraven/rules` vitest with the supabase config): **63 files, 1270 tests** (one more than 18.7: the new CORS cell). apps/partners: vitest **11 files, 295 tests**; Playwright **22 tests**.
+- **The apps/mobile flake (19.7) is load, not code.** `metro-cache-version.test.ts` and `metro-guard.test.ts` alone, with nothing else running from this session and a load average of about 2.5: **2 files, 15 tests pass**; the whole apps/mobile suite then passed too (**65 files, 1967 passed, 6 skipped**). Under a load average of 9 to 15 (other sessions' Postgres clusters) the same tests timed out at 5000 ms.
+- **main** has not moved past `f8a85f7` (`git fetch origin main`, 0 commits ahead), so nothing was merged.
