@@ -15,7 +15,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(177);
+SELECT plan(179);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -591,7 +591,8 @@ SELECT is(pg_temp.pset(:'dk_new'::bytea), 'locked|0', 'PA-21: ... and a SET on a
 ROLLBACK TO SAVEPOINT chg_lock;
 -- after a reset (must_change): the old key is dead, a coworker session cannot set, the email proof can
 SAVEPOINT reset_flow;
-SELECT pg_temp.seed_pin('00000000-0000-0000-0000-1000000000a1', :'dk_ok'::bytea, '{"must_change": true}'::jsonb);
+-- a reset that left stale counters and a stale backoff behind: the SET must clear every one of them (the day count, the consecutive count, next_attempt_at)
+SELECT pg_temp.seed_pin('00000000-0000-0000-0000-1000000000a1', :'dk_ok'::bytea, jsonb_build_object('must_change', true, 'failed_count', 3, 'failed_today', 7, 'failed_day', (clock_timestamp() AT TIME ZONE 'UTC')::date, 'next_attempt_at', clock_timestamp() + interval '1 hour'));
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 RESET ROLE;
@@ -600,10 +601,20 @@ SELECT throws_ok($$SELECT pg_temp.pset('\x44444444444444444444444444444444444444
 SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);
 SELECT is(pg_temp.pchg(:'dk_ok'::bytea, :'dk_new'::bytea), 'must_change|0', 'a CHANGE of a must_change PIN is refused as must_change (use set under the proof)');
 SELECT is(pg_temp.pset(:'dk_new'::bytea, :'salt_b'::bytea), 'ok|0', 'PA-21 / PA-18: with the email proof the SET replaces the reset PIN');
-SELECT is((SELECT must_change::text || ',' || failed_count::text || ',' || failed_today::text FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), 'false,0,0', 'PA-18: the new PIN clears must_change and the counters');
+SELECT is((SELECT must_change::text || ',' || failed_count::text || ',' || failed_today::text || ',' || (next_attempt_at IS NULL)::text FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), 'false,0,0,true', 'PA-18: the new PIN clears must_change, the consecutive and day counters and a stale backoff');
 SELECT is(pg_temp.pv(:'dk_ok'::bytea), 'wrong|0|false', 'PA-18: the pre-reset key is dead');
 SELECT is(pg_temp.pv(:'dk_new'::bytea), 'ok|0|true', 'PA-18: the new key verifies');
 ROLLBACK TO SAVEPOINT reset_flow;
+-- a CHANGE under a correct current key keeps the day count (only a SET after a reset forgives it) and clears the consecutive count
+SAVEPOINT chg_day;
+SELECT pg_temp.seed_pin('00000000-0000-0000-0000-1000000000a1', :'dk_ok'::bytea, jsonb_build_object('failed_count', 2, 'failed_today', 7, 'failed_day', (clock_timestamp() AT TIME ZONE 'UTC')::date));
+SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT is(pg_temp.pchg(:'dk_ok'::bytea, :'dk_new'::bytea), 'ok|0', 'a CHANGE under the correct current key succeeds');
+SELECT is((SELECT failed_count::text || ',' || failed_today::text FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), '0,7', 'PA-18: ... it clears the consecutive count and KEEPS the day count (a change does not forgive the day)');
+ROLLBACK TO SAVEPOINT chg_day;
 -- argument validation (after the prerequisite)
 SAVEPOINT args;
 SELECT pg_temp.seed_step('sx', '{"otp_s": 500}'::jsonb);

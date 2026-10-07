@@ -323,7 +323,7 @@ Deno.test("PA-18 / 0020: wrong keys are returned statuses, so the counters, the 
   const inBackoff = await stepUp(m, "7391");
   assertEquals(inBackoff.status, 429);
   assertEquals(await errCode(inBackoff), "pin_backoff");
-  assert(Number(inBackoff.headers.get("retry-after")) >= 1 && Number(inBackoff.headers.get("retry-after")) <= 30, "Retry-After");
+  assert(Number(inBackoff.headers.get("retry-after")) >= 20 && Number(inBackoff.headers.get("retry-after")) <= 30, "Retry-After is the whole seconds left of the 30 s backoff that the third failure started (not the 1 s floor)");
   assertEquals((await pinRow(m.uid))!.failed_count, 3, "a refused-for-backoff attempt is not counted");
   await clearBackoff(m.uid);
   assertEquals((await wrong()).status, 403); // 4th: 5 minutes
