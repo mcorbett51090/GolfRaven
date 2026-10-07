@@ -56,6 +56,9 @@ INSERT INTO app.profile (user_id, handle) VALUES
   ('eeee0000-0000-0000-0000-0000000000b0', 'edge_ub'),
   ('eeee0000-0000-0000-0000-0000000000d0', 'edge_ud');
 INSERT INTO app.app_review_demo_account (user_id) VALUES ('eeee0000-0000-0000-0000-0000000000d0');
+-- 0051: the review account is DISABLED outside a submission window (private.bind_actor refuses it), and D below is bound as an ordinary actor in several cells, so a window is
+-- open for the length of this file (removed in the cleanup at the end). The disabled state itself is proven in 29a-29f.
+INSERT INTO app.app_review_window (id, starts_at, ends_at, note) VALUES ('eeee0000-0000-0000-0000-00000000f001', now() - interval '1 day', now() + interval '1 day', 'matrix 16 window');
 
 -- Catalog: ONE course with a radius geometry (the matcher cell; edge_system cannot write geometry, so it
 -- has to be seeded). Everything else the importer cells need (backlog rows, a revoked kid, ledger and course
@@ -1510,6 +1513,7 @@ SET ROLE service_role;
 BEGIN;
 SELECT app.release_account_reservations(u) FROM unnest(ARRAY['eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-0000000000d0']::uuid[]) AS u;
 SELECT private.delete_my_data(u) FROM unnest(ARRAY['eeee0000-0000-0000-0000-0000000000a0', 'eeee0000-0000-0000-0000-0000000000b0', 'eeee0000-0000-0000-0000-0000000000d0']::uuid[]) AS u;
+DELETE FROM app.app_review_window WHERE id = 'eeee0000-0000-0000-0000-00000000f001';
 DELETE FROM app.catalog_course WHERE id = 'crs_edge_geo';
 DELETE FROM app.catalog_id_ledger WHERE id = 'crs_edge_geo';
 DELETE FROM app.offer WHERE id IN ('eeee0000-0000-0000-0000-00000000e101', 'eeee0000-0000-0000-0000-00000000e102', 'eeee0000-0000-0000-0000-00000000e103', 'eeee0000-0000-0000-0000-00000000e104');

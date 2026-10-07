@@ -440,7 +440,33 @@ export async function getActorFromRequest(req: Request): Promise<Actor | null> {
   });
   const { data, error } = await client.auth.getUser(token);
   if (error || !data?.user) return null;
+  // 0051: THE one choke point every authenticated Edge Function passes through, so the app-review account's gate lives here. For an ordinary account the gate
+  // answers `not_review` and writes nothing; for the review account it writes ONE audit row per GoTrue session (first request under each new session id, with the
+  // refusal outcome too) and answers `disabled` outside a submission window, which is a 403 and never reaches a handler. The database refuses to bind the account
+  // outside a window as well (private.bind_actor_internal), so a path that skipped this call still fails closed.
+  const verdict = await reviewAccountGate(data.user.id, sessionIdOfAccessToken(token));
+  if (verdict === "disabled") throw new HttpError(403, REVIEW_ACCOUNT_DISABLED_CODE, "this account is not enabled right now");
   return { uid: data.user.id, role: "authenticated" };
+}
+
+/** The 403 code a disabled review account receives (0051). Stable: the mobile app and the runbook name it. */
+export const REVIEW_ACCOUNT_DISABLED_CODE = "review_account_disabled";
+
+/**
+ * 0051: asks the database whether `uid` is the App Store review account and whether a submission window is open, recording the session's audit row on the way
+ * (`private.review_account_gate`: one row per (account, GoTrue session, outcome), committed WITH a refusal because the function returns a status and never raises
+ * over the outcome, the 0020 lesson). Its own short transaction as `edge_system` (the only role holding EXECUTE), run BEFORE any request transaction opens, so it
+ * never holds a second pooled connection from inside one (the hitRateLimitForActor ordering rule). `sessionId` is the `session_id` claim of the already-verified
+ * token; the database canonicalises it or treats anything else as an unknown session.
+ */
+async function reviewAccountGate(uid: string, sessionId: string | null): Promise<"not_review" | "allowed" | "disabled"> {
+  const verdict = await openScopedTx("system", { expectedUid: null }, async (trx) => {
+    const rows = await trx`select private.review_account_gate(${uid}::uuid, ${sessionId}::text) as verdict`;
+    return rows[0]?.verdict;
+  });
+  // anything but the three known answers fails CLOSED (an unexpected value must never read as "fine")
+  if (verdict === "not_review" || verdict === "allowed") return verdict;
+  return "disabled";
 }
 
 // THE SERVICE-ROLE KEY: the two places it is still read (the lint's privileged-file pass allows exactly these two functions, and nothing else).
