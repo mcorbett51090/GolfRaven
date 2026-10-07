@@ -69,6 +69,10 @@ describe("privileged-file pass: must-fail fixtures", () => {
     ["bad/mint-kind-outside.ts", "privileged-mint-scope"],
     ["bad/mint-kind-computed.ts", "privileged-mint-scope"],
     ["bad/mint-scoped-alias.ts", "privileged-mint-scope"],
+    // partner auth S1.2 (PA-13): the partner minter kind and role have the same scope, each with its own caller
+    ["bad/mint-partner-kind-outside.ts", "privileged-mint-scope"],
+    ["bad/mint-partner-kind-wrong-caller.ts", "privileged-mint-scope"],
+    ["bad/mint-partner-role-outside.ts", "privileged-mint-scope"],
   ];
 
   it("has a fixture for every file in bad/ (a fixture nobody asserts on proves nothing)", () => {
@@ -105,7 +109,7 @@ describe("privileged-file pass: must-fail fixtures", () => {
   });
 
   it("each openPool / driver fixture is flagged by exactly ONE finding, so a mutation of just that rule cannot be masked by a neighbouring one", () => {
-    for (const f of ["open-pool-url-arg", "open-pool-param", "open-pool-other-url", "driver-alias", "deno-destructured-env", "computed-member-variable", "computed-destructure", "unsafe-nonliteral", "unsafe-alias", "unsafe-destructured", "eval-call", "dynamic-import", "driver-import-url", "driver-import-twice", "driver-reexport", "deno-current-target", "deno-this-member", "deno-destructure-key", "sql-file", "mint-role-outside", "mint-role-literal", "mint-kind-outside", "mint-kind-computed", "mint-scoped-alias"]) {
+    for (const f of ["open-pool-url-arg", "open-pool-param", "open-pool-other-url", "driver-alias", "deno-destructured-env", "computed-member-variable", "computed-destructure", "unsafe-nonliteral", "unsafe-alias", "unsafe-destructured", "eval-call", "dynamic-import", "driver-import-url", "driver-import-twice", "driver-reexport", "deno-current-target", "deno-this-member", "deno-destructure-key", "sql-file", "mint-role-outside", "mint-role-literal", "mint-kind-outside", "mint-kind-computed", "mint-scoped-alias", "mint-partner-kind-outside", "mint-partner-kind-wrong-caller", "mint-partner-role-outside"]) {
       expect(lintPrivilegedSource(fixture(`bad/${f}.ts`)), f).toHaveLength(1);
     }
   });
@@ -191,6 +195,27 @@ describe("privileged-file pass: PR #34 LOW-1 shapes and the minter scope (edge c
     expect(rulesOf(`${tag} async function openScopedTx() { await t\`set local role edge_signin_minter_x\`; }`)).toContain("privileged-forbidden-role");
     // the three ordinary kinds are unaffected
     expect(rulesOf('declare function openScopedTx(k: string): void; export const a = () => openScopedTx("actor"); export const b = () => openScopedTx("system");')).toEqual([]);
+  });
+
+  it("partner auth S1.2 (PA-13): the partner minter role and kind have the SAME scope as the sign-in minter's, each kind with its OWN caller; edge_partner is an ordinary lane role", () => {
+    const tag = "declare const t: any;";
+    const open = "declare function openScopedTx(k: string): void;";
+    // the minter role: only inside openScopedTx
+    expect(rulesOf(`${tag} async function openScopedTx(kind: string) { await t\`set local role edge_partner_minter\`; }`)).toEqual([]);
+    expect(rulesOf(`${tag} async function withPartnerMint() { await t\`set local role edge_partner_minter\`; }`)).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf('export const R = "EDGE_PARTNER_MINTER";')).toEqual(["privileged-mint-scope"]);
+    // the kind: only inside openScopedTx and withPartnerMint
+    expect(rulesOf(`${open} async function withPartnerMint() { await openScopedTx("partner_mint"); }`)).toEqual([]);
+    expect(rulesOf(`${open} async function withPartnerMints() { await openScopedTx("partner_mint"); }`)).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf(`${open} async function signinEmailProofs() { await openScopedTx("partner_mint"); }`)).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf(`${open} async function withPartnerMint() { await openScopedTx("signin_mint"); }`)).toEqual(["privileged-mint-scope"]);
+    expect(rulesOf(`${open} export const k = "partner_" + "mint";`)).toEqual(["privileged-mint-scope"]);
+    // the lane role is NOT a minter: any function may use the partner KIND (a bound partner transaction); only the literal rule applies
+    expect(rulesOf(`${open} export const a = () => openScopedTx("partner");`)).toEqual([]);
+    expect(rulesOf(`${tag} async function openScopedTx() { await t\`set local role edge_partner\`; }`)).toEqual([]);
+    // a role that merely STARTS with the lane's name is not the lane
+    expect(rulesOf(`${tag} async function openScopedTx() { await t\`set local role edge_partner_x\`; }`)).toContain("privileged-forbidden-role");
+    expect(rulesOf(`${tag} async function openScopedTx() { await t\`set local role edge_partners\`; }`)).toContain("privileged-forbidden-role");
   });
 });
 

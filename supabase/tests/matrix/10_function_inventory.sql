@@ -11,7 +11,7 @@
 -- SECURITY DEFINER function sets `search_path` in `proconfig`.
 
 BEGIN;
-SELECT plan(159);
+SELECT plan(164);
 
 -- S1 restricted-mode fix: this file reads private.function_inventory and
 -- private.definer_policy_allowlist directly (both ENABLE+FORCE RLS,
@@ -839,7 +839,7 @@ FROM (
   FROM fam f
 ) c
 WHERE c.cls IS NULL
-   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY[]::text[] /* end_session_class_functions */)))
+   OR (c.cls NOT IN ('A0', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY['private.partner_whoami_for_partner()', 'private.partner_session_revoke_for_partner()', 'private.partner_session_lock_for_partner()'] /* end_session_class_functions */)))
 UNION ALL
 SELECT '(b) an edge_actor-executable definer outside the *_for_partner family evaluates partner scope: ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -854,7 +854,7 @@ WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f'
   AND p.proname NOT LIKE '%\_for\_partner'
   AND (regexp_replace(p.prosrc, '((?:/\*(?:[^*]|\*+[^*/])*\*+/)|(?:--[^\n]*))|(''(?:[^'']|'''')*'')', ' \2', 'g') ~ '''partner'''
        OR regexp_replace(p.prosrc, '((?:/\*(?:[^*]|\*+[^*/])*\*+/)|(?:--[^\n]*))|(''(?:[^'']|'''')*'')', ' \2', 'g') ~* '\m(actor_binding|partner_binding(_kind|_session)?)\M')
-  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (/* kind_readers */ ARRAY['private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.actor_uid()', 'private.bind_actor_internal(p_uid uuid, p_kind text)', 'private.bind_partner_session(p_token_hash text)', 'private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)', 'private.course_pin_attempt_for_actor(p_facility_id text, p_pin text, p_at timestamp with time zone)', 'private.course_qr_public_key_for_actor(p_kid text, p_purpose text)', 'private.delete_my_data_for_actor()', 'private.export_my_data_for_actor()', 'private.marker_cosignal_attach_for_actor(p_facility_id text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash text, p_qr_kid text, p_pin text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.offline_code_bound_staff()', 'private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)', 'private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)', 'private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)', 'private.partner_authority_revoke_sessions()', 'private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.partner_binding_session()', 'private.partner_challenge_issue_sign_in()', 'private.partner_pin_grant_consume()', 'private.partner_session_mint(p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)', 'private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)', 'private.signin_bound_user(p_who text)', 'private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)'] /* end_kind_readers */)
+  AND (n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')') <> ALL (/* kind_readers */ ARRAY['private.actor_uid()', 'private.bind_actor_internal(p_uid uuid, p_kind text)', 'private.bind_partner_session(p_token_hash text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.partner_binding_session()', 'private.partner_authorize(p_facility_id text, p_trail_id text, p_roles app.partner_role[], p_class text)', 'private.partner_audit_write(p_action text, p_subject_table text, p_subject_id text, p_detail jsonb)', 'private.partner_authority_revoke_sessions()', 'private.partner_pin_grant_consume()', 'private.activate_entitlement_for_actor(p_entitlement_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.activate_offer_code_for_actor(p_code_id uuid, p_device_id uuid, p_token_hash text, p_decision text, p_hold_detail jsonb)', 'private.claim_device_platform_for_actor(p_device_id uuid, p_platform text)', 'private.delete_my_data_for_actor()', 'private.export_my_data_for_actor()', 'private.offline_code_bound_staff()', 'private.offline_code_record_step_for_actor(p_device_id uuid, p_seed_version integer, p_step bigint, p_facility_id text)', 'private.offline_seed_for_actor(p_device_id uuid, p_rotate boolean)', 'private.register_attest_key_for_actor(p_device_id uuid, p_key_id text, p_public_key bytea)', 'private.signin_bound_user(p_who text)', 'private.signin_record_email_proof(p_caller_user_id uuid, p_target_user_id uuid, p_email text, p_provider text, p_provider_sub text, p_session_id uuid)', 'private.course_pin_attempt_for_actor(p_facility_id text, p_pin text, p_at timestamp with time zone)', 'private.course_qr_public_key_for_actor(p_kid text, p_purpose text)', 'private.marker_cosignal_attach_for_actor(p_facility_id text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash text, p_qr_kid text, p_pin text, p_at timestamp with time zone, p_cosignal_grade text, p_cosignal_fix_id text, p_cosignal_evidence_id uuid)', 'private.partner_challenge_issue_sign_in()', 'private.partner_session_mint(p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)', 'private.hit_partner_rate_limit(p_bucket_key text, p_window interval, p_max integer)', 'private.partner_credential_lookup(p_credential_id bytea)', 'private.partner_sign_in_failure_record(p_credential_id bytea)', 'private.partner_reauth_apply(p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)', 'private.partner_reauth_clear()'] /* end_kind_readers */)
 UNION ALL
 SELECT '(d) a *_for_partner function is EXECUTE-able by edge_actor, edge_system or PUBLIC (the partner lane is edge_partner alone): ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -885,8 +885,9 @@ WITH tails(tail) AS (
   FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE pol.polroles = ARRAY[(SELECT r.oid FROM pg_roles r WHERE r.rolname = 'private_definer')]
 ), win AS (
-  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e LIKE '%current_setting(%'
-    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%'))
+  SELECT * FROM exprs x WHERE x.e IS NOT NULL AND (x.e ~* '\mcurrent_setting\s*\(' OR x.e ~* '\mpg_settings\M'
+    OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = x.poloid AND d.refclassid = 'pg_proc'::regclass
+      AND (CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\mcurrent_setting\s*\(' OR CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\mpg_settings\M')))
 ), trail AS (
   SELECT w.nspname, w.relname, w.polname, w.part, left(w.e, length(w.e) - length(t.tail)) AS prefix
   FROM win w JOIN tails t ON right(w.e, length(t.tail)) = t.tail
@@ -1173,9 +1174,10 @@ $$;
 SELECT pass('every function''s actual edge_partner and edge_partner_minter EXECUTE grants match private.function_inventory (0047)');
 SELECT is(
   (SELECT array_agg(function_name::text ORDER BY function_name::text) FROM private.function_inventory WHERE expected_edge_partner),
-  ARRAY['bind_partner_session', 'partner_binding', 'partner_binding_kind'],
-  'edge_partner executes EXACTLY the binder and the two read-only binding helpers (4.3)');
-SELECT is((SELECT array_agg(function_name::text ORDER BY function_name::text) FROM private.function_inventory WHERE expected_edge_partner_minter), ARRAY['partner_challenge_issue_sign_in', 'partner_session_mint'], 'edge_partner_minter executes exactly the two mint functions of 0048 (S1.1b)');
+  ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_binding', 'partner_binding_kind', 'partner_session_lock_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
+        'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_whoami_for_partner'],
+  'edge_partner executes EXACTLY the binder, the two read-only binding helpers (4.3), the rate-limit twin and the seven _for_partner definers of 0049 (S1.2)');
+SELECT is((SELECT array_agg(function_name::text ORDER BY function_name::text) FROM private.function_inventory WHERE expected_edge_partner_minter), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'], 'edge_partner_minter executes exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2)');
 SELECT tests.clear_actor();
 
 -- ---- check 9, the 0047 roles ----
@@ -1678,14 +1680,11 @@ END
 $z$;
 REVOKE EXECUTE ON FUNCTION private.zz_e_ok_for_partner() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.zz_e_ok_for_partner() TO edge_partner;
-CREATE FUNCTION private.hit_partner_rate_limit(p_key text, p_window interval, p_max int) RETURNS boolean LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $z$ SELECT true $z$;
-REVOKE EXECUTE ON FUNCTION private.hit_partner_rate_limit(text, interval, int) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION private.hit_partner_rate_limit(text, interval, int) TO edge_partner;
+-- (S1.2, 0049: the real private.hit_partner_rate_limit(text, interval, integer) exists and is granted to edge_partner, so it is the control; the planted look-alike this cell used before 0049 would collide with it)
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v LIKE '(e)%') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): a *_for_partner function and hit_partner_rate_limit are allowed on edge_partner (controls)');
+SELECT is((SELECT bool_or(v LIKE '(e)%') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): a *_for_partner function and the real hit_partner_rate_limit are allowed on edge_partner (controls)');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_e_ok_for_partner();
-DROP FUNCTION private.hit_partner_rate_limit(text, interval, int);
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_14(), NULL::text[], 'check 14: clean again after every fixture function is dropped');
 SELECT tests.clear_actor();
@@ -1792,6 +1791,41 @@ SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_upd_ok') FROM unnest(pg_t
 SELECT is(pg_temp.edge_check_15() IS NULL OR cardinality(pg_temp.edge_check_15()) = 0, true, 'check 15: and nothing else in the schema is open (the direct and the InitPlan forms are both accepted)');
 SELECT tests.clear_actor();
 DROP POLICY zz15_upd_ok ON app.zz15_t;
+-- the check-15 follow-up (S1.2): a window is recognised from the function's DEPARSED definition (pg_get_functiondef), not from prosrc, and pg_settings counts as a reading of settings
+-- W3: a BEGIN ATOMIC wrapper (its prosrc is empty: the body lives in prosqlbody, so a prosrc scan never saw it)
+CREATE FUNCTION private.zz15_atomic() RETURNS text LANGUAGE sql STABLE BEGIN ATOMIC SELECT nullif(current_setting('app.zz15.atomic', true), ''); END;
+CREATE POLICY zz15_atomic ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_atomic());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_atomic') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL (W3): a policy whose BEGIN ATOMIC wrapper function reads the setting, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_atomic ON app.zz15_t;
+CREATE POLICY zz15_atomic_ok ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_atomic() AND private.partner_binding_kind() IS DISTINCT FROM 'partner');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_atomic_ok') FROM unnest(pg_temp.edge_check_15()) v), NULL, 'check 15 (W3): the same BEGIN ATOMIC wrapper policy WITH the conjunct is clean (control)');
+SELECT tests.clear_actor();
+DROP POLICY zz15_atomic_ok ON app.zz15_t;
+DROP FUNCTION private.zz15_atomic();
+-- W4: a space between the function name and its parenthesis in the wrapper source (the old `ILIKE '%current_setting(%'` missed it)
+CREATE FUNCTION private.zz15_space() RETURNS text LANGUAGE sql STABLE AS $z$ SELECT nullif(current_setting ('app.zz15.space', true), '') $z$;
+CREATE POLICY zz15_space ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_space());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_space') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL (W4): a wrapper whose source writes current_setting ( with a space, no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_space ON app.zz15_t;
+DROP FUNCTION private.zz15_space();
+-- pg_settings: reading the setting through the view is a window just the same (policy text, then a wrapper)
+CREATE POLICY zz15_pgs ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = (SELECT s.setting FROM pg_settings s WHERE s.name = 'app.zz15.pgs'));
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_pgs') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: a private_definer policy whose own text reads pg_settings, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_pgs ON app.zz15_t;
+CREATE FUNCTION private.zz15_pgs() RETURNS text LANGUAGE sql STABLE AS $z$ SELECT s.setting FROM pg_settings s WHERE s.name = 'app.zz15.pgsw' $z$;
+CREATE POLICY zz15_pgs_w ON app.zz15_t FOR SELECT TO private_definer USING (owner_id::text = private.zz15_pgs());
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is((SELECT bool_or(v LIKE '(15)%app.zz15_t.zz15_pgs_w') FROM unnest(pg_temp.edge_check_15()) v), true, 'check 15 MUST FAIL: a wrapper function that reads pg_settings, with no partner conjunct');
+SELECT tests.clear_actor();
+DROP POLICY zz15_pgs_w ON app.zz15_t;
+DROP FUNCTION private.zz15_pgs();
 DROP TABLE app.zz15_t;
 
 SELECT * FROM finish();

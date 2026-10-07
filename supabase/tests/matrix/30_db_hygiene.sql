@@ -1,4 +1,4 @@
--- 27_db_hygiene.sql
+-- 30_db_hygiene.sql
 -- 0050_db_hygiene.sql: (1) the six batched purge definers take their batch once (S1.1b gate L-4) and kept everything else; (2) the InitPlan form of the partner-binding conjunct;
 -- (3) the S2a gate NIT: the pepper epoch table refuses a future-dated rotation, and the previous-pepper selection is pinned to max(effective_from).
 -- The timing proof under STALE planner statistics cannot be a pgTAP cell (VACUUM cannot run inside a transaction): it is the Deno cell "0050: with STALE planner statistics" in
