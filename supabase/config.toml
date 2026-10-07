@@ -41,3 +41,10 @@ enabled = true
 # `security_invoker = true` (03_views_and_rpc.sql's own check).
 schemas = ["api"]
 extra_search_path = ["public"]
+
+[functions.partner-session]
+# partner auth S1.2 (docs/security/partner-auth-design.md 4.6): the partner session token travels in the Authorization header as `Bearer gr_ps_...`, which is NOT a Supabase JWT, so the gateway's own
+# JWT check must be off for this function: with it on, every partner request would be refused before it reached the function. A mistakenly ENABLED gateway check fails closed. The function
+# authenticates every session route itself (the `gr_ps_` bearer, hashed, bound in the database by private.bind_partner_session); the two pre-auth routes (options, verify) are protected by the
+# exact-origin refusal, the exact media type and the per-credential failure cooldown, not by the gateway. [unverified: the hosted gateway honours a per-function setting; design 15.3 R3]
+verify_jwt = false
