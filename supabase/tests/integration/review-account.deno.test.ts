@@ -9,12 +9,15 @@
 //   3. the window ENDING (its end moves to the past) disables the very next request;
 //   4. an ordinary account is never audited and never refused, in or out of a window;
 //   5. the database backstop: `withOwnership` for a disabled review account fails at the binder even if a caller skipped the gate;
-//   6. the audit rows carry no email, no token and no address.
+//   6. the audit rows carry no email, no token and no address;
+//   7. FAIL CLOSED (review LOW-2 / LOW-3): when the gate cannot read the window, or cannot write the audit row, the review account's request is refused with a server error and NEVER let through,
+//      while an ordinary account is unaffected;
+//   8. the gate's overhead for ordinary accounts (review LOW-4): measured with and without the in-process negative cache; the review account is asked on EVERY request, never cached.
 // The reward 403 for the review account (inside a window) is rewards-activate.deno.test.ts.
 
 import { assert, assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { adminSql, createTestUser, ensureServiceRole, freshUuid } from "./_helpers.ts";
-import { getActorFromRequest, withOwnership } from "../../functions/_shared/privileged.ts";
+import { adminSql, createTestUser, ensureServiceRole, freshUuid, rawOwnerSql } from "./_helpers.ts";
+import { getActorFromRequest, resetReviewGateCacheForTests, reviewGateDbCallsForTests, withOwnership } from "../../functions/_shared/privileged.ts";
 import { errorResponse, handleRequest, HttpError } from "../../functions/_shared/http.ts";
 
 const DT = { sanitizeOps: false, sanitizeResources: false };
@@ -206,6 +209,117 @@ Deno.test("an HttpError from the gate is the 403 the entrypoints return (code is
   assert(err instanceof HttpError);
   assertEquals((err as HttpError).status, 403);
   assertEquals((err as HttpError).code, "review_account_disabled");
+});
+
+Deno.test("LOW-3: when the audit row cannot be written, the review account is refused (a server error, never a pass, in or out of a window); an ordinary account is unaffected", DT, async () => {
+  await noWindowsAtAll();
+  resetReviewGateCacheForTests();
+  const uid = await reviewUser("auditfail");
+  const plain = freshUuid();
+  await createTestUser(plain, `rv-plain2-${plain.slice(0, 8)}`);
+  const owner = rawOwnerSql();
+  // a trigger the OWNER plants (the audit_log insert-only trigger is untouched): every review-account audit INSERT fails
+  await owner.unsafe(`create function public.zz_review_audit_fail() returns trigger language plpgsql as $f$ begin if new.action like 'review_account.%' then raise exception 'forced audit failure' using errcode = 'XX000'; end if; return new; end $f$`);
+  await owner.unsafe(`create trigger zz_review_audit_fail before insert on app.audit_log for each row execute function public.zz_review_audit_fail()`);
+  const w = await openWindow("-1 hour", "1 hour");
+  try {
+    for (const label of ["inside a window", "outside every window"]) {
+      if (label === "outside every window") await dropWindow(w);
+      const res = await entry(tokenFor(uid, freshUuid()));
+      assert(res.status >= 500, `${label}: a failed audit write must not become ${res.status}`);
+      assertEquals((await auditRows(uid)).length, 0, `${label}: and nothing was recorded`);
+    }
+    assertEquals((await entry(tokenFor(plain, freshUuid()))).status, 200, "an ordinary account never reaches the audit write");
+  } finally {
+    await owner.unsafe(`drop trigger if exists zz_review_audit_fail on app.audit_log`);
+    await owner.unsafe(`drop function if exists public.zz_review_audit_fail()`);
+    await dropWindow(w);
+  }
+  // control: with the trigger gone the same request is audited and answered normally
+  const w2 = await openWindow("-1 hour", "1 hour");
+  try {
+    assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200);
+    assertEquals((await auditRows(uid)).length, 1);
+  } finally {
+    await dropWindow(w2);
+  }
+});
+
+Deno.test("LOW-2: when the gate cannot read the window (a lock held past lock_timeout), the review account gets a server error, never a pass; an ordinary account is unaffected", DT, async () => {
+  await noWindowsAtAll();
+  resetReviewGateCacheForTests();
+  const uid = await reviewUser("lockfail");
+  const plain = freshUuid();
+  await createTestUser(plain, `rv-plain3-${plain.slice(0, 8)}`);
+  const w = await openWindow("-1 hour", "1 hour");
+  try {
+    await ensureServiceRole();
+    // a second connection holds the window table: the gate's read waits, then fails on lock_timeout (5 s)
+    let reviewStatus = 0;
+    let plainStatus = 0;
+    await adminSql().begin(async (tx) => {
+      await tx`lock table app.app_review_window in access exclusive mode`;
+      plainStatus = (await entry(tokenFor(plain, freshUuid()))).status;
+      reviewStatus = (await entry(tokenFor(uid, freshUuid()))).status;
+    });
+    assertEquals(plainStatus, 200, "an ordinary account never reads the window");
+    assert(reviewStatus >= 500, `the review account must be refused when the window cannot be read, got ${reviewStatus}`);
+    assertEquals((await auditRows(uid)).length, 0);
+  } finally {
+    await dropWindow(w);
+  }
+});
+
+Deno.test("LOW-4: the gate costs one transaction per ordinary account per 30 s, not one per request; the review account is asked on EVERY request; the numbers are logged", DT, async () => {
+  await noWindowsAtAll();
+  const plain = freshUuid();
+  await createTestUser(plain, `rv-plain4-${plain.slice(0, 8)}`);
+  const N = 100;
+  const tok = tokenFor(plain, freshUuid());
+  const timeIt = async (reset: boolean): Promise<{ ms: number; calls: number }> => {
+    resetReviewGateCacheForTests();
+    const c0 = reviewGateDbCallsForTests();
+    const t0 = performance.now();
+    for (let i = 0; i < N; i++) {
+      if (reset) resetReviewGateCacheForTests();
+      assertEquals((await entry(tok)).status, 200);
+    }
+    return { ms: performance.now() - t0, calls: reviewGateDbCallsForTests() - c0 };
+  };
+  await timeIt(false); // warm the pools
+  const uncached = await timeIt(true);
+  const cached = await timeIt(false);
+  console.log(`review-gate overhead, ${N} authenticated requests of an ordinary account (auth stub on loopback, unix-socket database): WITHOUT the negative cache ${(uncached.ms / N).toFixed(2)} ms/request (${uncached.calls} gate transactions); WITH it ${(cached.ms / N).toFixed(2)} ms/request (${cached.calls} gate transaction)`);
+  assertEquals(uncached.calls, N);
+  assertEquals(cached.calls, 1, "one gate transaction serves the whole burst of an ordinary account");
+  // the review account is NEVER cached: every request asks (and is audited per session)
+  const rv = await reviewUser("nocache");
+  const w = await openWindow("-1 hour", "1 hour");
+  try {
+    const c0 = reviewGateDbCallsForTests();
+    const sid = freshUuid();
+    for (let i = 0; i < 5; i++) assertEquals((await entry(tokenFor(rv, sid))).status, 200);
+    assertEquals(reviewGateDbCallsForTests() - c0, 5, "the review account is asked on every request");
+    assertEquals((await auditRows(rv)).filter((r) => r.action === "review_account.session_allowed").length, 1, "and still audited once per session");
+  } finally {
+    await dropWindow(w);
+  }
+});
+
+Deno.test("the negative cache's bounded corner: an account that becomes the review account inside the TTL is skipped by the gate but NOT by the database (the binder refuses it outside a window); a reset closes the corner", DT, async () => {
+  await noWindowsAtAll();
+  resetReviewGateCacheForTests();
+  const uid = freshUuid();
+  await createTestUser(uid, `rv-late-${uid.slice(0, 8)}`);
+  assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200); // cached as an ordinary account
+  await ensureServiceRole();
+  await adminSql()`delete from app.app_review_demo_account`;
+  await adminSql()`insert into app.app_review_demo_account (user_id) values (${uid})`;
+  assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 200, "inside the TTL the gate is skipped (documented, bounded)");
+  assertEquals((await auditRows(uid)).length, 0);
+  await assertRejects(() => withOwnership({ uid, role: "authenticated" }, async () => "x"), Error); // ...but the database still refuses it outside a window
+  resetReviewGateCacheForTests();
+  assertEquals((await entry(tokenFor(uid, freshUuid()))).status, 403, "with the cache empty the gate applies at once");
 });
 
 Deno.test({ name: "teardown: stop the Auth stub and restore the environment", sanitizeOps: false, sanitizeResources: false, fn: async () => {

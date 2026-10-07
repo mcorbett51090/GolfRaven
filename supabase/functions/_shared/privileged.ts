@@ -513,13 +513,43 @@ export const REVIEW_ACCOUNT_DISABLED_CODE = "review_account_disabled";
  * token; the database canonicalises it or treats anything else as an unknown session.
  */
 async function reviewAccountGate(uid: string, sessionId: string | null): Promise<"not_review" | "allowed" | "disabled"> {
+  // The overhead of the gate is one short `edge_system` transaction (about eight statements: begin, role, three timeouts, the role check, the call, commit), which for EVERY authenticated request
+  // is too much to pay to learn that the caller is an ordinary player. So the answer "not a review account" (and ONLY that answer) is remembered in this process for REVIEW_GATE_NEGATIVE_TTL_MS:
+  //   - `allowed` and `disabled` are NEVER cached: the review account is asked on every request (a window's end is exact, and every session is audited);
+  //   - what a stale `not_review` can do is bounded: it only matters for an account that BECAME the review account less than the TTL ago (provisioning marks a fresh, banned account, which has
+  //     made no request, so this is the --adopt corner only) and it costs at most that account's first-session audit row; the database backstop (private.bind_actor_internal) does not read this cache
+  //     and refuses the account outside a window regardless;
+  //   - a cached entry never outlives the process, and the map is bounded (cleared when full).
+  const now = Date.now();
+  const cachedUntil = reviewGateNegativeCache.get(uid);
+  if (cachedUntil !== undefined && cachedUntil > now) return "not_review";
+  reviewGateDbCalls += 1;
   const verdict = await openScopedTx("system", { expectedUid: null }, async (trx) => {
     const rows = await trx`select private.review_account_gate(${uid}::uuid, ${sessionId}::text) as verdict`;
     return rows[0]?.verdict;
   });
   // anything but the three known answers fails CLOSED (an unexpected value must never read as "fine")
-  if (verdict === "not_review" || verdict === "allowed") return verdict;
+  if (verdict === "not_review" || verdict === "allowed") {
+    if (verdict === "not_review") {
+      if (reviewGateNegativeCache.size >= REVIEW_GATE_NEGATIVE_MAX) reviewGateNegativeCache.clear();
+      reviewGateNegativeCache.set(uid, now + REVIEW_GATE_NEGATIVE_TTL_MS);
+    }
+    return verdict;
+  }
   return "disabled";
+}
+
+const REVIEW_GATE_NEGATIVE_TTL_MS = 30_000;
+const REVIEW_GATE_NEGATIVE_MAX = 5_000;
+const reviewGateNegativeCache = new Map<string, number>();
+let reviewGateDbCalls = 0;
+
+/** Test hooks (the integration suite measures the gate's overhead with and without the negative cache, and starts every case from an empty one). */
+export function resetReviewGateCacheForTests(): void {
+  reviewGateNegativeCache.clear();
+}
+export function reviewGateDbCallsForTests(): number {
+  return reviewGateDbCalls;
 }
 
 // THE SERVICE-ROLE KEY: the two places it is still read (the lint's privileged-file pass allows exactly these two functions, and nothing else).
