@@ -10,5 +10,6 @@ import { getAssertion, type GetAssertionDeps } from "../webauthn/assertion";
 export async function signInWithPasskey(api: PartnerApi, webauthn: GetAssertionDeps, signal?: AbortSignal): Promise<SessionGrant> {
   const challenge = await api.signInOptions();
   const credential = await getAssertion(webauthn, challenge.options, signal);
-  return await api.verify({ challengeToken: challenge.challengeToken, credential });
+  // the signal is for verify's CANCEL handling (a session opened by a cancelled sign-in is revoked, not held); it does not abort the request (see VerifyOptions)
+  return await api.verify({ challengeToken: challenge.challengeToken, credential }, signal === undefined ? {} : { signal });
 }

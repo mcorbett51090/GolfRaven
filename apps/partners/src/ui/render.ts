@@ -101,8 +101,9 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
         "div",
         { class: "actions" },
         h("button", { type: "button", disabled: busy, "data-testid": "refresh", onclick: () => void controller.refresh() }, t("home.refresh")),
-        h("button", { type: "button", disabled: busy, "data-testid": "lock", onclick: () => void controller.lock() }, t("home.lock")),
-        h("button", { type: "button", class: "danger", disabled: busy, "data-testid": "sign-out", onclick: () => void controller.signOut() }, t("home.signOut")),
+        // Lock and Sign-out are NEVER disabled by a busy refresh (a refresh that never answers must not stand between a person and the lock); each takes effect at once
+        h("button", { type: "button", "data-testid": "lock", onclick: () => void controller.lock() }, t("home.lock")),
+        h("button", { type: "button", class: "danger", "data-testid": "sign-out", onclick: () => void controller.signOut() }, t("home.signOut")),
       ),
       h("p", { class: "muted" }, t("home.lock.hint")),
       h("p", { class: "muted" }, t("home.reloadNote")),
@@ -125,7 +126,7 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
       heading,
       notice(state.notice),
       h("p", {}, t("signIn.lead")),
-      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", "data-testid": "sign-in", onclick: () => void controller.signIn() }, t("signIn.button"))),
+      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", disabled: state.retryUntilMs !== undefined && Date.now() < state.retryUntilMs, "data-testid": "sign-in", onclick: () => void controller.signIn() }, t("signIn.button"))),
     );
   }
 

@@ -43,7 +43,7 @@ describe("sign-in against the real handler", () => {
     await w.api.session();
     await w.api.lock();
     const logged = w.server.log.filter((r) => r.method !== "OPTIONS");
-    expect(logged.map((r) => `${r.method} ${r.path.split("/").pop()}`)).toEqual(["POST options", "POST verify", "GET session", "POST lock"]);
+    expect(logged.map((r) => `${r.method} ${r.path.split("/").pop()}`)).toEqual(["POST options", "POST verify", "GET session", "POST sign-out"]);
     for (const r of logged) {
       expect(r.contentType, r.path).toBe("application/json");
       expect(r.origin, r.path).toBe(PAGE_ORIGIN);
@@ -143,12 +143,17 @@ describe("session routes against the real handler", () => {
     expect(raw.status).toBe(401);
   });
 
-  it("lock tells the server, wipes the client, and leaves the server session alive (it ends by idle expiry; sign-out is the revoke)", async () => {
+  it("lock REVOKES the session on the real handler (design 19.4 ruling): the client wipes, the server marks it revoked, and the OLD token then gets the uniform 401", async () => {
     const w = await signedIn();
+    const token = w.server.issuedTokens[0]!;
     await w.api.lock();
-    expect(w.server.state.lockCalls).toBe(1);
+    expect(w.server.state.lockCalls).toBe(0); // the non-revoking `lock` route is no longer called
+    expect(w.server.state.signOutCalls).toBe(1);
     expect(w.api.hasSession()).toBe(false);
-    expect(w.server.state.revokedSessions.size).toBe(0);
+    expect(w.server.state.revokedSessions.size).toBe(1);
+    expect(w.server.sessions()).toEqual([]);
+    const raw = await w.server.handler(new Request("https://api.example.test/functions/v1/partner-session/session", { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } }));
+    expect(raw.status).toBe(401);
     // with nothing held the client makes no further request
     const before = w.server.log.length;
     await apiErr(w.api.session());

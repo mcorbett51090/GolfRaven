@@ -7,6 +7,7 @@
 
 import { createPartnerApi } from "./api/client";
 import { createController } from "./app/controller";
+import { installPageLifecycle } from "./app/lifecycle";
 import { LOCALES, resolveLocale, type Locale } from "./i18n";
 import { render } from "./ui/render";
 
@@ -35,4 +36,5 @@ function draw(): void {
 }
 
 controller.subscribe(draw);
+installPageLifecycle(window, api, controller);
 draw();

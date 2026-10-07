@@ -16,14 +16,42 @@
  *
  * ERRORS are `PartnerApiError` values with a closed `kind` (see errors.ts). A 401 on an authenticated call means the
  * session is dead: the token is wiped here, before the caller sees the error, and listeners are told.
+ *
+ * ENDING A SESSION IS IMMEDIATE (threat model: a shared shop iPad). `signOut()` and `lock()` copy the token into a local, wipe
+ * it and tell the listeners (the screen goes to sign-in) BEFORE a byte is sent, then send with the copy and drop the copy as
+ * soon as `fetch` has been called, so a request that never answers neither keeps the screen up nor keeps the token in memory.
+ * Every request carries a timeout (REQUEST_TIMEOUT_MS), and a wipe aborts every authenticated request still in flight.
+ * `lock()` REVOKES the session (it is a sign-out with the "locked" wording): a copied-out token is dead at once, not at its idle
+ * expiry (design 19.4).
+ *
+ * THE BEARER GOES ONLY TO PARTNER FUNCTIONS: `call()` refuses any function name that is not in `partner-functions.json`, the
+ * same list the build turns into the CSP's `connect-src` entries.
  */
 
 import { kindForStatus, parseRetryAfter, PartnerApiError } from "./errors";
+import PARTNER_FUNCTION_LIST from "./partner-functions.json";
 import type { AssertionJson, ChallengeResponse, ReauthResult, SessionGrant, WhoAmI } from "./types";
 
 export const SESSION_FUNCTION = "partner-session";
-/** `gr_ps_` + 43 base64url characters: the shape the server issues (token.ts) and accepts. */
-const TOKEN_RE = /^gr_ps_[A-Za-z0-9_-]{43}$/;
+/** The partner functions this page may talk to (and may send the bearer to). One list, read by the client here and by scripts/lib/csp.mjs for `connect-src`. */
+export const PARTNER_FUNCTIONS: readonly string[] = PARTNER_FUNCTION_LIST;
+/** Every request is cut off after this long (a request that never answers must not pin a screen or a token). */
+export const REQUEST_TIMEOUT_MS = 15_000;
+const TOKEN_PREFIX = "gr_ps_";
+/**
+ * `gr_ps_` + 43 base64url characters: the shape the server issues (token.ts) and accepts. Checked WITHOUT a regular expression on purpose: V8 keeps the input
+ * of the last successful regexp match alive in the realm (`regexp_last_match_info`), so `TOKEN_RE.test(token)` leaves a copy of a live token in the heap, out of
+ * reach of every wipe, until some later regexp happens to overwrite it. (Found by the Playwright heap check on a cancelled or failed sign-in, where none did.)
+ */
+function isIssuedToken(v: string): boolean {
+  if (v.length !== TOKEN_PREFIX.length + 43 || !v.startsWith(TOKEN_PREFIX)) return false;
+  for (let i = TOKEN_PREFIX.length; i < v.length; i += 1) {
+    const c = v.charCodeAt(i);
+    const ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 45 || c === 95;
+    if (!ok) return false;
+  }
+  return true;
+}
 const ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
 export type SessionEndReason = "signed-out" | "locked" | "expired" | "forgotten";
@@ -34,6 +62,24 @@ export interface PartnerApiConfig {
   /** Injected for tests. The default is the global `fetch`, looked up at call time. */
   readonly fetch?: typeof fetch;
   readonly nowMs?: () => number;
+  /** The partner functions `call()` may reach. Default: PARTNER_FUNCTIONS. Injected for tests only. */
+  readonly functions?: readonly string[];
+  /** Per-request timeout. Default: REQUEST_TIMEOUT_MS. Injected for tests only. */
+  readonly timeoutMs?: number;
+}
+
+export interface EndOptions {
+  /** `fetch(..., { keepalive: true })`: the request may outlive the page (a page that is going away). */
+  readonly keepalive?: boolean;
+}
+
+export interface VerifyOptions {
+  /**
+   * The sign-in's cancel signal. It is NOT given to the request: a verify that is already on the wire may have created a session whose token only
+   * the response carries, so cancelling it would orphan that session. Instead, if the signal is aborted by the time the response arrives, the new
+   * token is revoked with a copy and never held, and verify rejects with kind "aborted".
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface PartnerApi {
@@ -41,13 +87,16 @@ export interface PartnerApi {
   /** `POST options`: a fresh sign-in challenge. */
   signInOptions(): Promise<ChallengeResponse>;
   /** `POST verify`: trades the assertion for a session. The token is kept inside the client and is NOT returned. */
-  verify(input: { challengeToken: string; credential: AssertionJson }): Promise<SessionGrant>;
+  verify(input: { challengeToken: string; credential: AssertionJson }, opts?: VerifyOptions): Promise<SessionGrant>;
   /** `GET session`: who am I (PEEK: does not extend the idle timer). */
-  session(): Promise<WhoAmI>;
-  /** `POST sign-out`: revokes the session on the server. The token is wiped whether or not the request succeeds. */
-  signOut(): Promise<void>;
-  /** `POST lock`: clears every step-up grant on the server, then wipes the token (a locked screen needs a fresh passkey tap). The token is wiped whether or not the request succeeds. */
-  lock(): Promise<void>;
+  session(signal?: AbortSignal): Promise<WhoAmI>;
+  /** `POST sign-out`: revokes the session on the server. The token is wiped (and the listeners told) BEFORE the request is sent, and the request uses a copy. */
+  signOut(opts?: EndOptions): Promise<void>;
+  /**
+   * Lock: wipes the token and tells the listeners at once, then REVOKES the session with `POST sign-out` (design 19.4: lock must revoke, so a token copied
+   * out of the page is dead immediately). The wording differs from sign-out (the reason is "locked"); the wire request is the same.
+   */
+  lock(opts?: EndOptions): Promise<void>;
   /** `POST reauth/options`. */
   reauthOptions(): Promise<ChallengeResponse>;
   /** `POST reauth`: a fresh passkey assertion by the session's own person. */
@@ -107,25 +156,65 @@ function parseWhoAmI(data: unknown, status: number): WhoAmI {
   };
 }
 
+/** The signal of one request: the timeout, plus the caller's and the session's signals when there are any. Falls back where `AbortSignal.timeout` / `.any` are missing (older Safari). */
+function requestSignal(timeoutMs: number, others: ReadonlyArray<AbortSignal | undefined>): AbortSignal {
+  const signals: AbortSignal[] = [];
+  if (typeof AbortSignal.timeout === "function") signals.push(AbortSignal.timeout(timeoutMs));
+  else {
+    const c = new AbortController();
+    setTimeout(() => c.abort(new DOMException("request timed out", "TimeoutError")), timeoutMs);
+    signals.push(c.signal);
+  }
+  for (const o of others) if (o !== undefined) signals.push(o);
+  if (signals.length === 1) return signals[0] as AbortSignal;
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
+  const merged = new AbortController();
+  for (const sig of signals) {
+    if (sig.aborted) {
+      merged.abort(sig.reason);
+      break;
+    }
+    sig.addEventListener("abort", () => merged.abort(sig.reason), { once: true });
+  }
+  return merged.signal;
+}
+
 export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
   const base = config.baseUrl.replace(/\/+$/, "");
   const nowMs = config.nowMs ?? (() => Date.now());
+  const timeoutMs = config.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const allowedFunctions = config.functions ?? PARTNER_FUNCTIONS;
   // THE ONLY PLACE THE TOKEN IS HELD.
   let token: string | null = null;
+  /** Changes whenever a token is stored or wiped, so a late answer can tell whether the session it was sent under is still the current one. */
+  let epoch = 0;
   const listeners = new Set<(reason: SessionEndReason) => void>();
+  /** Authenticated requests in flight under the CURRENT token: a wipe aborts them. */
+  const inflight = new Set<AbortController>();
 
   function wipe(reason: SessionEndReason): void {
     const had = token !== null;
     token = null;
-    if (had) for (const l of [...listeners]) l(reason);
+    if (!had) return;
+    epoch += 1;
+    for (const c of [...inflight]) c.abort();
+    inflight.clear();
+    for (const l of [...listeners]) {
+      try {
+        l(reason);
+      } catch {
+        // a listener's failure must not stop the others, nor the request that follows the wipe
+      }
+    }
   }
 
-  async function send(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body: unknown, authed: boolean): Promise<{ status: number; data: unknown }> {
+  /**
+   * Starts one request and returns the pending response. NOT async on purpose: when it returns, nothing in this module's frames references the
+   * bearer's header any more (the caller drops its own copy), so the page holds no copy of a token whose request is still hanging.
+   */
+  function dispatch(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body: unknown, bearer: string | null, signal: AbortSignal, keepalive: boolean): Promise<Response> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (authed) {
-      if (token === null) throw new PartnerApiError("unauthenticated");
-      headers["Authorization"] = `Bearer ${token}`;
-    }
+    if (bearer !== null) headers["Authorization"] = `Bearer ${bearer}`;
     const init: RequestInit = {
       method,
       headers,
@@ -134,11 +223,18 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
       cache: "no-store",
       redirect: "error",
       referrerPolicy: "no-referrer",
+      signal,
     };
+    if (keepalive) init.keepalive = true;
     if (method !== "GET") init.body = JSON.stringify(body ?? {});
+    return (config.fetch ?? fetch)(`${base}/${fn}/${route}`, init);
+  }
+
+  /** Reads the response of a dispatched request into `{ status, data }` or throws the typed error. `sessionEpoch`: the session a 401 may end (null: none). */
+  async function finish(pending: Promise<Response>, sessionEpoch: number | null): Promise<{ status: number; data: unknown }> {
     let res: Response;
     try {
-      res = await (config.fetch ?? fetch)(`${base}/${fn}/${route}`, init);
+      res = await pending;
     } catch {
       throw new PartnerApiError("network");
     }
@@ -166,65 +262,106 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
       code,
       retryAfterSeconds: kind === "rate_limited" ? parseRetryAfter(res.headers.get("retry-after"), nowMs()) : null,
     });
-    // a 401 on an authenticated call means the session is dead: nothing is left to protect, so the token goes before anyone sees the error
-    if (authed && kind === "unauthenticated") wipe("expired");
+    // a 401 on a request made under the CURRENT session means that session is dead: nothing is left to protect, so the token goes before anyone sees the error
+    if (sessionEpoch !== null && sessionEpoch === epoch && kind === "unauthenticated") wipe("expired");
     throw err;
   }
 
-  const sessionCall = (method: "GET" | "POST", route: string) => send(method, SESSION_FUNCTION, route, undefined, true);
+  /** A request without a bearer (options, verify). */
+  function sendPublic(route: string, body: unknown, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
+    return finish(dispatch("POST", SESSION_FUNCTION, route, body, null, requestSignal(timeoutMs, [signal]), false), null);
+  }
+
+  /** A request under the live session token: aborted by a wipe, timed out, and a 401 ends the session. */
+  async function sendAuthed(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body: unknown, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
+    if (token === null) throw new PartnerApiError("unauthenticated");
+    const life = new AbortController();
+    inflight.add(life);
+    const sessionEpoch = epoch;
+    try {
+      return await finish(dispatch(method, fn, route, body, token, requestSignal(timeoutMs, [signal, life.signal]), false), sessionEpoch);
+    } finally {
+      inflight.delete(life);
+    }
+  }
+
+  /** Revokes `bearer` (a copy that is no longer held by this client) with `POST sign-out`. NOT async: see `dispatch`. */
+  function revokeCopy(bearer: string, keepalive: boolean): Promise<void> {
+    return finish(dispatch("POST", SESSION_FUNCTION, "sign-out", {}, bearer, requestSignal(timeoutMs, []), keepalive), null).then(() => undefined);
+  }
+
+  /**
+   * Ends the session NOW and revokes it on the server afterwards. Order is the point: the token is copied, wiped and the listeners are told (so the
+   * screen is signed-out) before anything is sent; the request then uses the copy, and the copy is dropped as soon as `fetch` has been called.
+   * NOT async, so no suspended frame keeps the copy. Rejects with the request's error (the wipe has happened either way).
+   */
+  function endSession(reason: SessionEndReason, keepalive: boolean): Promise<void> {
+    let copy = token;
+    if (copy === null) return Promise.reject(new PartnerApiError("unauthenticated"));
+    wipe(reason);
+    const pending = revokeCopy(copy, keepalive);
+    copy = null;
+    return pending;
+  }
+
+  const sessionCall = (route: string, signal?: AbortSignal) => sendAuthed("GET", SESSION_FUNCTION, route, undefined, signal);
 
   return {
     hasSession: () => token !== null,
 
     async signInOptions() {
-      const r = await send("POST", SESSION_FUNCTION, "options", {}, false);
+      const r = await sendPublic("options", {});
       return parseChallenge(r.data, r.status);
     },
 
-    async verify(input) {
-      const r = await send("POST", SESSION_FUNCTION, "verify", { challengeToken: input.challengeToken, credential: input.credential }, false);
+    async verify(input, opts = {}) {
+      if (token !== null) throw new PartnerApiError("bad_request", { code: "session_exists" });
+      // no caller signal on the request itself: see VerifyOptions
+      const r = await sendPublic("verify", { challengeToken: input.challengeToken, credential: input.credential });
       const d = r.data;
-      if (!isObject(d) || !isString(d["token"]) || !TOKEN_RE.test(d["token"]) || !isString(d["expiresAt"]) || typeof d["aal"] !== "number") throw malformed(r.status);
+      if (!isObject(d) || !isString(d["token"]) || !isIssuedToken(d["token"]) || !isString(d["expiresAt"]) || typeof d["aal"] !== "number") throw malformed(r.status);
+      const expiresAt = d["expiresAt"];
+      const aal = d["aal"];
+      if (opts.signal?.aborted === true || token !== null) {
+        // the sign-in was cancelled while this request was on the wire (or another sign-in finished first): this session must not be held and must not outlive the cancel
+        const aborted = opts.signal?.aborted === true;
+        try {
+          await revokeCopy(d["token"], false);
+        } catch {
+          // best effort: nothing holds this token, and the idle timer ends the session
+        }
+        throw aborted ? new PartnerApiError("aborted") : new PartnerApiError("bad_request", { code: "session_exists" });
+      }
       token = d["token"];
-      return { expiresAt: d["expiresAt"], aal: d["aal"] };
+      epoch += 1;
+      return { expiresAt, aal };
     },
 
-    async session() {
-      const r = await sessionCall("GET", "session");
+    async session(signal) {
+      const r = await sessionCall("session", signal);
       return parseWhoAmI(r.data, r.status);
     },
 
-    async signOut() {
-      try {
-        await send("POST", SESSION_FUNCTION, "sign-out", {}, true);
-      } finally {
-        wipe("signed-out");
-      }
-    },
+    signOut: (opts = {}) => endSession("signed-out", opts.keepalive === true),
 
-    async lock() {
-      try {
-        await send("POST", SESSION_FUNCTION, "lock", {}, true);
-      } finally {
-        wipe("locked");
-      }
-    },
+    lock: (opts = {}) => endSession("locked", opts.keepalive === true),
 
     async reauthOptions() {
-      const r = await send("POST", SESSION_FUNCTION, "reauth/options", {}, true);
+      const r = await sendAuthed("POST", SESSION_FUNCTION, "reauth/options", {});
       return parseChallenge(r.data, r.status);
     },
 
     async reauth(input) {
-      const r = await send("POST", SESSION_FUNCTION, "reauth", { challengeToken: input.challengeToken, credential: input.credential }, true);
+      const r = await sendAuthed("POST", SESSION_FUNCTION, "reauth", { challengeToken: input.challengeToken, credential: input.credential });
       if (!isObject(r.data) || !isString(r.data["reauthUntil"])) throw malformed(r.status);
       return { reauthUntil: r.data["reauthUntil"] };
     },
 
     async call(method, fn, route, body) {
-      // the bearer is attached here, so the path is a closed shape: a function name and a route of path-safe characters, no dot segments, no query, no fragment
-      if (!/^[a-z][a-z0-9-]{0,63}$/.test(fn) || !/^[A-Za-z0-9_~/-]{0,200}$/.test(route) || route.includes("//")) throw new PartnerApiError("bad_request");
-      return (await send(method, fn, route, body, true)).data;
+      // the bearer is attached here, so the target is a closed shape: a function on the explicit partner allow-list (never any other path on the API host, and the
+      // same list the CSP's connect-src is built from), and a route of path-safe characters, no dot segments, no query, no fragment
+      if (!allowedFunctions.includes(fn) || !/^[a-z][a-z0-9-]{0,63}$/.test(fn) || !/^[A-Za-z0-9_~/-]{0,200}$/.test(route) || route.includes("//")) throw new PartnerApiError("bad_request");
+      return (await sendAuthed(method, fn, route, body)).data;
     },
 
     forgetSession: () => wipe("forgotten"),

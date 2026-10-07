@@ -20,7 +20,7 @@ export const frCA: Record<MessageKey, string> = {
   "notice.signedOut": "Vous êtes déconnecté.",
   "notice.expired": "Votre session est terminée. Reconnectez-vous.",
   "notice.signOutOffline": "Vous êtes déconnecté sur cet appareil, mais le serveur est resté injoignable. La session prendra fin d'elle-même.",
-  "notice.lockOffline": "Cet appareil est verrouillé, mais le serveur est resté injoignable pour effacer vos confirmations. Reconnectez-vous pour continuer.",
+  "notice.lockOffline": "Cet appareil est verrouillé, mais le serveur est resté injoignable pour mettre fin à votre session. Reconnectez-vous pour continuer.",
 
   "error.cancelled": "L'invite de la clé d'accès a été annulée ou a expiré. Réessayez.",
   "error.webauthnUnsupported": "Ce navigateur ne gère pas les clés d'accès. Ouvrez cette page dans un navigateur à jour.",

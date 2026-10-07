@@ -30,7 +30,9 @@ export type ApiErrorKind =
   /** The request never produced a response (offline, DNS, CORS refusal, aborted). */
   | "network"
   /** A response that is not the documented shape (a server or deployment fault). */
-  | "malformed_response";
+  | "malformed_response"
+  /** The caller cancelled while the request was on the wire; whatever it produced was discarded (a session it opened was revoked, not held). */
+  | "aborted";
 
 export class PartnerApiError extends Error {
   readonly kind: ApiErrorKind;

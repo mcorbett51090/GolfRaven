@@ -18,7 +18,7 @@ export const en = {
   "notice.signedOut": "You are signed out.",
   "notice.expired": "Your session has ended. Sign in again.",
   "notice.signOutOffline": "You are signed out on this device, but the server could not be reached. The session will end on its own.",
-  "notice.lockOffline": "This device is locked, but the server could not be reached to clear your confirmations. Sign in again to continue.",
+  "notice.lockOffline": "This device is locked, but the server could not be reached to end your session. Sign in again to continue.",
 
   "error.cancelled": "The passkey prompt was cancelled or timed out. Try again.",
   "error.webauthnUnsupported": "This browser cannot use passkeys. Open this page in an up-to-date browser.",
