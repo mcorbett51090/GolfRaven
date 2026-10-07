@@ -15,7 +15,9 @@ import { toBase64Url } from "./binding.ts";
 import { pkcs8PemToDer } from "../pem.ts";
 
 export interface VendorHttp {
-    fetch(url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal }): Promise<Response>;
+  /** `redirect: "error"` makes the platform `fetch` reject a redirect instead of following it (a redirect would be a way to leave a host
+   * allow-list after the check). Optional only so the Play Integrity adapter, which does not set it, still type-checks. */
+  fetch(url: string, init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal; redirect?: "error" }): Promise<Response>;
   nowMs(): number;
   randomUuid(): string;
   /** Per-vendor-call wall-clock bound; see `VENDOR_CALL_TIMEOUT_MS`. */
