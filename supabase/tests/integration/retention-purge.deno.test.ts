@@ -12,6 +12,8 @@
 //   6. the rate limit (12 per hour) holds;
 //   7. (0040) the four SQL-bounded steps clear a backlog larger than one batch over several batches, a full batch is exactly RETENTION_DEFINER_BATCH_ROWS,
 //      and the catalog import's own purge calls honour the same per-step try-lock;
+//   9. (0050, S1.1b gate L-4) with STALE planner statistics and no ANALYZE each SQL-bounded step is still fast (a full batch in well under a second), and the 0040 statement shape is not (a temp table in the
+//      same state is the positive control); the cell "0050: with STALE planner statistics".
 //   8. (PR4b gate LOW-2) an empty service-role key admits nobody, even a bearer that only SEEMS empty (NBSP, U+3000) after normalisation.
 // The pure contract (ordering, truncation, busy, failure codes, no database text on the wire) is supabase/tests/unit/retention-purge-handler.test.ts.
 
@@ -466,18 +468,11 @@ async function makeStatsStale(): Promise<() => Promise<void>> {
   }
 }
 
-/** The 0040 / 0041 statement shapes, verbatim, as private_definer (the role the definers run as). Each is the whole body of the purge, which is a single DELETE. */
-const OLD_PURGE_SHAPES: Record<(typeof BOUNDED_CLASSES)[number], string> = {
-  consumed_nonce: `delete from private.consumed_nonce n where n.nonce_hash in (select s.nonce_hash from private.consumed_nonce s where coalesce(s.expires_at, s.consumed_at) < now() - interval '7 days' limit 5000)`,
-  rate_limit_buckets: `delete from private.rate_limit_bucket b where (b.bucket_key, b.window_start) in (select s.bucket_key, s.window_start from private.rate_limit_bucket s where s.window_start < now() - interval '2 days' limit 5000)`,
-  signin_email_proofs: `delete from private.signin_email_proof p where p.id in (select s.id from private.signin_email_proof s where s.expires_at < now() - interval '1 hour' order by s.expires_at, s.id limit 5000)`,
-  signin_revocation_queue: `delete from private.signin_revocation_queue q where q.id in (select s.id from private.signin_revocation_queue s where s.status <> 'pending' and s.completed_at < now() - interval '30 days' limit 5000)`,
-};
 const STALE_BUDGET_MS = 1000;
 /** Thrown after each run of an old statement shape so the surrounding transaction ALWAYS rolls back. */
 class OldShapeRan extends Error {}
 
-retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched purge is fast, and the 0040 statement shape is NOT (positive control); the whole backlog is still cleared", async () => {
+retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched purge is fast; the 0040 statement shape is NOT, on a table in the same state (positive control); the whole backlog is still cleared", async () => {
   const restore = await makeStatsStale();
   try {
     // the precondition: the planner really is misled (a test that passed because autovacuum had repaired the statistics would prove nothing)
@@ -487,33 +482,49 @@ retentionTest("0050: with STALE planner statistics (no ANALYZE) each batched pur
       assert(stat < 1000, `${t} is estimated at ${stat} tuples (the 5003 loaded rows must be unaccounted for): the statistics are not stale`);
     }
     // positive control: the old shape cannot finish inside the budget on these statistics. (Each runs in its own transaction and is rolled back whatever happens.)
-    for (const name of BOUNDED_CLASSES) {
-      let result = "not run";
-      let nestedLoop = false;
-      await asDefiner(async (sql) => {
-        if (name === "signin_email_proofs") await sql`select set_config('app.signin.proof_purge', 'on', true)`;
-        const plan = (await sql.unsafe(`explain ${OLD_PURGE_SHAPES[name]}`)).map((r: Record<string, string>) => r["QUERY PLAN"]).join("\n");
-        nestedLoop = /Nested Loop/.test(plan) && /Semi Join/.test(plan);
-        await sql.unsafe(`set local statement_timeout = '${STALE_BUDGET_MS}ms'`);
-        const t0 = Date.now();
-        try {
-          await sql.unsafe(OLD_PURGE_SHAPES[name]);
-          result = `finished in ${Date.now() - t0} ms`;
-        } catch (e) {
-          result = (e as { code?: string }).code === "57014" ? "cancelled" : `error ${String(e)}`; // 57014: the statement timeout
-        }
-        throw new OldShapeRan(); // never commit the old shape's deletes: the transaction always rolls back
-      }).catch((e) => {
-        if (!(e instanceof OldShapeRan) && result === "cancelled") return; // the driver may surface the cancelled statement's own error at ROLLBACK
-        if (!(e instanceof OldShapeRan)) throw e;
-      });
-      console.log(`0050 stale statistics: the 0040 shape of ${name}: ${result}${nestedLoop ? " (planned as a Nested Loop Semi Join)" : ""}`);
-      // The sign-in proof table is the one the S1.1b gate measured (26.9 s) and the one whose old shape sorts the batch per outer row: it MUST be cancelled, or this fixture no longer reproduces the pathology.
-      // The other three are logged: how slow the old shape is on them depends on their row width and index (a revocation-queue batch finishes in about half a second), so they are evidence, not a gate.
-      if (name === "signin_email_proofs") {
-        assert(nestedLoop, `${name}: the old shape is not planned as a Nested Loop Semi Join on these statistics`);
-        assertEquals(result, "cancelled", `positive control: the 0040 shape of ${name} was not cancelled inside ${STALE_BUDGET_MS} ms on stale statistics, so this fixture no longer reproduces the pathology`);
-      }
+    // The positive control, on a table whose planner state is fully under this cell's control (a TEMPORARY table: no RLS, no history, and autovacuum never touches it): the same recipe, and the 0040 shape
+    // verbatim, against the new shape. On the four real tables how slow the old shape is depends on row width, the index and the histogram state autovacuum left in the template database (measured: it ran
+    // 4 s to 119 s on stale statistics, and 22 ms in other states), which is the very dependence 0050 removes; so the real tables are asserted only for the NEW definers, below.
+    const owner = rawOwnerSql();
+    await owner.unsafe(`create temp table hygiene_stale (id uuid primary key default gen_random_uuid(), expires_at timestamptz not null)`);
+    try {
+      await owner.unsafe(`create index on hygiene_stale (expires_at)`);
+      const load = () => owner.unsafe(`insert into hygiene_stale (expires_at) select now() - interval '3 hours' from generate_series(1, ${RETENTION_DEFINER_BATCH_ROWS + 3})`);
+      await load();
+      await owner.unsafe(`delete from hygiene_stale`);
+      await owner.unsafe(`vacuum (truncate false) hygiene_stale`);
+      await load();
+      const est = await owner.unsafe(`select reltuples::int as t from pg_class where relname = 'hygiene_stale'`);
+      assert(Number(est[0]!.t) < 100, `the temp table is estimated at ${est[0]!.t} tuples: the statistics are not stale`);
+      const oldShape = `delete from hygiene_stale p where p.id in (select s.id from hygiene_stale s where s.expires_at < now() - interval '1 hour' order by s.expires_at, s.id limit 5000)`;
+      const newShape = `delete from hygiene_stale p where p.id = any (array(select s.id from hygiene_stale s where s.expires_at < now() - interval '1 hour' order by s.expires_at, s.id limit 5000))`;
+      const attempt = async (statement: string): Promise<string> => {
+        let result = "not run";
+        await owner
+          .begin(async (trx: ReturnType<typeof postgres>) => {
+            await trx.unsafe(`set local statement_timeout = '${STALE_BUDGET_MS}ms'`);
+            const t0 = Date.now();
+            try {
+              const res = await trx.unsafe(statement);
+              result = `finished in ${Date.now() - t0} ms (${res.count} rows)`;
+            } catch (e) {
+              result = (e as { code?: string }).code === "57014" ? "cancelled" : `error ${String(e)}`; // 57014: the statement timeout
+            }
+            throw new OldShapeRan(); // always roll back
+          })
+          .catch((e: unknown) => {
+            if (e instanceof OldShapeRan || result === "cancelled") return; // the driver may surface the cancelled statement's own error at ROLLBACK
+            throw e;
+          });
+        return result;
+      };
+      const oldResult = await attempt(oldShape);
+      const newResult = await attempt(newShape);
+      console.log(`0050 stale statistics (temp table, ${RETENTION_DEFINER_BATCH_ROWS + 3} rows): the 0040 shape: ${oldResult}; the 0050 shape: ${newResult}`);
+      assertEquals(oldResult, "cancelled", `positive control: the 0040 shape was not cancelled inside ${STALE_BUDGET_MS} ms on stale statistics, so this fixture no longer reproduces the pathology`);
+      assert(newResult.startsWith("finished in") && newResult.endsWith("(5000 rows)"), `the 0050 shape: ${newResult}`);
+    } finally {
+      await owner.unsafe(`drop table if exists hygiene_stale`);
     }
     // the 0050 definers: one full batch of each, timed
     const steps = retentionPurgeSteps();
