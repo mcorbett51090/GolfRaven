@@ -233,3 +233,97 @@ BEGIN
 END
 $assert_0050_purges$;
 DROP TABLE hygiene_0050_before;
+
+-- ============================================================================
+-- 2. The InitPlan form of the partner-binding conjunct (S1.1a NIT, partner-auth-design 17.3), now that the purges do not depend on the plan
+-- ============================================================================
+-- 0047 section 8c closed every GUC-keyed private_definer policy under a partner binding with `AND private.partner_binding_kind() IS DISTINCT FROM 'partner'`. The cheaper spelling is
+-- `(SELECT private.partner_binding_kind())`: an InitPlan, evaluated once per statement instead of once per row. S1.1a withdrew the conversion because, with the 0040 purges, it tipped the plan
+-- into the quadratic nested loop (26.9 s instead of 30 ms). Section 1 removed that dependence, so it is re-measured and taken. Measured on the same stale-statistics tables, as private_definer under RLS,
+-- before / after the conversion, with the section 1 definers: purge_consumed_nonce 13 / 10 ms, purge_rate_limit_buckets 30 / 29 ms, purge_signin_email_proofs 69 / 18 ms. (The 0040 SHAPE on the
+-- converted policies took 27.8 s on the proofs, the figure S1.1a saw: the conversion alone would still be a hazard; it is safe only because of section 1.)
+-- Only the call changes, in USING and in WITH CHECK, of exactly the private_definer policies that carry it as the direct call: the same predicate, the same roles, the same commands, no grant. A policy
+-- already in the InitPlan form (0048's alarm policies) is not matched (the lookbehind). verify-function-inventory check 15 and matrix 10 accept both forms (a control cell).
+DO $initplan_0050$
+DECLARE
+  v_pd oid := (SELECT oid FROM pg_roles WHERE rolname = 'private_definer');
+  v_direct constant text := '(?<!SELECT )private\.partner_binding_kind\(\)';
+  v_init constant text := '(SELECT private.partner_binding_kind())';
+  v_pol record;
+  v_sql text;
+  v_n integer := 0;
+BEGIN
+  FOR v_pol IN
+    SELECT n.nspname, c.relname, pol.polname,
+           pg_get_expr(pol.polqual, pol.polrelid) AS qual, pg_get_expr(pol.polwithcheck, pol.polrelid) AS wcheck
+    FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE pol.polroles = ARRAY[v_pd]
+      AND coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') ~ v_direct
+    ORDER BY n.nspname, c.relname, pol.polname
+  LOOP
+    v_sql := format('ALTER POLICY %I ON %I.%I', v_pol.polname, v_pol.nspname, v_pol.relname);
+    IF v_pol.qual IS NOT NULL THEN
+      v_sql := v_sql || format(' USING (%s)', regexp_replace(v_pol.qual, v_direct, v_init, 'g'));
+    END IF;
+    IF v_pol.wcheck IS NOT NULL THEN
+      v_sql := v_sql || format(' WITH CHECK (%s)', regexp_replace(v_pol.wcheck, v_direct, v_init, 'g'));
+    END IF;
+    EXECUTE v_sql;
+    v_n := v_n + 1;
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_policy pol
+             WHERE pol.polroles = ARRAY[v_pd]
+               AND coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') ~ v_direct) THEN
+    RAISE EXCEPTION '0050: a private_definer policy still calls private.partner_binding_kind() directly';
+  END IF;
+  -- the conjunct is still there on every policy that had it: nothing was dropped by the rewrite
+  IF v_n < 1 THEN
+    RAISE EXCEPTION '0050: no policy was converted (0047 section 8c closed some, so this is a defect)';
+  END IF;
+  RAISE NOTICE '0050: % private_definer polic(ies) now use the InitPlan form of the partner-binding conjunct', v_n;
+END
+$initplan_0050$;
+
+-- The registry keeps a snapshot of each policy's live expression (checks 5 / 6 compare the two): re-derive it for the policies just rewritten. Same bracket as 0047 section 13b.
+GRANT UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0050 ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class cl ON cl.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = cl.relnamespace
+WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
+  AND coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%SELECT private.partner_binding_kind()%'
+  AND (al.using_expr IS DISTINCT FROM pg_get_expr(pol.polqual, pol.polrelid) OR al.with_check_expr IS DISTINCT FROM pg_get_expr(pol.polwithcheck, pol.polrelid));
+-- every registered policy's snapshot agrees with the live policy again (the UPDATE above matched nothing silently if it matched nothing)
+DO $assert_0050_allowlist$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM private.definer_policy_allowlist al
+    JOIN pg_policy pol ON pol.polname = al.policy_name
+    JOIN pg_class cl ON cl.oid = pol.polrelid AND cl.relname = al.table_name
+    JOIN pg_namespace n ON n.oid = cl.relnamespace AND n.nspname = al.schema_name
+    WHERE al.using_expr IS DISTINCT FROM pg_get_expr(pol.polqual, pol.polrelid) OR al.with_check_expr IS DISTINCT FROM pg_get_expr(pol.polwithcheck, pol.polrelid)
+  ) THEN
+    RAISE EXCEPTION '0050: a definer_policy_allowlist row no longer matches its live policy';
+  END IF;
+END
+$assert_0050_allowlist$;
+DROP POLICY current_user_seed_definer_policy_allowlist_0050 ON private.definer_policy_allowlist;
+REVOKE UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
+
+-- ============================================================================
+-- 3. S2a gate NIT: a pepper rotation cannot be dated in the future (app.course_pin_pepper_epoch)
+-- ============================================================================
+-- `effective_from` is the instant the CURRENT pepper took effect; private.course_pin_matches judges every instant before the latest one under the PREVIOUS pepper. The operator writes it
+-- (`INSERT ... (effective_from) VALUES (now())`, in the same transaction as the Vault update, so recorded_at = effective_from). A future-dated row (a typo, a wrong timezone) would send every scan made
+-- BETWEEN now and then to the previous pepper, which for a compromise-adjacent rotation is the pepper that was just retired. It can never have been in effect before the row was written, so the
+-- table now refuses it. A plain CHECK: both columns are the row's own and the test is immutable. The table is empty at rest today (0046 shipped it as the operator's, unused until the first
+-- rotation); ADD CONSTRAINT validates any row that exists, so a row that violates it fails this migration loudly instead of being waved through. Honest limit: recorded_at has a default but the
+-- operator may supply it, so this stops the mistake (a future effective_from with the default recorded_at), not a deliberate one; the operator is already trusted with the whole table.
+ALTER TABLE app.course_pin_pepper_epoch
+  ADD CONSTRAINT course_pin_pepper_epoch_effective_not_future CHECK (effective_from <= recorded_at);
+COMMENT ON CONSTRAINT course_pin_pepper_epoch_effective_not_future ON app.course_pin_pepper_epoch IS
+  '0050. A pepper cannot take effect after the moment it was recorded: effective_from <= recorded_at. A future-dated row would judge the instants between now and then under the retired (previous) pepper.';
