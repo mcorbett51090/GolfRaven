@@ -131,8 +131,8 @@ SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authentic
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private', 'public') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_session_mint'],
-  'PA-8: the minter can execute NOTHING ELSE in app, api or private (the pgTAP and extension functions of public aside)');
+             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+  'PA-8: the minter can execute NOTHING ELSE in app, api or private but the three minter-lane definers of 0049 (S1.2: the credential lookup, the failure counter and the relying-party read; the pgTAP and extension functions of public aside)');
 SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')

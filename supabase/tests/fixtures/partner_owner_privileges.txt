@@ -22,6 +22,7 @@
 {"privilege": "SELECT", "role_name": "partner_reauth_verifier", "column_name": "reauth_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "UPDATE", "role_name": "partner_reauth_verifier", "column_name": "reauth_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "EXECUTE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "EXECUTE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_reauth_check(uuid,bytea,bytea,bigint,bytea,bytea,bytea,bytea)"}
 {"privilege": "USAGE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "schema", "object_name": "app"}
 {"privilege": "USAGE", "role_name": "partner_reauth_verifier", "column_name": null, "object_kind": "schema", "object_name": "private"}
 {"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": "nonce_hash", "object_kind": "column", "object_name": "app.partner_auth_challenge"}
@@ -51,6 +52,9 @@
 {"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_auth_challenge"}
 {"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_credential"}
 {"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_session"}
+{"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_sign_in_failure"}
+{"privilege": "SELECT", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_sign_in_failure"}
+{"privilege": "UPDATE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "relation", "object_name": "app.partner_sign_in_failure"}
 {"privilege": "USAGE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "schema", "object_name": "app"}
 {"privilege": "USAGE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "schema", "object_name": "private"}
 {"privilege": "SELECT", "role_name": "partner_session_toucher", "column_name": "id", "object_kind": "column", "object_name": "app.partner_credential"}
