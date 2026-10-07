@@ -8,7 +8,7 @@
 // Accepted: exactly one `PRIVATE KEY` block (PKCS#8, not `EC PRIVATE KEY` / `RSA PRIVATE KEY` / a public key) whose body is STRICT standard base64
 // (padded, canonical: the decoded bytes must re-encode to exactly the text, so unpadded input and non-zero trailing bits are refused), with real
 // line breaks (LF or CRLF) OR the two characters backslash + `n` standing in for each line break, and ASCII whitespace (space, tab, CR, LF) around
-// the block and inside the body. Anything else (a non-string, empty, wrong label, non-base64 or Unicode whitespace, unpadded or non-canonical
+// the block and inside the body, and ONE leading byte-order mark (U+FEFF). Anything else (a non-string, empty, wrong label, non-base64 or Unicode whitespace, unpadded or non-canonical
 // base64, trailing junk, a second block) is `null`; this function never throws.
 //
 // The block markers are assembled at run time so no source line carries a literal PEM header (a secret scanner reads one as a
@@ -20,7 +20,10 @@ const PKCS8_PEM = new RegExp(`^[ \\t\\r\\n]*${PEM_FENCE}BEGIN PRIVATE KEY${PEM_F
 /** PEM (PKCS#8) -> DER; `null` unless it is exactly one well-formed PRIVATE KEY block. */
 export function pkcs8PemToDer(pem: string): Uint8Array | null {
   if (typeof pem !== "string") return null;
-  const normalised = pem.replace(/\\n/g, "\n");
+  // One leading byte-order mark (U+FEFF) is dropped: Windows editors and PowerShell's `Out-File` prepend one to a saved key file or env file.
+  // Nothing else beyond ASCII whitespace is tolerated: a no-break space (U+00A0), any other Unicode space, or a second BOM is refused on purpose
+  // (a pasted key that picked up one has been through a word processor and should be re-exported, not silently repaired).
+  const normalised = (pem.charCodeAt(0) === 0xfeff ? pem.slice(1) : pem).replace(/\\n/g, "\n");
   const m = PKCS8_PEM.exec(normalised);
   if (!m) return null;
   const text = m[1]!.replace(/[ \t\r\n]+/g, "");

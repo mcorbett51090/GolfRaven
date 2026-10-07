@@ -80,6 +80,21 @@ describe("the shared PKCS#8 PEM parser", () => {
     }
   });
 
+  it("drops exactly ONE leading byte-order mark (an editor-saved key file) and refuses a second one, one elsewhere, and a no-break space", () => {
+    const BOM = "\ufeff";
+    for (const parse of [shared, viaSignin, viaRewards]) {
+      expect(Array.from(parse(`${BOM}${pem}`) ?? []), "BOM + key").toEqual(Array.from(der));
+      expect(Array.from(parse(`${BOM}\n  ${pem}\n`) ?? []), "BOM + whitespace + key").toEqual(Array.from(der));
+      expect(Array.from(parse(`${BOM}${pem.replace(/\n/g, "\\n")}`) ?? []), "BOM + one-line escaped key").toEqual(Array.from(der));
+      expect(parse(`${BOM}${BOM}${pem}`), "two BOMs").toBeNull();
+      expect(parse(`${pem}${BOM}`), "trailing BOM").toBeNull();
+      expect(parse(pem.replace("\n", `\n${BOM}`)), "BOM inside the block").toBeNull();
+      expect(parse(`${BOM}\u00a0${pem}`), "BOM then NBSP").toBeNull();
+      expect(parse(`\u00a0${pem}`), "NBSP before the block").toBeNull();
+      expect(parse(`${pem}\u00a0`), "NBSP after the block").toBeNull();
+    }
+  });
+
   it("returns null (never throws) for a non-string", () => {
     for (const v of [undefined, null, 0, 42, {}, [], true, Symbol.iterator, new Uint8Array([1, 2, 3])]) {
       for (const parse of [shared, viaSignin, viaRewards]) expect(() => parse(v as unknown as string), String(typeof v)).not.toThrow();

@@ -102,8 +102,8 @@ describe("minting", () => {
     expect(decode(r.stdout.trim()).claims.exp - decode(r.stdout.trim()).claims.iat).toBe(150 * 86_400); // the default
   });
 
-  it("accepts a one-line key with literal backslash-n and CRLF (the shared parser's forms)", async () => {
-    for (const form of [pem.trim().replace(/\n/g, "\\n"), pem.replace(/\n/g, "\r\n")]) {
+  it("accepts a one-line key with literal backslash-n, CRLF and a leading BOM (the shared parser's forms)", async () => {
+    for (const form of [pem.trim().replace(/\n/g, "\\n"), pem.replace(/\n/g, "\r\n"), `\ufeff${pem}`]) {
       const r = run([...IDS, "--key-file", "-"], form);
       expect(r.status).toBe(0);
       expect(await verifies(r.stdout.trim())).toBe(true);
