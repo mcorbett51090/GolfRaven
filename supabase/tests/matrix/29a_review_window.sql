@@ -77,12 +77,12 @@ SELECT is((SELECT pg_get_userbyid(p.proowner) FROM pg_proc p WHERE p.oid = 'priv
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%review_window_open_at%'), 1, 'the binder carries the window backstop');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.bind_actor_internal(uuid, text)'::regprocedure AND p.prosrc LIKE '%p_kind = ''user'' AND private.is_demo_account(p_uid) AND NOT private.review_window_open_at%'), 1, 'the backstop applies to the user kind only (a system delegate is the system acting on one queued row, not a sign-in)');
 SELECT is((SELECT indisunique AND indpred IS NOT NULL FROM pg_index WHERE indexrelid = 'app.audit_log_review_session_once'::regclass), true, 'one audit row per (account, session, outcome) is a partial unique index (a database fact)');
-SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name = 'pd_read_review_window' AND using_expr = 'true' AND role_name = 'private_definer'), 1, 'the one new private_definer policy is registered (and the checked-in fixture compares it)');
 
 -- ============================================================================
 -- 4. The restrictions the review account already had, pinned (service_role asks the predicates; nothing here widens anything)
 -- ============================================================================
 SET ROLE service_role;
+SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name = 'pd_read_review_window' AND using_expr = 'true' AND role_name = 'private_definer'), 1, 'the one new private_definer policy is registered (and the checked-in fixture compares it)');
 SELECT is(private.is_demo_account('29510000-0000-0000-0000-0000000000a0'), true, 'R is a review account');
 SELECT is(private.is_demo_account('29510000-0000-0000-0000-0000000000b0'), false, 'N is not');
 -- "It has no partner scope": the demo account holds no partner membership, and the two scope predicates are false for it at ANY facility / trail
