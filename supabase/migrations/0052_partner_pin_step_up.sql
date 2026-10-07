@@ -529,7 +529,7 @@ DECLARE
   v_r record;
 BEGIN
   v_uid := private.partner_authorize(NULL, NULL, ARRAY['staff', 'manager']::app.partner_role[], 'A0');
-  -- the PIN is a staff / manager factor: an admin passes partner_authorize's "anywhere" branch with no membership at all, and an admin or operator has NO PIN (6.3; the A3 substitution is S1.4's)
+  -- the PIN is a staff / manager factor: an admin passes the anywhere branch of partner_authorize with no membership at all, and an admin or operator has NO PIN (6.3; the A3 substitution is S1.4's)
   IF NOT EXISTS (SELECT 1 FROM app.partner_member m WHERE m.user_id = v_uid AND m.revoked_at IS NULL AND m.role IN ('staff', 'manager')) THEN
     RAISE EXCEPTION 'partner_pin_set_for_partner: only an active staff or manager member holds a PIN' USING ERRCODE = '42501';
   END IF;
