@@ -8,6 +8,13 @@
 //   2. THE RATCHET: any migration AFTER 0051 that INSERTs into app.offer_code, app.entitlement, app.marker_credit, app.purchase_evidence or app.device_reward_ledger from a function must mention
 //      `is_demo_account` in that function's body, or the function must be named in EXEMPT with a reason. This is the S3 / S5 / S6 condition (docs/security/review-account-design.md section 8): the
 //      offline-code staff lane (S3), the sponsor / offer minters (S5, S6) and any entitlement minter must refuse the review account IN THE DATABASE, as a returned status or a 42501.
+// KNOWN LIMITS of the ratchet (a source scan, not a parser; the catalogue-level proof for the four current definers is the DO block in 0051 itself):
+//   - it finds a function body only through `AS <dollar-quote>` (any tag, but not an `AS '...'` single-quoted body or a `BEGIN ATOMIC` SQL-standard body);
+//   - it recognises the writers by the literal text `INSERT INTO app.<table>`: a quoted identifier (`"app"."offer_code"`), dynamic SQL (`EXECUTE format(...)`) or a write made through a view
+//     or by another function would not be seen;
+//   - the refusal is recognised by a CALL to `is_demo_account(` that survives comment stripping: it does not prove the call guards the INSERT (a call in a branch that never runs would pass).
+// Review of any new minter must still read the function; the ratchet is the floor that catches the forgetful case, and EXEMPT is where a reviewed exception is written down.
+//
 //   3. The refusal exists where the writers are TODAY: every function in migrations up to 0051 that INSERTs into those tables is either one of the four, or listed in KNOWN with why it is not an
 //      edge_actor entry point.
 
