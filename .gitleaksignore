@@ -27,3 +27,9 @@ fe6b390e215b383fab9e8feeafb61bbd33052b60:apps/signup-worker/test/router.test.ts:
 # never a real secret; the literal is replaced with a runtime-built value ("s".repeat(48)) in the
 # next commit. This entry covers only the historical commit that still contains it.
 5aba031023efdf09b0f2d572a304262d00ba978a:supabase/tests/integration/import-catalog.deno.test.ts:generic-api-key:149
+
+# 2026-10-07 — partner-session tests (S1.2). Two test files held a JWT-SHAPED literal (a base64url header, a payload naming a
+# made-up subject, and a dummy signature) used as the "foreign bearer a partner function must refuse". Never a real token. The
+# literals were replaced with a value built at run time in the next commit; these entries only cover the two historical commits.
+b884147ad39f60957e9eec44ebcde73318fe2fad:supabase/tests/integration/partner-session.deno.test.ts:jwt:205
+3eaa1b52c67ee481cb16dde797f12798a06b1fd0:supabase/tests/unit/partner-session-handler.test.ts:jwt:12

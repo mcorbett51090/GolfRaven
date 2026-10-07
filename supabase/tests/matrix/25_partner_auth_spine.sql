@@ -94,11 +94,12 @@ SELECT is((SELECT count(*)::int FROM pg_namespace n CROSS JOIN (VALUES ('edge_pa
   'PA-1: and no CREATE anywhere (the always-open TEMP schema aside), and USAGE on no schema but private (plus the PUBLIC-open public, tests, pg_catalog and information_schema): in particular NONE on app');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
-          ARRAY['bind_partner_session', 'partner_binding', 'partner_binding_kind', 'zz24_authz_for_partner'],
-  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3) and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
+          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_binding', 'partner_binding_kind', 'partner_session_lock_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
+                'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_whoami_for_partner', 'zz24_authz_for_partner'],
+  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin and the seven _for_partner definers of 0049 (S1.2), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
-          ARRAY['partner_challenge_issue_sign_in', 'partner_session_mint'],
-  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
+          ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2), and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure,
              'private.partner_session_guard()'::regprocedure, 'private.partner_member_role_invariant()'::regprocedure, 'private.partner_scope_invariant()'::regprocedure)
            AND (SELECT count(*) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
@@ -823,8 +824,9 @@ END
 $f$;
 -- Is this policy GUC-keyed? Its own text reads a setting, OR it calls a function (pg_depend, one level deep: the HIGH-1 wrapper rule) whose body does (the S1.1b gate's L-2: `USING (user_id::text = private.zz_guc())`)
 CREATE FUNCTION pg_temp.policy_is_window(p_pol oid) RETURNS boolean LANGUAGE sql STABLE AS $f$
-  SELECT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.oid = p_pol AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') LIKE '%current_setting(%' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') LIKE '%current_setting(%'))
-      OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = p_pol AND d.refclassid = 'pg_proc'::regclass AND fp.prosrc ILIKE '%current_setting(%')
+  SELECT EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.oid = p_pol AND ((coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '')) ~* '\mcurrent_setting\s*\(|\mpg_settings\M'))
+      OR EXISTS (SELECT 1 FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = p_pol AND d.refclassid = 'pg_proc'::regclass
+                 AND CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END ~* '\mcurrent_setting\s*\(|\mpg_settings\M')
 $f$;
 -- a setting a window policy reads that plant_all does not know: the cell below would silently test nothing for it, so it FAILS (a later slice that adds a window must add its setting here)
 CREATE FUNCTION pg_temp.unplanted_settings() RETURNS text[] LANGUAGE sql AS $f$
@@ -833,8 +835,8 @@ CREATE FUNCTION pg_temp.unplanted_settings() RETURNS text[] LANGUAGE sql AS $f$
   CROSS JOIN LATERAL (
     SELECT regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), 'current_setting\(''([^'']+)''', 'g') AS m
     UNION ALL
-    SELECT regexp_matches(fp.prosrc, 'current_setting\s*\(\s*''([^'']+)''', 'gi')
-    FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = pol.oid AND d.refclassid = 'pg_proc'::regclass
+    SELECT regexp_matches(CASE WHEN fp.prokind IN ('f', 'p') THEN pg_get_functiondef(fp.oid) END, 'current_setting\s*\(\s*''([^'']+)''', 'gi')
+    FROM pg_depend d JOIN pg_proc fp ON fp.oid = d.refobjid WHERE d.classid = 'pg_policy'::regclass AND d.objid = pol.oid AND d.refclassid = 'pg_proc'::regclass AND fp.prokind IN ('f', 'p')
   ) x(m)
   WHERE pol.polroles = ARRAY['private_definer'::regrole::oid]
     AND x.m[1] <> ALL (pg_temp.plant_settings())
@@ -912,10 +914,10 @@ BEGIN
     v_vals := v_vals || format('%L::%s', pg_temp.plant_value(k.setting, p_user), format_type(k.atttypid, k.atttypmod));
   END LOOP;
   -- a policy that compares a column with a WRAPPER's result (`col::text = private.fn()`, the function body reading the setting) is keyed on that column too
-  FOR k IN SELECT DISTINCT ON (m[1]) m[1] AS col, (regexp_match(fp.prosrc, 'current_setting\s*\(\s*''([^'']+)''', 'i'))[1] AS setting, a.atttypid, a.atttypmod
+  FOR k IN SELECT DISTINCT ON (m[1]) m[1] AS col, (regexp_match(pg_get_functiondef(fp.oid), 'current_setting\s*\(\s*''([^'']+)''', 'i'))[1] AS setting, a.atttypid, a.atttypmod
            FROM pg_policy pol
            CROSS JOIN LATERAL regexp_matches(coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || ' ' || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), ''), '\(*(\w+)\)*(?:::text)? = \(*(?:\w+\.)?(\w+)\(\)', 'g') AS m
-           JOIN pg_proc fp ON fp.proname = m[2] AND fp.prosrc ILIKE '%current_setting(%'
+           JOIN pg_proc fp ON fp.proname = m[2] AND fp.prokind IN ('f', 'p') AND pg_get_functiondef(fp.oid) ~* '\mcurrent_setting\s*\('
            JOIN pg_attribute a ON a.attrelid = pol.polrelid AND a.attname = m[1] AND a.attnum > 0 AND NOT a.attisdropped
            WHERE pol.polrelid = p_relid AND pol.polroles = ARRAY['private_definer'::regrole::oid] AND quote_ident(m[1]) <> ALL (v_cols)
            ORDER BY m[1] LOOP

@@ -99,6 +99,17 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
     });
   }
 
+  // Partner auth S1.2: the new function is an entrypoint, so the loops above already require it in all three lists; this cell names it so a future edit that drops it fails with its own message, and
+  // the pure handler suite (the real wrapper and the software authenticator, no network) is cached by the same step that runs it.
+  for (const step of STEPS) {
+    it(`"${step}" lists the partner-session entrypoint`, () => {
+      expect(listedPaths(step)).toContain("supabase/functions/partner-session/index.ts");
+    });
+  }
+  it("the pure Deno suite step caches the partner session handler suite before running with --cached-only", () => {
+    expect(runText("Run supabase/tests/deno-unit")).toContain("supabase/tests/deno-unit/partner-session-handler.deno.test.ts");
+  });
+
   const DENO_UNIT_STEP = "Run supabase/tests/deno-unit";
   const PARTNER_NPM_TAMPER_STEP = "deno cache --frozen npm tamper test (partner auth S0";
 
