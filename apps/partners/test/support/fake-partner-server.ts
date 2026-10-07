@@ -210,6 +210,25 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         async reauthCredential(id: Uint8Array): Promise<ReauthCredential | null> {
           return toB64u(id) === credId ? { ...credentialRow, signCount, rp } : null;
         },
+        // S1.3 step-up surface: fail closed. The S7a page never calls these (S7b builds the PIN screens and will implement the flows in this fake).
+        async pinParams(): Promise<never> {
+          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        },
+        async pinVerify(): Promise<never> {
+          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        },
+        async pinSet(): Promise<never> {
+          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        },
+        async pinChange(): Promise<never> {
+          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        },
+        async otpTarget() {
+          return null; // no mailbox: the email proof cannot start
+        },
+        async otpProof() {
+          return { status: "refused" as const, otpProofUntil: null };
+        },
         async reauth(input: ReauthInput) {
           if (!consume(input.nonce, input.exp, input.mac, hash)) return { status: "challenge_invalid", reauthUntil: null };
           signCount = Buffer.from(input.authenticatorData).readUInt32BE(33);
@@ -231,6 +250,15 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       db,
       allowedOrigin: opts.pageOrigin,
       webauthn: verifier,
+      // the email OTP of the step-up proof: nothing is sent and every code is refused (S7b)
+      otp: {
+        async send() {
+          throw new Error("fake partner server: the email OTP is not implemented (S7b)");
+        },
+        async verify() {
+          return { ok: false as const };
+        },
+      },
       nowMs: () => Date.now(),
       newSessionToken: async () => {
         const token = "gr_ps_" + toB64u(randomBytes(32));
