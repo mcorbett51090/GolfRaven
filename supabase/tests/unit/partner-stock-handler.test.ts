@@ -2,7 +2,7 @@
 //
 // The `stock-admin` handler and its strict shapes (docs/security/partner-auth-design.md 12, 28; slice S5, the Edge half of 0058), against an in-memory `PartnerDb`. What is decided HERE: the route table, the
 // Origin / bearer / media-type / strict-body order, that every route is a session route, the status-to-HTTP map (a returned refusal is a status that COMMITS; a 42501 and a 22023 throw and ROLL BACK), and that
-// the arguments reach the port exactly as validated. What is the DATABASE's (scope, class, row lock, never below zero, movement rows, availability): supabase/tests/matrix/36_partner_stock_handover.sql.
+// the arguments reach the port exactly as validated. What is the DATABASE's (scope, class, row lock, never below zero, movement rows, availability): matrix 36 (supabase/tests/matrix/36_*).
 
 import { describe, expect, it } from "vitest";
 import { handlePartnerStockRequest, STOCK_BUCKET, STOCK_PER_MEMBER_PER_HOUR, type PartnerStockDeps } from "../../functions/_shared/partner/stock-handler.ts";
