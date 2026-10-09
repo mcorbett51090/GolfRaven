@@ -18,13 +18,15 @@ SELECT plan(84);
 -- 0. Setup
 -- ----------------------------------------------------------------------------
 GRANT edge_partner, edge_actor, partner_totp_verifier, partner_pin_verifier, private_definer TO CURRENT_USER WITH SET TRUE;
-GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_totp TO CURRENT_USER;
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_totp, app.partner_rp_config TO CURRENT_USER;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
 ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
 CREATE POLICY zz31_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz31_sess ON app.partner_session FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz31_totp ON app.partner_totp FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz31_rp ON app.partner_rp_config FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz31_audit ON app.audit_log FOR SELECT TO CURRENT_USER USING (true);
+INSERT INTO app.partner_rp_config (rp_id, origin) VALUES ('partners.example.test', 'https://partners.example.test');
 
 CREATE FUNCTION pg_temp.th(p_label text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$ SELECT md5('s31:' || p_label) || md5('s31b:' || p_label) $f$;
 CREATE FUNCTION pg_temp.mk_cred(p_label text, p_uid uuid) RETURNS uuid LANGUAGE sql AS $f$

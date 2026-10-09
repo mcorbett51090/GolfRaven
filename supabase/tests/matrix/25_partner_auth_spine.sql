@@ -1326,7 +1326,7 @@ SET LOCAL ROLE service_role;
 SELECT private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid)::text AS exp_json \gset
 RESET ROLE;
 SELECT is((SELECT jsonb_array_length(:'exp_json'::jsonb -> 'partner_credential')), 3, 'PA-1b: export_my_data carries the account''s partner credential block');
-SELECT is((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys((:'exp_json'::jsonb -> 'partner_credential') -> 0) k),
+SELECT is((SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys((:'exp_json'::jsonb -> 'partner_credential') -> 0) k),
           ARRAY['aaguid', 'alg', 'backup_eligible', 'backup_state', 'created_at', 'id', 'label', 'last_used_at', 'note', 'revoke_reason', 'revoked_at', 'transports', 'user_id'],
   'PA-1b: ... metadata only: never public_key, credential_id or sign_count');
 SELECT is(:'exp_json' ~ 'token_hash|mint_signature|nonce_hash|public_key', false, 'PA-1b: and no session, token, challenge or key artefact appears anywhere in the export');
