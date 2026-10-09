@@ -77,3 +77,5 @@ private.partner_credential_register_first(p_token_hash text, p_user_id uuid, p_r
 private.partner_bound_staff_at(p_facility_id text)
 private.partner_bound_manager_at(p_facility_id text)
 private.partner_bound_staff_any()
+# 0057 (S4 receipts and review): one policy predicate outside the *_for_partner family reads the partner binding (admin-only queue and resolve policies). EXECUTE for nobody but the owner.
+private.partner_bound_admin()

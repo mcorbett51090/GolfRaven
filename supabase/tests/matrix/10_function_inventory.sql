@@ -1176,13 +1176,16 @@ SELECT is(
   (SELECT array_agg(function_name::text ORDER BY function_name::text COLLATE "C") FROM private.function_inventory WHERE expected_edge_partner),
   ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_attest_for_partner', 'partner_binding', 'partner_binding_kind',
         'partner_credential_list_for_partner', 'partner_credential_options_for_partner', 'partner_credential_register_for_partner', 'partner_credential_revoke_for_partner',
+        'partner_held_queue_for_partner',
         'partner_invite_accept_for_partner', 'partner_invite_create_for_partner', 'partner_invite_list_for_partner', 'partner_invite_revoke_for_partner',
         'partner_member_recover_for_partner', 'partner_member_revoke_for_partner', 'partner_offline_attest_for_partner', 'partner_org_sessions_revoke_for_partner', 'partner_pin_change_for_partner',
-        'partner_pin_params_for_partner', 'partner_pin_reset_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner', 'partner_session_lock_for_partner',
+        'partner_pin_params_for_partner', 'partner_pin_reset_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner',
+        'partner_resolve_held_entitlement_for_partner', 'partner_resolve_held_offer_code_for_partner', 'partner_review_sla_for_partner',
+        'partner_session_lock_for_partner',
         'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
         'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_shift_log_for_partner', 'partner_staff_activity_for_partner', 'partner_totp_confirm_for_partner', 'partner_totp_enrol_for_partner',
         'partner_totp_reset_for_partner', 'partner_totp_verify_for_partner', 'partner_whoami_for_partner'],
-  'edge_partner executes EXACTLY the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3) the five of 0053 (S1.4) and the twelve of 0054 (S1.5) and the four of 0056 (S3)');
+  'edge_partner executes EXACTLY the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3) the five of 0053 (S1.4) and the twelve of 0054 (S1.5) and the four of 0056 (S3) and the four of 0057 (S4)');
 SELECT is((SELECT array_agg(function_name::text ORDER BY function_name::text COLLATE "C") FROM private.function_inventory WHERE expected_edge_partner_minter), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'], 'edge_partner_minter executes exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2) and the five of 0054 (S1.5)');
 SELECT tests.clear_actor();
 
