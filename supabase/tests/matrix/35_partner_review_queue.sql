@@ -162,6 +162,13 @@ SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_par
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a3_missing;
 
+-- planted GUC with NO partner binding (must run before the §3 bind: one bind per transaction)
+SET LOCAL ROLE private_definer;
+SELECT set_config('app.delete_my_data.target_user_id', '00000000-0000-0000-0000-4000000000d0', true);
+SELECT ok(NOT private.partner_bound_admin(), 'a planted delete_my_data GUC does not make partner_bound_admin true');
+SELECT set_config('app.delete_my_data.target_user_id', '', true);
+RESET ROLE;
+
 -- ----------------------------------------------------------------------------
 -- 3. Happy path: admin approves a held code and a held entitlement; rejects the budget-short path
 -- ----------------------------------------------------------------------------
@@ -233,10 +240,6 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname LIKE 'pd_pa
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname LIKE 'pd_partner_review_%'
            AND (coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') || coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '')) ~ 'partner_bound_admin'), 11,
   'each of them is keyed on partner_bound_admin');
-SET LOCAL ROLE private_definer;
-SELECT set_config('app.delete_my_data.target_user_id', '00000000-0000-0000-0000-4000000000d0', true);
-SELECT ok(NOT private.partner_bound_admin(), 'a planted delete_my_data GUC does not make partner_bound_admin true');
-RESET ROLE;
 SET LOCAL ROLE service_role;
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd_partner_review_%'), 11, 'the eleven policies are in definer_policy_allowlist');
 RESET ROLE;
