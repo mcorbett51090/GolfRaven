@@ -3,7 +3,10 @@
 -- the held-review queue and SLA summary reads (class A0, admin only); staff / manager / operator cannot resolve or read the queue; a missing A3 (no fresh TOTP window) is refused; not_found / not_held / budget_short
 -- are returned statuses; edge_partner has no EXECUTE on app.resolve_held_*; the binding-keyed policies are closed without a partner binding and not opened by a planted GUC.
 --
--- Principals are helpers.sql's: staff_x (a1), manager_x (b1), operator_t (c1), admin (d0), player_a.
+-- HOW THIS FILE RUNS. One transaction, rolled back at the end (the 34 pattern). Token hashes are precomputed with \gset so they can be passed under SET LOCAL ROLE edge_partner
+-- (edge_partner cannot EXECUTE pg_temp helpers). Inventory / allow-list reads run as service_role (FORCE RLS; SELECT is granted to service_role only).
+--
+-- Principals are helpers.sql's: staff_x (a1), manager_x (b1), operator_t (c1), admin (d0), player_a / player_b.
 
 \set QUIET 1
 BEGIN;
@@ -50,30 +53,33 @@ BEGIN
 END
 $f$;
 
--- call a resolve as edge_partner under a binding; returns status|state
+-- call a resolve as edge_partner under a binding; returns status|state. Hash captured BEFORE SET ROLE (edge_partner cannot EXECUTE pg_temp.th).
 CREATE FUNCTION pg_temp.res_oc(p_label text, p_id uuid, p_approve boolean) RETURNS text LANGUAGE plpgsql AS $f$
-DECLARE r record;
+DECLARE r record; v_th text;
 BEGIN
+  v_th := pg_temp.th(p_label);
   PERFORM pg_temp.seed_step(p_label, '{"mfa_s": 240, "aal": 2}'::jsonb);
   EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(pg_temp.th(p_label));
+  PERFORM private.bind_partner_session(v_th);
   SELECT * INTO r FROM private.partner_resolve_held_offer_code_for_partner(p_id, p_approve);
   EXECUTE 'RESET ROLE';
   RETURN r.o_status || '|' || coalesce(r.o_state, '');
 END
 $f$;
 CREATE FUNCTION pg_temp.res_ent(p_label text, p_id uuid, p_approve boolean) RETURNS text LANGUAGE plpgsql AS $f$
-DECLARE r record;
+DECLARE r record; v_th text;
 BEGIN
+  v_th := pg_temp.th(p_label);
   PERFORM pg_temp.seed_step(p_label, '{"mfa_s": 240, "aal": 2}'::jsonb);
   EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(pg_temp.th(p_label));
+  PERFORM private.bind_partner_session(v_th);
   SELECT * INTO r FROM private.partner_resolve_held_entitlement_for_partner(p_id, p_approve);
   EXECUTE 'RESET ROLE';
   RETURN r.o_status || '|' || coalesce(r.o_state, '');
 END
 $f$;
 
+SELECT pg_temp.th('sx') AS th_sx, pg_temp.th('mx') AS th_mx, pg_temp.th('op') AS th_op, pg_temp.th('ad') AS th_ad \gset
 SELECT pg_temp.mk_cred('sx', '00000000-0000-0000-0000-1000000000a1') AS c_sx \gset
 SELECT pg_temp.mk_cred('mx', '00000000-0000-0000-0000-2000000000b1') AS c_mx \gset
 SELECT pg_temp.mk_cred('op', '00000000-0000-0000-0000-3000000000c1') AS c_op \gset
@@ -114,9 +120,11 @@ SELECT ok(has_function_privilege('edge_partner', 'private.partner_resolve_held_e
 SELECT ok(has_function_privilege('edge_partner', 'private.partner_held_queue_for_partner()'::regprocedure, 'EXECUTE'), 'the queue read is edge_partner');
 SELECT ok(has_function_privilege('edge_partner', 'private.partner_review_sla_for_partner()'::regprocedure, 'EXECUTE'), 'the SLA read is edge_partner');
 SELECT ok(NOT has_function_privilege('edge_partner', 'private.partner_resolve_held_offer_code_apply(uuid, boolean, uuid)'::regprocedure, 'EXECUTE'), 'the apply helper is not edge_partner');
+SET LOCAL ROLE service_role;
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN (
   'partner_resolve_held_offer_code_for_partner', 'partner_resolve_held_entitlement_for_partner', 'partner_held_queue_for_partner', 'partner_review_sla_for_partner') AND expected_edge_partner), 4,
   'the four partner functions are in function_inventory as edge_partner');
+RESET ROLE;
 
 -- ----------------------------------------------------------------------------
 -- 2. Authority: only an admin with A3 may resolve; only an admin may read the queue
@@ -124,7 +132,7 @@ SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_n
 SAVEPOINT staff_resolve;
 SELECT pg_temp.seed_step('sx', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(pg_temp.th('sx'));
+SELECT private.bind_partner_session(:'th_sx');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner('70000000-0000-0000-0000-000000003501', true)$$, '42501', NULL, 'staff cannot resolve (admin only after A3)');
 SELECT throws_ok($$SELECT * FROM private.partner_held_queue_for_partner()$$, '42501', NULL, 'staff cannot read the queue');
 RESET ROLE;
@@ -133,7 +141,7 @@ ROLLBACK TO SAVEPOINT staff_resolve;
 SAVEPOINT mgr_resolve;
 SELECT pg_temp.seed_step('mx', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(pg_temp.th('mx'));
+SELECT private.bind_partner_session(:'th_mx');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner('70000000-0000-0000-0000-000000003501', true)$$, '42501', NULL, 'manager cannot resolve');
 SELECT throws_ok($$SELECT * FROM private.partner_review_sla_for_partner()$$, '42501', NULL, 'manager cannot read the SLA summary');
 RESET ROLE;
@@ -142,7 +150,7 @@ ROLLBACK TO SAVEPOINT mgr_resolve;
 SAVEPOINT op_resolve;
 SELECT pg_temp.seed_step('op', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(pg_temp.th('op'));
+SELECT private.bind_partner_session(:'th_op');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner('70000000-0000-0000-0000-000000003501', true)$$, '42501', 'partner_resolve_held_offer_code_for_partner: only an admin may resolve a held reward', 'operator with A3 still cannot resolve (admin only)');
 SELECT throws_ok($$SELECT * FROM private.partner_held_queue_for_partner()$$, '42501', NULL, 'operator cannot read the queue');
 RESET ROLE;
@@ -152,7 +160,7 @@ SAVEPOINT a3_missing;
 -- admin at aal 2 but no mfa_until: A3 refused
 SELECT pg_temp.seed_step('ad', '{"aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(pg_temp.th('ad'));
+SELECT private.bind_partner_session(:'th_ad');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner('70000000-0000-0000-0000-000000003501', true)$$, '42501', NULL, 'A3 without a fresh TOTP window is refused');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a3_missing;
@@ -180,7 +188,7 @@ SELECT is(pg_temp.res_ent('ad', '51000000-0000-0000-0000-000000003599', false), 
 SAVEPOINT bad_args;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(pg_temp.th('ad'));
+SELECT private.bind_partner_session(:'th_ad');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner(NULL, true)$$, '22023', NULL, 'a NULL code id is 22023');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner('70000000-0000-0000-0000-000000003501', NULL)$$, '22023', NULL, 'a NULL approve flag is 22023');
 RESET ROLE;
@@ -199,16 +207,18 @@ VALUES ('70000000-0000-0000-0000-000000003503', '60000000-0000-0000-0000-0000000
 UPDATE app.entitlement SET state = 'held_review', hold_detail = '{"heldFor":"test"}'::jsonb, activated_at = now() - interval '3 days'
 WHERE id = '51000000-0000-0000-0000-000000003501';
 
+SELECT count(*)::int AS held_oc_n FROM app.offer_code WHERE state = 'held_review' \gset
+
 SAVEPOINT queue_read;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(pg_temp.th('ad'));
+SELECT private.bind_partner_session(:'th_ad');
 SELECT ok((SELECT count(*)::int FROM private.partner_held_queue_for_partner() WHERE o_kind = 'offer_code') >= 1, 'the queue lists held offer_codes');
 SELECT ok((SELECT count(*)::int FROM private.partner_held_queue_for_partner() WHERE o_kind = 'entitlement') >= 1, 'the queue lists held entitlements');
 SELECT ok((SELECT count(*)::int FROM private.partner_held_queue_for_partner() WHERE o_kind = 'review_item') >= 1, 'the queue lists open review_items');
 SELECT ok((SELECT bool_or(o_sla_breached) FROM private.partner_held_queue_for_partner() WHERE o_kind = 'entitlement' AND o_id = '51000000-0000-0000-0000-000000003501'), 'a hold older than 48 h is sla_breached');
 SELECT ok(NOT coalesce((SELECT bool_or(o_sla_breached) FROM private.partner_held_queue_for_partner() WHERE o_id = '70000000-0000-0000-0000-000000003503'), true), 'a fresh hold is not sla_breached');
-SELECT is((SELECT o_held_offer_codes::int FROM private.partner_review_sla_for_partner()), (SELECT count(*)::int FROM app.offer_code WHERE state = 'held_review'), 'SLA summary held_offer_codes matches');
+SELECT is((SELECT o_held_offer_codes::int FROM private.partner_review_sla_for_partner()), :held_oc_n, 'SLA summary held_offer_codes matches');
 SELECT is((SELECT o_sla_hours FROM private.partner_review_sla_for_partner()), 48, 'SLA hours is 48 ([inference])');
 SELECT ok((SELECT o_sla_breached_rewards FROM private.partner_review_sla_for_partner()) >= 1, 'SLA summary counts breached rewards');
 RESET ROLE;
@@ -228,7 +238,9 @@ SET LOCAL ROLE private_definer;
 SELECT set_config('app.delete_my_data.target_user_id', '00000000-0000-0000-0000-4000000000d0', true);
 SELECT ok(NOT private.partner_bound_admin(), 'a planted delete_my_data GUC does not make partner_bound_admin true');
 RESET ROLE;
+SET LOCAL ROLE service_role;
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd_partner_review_%'), 11, 'the eleven policies are in definer_policy_allowlist');
+RESET ROLE;
 
 SELECT * FROM finish();
 ROLLBACK;
