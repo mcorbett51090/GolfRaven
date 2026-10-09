@@ -351,7 +351,7 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'attestation', 'pd_partner_offers_attest_insert', 'INSERT', true, 'P5.1b: an offer_redemption attestation by the BOUND partner member at a facility they work at', 'private_definer'),
   ('private', 'consumed_nonce', 'pd_partner_offers_nonce_insert', 'INSERT', true, 'P5.1b: the check-in token a staff_scan offer redeem consumes, source offer_redemption', 'private_definer'),
   ('private', 'consumed_nonce', 'pd_partner_offers_nonce_select', 'SELECT', true, 'P5.1b: the replay check of a staff_scan offer redeem, source offer_redemption only', 'private_definer'),
-  ('app', 'offer_code', 'pd_partner_offers_settlement_code_select', 'SELECT', true, 'P5.1b: redeemed offer codes whose offer is on a trail the bound operator runs (or admin); settlement export', 'private_definer');
+  ('app', 'offer_code', 'pd_partner_offers_settlement_code_select', 'SELECT', true, 'P5.1b: redeemed offer codes at a facility on a trail the bound operator runs (or admin), via facility_programme (not offer: offer policies EXISTS offer_code and would recurse); settlement export', 'private_definer');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
