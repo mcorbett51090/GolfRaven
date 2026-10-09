@@ -74,13 +74,17 @@ CREATE POLICY pd_partner_offers_nonce_insert ON private.consumed_nonce FOR INSER
 CREATE POLICY pd_partner_offers_nonce_select ON private.consumed_nonce FOR SELECT TO private_definer
   USING ((SELECT private.partner_binding_kind()) = 'partner' AND source = 'offer_redemption');
 
--- 2f. settlement export: redeemed codes whose offer is on a trail the bound operator runs (or admin)
+-- 2f. settlement export: redeemed codes at a facility on a trail the bound operator runs (or admin).
+-- Deliberately keyed on facility_programme, NOT a subquery of app.offer: offer's private_definer policies
+-- (pd_edge_act_offer_select) EXISTS offer_code, so an offer_code policy that SELECTs offer recurses (helpers.sql COMMIT /
+-- offer_code_play_guard). The settlement definer still joins offer for trail_id / funder / face_value; this policy is the
+-- binding-keyed gate only.
 CREATE POLICY pd_partner_offers_settlement_code_select ON app.offer_code FOR SELECT TO private_definer
   USING ((SELECT private.partner_binding_kind()) = 'partner' AND state = 'redeemed' AND (
     private.partner_bound_admin()
     OR EXISTS (
-      SELECT 1 FROM app.offer o
-      WHERE o.id = offer_id AND private.partner_bound_operator_at_trail(o.trail_id)
+      SELECT 1 FROM app.facility_programme fp
+      WHERE fp.facility_id = facility_id AND private.partner_bound_operator_at_trail(fp.trail_id)
     )
   ));
 
