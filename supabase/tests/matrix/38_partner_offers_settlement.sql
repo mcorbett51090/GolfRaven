@@ -224,8 +224,8 @@ SELECT is((SELECT o_status || '|' || count(*) OVER () FROM private.partner_settl
   'ok|1', 'AT(17)/AT(10): settlement export returns ok with one line for the month');
 SELECT is((SELECT o_sponsorship_id::text FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date) WHERE o_status = 'ok' LIMIT 1),
   '38000000-0000-0000-0000-000000000001', 'AT(20): settlement line includes sponsorship_id for sponsor funder');
-SELECT is((SELECT o_redemptions::text || '|' || o_face_value_total::text FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date) WHERE o_status = 'ok' LIMIT 1),
-  '1|10', 'AT(10): export redemptions and face_value_total match the planted redeem');
+SELECT is((SELECT o_redemptions::text || '|' || o_face_value_total::numeric::text FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date) WHERE o_status = 'ok' LIMIT 1),
+  '1|10.00', 'AT(10): export redemptions and face_value_total match the planted redeem');
 SELECT is((SELECT o_funder FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date) WHERE o_status = 'ok' LIMIT 1),
   'sponsor', 'settlement funder is sponsor');
 SELECT is((SELECT o_status FROM private.partner_settlement_export_for_partner('trl_t', '2000-01-01'::date) LIMIT 1), 'empty', 'settlement for a month with no redemptions is empty');
@@ -251,10 +251,10 @@ RESET ROLE;
 SELECT ok((SELECT count(*)::int FROM private.partner_offers_queue_for_partner('fac_x')) >= 2, 'A0: queue lists issued codes at the facility');
 SELECT ok((SELECT bool_or(o_player_handle = 'player_b') FROM private.partner_offers_queue_for_partner('fac_x')), 'queue shows player handle');
 
-SELECT is((SELECT budget_reserved::text || '|' || budget_used::text FROM app.offer WHERE id = '68000000-0000-0000-0000-000000000002'), '10|0', 'offer budget before redeem: reserved 10 used 0');
+SELECT is((SELECT budget_reserved::text || '|' || budget_used::text FROM app.offer WHERE id = '68000000-0000-0000-0000-000000000002'), '10.00|0.00', 'offer budget before redeem: reserved 10 used 0');
 SELECT is(pg_temp.red('sx', 'fac_x', '78000000-0000-0000-0000-000000000001', 'staff_scan', '38200000-0000-0000-0000-000000000001'), 'ok|true', 'happy redeem consumes budget and writes attestation');
 SELECT is((SELECT state::text FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000001'), 'redeemed', 'offer_code is redeemed');
-SELECT is((SELECT budget_reserved::text || '|' || budget_used::text FROM app.offer WHERE id = '68000000-0000-0000-0000-000000000002'), '0|10', 'budget: reserved 0 used 10 after consume of 10');
+SELECT is((SELECT budget_reserved::text || '|' || budget_used::text FROM app.offer WHERE id = '68000000-0000-0000-0000-000000000002'), '0.00|10.00', 'budget: reserved 0 used 10 after consume of 10');
 SELECT is((SELECT count(*)::int FROM app.attestation WHERE kind = 'offer_redemption' AND player_user_id = '00000000-0000-0000-0000-00000000000b'), 1, 'one offer_redemption attestation');
 SELECT is(pg_temp.red('sx', 'fac_x', '78000000-0000-0000-0000-000000000001', 'staff_scan', '38200000-0000-0000-0000-000000000001'), 'not_issued|false', 'already redeemed is not_issued');
 
