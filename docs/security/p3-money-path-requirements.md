@@ -2131,10 +2131,13 @@ guard disabled (the LOW test then dies with the uncaught `TypeError`, failing th
   contention exists only between requests for the *same* reward or device; the offer lock is held for milliseconds. The
   later advisory-lock waits still cannot add to the budget: no vendor call happens after one is taken. Probe (Deno): 6
   parallel activations on one offer, each with a 2.4 s write, finish together in well under the 14 s a serialised queue would take (asserted < 7 s) with one write each.
-- **F7. The held-review queue has no Edge Function yet.** `app.resolve_held_offer_code` / `resolve_held_entitlement` exist
-  (service_role only, `p_resolved_by` must be an admin, audited) for P5.1a; the caller must authenticate the admin.
-  Voiding a held code by *any* path (not only `resolve_held_offer_code`) now releases its reservation, because the
-  release lives in the `offer_code_reservation_sync` trigger (H3), not in the resolver.
+- **F7. The held-review queue Edge Function is built (P5.1a S4, migration `0057`, design §27).** `app.resolve_held_offer_code` /
+  `resolve_held_entitlement` remain executable by `service_role` and (from 0057) by `private_definer` for the A3 partner
+  wrappers; **no edge role holds EXECUTE on them**. The partner lane reaches them only through
+  `private.partner_resolve_held_*_for_partner` (class A3, admin only; Edge `partner-review` `POST resolve/offer-code` and
+  `POST resolve/entitlement`). The queue and SLA reads are `partner_held_queue_for_partner` / `partner_review_sla_for_partner`
+  (class A0, admin only). Voiding a held code by *any* path (not only `resolve_held_offer_code`) still releases its
+  reservation, because the release lives in the `offer_code_reservation_sync` trigger (H3), not in the resolver.
 - **F8. Per-device rate limit is actor-scoped (accepted).** `hitRateLimitForActor` prefixes the actor's uid (as for evidence),
   so the 20/device/day bucket bounds one account's use of a device, not several accounts' use of it. Multi-account
   detection is the bits' job (and the Android substitute's), not the limiter's.

@@ -2000,3 +2000,46 @@ Run in this environment (PostgreSQL 16, Deno 2.5.2 from the CI-pinned release):
 - `HARNESS_MODE=superuser tools/db/test.sh`, run on the final tree: pgTAP **Files=54, Tests=5177, PASS**, Deno **382 passed, 0 failed**, inventory OK, lint clean.
 - `tools/db/verify-function-inventory.mjs`: OK (checks 1-15, including check 14 clauses (a) to (e) and the 14 (a) behavioural-cell rule for the four new functions); `service-role-lint` clean; `tools/db/check-migrations-immutable.sh --base edc5020`: all 54 existing migrations byte-identical.
 - vitest (`supabase/tests/unit`): the new `partner-attest-handler.test.ts` (shapes, route order, the status map, commit-versus-rollback, no seed or code in any response) and the updated enumerations pass; the files that fail in this environment fail for reasons outside this slice (`mint-siwa-client-secret` and `rules-vendor-freshness` need a build or network; `review-account-minters` failed on a first draft of the writer and is fixed here by the demo-account refusal). `apps/partners` typechecks (the fake `PartnerDb` gained `withAttest`).
+
+## 27. As built: S4 (held-review queue and resolve; receipts upload is a documented seam)
+
+Numbering: **migration `0057`, matrix `35`, this section 27.** S2b claims `0055` / matrix `33` / section 25; S3 claims `0056` / matrix `34` / section 26; S7 claims section 24. This slice takes the next free number of each so the branches merge without a rename. Nothing from 0001-0056 is edited.
+
+### 27.1 What was built
+
+**Migration `0057_partner_review_queue.sql`** (database half) and **matrix `35_partner_review_queue.sql`** (44 cells; both harness modes), then the Edge function **`partner-review`**.
+
+- **`private.partner_resolve_held_offer_code_for_partner(code_id, approve)`** and **`private.partner_resolve_held_entitlement_for_partner(entitlement_id, approve)`**, class **A3**, **ADMIN only** (an operator with a fresh TOTP window still cannot). They wrap `app.resolve_held_*` (0027, E20) so the Edge never reaches those functions: `edge_partner` (and every other edge role) still has no EXECUTE on them. The bound admin is `p_resolved_by`. Outcomes are **status rows** (`ok | not_found | not_held | budget_short` for offer codes; no `budget_short` for entitlements), so an expected refusal commits; only a missing authority (`42501`) or a malformed argument (`22023`) raises. Apply helpers (`partner_resolve_held_*_apply`, EXECUTE for nobody but their owner) translate the SQLSTATEs of `resolve_held_*` (`P0002`, `55000`, `23514`) so the `_for_partner` bodies stay free of `EXCEPTION` blocks (check 14).
+- **`private.partner_held_queue_for_partner()`**, class **A0**, ADMIN only. The open `held_review` offer codes and entitlements plus open `review_item` rows, with an SLA-breach flag (held / open longer than **48 hours**; `[inference]`: the plan's §9.2 SLA number is not in the repository). No plaintext code, no DeviceCheck hash, no ledger row. Newest-breach-first, capped at 500.
+- **`private.partner_review_sla_for_partner()`**, class **A0**, ADMIN only. Counts of open held rewards and open review items, and of those past the SLA (the portal / ops alert surface).
+- **Binding-keyed policies (S1.1a LOW-3)**: `private.partner_bound_admin()` (EXECUTE for nobody but the owner; in the 14(c) reader list) and **11** `private_definer` policies on `offer_code`, `entitlement`, `offer`, `device_reward_ledger`, `review_item` and `profile`, all keyed on that predicate — **none reads a GUC**. Each is in `definer_policy_allowlist` and `supabase/tests/fixtures/definer_policy_exprs.txt`. `GRANT EXECUTE` on `app.resolve_held_*` to `private_definer` only; apply-time asserts no edge role can execute them.
+
+**Edge** (`supabase/functions/partner-review/`, `_shared/partner/review-handler.ts`, `review-shape.ts`, `ports.ts` `PartnerReviewTx` / `PartnerDb.withReview`, `privileged.ts` `buildPartnerReviewTx`). Routes (all session routes, `verify_jwt = false`):
+
+| Route | Class | Body | Answers |
+|---|---|---|---|
+| `GET queue` | A0 | (none) | 200 `{items}`; 403 not admin |
+| `GET sla` | A0 | (none) | 200 counts + `slaHours: 48`; 403 not admin |
+| `POST resolve/offer-code` | A3 | `{id, approve}` | 200 `{state}`; 404 `not_found`; 409 `not_held`; 422 `budget_short`; 403 no A3 / not admin |
+| `POST resolve/entitlement` | A3 | `{id, approve}` | 200 `{state}`; 404 / 409 as above |
+
+The order is the members handler's (Origin, preflight, route and method, bearer, strict body on POST, the per-member bucket `partner-review:member` at 120 an hour `[inference]`, then the work). Entrypoint enumerations updated: `config.toml`, the three CI function lists, `partner-modules.test.ts`, `review-account-gate.test.ts`, the Deno and partners fakes. Matrices 10, 25 and 28 pin the four new `edge_partner` names and the two new class-A0 names.
+
+### 27.2 Decisions and departures, and why
+
+- **A3 wrappers around `app.resolve_held_*`, not a rewrite.** 0027's state machine, budget reservation, audit and ledger writes stay; S4 only makes them reachable under a partner binding with an admin and a fresh TOTP window (E20 / F7). Status translation lives in apply helpers so check 14 stays clean.
+- **Admin only, not operator.** The money doc and 0027 already require `p_resolved_by` to be an admin; the wrappers re-check `private.is_admin` after `partner_authorize` with an operator role array (the same shape as `partner_admin_enrolment_issue_for_partner`).
+- **48 h SLA is `[inference]`.** One literal in each of the queue and SLA definers; change both together if the plan's number lands.
+- **Queue GETs take no query string.** The list is global for the admin (held rewards are not facility-scoped today); facility filtering stays a portal concern until a filter is specified.
+
+### 27.3 Not built, honestly
+
+- **Player-lane `POST /v1/receipts` upload** (EXIF strip, size and type gates, perceptual hash). That path is the player's evidence intake, not the partner review queue; it needs its own Edge function and the existing `receipt_fingerprint` / purchase-evidence writers. **Seam**: a player-lane receipts function calling the existing intake definers; S4's queue already lists holds those writers create.
+- **Resolving a held PLAY** (`resolve_held_*` moves the reward row, not the play). Clearing a `fraud_signal`. The contract-reviewer staffing trigger of `roles-table.md`.
+- **Partners PWA review screens** (S7d). This slice is the Edge + database half the portal will call.
+- **No mutation pass was run for this slice.**
+- **Merge notes**: S2b edits the same enumeration files (`privileged.ts`, `ports.ts`, `ci.yml`, `partner_kind_readers.txt`, `definer_policy_exprs.txt`, matrices 10/25/28). The lists here include S3's names and S4's; merging S2b is a textual (not semantic) conflict in those lists.
+
+### 27.4 Verification run for this slice
+
+Recorded when the local harness and unit suites have been run for this tree (see the PR). Expected: matrix 35's 44 cells; `verify-function-inventory` OK including the eleven new allow-list rows against `definer_policy_exprs.txt`; vitest `partner-review-handler.test.ts` and the updated enumerations; `apps/partners` typechecks (`PartnerDb` gained `withReview`).
