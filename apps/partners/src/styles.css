@@ -135,3 +135,25 @@ button:disabled {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
 }
+.field {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+}
+.field label {
+  font-weight: 600;
+}
+.text-field {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  letter-spacing: 0.15em;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}

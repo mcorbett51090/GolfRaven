@@ -12,26 +12,46 @@
  *
  * `handler` is a `(Request) => Promise<Response>`; `httpServer()` wraps it in a node:http server for the Playwright suite.
  */
-import { createHash, randomBytes, verify } from "node:crypto";
+import { createHash, randomBytes, randomUUID, verify } from "node:crypto";
 import { createServer, type IncomingMessage, type Server } from "node:http";
+import { handlePartnerInvitesRequest } from "../../../../supabase/functions/_shared/partner/invites-handler.ts";
+import { derivePinKey, newPinSalt } from "../../../../supabase/functions/_shared/partner/pin-contract.ts";
 import {
   type AssertionVerifier,
   type ChallengeIssue,
   type CredentialLookup,
+  type EmailOtpPort,
+  type EnrolmentAcceptResult,
+  type InviteAcceptResult,
   type MintInput,
   type MintResult,
   type PartnerDb,
+  type PartnerInviteMintTx,
   type PartnerMintTx,
-  type PartnerSessionTx,
+  PartnerAuthorityRefused,
   PartnerSessionRefused,
+  type PartnerSessionTx,
+  type PinChangeInput,
+  type PinParams,
+  type PinSetInput,
+  type PinVerifyResult,
+  type PinWriteResult,
   type ReauthCredential,
   type ReauthInput,
+  type RegisterFirstInput,
+  type RegisterFirstResult,
+  type RegistrationVerifier,
   type RpConfig,
+  type TotpConfirmResult,
+  type TotpEnrolResult,
+  type TotpVerifyResult,
   type VerifyAssertionRequest,
   type VerifyOutcome,
 } from "../../../../supabase/functions/_shared/partner/ports.ts";
 import { handlePartnerSessionRequest } from "../../../../supabase/functions/_shared/partner/session-handler.ts";
 import { fromB64u, sha256Hex, toB64u } from "../../../../supabase/functions/_shared/partner/token.ts";
+import { hotpSha1, partnerTotpStep } from "../../../../supabase/functions/_shared/partner/totp-contract.ts";
+import { type Cbor, cborDecode } from "./cbor";
 import { publicKeyFromSpki, type SoftCredential } from "./soft-authenticator";
 
 export const USER_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -76,7 +96,31 @@ export interface FakeServer {
     delayAfter: Record<string, number>;
     /** when set, every `options` call is answered 429 with this Retry-After (seconds) */
     optionsRetryAfter: number | null;
+    /** the one-time code the fake mailbox accepts (the email proof and the invite / enrolment code) */
+    otpCode: string;
+    /** every address the fake "emailed" a code to, in order */
+    mailed: string[];
+    /** when set, the next invite or enrolment acceptance answers this status instead of `ok` (consumed once) */
+    acceptOutcome: "existing_member_sign_in" | "recover_required" | null;
+    /** the PIN grants the server has issued and the sessions that spent them: a grant is single-use */
+    pinGrantsIssued: number;
   };
+  /** Gives a user a PIN, derived here exactly as the browser derives it (pin-contract.ts). Default user: the signed-in one. */
+  seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean }): Promise<void>;
+  /** What the server stores of a user's PIN (never the digits), or null. */
+  pinRecord(userId?: string): { derived: string; salt: string; iterations: number; failures: number; locked: boolean; mustChange: boolean } | null;
+  /** A new invite (branch N) for an address: the token the invite link would carry. */
+  addInvite(input: { email: string; orgId?: string; role?: string }): { token: string; inviteId: string };
+  /** A new enrolment token (recovery) for an address that already has an account. */
+  addEnrolment(input: { email: string }): { token: string };
+  /** The credentials the server holds for a user, as `{ credentialId, publicKeySpki }`. */
+  credentialsOf(userId: string): Array<{ credentialId: string; publicKeySpki: Uint8Array }>;
+  /** The user the fake created for an address (by an accepted invite), or undefined. */
+  userByEmail(email: string): { id: string } | undefined;
+  /** The TOTP seed enrolled for a user, or null. */
+  totpSeed(userId?: string): Uint8Array | null;
+  /** A currently valid TOTP code for the seed (what an authenticator app would show). */
+  totpCodeNow(userId?: string): Promise<string>;
   /** the sha256 hex of every LIVE (not revoked) session token */
   sessions(): string[];
   /** kills a live session on the server (as an idle expiry would) without the client knowing */
@@ -88,28 +132,100 @@ export interface FakeServer {
 
 const sha256 = (d: Uint8Array | string): Buffer => createHash("sha256").update(d).digest();
 
+interface PinRecord {
+  salt: Uint8Array;
+  iterations: number;
+  derived: Uint8Array;
+  failures: number;
+  locked: boolean;
+  mustChange: boolean;
+  backoffUntil: number;
+}
+interface FakeUser {
+  id: string;
+  email: string;
+  memberships: unknown[];
+  pin: PinRecord | null;
+  totp: { seed: Uint8Array; confirmed: boolean; enrolSession: string | null } | null;
+}
+interface FakeSession {
+  userId: string;
+  createdAt: Date;
+  aal: number;
+  enrolmentUntil: number | null;
+  otpProofUntil: number | null;
+  pinGrantUntil: number | null;
+  mfaUntil: number | null;
+}
+interface FakeCredential {
+  id: string;
+  userId: string;
+  alg: number;
+  publicKey: Uint8Array;
+  signCount: number;
+}
+interface FakeInvite {
+  id: string;
+  email: string;
+  orgId: string;
+  role: string;
+  kind: "invite" | "enrolment";
+  accepted: boolean;
+}
+
+const SPKI_P256_PREFIX = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
+const equalBytes = (a: Uint8Array, b: Uint8Array): boolean => Buffer.from(a).equals(Buffer.from(b));
+const ISO = (ms: number): string => new Date(ms).toISOString();
+
 export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
   const rp: RpConfig = { rpId: opts.rpId, origin: opts.pageOrigin };
-  const credId = toB64u(opts.credential.credentialId);
-  const credentialRow = { id: "11111111-1111-4111-8111-111111111111", userId: USER_ID, alg: -7, publicKey: opts.credential.publicKeySpki, signCount: 0 };
-  const challenges = new Map<string, { mac: string; exp: number; used: boolean; sessionHash: string | null }>();
-  const sessions = new Map<string, { userId: string; createdAt: Date }>();
+  const challenges = new Map<string, { mac: string; exp: number; used: boolean; sessionHash: string | null; binding: string | null }>();
+  const sessions = new Map<string, FakeSession>();
+  const users = new Map<string, FakeUser>();
+  const credentials = new Map<string, FakeCredential>();
+  const invites = new Map<string, FakeInvite>();
+  const usedGotrueSessions = new Set<string>();
   const log: LoggedRequest[] = [];
   const issuedTokens: string[] = [];
-  const state: FakeServer["state"] = { revokedSessions: new Set(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null, hang: new Set(), delayAfter: {}, optionsRetryAfter: null };
+  const state: FakeServer["state"] = {
+    revokedSessions: new Set(),
+    lockCalls: 0,
+    signOutCalls: 0,
+    reauthLimit: Number.POSITIVE_INFINITY,
+    reauthHits: 0,
+    unavailable: false,
+    reauthUntil: null,
+    hang: new Set(),
+    delayAfter: {},
+    optionsRetryAfter: null,
+    otpCode: "123456",
+    mailed: [],
+    acceptOutcome: null,
+    pinGrantsIssued: 0,
+  };
   const held: Array<() => void> = [];
   let signCount = 0;
+  let gotrueCounter = 0;
 
-  const issue = (sessionHash: string | null): ChallengeIssue => {
+  const defaultMemberships = () => opts.whoami?.memberships ?? [{ orgId: "33333333-3333-4333-8333-333333333333", role: "staff", facilityIds: ["44444444-4444-4444-8444-444444444444"], trailIds: [] }];
+  /** The signed-in test user and the credential the virtual authenticators hold. */
+  function seed(): void {
+    users.set(USER_ID, { id: USER_ID, email: "staff@partners.example.test", memberships: defaultMemberships(), pin: null, totp: null });
+    credentials.set(toB64u(opts.credential.credentialId), { id: "11111111-1111-4111-8111-111111111111", userId: USER_ID, alg: -7, publicKey: opts.credential.publicKeySpki, signCount: 0 });
+  }
+  seed();
+  const userOf = (hash: string): FakeUser => users.get(sessions.get(hash)!.userId)!;
+
+  const issue = (sessionHash: string | null, binding: string | null = null): ChallengeIssue => {
     const nonce = randomBytes(32);
     const mac = randomBytes(32);
     const exp = Math.floor(Date.now() / 1000) + 120;
-    challenges.set(toB64u(nonce), { mac: toB64u(mac), exp, used: false, sessionHash });
+    challenges.set(toB64u(nonce), { mac: toB64u(mac), exp, used: false, sessionHash, binding });
     return { nonce, exp, mac };
   };
-  const consume = (nonce: Uint8Array, exp: number, mac: Uint8Array, sessionHash: string | null): boolean => {
+  const consume = (nonce: Uint8Array, exp: number, mac: Uint8Array, sessionHash: string | null, binding: string | null = null): boolean => {
     const c = challenges.get(toB64u(nonce));
-    if (c === undefined || c.used || c.exp !== exp || c.mac !== toB64u(mac) || c.sessionHash !== sessionHash || c.exp * 1000 <= Date.now()) return false;
+    if (c === undefined || c.used || c.exp !== exp || c.mac !== toB64u(mac) || c.sessionHash !== sessionHash || c.binding !== binding || c.exp * 1000 <= Date.now()) return false;
     c.used = true;
     return true;
   };
@@ -149,22 +265,37 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
 
   const whoamiPayload = (sessionHash: string) => {
     const s = sessions.get(sessionHash)!;
+    const user = users.get(s.userId)!;
     const now = Date.now();
-    const iso = (ms: number) => new Date(ms).toISOString();
+    const live = (ms: number | null): string | null => (ms !== null && ms > now ? ISO(ms) : null);
     return {
       userId: s.userId,
       sessionId: "22222222-2222-4222-8222-222222222222",
-      aal: opts.whoami?.aal ?? 1,
+      aal: s.aal,
       requiredAal: opts.whoami?.requiredAal ?? 1,
-      createdAt: iso(s.createdAt.getTime()),
-      lastSeenAt: iso(now),
-      idleExpiresAt: iso(now + 30 * 60_000),
-      expiresAt: iso(s.createdAt.getTime() + 8 * 3_600_000),
+      createdAt: ISO(s.createdAt.getTime()),
+      lastSeenAt: ISO(now),
+      idleExpiresAt: ISO(now + 30 * 60_000),
+      expiresAt: ISO(s.createdAt.getTime() + 8 * 3_600_000),
       isAdmin: opts.whoami?.isAdmin ?? false,
-      stepUp: { pinGrantActive: false, reauthUntil: state.reauthUntil, mfaUntil: null, otpProofUntil: null, enrolmentUntil: null },
-      memberships: opts.whoami?.memberships ?? [{ orgId: "33333333-3333-4333-8333-333333333333", role: "staff", facilityIds: ["44444444-4444-4444-8444-444444444444"], trailIds: [] }],
+      stepUp: { pinGrantActive: s.pinGrantUntil !== null && s.pinGrantUntil > now, reauthUntil: state.reauthUntil, mfaUntil: live(s.mfaUntil), otpProofUntil: live(s.otpProofUntil), enrolmentUntil: live(s.enrolmentUntil) },
+      memberships: user.memberships,
     };
   };
+
+  /** The session may set a PIN or enrol TOTP: an unexpired enrolment window or email proof (design 6.3). */
+  const hasProof = (s: FakeSession): boolean => Date.now() < Math.max(s.enrolmentUntil ?? 0, s.otpProofUntil ?? 0);
+
+  const pinStatus = (pin: PinRecord | null): "unset" | "must_change" | "locked" | "ok" => (pin === null ? "unset" : pin.locked ? "locked" : pin.mustChange ? "must_change" : "ok");
+
+  /** One consecutive failure: counts, locks at 5, and starts the back-off (3rd: 30 s, 4th: 5 min). */
+  function recordPinFailure(pin: PinRecord): number {
+    pin.failures += 1;
+    if (pin.failures >= 5) pin.locked = true;
+    else if (pin.failures === 3) pin.backoffUntil = Date.now() + 30_000;
+    else if (pin.failures === 4) pin.backoffUntil = Date.now() + 300_000;
+    return Math.max(0, Math.ceil((pin.backoffUntil - Date.now()) / 1000));
+  }
 
   const db: PartnerDb = {
     async withMint(op) {
@@ -176,22 +307,27 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           return issue(null);
         },
         async lookupCredential(id: Uint8Array): Promise<CredentialLookup> {
-          return toB64u(id) === credId ? { status: "ok", credential: { ...credentialRow, signCount } } : { status: "unknown" };
+          const c = credentials.get(toB64u(id));
+          return c === undefined ? { status: "unknown" } : { status: "ok", credential: { ...c, signCount } };
         },
         async recordFailure() {
           return "counted";
         },
         async mint(input: MintInput): Promise<MintResult> {
           if (!consume(input.nonce, input.exp, input.mac, null)) return { status: "challenge_invalid", aal: null, expiresAt: null };
+          const c = credentials.get(toB64u(input.credentialId));
+          if (c === undefined) return { status: "unknown_credential", aal: null, expiresAt: null };
           signCount = Buffer.from(input.authenticatorData).readUInt32BE(33);
-          sessions.set(input.tokenHash, { userId: USER_ID, createdAt: new Date() });
-          return { status: "ok", aal: opts.whoami?.aal ?? 1, expiresAt: new Date(Date.now() + 8 * 3_600_000).toISOString() };
+          const aal = opts.whoami?.aal ?? 1;
+          sessions.set(input.tokenHash, { userId: c.userId, createdAt: new Date(), aal, enrolmentUntil: null, otpProofUntil: null, pinGrantUntil: null, mfaUntil: null });
+          return { status: "ok", aal, expiresAt: new Date(Date.now() + 8 * 3_600_000).toISOString() };
         },
       };
       return await op(tx);
     },
     async withSession(hash, op) {
       if (!sessions.has(hash) || state.revokedSessions.has(hash)) throw new PartnerSessionRefused();
+      const session = sessions.get(hash)!;
       const tx: PartnerSessionTx = {
         async whoami() {
           return whoamiPayload(hash);
@@ -203,44 +339,96 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         async lock() {
           state.lockCalls += 1;
           state.reauthUntil = null;
+          session.pinGrantUntil = null;
+          session.otpProofUntil = null;
         },
         async reauthOptions() {
           return { ...issue(hash), rp };
         },
         async reauthCredential(id: Uint8Array): Promise<ReauthCredential | null> {
-          return toB64u(id) === credId ? { ...credentialRow, signCount, rp } : null;
+          const c = credentials.get(toB64u(id));
+          return c !== undefined && c.userId === session.userId ? { ...c, signCount, rp } : null;
         },
-        // S1.3 step-up surface: fail closed. The S7a page never calls these (S7b builds the PIN screens and will implement the flows in this fake).
-        async pinParams(): Promise<never> {
-          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        async pinParams(): Promise<PinParams> {
+          const pin = userOf(hash).pin;
+          const st = pinStatus(pin);
+          if (st !== "ok" || pin === null) return { state: st === "ok" ? "unset" : st };
+          return { state: "ok", salt: pin.salt, iterations: pin.iterations, retryAfterSeconds: Math.max(0, Math.ceil((pin.backoffUntil - Date.now()) / 1000)) };
         },
-        async pinVerify(): Promise<never> {
-          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        async pinVerify(derived: Uint8Array): Promise<PinVerifyResult> {
+          const pin = userOf(hash).pin;
+          const st = pinStatus(pin);
+          if (pin === null || st === "unset") return { status: "unset", retryAfterSeconds: 0, grantUntil: null };
+          if (st === "locked") return { status: "locked", retryAfterSeconds: 0, grantUntil: null };
+          if (st === "must_change") return { status: "must_change", retryAfterSeconds: 0, grantUntil: null };
+          if (pin.backoffUntil > Date.now()) return { status: "retry_after", retryAfterSeconds: Math.ceil((pin.backoffUntil - Date.now()) / 1000), grantUntil: null };
+          if (!equalBytes(derived, pin.derived)) {
+            const wait = recordPinFailure(pin);
+            return { status: pin.locked ? "locked" : "wrong", retryAfterSeconds: wait, grantUntil: null };
+          }
+          pin.failures = 0;
+          session.pinGrantUntil = Date.now() + 60_000;
+          state.pinGrantsIssued += 1;
+          return { status: "ok", retryAfterSeconds: 0, grantUntil: ISO(session.pinGrantUntil) };
         },
-        async pinSet(): Promise<never> {
-          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        async pinSet(input: PinSetInput): Promise<PinWriteResult> {
+          if (!hasProof(session)) throw new PartnerAuthorityRefused();
+          const user = userOf(hash);
+          if (user.pin !== null && !user.pin.mustChange && !user.pin.locked) return { status: "already_set", retryAfterSeconds: 0 };
+          user.pin = { salt: input.salt, iterations: input.iterations, derived: input.derived, failures: 0, locked: false, mustChange: false, backoffUntil: 0 };
+          return { status: "ok", retryAfterSeconds: 0 };
         },
-        async pinChange(): Promise<never> {
-          throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
+        async pinChange(input: PinChangeInput): Promise<PinWriteResult> {
+          if (!hasProof(session)) throw new PartnerAuthorityRefused();
+          const user = userOf(hash);
+          const pin = user.pin;
+          if (pin === null) return { status: "no_pin", retryAfterSeconds: 0 };
+          if (pin.locked) return { status: "locked", retryAfterSeconds: 0 };
+          if (pin.mustChange) return { status: "must_change", retryAfterSeconds: 0 };
+          if (pin.backoffUntil > Date.now()) return { status: "retry_after", retryAfterSeconds: Math.ceil((pin.backoffUntil - Date.now()) / 1000) };
+          if (!equalBytes(input.current, pin.derived)) {
+            const wait = recordPinFailure(pin);
+            return { status: pin.locked ? "locked" : "wrong", retryAfterSeconds: wait };
+          }
+          user.pin = { salt: input.salt, iterations: input.iterations, derived: input.derived, failures: 0, locked: false, mustChange: false, backoffUntil: 0 };
+          return { status: "ok", retryAfterSeconds: 0 };
         },
-        // S1.4 TOTP surface: fail closed. The S7 PIN/TOTP screens will implement these in this fake.
-        async totpEnrol(): Promise<never> {
-          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        async totpEnrol(): Promise<TotpEnrolResult> {
+          if (!hasProof(session)) throw new PartnerAuthorityRefused();
+          const user = userOf(hash);
+          if (user.totp?.confirmed === true) return { status: "already_confirmed", seed: null, seedVersion: null, issuer: null, period: null, digits: null, algo: null };
+          user.totp = { seed: new Uint8Array(randomBytes(20)), confirmed: false, enrolSession: hash };
+          return { status: "ok", seed: user.totp.seed, seedVersion: 1, issuer: "GolfRaven", period: 30, digits: 6, algo: "SHA1" };
         },
-        async totpConfirm(): Promise<never> {
-          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        async totpConfirm(code: string): Promise<TotpConfirmResult> {
+          const t = userOf(hash).totp;
+          if (t === null) return { status: "unset", retryAfterSeconds: 0 };
+          if (t.confirmed) return { status: "already_confirmed", retryAfterSeconds: 0 };
+          if (t.enrolSession !== hash) return { status: "wrong_session", retryAfterSeconds: 0 };
+          if (!(await totpAccepts(t.seed, code))) return { status: "wrong", retryAfterSeconds: 0 };
+          t.confirmed = true;
+          return { status: "ok", retryAfterSeconds: 0 };
         },
-        async totpVerify(): Promise<never> {
-          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        async totpVerify(code: string): Promise<TotpVerifyResult> {
+          const t = userOf(hash).totp;
+          if (t === null) return { status: "unset", retryAfterSeconds: 0, mfaUntil: null };
+          if (!t.confirmed) return { status: "unconfirmed", retryAfterSeconds: 0, mfaUntil: null };
+          if (!(await totpAccepts(t.seed, code))) return { status: "wrong", retryAfterSeconds: 0, mfaUntil: null };
+          session.aal = 2;
+          session.mfaUntil = Date.now() + 5 * 60_000;
+          return { status: "ok", retryAfterSeconds: 0, mfaUntil: ISO(session.mfaUntil) };
         },
         async totpReset(): Promise<never> {
-          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+          throw new Error("fake partner server: totp-reset is a partner-members route (not implemented)");
         },
         async otpTarget() {
-          return null; // no mailbox: the email proof cannot start
+          return userOf(hash).email;
         },
-        async otpProof() {
-          return { status: "refused" as const, otpProofUntil: null };
+        async otpProof(gotrueSessionId: string) {
+          if (usedGotrueSessions.has(gotrueSessionId)) return { status: "refused" as const, otpProofUntil: null };
+          usedGotrueSessions.add(gotrueSessionId);
+          session.otpProofUntil = Date.now() + 10 * 60_000;
+          return { status: "ok" as const, otpProofUntil: ISO(session.otpProofUntil) };
         },
         async reauth(input: ReauthInput) {
           if (!consume(input.nonce, input.exp, input.mac, hash)) return { status: "challenge_invalid", reauthUntil: null };
@@ -251,47 +439,177 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       };
       return await op(tx);
     },
-    async hitRateLimit(hash) {
+    async hitRateLimit(hash, bucket) {
       if (!sessions.has(hash) || state.revokedSessions.has(hash)) throw new PartnerSessionRefused();
+      if (bucket !== "partner-reauth:member") return { ok: true, retryAfterSeconds: 0 };
       state.reauthHits += 1;
       return state.reauthHits > state.reauthLimit ? { ok: false, retryAfterSeconds: 1800 } : { ok: true, retryAfterSeconds: 0 };
     },
-    // S1.5 invite/member surface: fail closed. The S7 invite and member screens will implement these in this fake.
-    withInviteMint() {
-      return Promise.reject(new Error("fake partner server: invite mint is not implemented (S7)"));
+    // S1.5: the pre-session invite and enrolment routes run the REAL partner-invites handler over this fake; the member routes stay closed
+    async withInviteMint(op) {
+      const emailOf = (hashHex: string, kind: FakeInvite["kind"]): string | null => {
+        const inv = invites.get(hashHex);
+        return inv !== undefined && inv.kind === kind && !inv.accepted ? inv.email : null;
+      };
+      const accept = (hashHex: string, userId: string, kind: FakeInvite["kind"]) => {
+        const inv = invites.get(hashHex);
+        if (inv === undefined || inv.kind !== kind || inv.accepted) return null;
+        const forced = state.acceptOutcome;
+        if (forced !== null) {
+          state.acceptOutcome = null;
+          return { status: forced, inv };
+        }
+        inv.accepted = true;
+        const user = users.get(userId)!;
+        if (kind === "invite") user.memberships = [{ orgId: inv.orgId, role: inv.role, facilityIds: ["44444444-4444-4444-8444-444444444444"], trailIds: [] }];
+        return { status: "ok", inv, challenge: issue(null, `${userId}:${kind}:${inv.id}`) };
+      };
+      const tx: PartnerInviteMintTx = {
+        async rpConfig() {
+          return rp;
+        },
+        async inviteEmailForToken(h) {
+          return emailOf(h, "invite");
+        },
+        async enrolmentEmailForToken(h) {
+          return emailOf(h, "enrolment");
+        },
+        async inviteAccept(h, userId): Promise<InviteAcceptResult> {
+          const r = accept(h, userId, "invite");
+          if (r === null) return { status: "not_found", accepted: null };
+          if (r.status !== "ok" || r.challenge === undefined) return { status: r.status as "existing_member_sign_in", accepted: null };
+          return { status: "ok", accepted: { userId, inviteId: r.inv.id, orgId: r.inv.orgId, role: r.inv.role, challenge: r.challenge } };
+        },
+        async enrolmentAccept(h, userId): Promise<EnrolmentAcceptResult> {
+          const r = accept(h, userId, "enrolment");
+          if (r === null) return { status: "not_found", accepted: null };
+          if (r.status !== "ok" || r.challenge === undefined) return { status: r.status as "existing_member_sign_in", accepted: null };
+          return { status: "ok", accepted: { userId, tokenId: r.inv.id, purpose: "recovery", challenge: r.challenge } };
+        },
+        async registerFirst(input: RegisterFirstInput): Promise<RegisterFirstResult> {
+          const refuse = (status: string): RegisterFirstResult => ({ status, credentialId: null, aal: null, expiresAt: null, enrolmentUntil: null });
+          const kind = input.refKind === 1 ? "invite" : "enrolment";
+          if (!consume(input.nonce, input.exp, input.mac, null, `${input.userId}:${kind}:${input.refId}`)) return refuse("bad_challenge");
+          const id = toB64u(input.credentialId);
+          if (credentials.has(id)) return refuse("credential_in_use");
+          credentials.set(id, { id: randomUUID(), userId: input.userId, alg: -7, publicKey: input.publicKey, signCount: 0 });
+          const now = Date.now();
+          const aal = opts.whoami?.aal ?? 1;
+          sessions.set(input.sessionTokenHash, { userId: input.userId, createdAt: new Date(now), aal, enrolmentUntil: now + 15 * 60_000, otpProofUntil: null, pinGrantUntil: null, mfaUntil: null });
+          return { status: "ok", credentialId: id, aal, expiresAt: ISO(now + 8 * 3_600_000), enrolmentUntil: ISO(now + 15 * 60_000) };
+        },
+      };
+      return await op(tx);
     },
     withInvites() {
-      return Promise.reject(new Error("fake partner server: invites are not implemented (S7)"));
+      return Promise.reject(new Error("fake partner server: invite create / list / branch E are not implemented"));
     },
     withMembers() {
-      return Promise.reject(new Error("fake partner server: members are not implemented (S7)"));
+      return Promise.reject(new Error("fake partner server: members are not implemented"));
     },
     async hitSystemRateLimit() {
       return { ok: true, retryAfterSeconds: 0 };
     },
   };
 
-  const innerHandler = (req: Request) =>
-    handlePartnerSessionRequest(req, {
+  async function totpAccepts(seedBytes: Uint8Array, code: string): Promise<boolean> {
+    const step = partnerTotpStep(Math.floor(Date.now() / 1000));
+    for (const d of [-1, 0, 1]) if ((await hotpSha1(seedBytes, step + d)) === code) return true;
+    return false;
+  }
+
+  const mailbox = (): EmailOtpPort => ({
+    async send(email) {
+      state.mailed.push(email);
+    },
+    async verify(email, code) {
+      if (code !== state.otpCode) return { ok: false as const };
+      let user = [...users.values()].find((u) => u.email === email);
+      if (user === undefined) {
+        user = { id: randomUUID(), email, memberships: [], pin: null, totp: null };
+        users.set(user.id, user);
+      }
+      gotrueCounter += 1;
+      return { ok: true as const, userId: user.id, sessionId: `gotrue-session-${gotrueCounter}`, closeSession: async () => undefined };
+    },
+  });
+
+  /** The registration wrapper of the real Edge, in miniature: the checks it makes on the create ceremony, and the key it hands the database (here an SPKI the fake sign-in verifies against). */
+  const registration: RegistrationVerifier = {
+    async options(req) {
+      return {
+        rp: { name: "GolfRaven Partners", id: req.rp.rpId },
+        user: { id: toB64u(req.userHandle), name: req.userName, displayName: req.userName },
+        challenge: toB64u(req.challenge),
+        pubKeyCredParams: [{ alg: -7, type: "public-key" }, { alg: -257, type: "public-key" }],
+        timeout: 60000,
+        attestation: "none",
+        excludeCredentials: req.excludeCredentialIds.map((id) => ({ id: toB64u(id), type: "public-key" })),
+        authenticatorSelection: { residentKey: "required", userVerification: "required", requireResidentKey: true },
+      };
+    },
+    async verify(req) {
+      const refuse = { ok: false as const };
+      const cd = fromB64u(req.response.response.clientDataJSON);
+      const att = fromB64u(req.response.response.attestationObject);
+      if (cd === null || att === null) return refuse;
+      let client: { type?: unknown; challenge?: unknown; origin?: unknown; crossOrigin?: unknown };
+      try {
+        client = JSON.parse(new TextDecoder().decode(cd));
+      } catch {
+        return refuse;
+      }
+      if (client.type !== "webauthn.create" || client.challenge !== toB64u(req.expectedChallenge) || client.origin !== req.rp.origin || client.crossOrigin === true) return refuse;
+      let obj: Cbor;
+      try {
+        obj = cborDecode(att);
+      } catch {
+        return refuse;
+      }
+      if (!(obj instanceof Map) || obj.get("fmt") !== "none") return refuse;
+      const authData = obj.get("authData");
+      if (!(authData instanceof Uint8Array) || authData.length < 55 || !equalBytes(authData.subarray(0, 32), sha256(req.rp.rpId))) return refuse;
+      const flags = authData[32] ?? 0;
+      if ((flags & 0x01) === 0 || (flags & 0x04) === 0 || (flags & 0x40) === 0) return refuse;
+      const idLen = (authData[53]! << 8) | authData[54]!;
+      const credentialId = authData.slice(55, 55 + idLen);
+      let cose: Cbor;
+      try {
+        cose = cborDecode(authData.slice(55 + idLen));
+      } catch {
+        return refuse;
+      }
+      if (!(cose instanceof Map)) return refuse;
+      const x = cose.get(-2);
+      const y = cose.get(-3);
+      if (!(x instanceof Uint8Array) || !(y instanceof Uint8Array) || cose.get(3) !== -7) return refuse;
+      if (toB64u(credentialId) !== req.response.id) return refuse;
+      return { ok: true as const, credentialId, publicKey: new Uint8Array(Buffer.concat([SPKI_P256_PREFIX, Buffer.from([0x04]), Buffer.from(x), Buffer.from(y)])), transports: req.response.response.transports ?? [] };
+    },
+  };
+
+  const newSessionToken = async () => {
+    const token = "gr_ps_" + toB64u(randomBytes(32));
+    issuedTokens.push(token);
+    return { token, hash: await sha256Hex(token) };
+  };
+  const sessionHandler = (req: Request) =>
+    handlePartnerSessionRequest(req, { db, allowedOrigin: opts.pageOrigin, webauthn: verifier, otp: mailbox(), nowMs: () => Date.now(), newSessionToken });
+  const invitesHandler = (req: Request) =>
+    handlePartnerInvitesRequest(req, {
       db,
       allowedOrigin: opts.pageOrigin,
-      webauthn: verifier,
-      // the email OTP of the step-up proof: nothing is sent and every code is refused (S7b)
-      otp: {
-        async send() {
-          throw new Error("fake partner server: the email OTP is not implemented (S7b)");
-        },
-        async verify() {
-          return { ok: false as const };
-        },
-      },
+      registration,
+      inviteOtp: mailbox(),
+      enrolmentOtp: mailbox(),
       nowMs: () => Date.now(),
-      newSessionToken: async () => {
-        const token = "gr_ps_" + toB64u(randomBytes(32));
-        issuedTokens.push(token);
+      newSessionToken,
+      newInviteToken: async () => {
+        const token = "gr_inv_" + toB64u(randomBytes(32));
         return { token, hash: await sha256Hex(token) };
       },
     });
+  const innerHandler = (req: Request) => (new URL(req.url).pathname.includes("/partner-invites/") ? invitesHandler(req) : sessionHandler(req));
 
   const handler = async (req: Request): Promise<Response> => {
     const body = req.method === "GET" || req.method === "OPTIONS" ? "" : await req.clone().text();
@@ -338,8 +656,47 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       log.length = 0;
       issuedTokens.length = 0;
       signCount = 0;
+      gotrueCounter = 0;
+      users.clear();
+      credentials.clear();
+      invites.clear();
+      usedGotrueSessions.clear();
+      seed();
       for (const release of held.splice(0)) release();
-      Object.assign(state, { revokedSessions: new Set<string>(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null, hang: new Set<string>(), delayAfter: {}, optionsRetryAfter: null });
+      Object.assign(state, { revokedSessions: new Set<string>(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null, hang: new Set<string>(), delayAfter: {}, optionsRetryAfter: null, otpCode: "123456", mailed: [], acceptOutcome: null, pinGrantsIssued: 0 });
+    },
+    async seedPin(pin, o = {}) {
+      const user = users.get(o.userId ?? USER_ID);
+      if (user === undefined) throw new Error("fake partner server: no such user");
+      const salt = newPinSalt();
+      const iterations = o.iterations ?? 210_000;
+      user.pin = { salt, iterations, derived: await derivePinKey(pin, salt, iterations), failures: 0, locked: o.locked === true, mustChange: o.mustChange === true, backoffUntil: 0 };
+    },
+    pinRecord(userId = USER_ID) {
+      const pin = users.get(userId)?.pin ?? null;
+      return pin === null ? null : { derived: toB64u(pin.derived), salt: toB64u(pin.salt), iterations: pin.iterations, failures: pin.failures, locked: pin.locked, mustChange: pin.mustChange };
+    },
+    addInvite({ email, orgId = "55555555-5555-4555-8555-555555555555", role = "staff" }) {
+      const token = "gr_inv_" + toB64u(randomBytes(32));
+      const id = randomUUID();
+      invites.set(createHash("sha256").update(token).digest("hex"), { id, email, orgId, role, kind: "invite", accepted: false });
+      return { token, inviteId: id };
+    },
+    addEnrolment({ email }) {
+      const token = "gr_enr_" + toB64u(randomBytes(32));
+      invites.set(createHash("sha256").update(token).digest("hex"), { id: randomUUID(), email, orgId: "", role: "", kind: "enrolment", accepted: false });
+      return { token };
+    },
+    credentialsOf: (userId) => [...credentials].filter(([, c]) => c.userId === userId).map(([credentialId, c]) => ({ credentialId, publicKeySpki: c.publicKey })),
+    userByEmail: (email) => {
+      const u = [...users.values()].find((x) => x.email === email);
+      return u === undefined ? undefined : { id: u.id };
+    },
+    totpSeed: (userId = USER_ID) => users.get(userId)?.totp?.seed ?? null,
+    async totpCodeNow(userId = USER_ID) {
+      const t = users.get(userId)?.totp;
+      if (t === undefined || t === null) throw new Error("fake partner server: no TOTP seed");
+      return await hotpSha1(t.seed, partnerTotpStep(Math.floor(Date.now() / 1000)));
     },
     killAllSessions: () => {
       for (const h of sessions.keys()) state.revokedSessions.add(h);

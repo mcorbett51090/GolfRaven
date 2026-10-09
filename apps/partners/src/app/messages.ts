@@ -2,6 +2,7 @@
 
 import { isPartnerApiError } from "../api/errors";
 import type { MessageKey, Params } from "../i18n";
+import type { PinRejection } from "../auth/pin";
 import { WebAuthnFailure } from "../webauthn/assertion";
 
 export interface UiMessage {
@@ -9,8 +10,42 @@ export interface UiMessage {
   readonly params?: Params;
 }
 
-/** `context`: a 401 means "that sign-in failed" while signing in, and "your session ended" anywhere else. */
-export function messageForError(e: unknown, context: "sign-in" | "session"): UiMessage {
+export type ErrorContext = "sign-in" | "session" | "enrol" | "pin" | "proof" | "totp";
+
+/** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
+function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
+  const wait = (key: MessageKey, waitKey: MessageKey): UiMessage => (retryAfterSeconds !== null ? { key: waitKey, params: { seconds: retryAfterSeconds } } : { key });
+  if (context === "pin") {
+    if (code === "pin_wrong") return { key: "pin.wrong" };
+    if (code === "pin_locked") return { key: "pin.locked" };
+    if (code === "pin_backoff") return wait("pin.backoff", "pin.backoff.wait");
+    if (code === "pin_already_set") return { key: "pin.alreadySet" };
+    if (code === "pin_not_set") return { key: "pin.notSet" };
+    if (code === "pin_must_change") return { key: "pin.mustChange" };
+  }
+  if (context === "proof") {
+    if (code === "otp_refused") return { key: "proof.refused" };
+    if (code === "otp_unavailable") return { key: "proof.unavailable" };
+  }
+  if (context === "totp") {
+    if (code === "totp_wrong") return { key: "totp.wrong" };
+    if (code === "totp_locked") return { key: "totp.locked" };
+    if (code === "totp_backoff") return wait("totp.backoff", "totp.backoff.wait");
+    if (code === "totp_not_set") return { key: "totp.notSet" };
+    if (code === "totp_unconfirmed") return { key: "totp.unconfirmed" };
+    if (code === "totp_already_confirmed") return { key: "totp.alreadyConfirmed" };
+    if (code === "totp_wrong_session") return { key: "totp.wrongSession" };
+  }
+  if (context === "enrol") {
+    if (kind === "forbidden") return { key: "enrol.refused" };
+    if (kind === "gone") return { key: "enrol.expired" };
+    if (kind === "conflict") return { key: "enrol.conflict" };
+  }
+  return null;
+}
+
+/** `context`: a 401 means "that sign-in failed" while signing in, and "your session ended" anywhere else; the step-up and enrolment contexts also read the server's closed error code. */
+export function messageForError(e: unknown, context: ErrorContext): UiMessage {
   if (e instanceof WebAuthnFailure) {
     switch (e.kind) {
       case "unsupported":
@@ -24,6 +59,8 @@ export function messageForError(e: unknown, context: "sign-in" | "session"): UiM
     }
   }
   if (isPartnerApiError(e)) {
+    const specific = messageForCode(e.kind, e.code, context, e.retryAfterSeconds);
+    if (specific !== null) return specific;
     switch (e.kind) {
       case "unauthenticated":
         return { key: context === "sign-in" ? "error.signInFailed" : "error.sessionEnded" };
@@ -41,4 +78,9 @@ export function messageForError(e: unknown, context: "sign-in" | "session"): UiM
     }
   }
   return { key: "error.generic" };
+}
+
+/** Why the page itself refused a PIN (before deriving anything). Closed set: `PinRejection`. */
+export function messageForPinRejection(reason: PinRejection): UiMessage {
+  return { key: `pin.rejected.${reason}` };
 }

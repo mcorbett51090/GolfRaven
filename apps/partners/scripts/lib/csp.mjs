@@ -71,7 +71,7 @@ export function buildCsp(apiBase, opts = {}) {
  * The generated `_headers` file (Cloudflare Pages syntax, as apps/site). One `/*` block carries the security headers; the hashed assets add a long cache
  * lifetime in their own block (no header name is repeated across blocks: Pages joins repeated names with a comma instead of replacing them).
  *
- * `/` and `/index.html` (the page itself) are `no-store`, so a back/forward navigation never serves the signed-in page from the HTTP cache or, in
+ * `/`, `/index.html` and `/invite` (the page itself; `/invite#<token>` is the link an invite carries, served the same page by the host's single-page fallback) are `no-store`, so a back/forward navigation never serves the signed-in page from the HTTP cache or, in
  * Chromium, from the back/forward cache (a page whose main resource is no-store is not bfcache-eligible there). The hashed `/assets/*` stay immutable.
  * They are separate blocks from `/assets/*` and match disjoint paths, so no request gets two `Cache-Control` values.
  *
@@ -97,6 +97,9 @@ export function buildHeadersFile(apiBase) {
     `  Cache-Control: no-store\n` +
     `\n` +
     `/index.html\n` +
+    `  Cache-Control: no-store\n` +
+    `\n` +
+    `/invite\n` +
     `  Cache-Control: no-store\n` +
     `\n` +
     `/assets/*\n` +
