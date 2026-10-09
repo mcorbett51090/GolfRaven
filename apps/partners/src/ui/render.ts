@@ -110,6 +110,8 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
           { class: "actions" },
           h("button", { type: "button", class: "primary", disabled: busy || needsSecondFactor, "data-testid": "open-attest", onclick: () => controller.openAttest(firstFacility) }, t("home.work.attest")),
           h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-course-qr", onclick: () => controller.openCourseQr(firstFacility) }, t("home.work.courseQr")),
+          h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-handover", onclick: () => controller.openHandover(firstFacility) }, t("home.work.handover")),
+          h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-stock", onclick: () => controller.openStock(firstFacility) }, t("home.work.stock")),
         ),
       ),
       h(

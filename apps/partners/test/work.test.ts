@@ -1,5 +1,5 @@
 /**
- * S7b work screens through the controller: open attest / course-QR, requirePin then the action, and the request body never carries the PIN's digits.
+ * S7b/S7c work screens through the controller: open attest / course-QR / stock / hand-over, requirePin then the action, and the request body never carries the PIN's digits.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPartnerApi } from "../src/api/client";
@@ -110,5 +110,73 @@ describe("S7b course-QR screen", () => {
     }
     const mintBody = s.w.server.log.filter((r) => r.path.endsWith("/course-qr/tokens")).map((r) => r.body);
     expect(mintBody.some((b) => b.includes(PIN))).toBe(false);
+  });
+});
+
+describe("S7c stock screen", () => {
+  it("loads stock (A0) and records a move only after a PIN grant (A1)", async () => {
+    const s = await setup();
+    s.controller.openStock(FACILITY);
+    expect(home(s.controller).work?.kind).toBe("stock");
+
+    await s.controller.loadStock();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("stock");
+      if (w?.kind === "stock") expect(w.rows?.[0]?.trailId).toBe("trl_demo");
+    }
+
+    const pending = s.controller.submitStockMove("trl_demo", "delivered", 2, null);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for stock move");
+    s.controller.submitPin(PIN);
+    await pending;
+    expect(home(s.controller).notice).toEqual({ kind: "stock-moved" });
+    const movePosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/stock-admin/stock/move"));
+    expect(movePosts).toHaveLength(1);
+    expect(JSON.parse(movePosts[0]!.body)).toEqual({ facilityId: FACILITY, trailId: "trl_demo", kind: "delivered", qty: 2 });
+    expect(movePosts[0]!.body).not.toMatch(/7391|derived|pin/i);
+  });
+});
+
+describe("S7c hand-over screen", () => {
+  it("mints a gr_ho_ token after PIN and redeems with staff_scan after PIN", async () => {
+    const s = await setup();
+    s.controller.openHandover(FACILITY);
+    expect(home(s.controller).work?.kind).toBe("handover");
+
+    await s.controller.loadCollectQueue();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("handover");
+      if (w?.kind === "handover") expect(w.queue?.[0]?.playerHandle).toBe("player_one");
+    }
+
+    const ent = "51000000-0000-0000-0000-000000003601";
+    const mintPending = s.controller.mintHandover(ent);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for mint");
+    s.controller.submitPin(PIN);
+    await mintPending;
+    expect(home(s.controller).notice).toEqual({ kind: "handover-minted" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("handover");
+      if (w?.kind === "handover") expect(w.minted?.token.startsWith("gr_ho_")).toBe(true);
+    }
+
+    s.controller.dismissHandoverMint();
+    const redeemPending = s.controller.submitRedeem(ent, TOKEN);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for redeem");
+    s.controller.submitPin(PIN);
+    await redeemPending;
+    expect(home(s.controller).notice).toEqual({ kind: "redeem-ok" });
+    const redeemPosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-entitlements/redeem"));
+    expect(redeemPosts).toHaveLength(1);
+    expect(JSON.parse(redeemPosts[0]!.body)).toEqual({
+      facilityId: FACILITY,
+      entitlementId: ent,
+      method: "staff_scan",
+      credential: TOKEN,
+    });
+    expect(redeemPosts[0]!.body).not.toMatch(/7391|derived|pin/i);
   });
 });

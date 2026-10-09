@@ -10,7 +10,7 @@ export interface UiMessage {
   readonly params?: Params;
 }
 
-export type ErrorContext = "sign-in" | "session" | "enrol" | "pin" | "proof" | "totp" | "attest" | "course-qr";
+export type ErrorContext = "sign-in" | "session" | "enrol" | "pin" | "proof" | "totp" | "attest" | "course-qr" | "stock" | "handover";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
@@ -54,6 +54,25 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
   if (context === "course-qr") {
     if (code === "no_programme") return { key: "courseQr.noProgramme" };
     if (code === "not_printed") return { key: "courseQr.notPrinted" };
+  }
+  if (context === "stock") {
+    if (code === "no_stock_row") return { key: "stock.noRow" };
+    if (code === "short") return { key: "stock.short" };
+    if (code === "over_cap") return { key: "stock.overCap" };
+    if (kind === "unprocessable") return { key: "stock.moveFailed" };
+  }
+  if (context === "handover") {
+    if (code === "out_of_stock") return { key: "handover.outOfStock" };
+    if (code === "replayed") return { key: "handover.replayed" };
+    if (code === "token_invalid") return { key: "handover.tokenInvalid" };
+    if (code === "not_redeemable") return { key: "handover.notRedeemable" };
+    if (code === "wrong_facility") return { key: "handover.wrongFacility" };
+    if (code === "no_stock_row") return { key: "stock.noRow" };
+    if (code === "no_programme") return { key: "handover.noProgramme" };
+    if (code === "token_exists") return { key: "handover.tokenExists" };
+    if (code === "cold_start_cap") return { key: "handover.coldStart" };
+    if (kind === "conflict") return { key: "handover.outOfStock" };
+    if (kind === "unprocessable") return { key: "handover.failed" };
   }
   return null;
 }

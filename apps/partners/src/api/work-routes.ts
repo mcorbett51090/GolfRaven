@@ -1,5 +1,6 @@
 /**
- * Typed wrappers for the S7b work screens: `partner-attest`, `course-qr` and `qr-print` (docs/security/partner-auth-design.md 26, 25, S7b).
+ * Typed wrappers for the S7b/S7c work screens: `partner-attest`, `course-qr`, `qr-print`, `stock-admin` and `partner-entitlements`
+ * (docs/security/partner-auth-design.md 26, 25, 28, S7b/S7c).
  *
  * Every call goes through `PartnerApi.call`, so the bearer, the function allow-list and the closed route/query shapes apply. Response bodies are checked
  * field-by-field: a malformed answer is `malformed_response`, never trusted into the UI.
@@ -178,4 +179,123 @@ export async function postPrintedQr(api: PartnerApi, facilityId: string): Promis
   if (isStringOrNull(data["link"] ?? null)) (out as { link?: string | null }).link = data["link"] as string | null;
   if (isBool(data["changed"])) (out as { changed?: boolean }).changed = data["changed"];
   return out;
+}
+
+/** Staff-initiated stock moves (never `redeemed` / `voucher_redeemed`: those are redeem's). */
+export const STOCK_MOVE_KINDS = ["delivered", "transfer_in", "transfer_out", "count_adjustment", "damaged"] as const;
+export type StockMoveKind = (typeof STOCK_MOVE_KINDS)[number];
+
+export interface StockRow {
+  readonly trailId: string;
+  readonly onHand: number;
+  readonly lowThreshold: number;
+  readonly status: string;
+  readonly lastCountedAt: string | null;
+}
+
+export interface StockMoveResult {
+  readonly onHand: number;
+  readonly availability: string | null;
+}
+
+export interface EntitlementQueueRow {
+  readonly entitlementId: string;
+  readonly trailId: string;
+  readonly state: string;
+  readonly playerHandle: string;
+  readonly activatedAt: string | null;
+  readonly voucherIssuedAt: string | null;
+}
+
+export interface HandoverMinted {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
+export type RedeemMethod = "staff_scan" | "hand_over_token";
+
+export interface RedeemResult {
+  readonly attestationId: string;
+  readonly movement: string;
+  readonly availability: string | null;
+}
+
+export async function getStock(api: PartnerApi, facilityId: string): Promise<readonly StockRow[]> {
+  const data = await api.call("GET", "stock-admin", "stock", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["stock"])) malformed();
+  return data["stock"].map((r) => {
+    if (
+      !isObject(r) || !isString(r["trailId"]) || !isNum(r["onHand"]) || !isNum(r["lowThreshold"]) ||
+      !isString(r["status"]) || !isStringOrNull(r["lastCountedAt"] ?? null)
+    ) malformed();
+    return {
+      trailId: r["trailId"],
+      onHand: r["onHand"],
+      lowThreshold: r["lowThreshold"],
+      status: r["status"],
+      lastCountedAt: (r["lastCountedAt"] as string | null) ?? null,
+    };
+  });
+}
+
+export async function postStockMove(
+  api: PartnerApi,
+  input: { facilityId: string; trailId: string; kind: StockMoveKind; qty: number; note?: string | null },
+): Promise<StockMoveResult> {
+  const data = await api.call("POST", "stock-admin", "stock/move", {
+    facilityId: input.facilityId,
+    trailId: input.trailId,
+    kind: input.kind,
+    qty: input.qty,
+    ...(input.note !== undefined && input.note !== null ? { note: input.note } : {}),
+  });
+  if (!isObject(data) || !isNum(data["onHand"]) || !isStringOrNull(data["availability"] ?? null)) malformed();
+  return { onHand: data["onHand"], availability: (data["availability"] as string | null) ?? null };
+}
+
+export async function getCollectQueue(api: PartnerApi, facilityId: string): Promise<readonly EntitlementQueueRow[]> {
+  const data = await api.call("GET", "partner-entitlements", "collect", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["entitlements"])) malformed();
+  return data["entitlements"].map((r) => {
+    if (
+      !isObject(r) || !isString(r["entitlementId"]) || !isString(r["trailId"]) || !isString(r["state"]) ||
+      !isString(r["playerHandle"]) || !isStringOrNull(r["activatedAt"] ?? null) || !isStringOrNull(r["voucherIssuedAt"] ?? null)
+    ) malformed();
+    return {
+      entitlementId: r["entitlementId"],
+      trailId: r["trailId"],
+      state: r["state"],
+      playerHandle: r["playerHandle"],
+      activatedAt: (r["activatedAt"] as string | null) ?? null,
+      voucherIssuedAt: (r["voucherIssuedAt"] as string | null) ?? null,
+    };
+  });
+}
+
+export async function postHandoverMint(api: PartnerApi, facilityId: string, entitlementId: string): Promise<HandoverMinted> {
+  const data = await api.call("POST", "partner-entitlements", "handover/mint", { facilityId, entitlementId });
+  if (!isObject(data) || !isString(data["token"]) || !isString(data["expiresAt"])) malformed();
+  return { token: data["token"], expiresAt: data["expiresAt"] };
+}
+
+export async function postRedeem(
+  api: PartnerApi,
+  input: { facilityId: string; entitlementId: string; method: RedeemMethod; credential: string },
+): Promise<RedeemResult> {
+  const data = await api.call("POST", "partner-entitlements", "redeem", input);
+  if (
+    !isObject(data) || !isString(data["attestationId"]) || !isString(data["movement"]) ||
+    !isStringOrNull(data["availability"] ?? null)
+  ) malformed();
+  return {
+    attestationId: data["attestationId"],
+    movement: data["movement"],
+    availability: (data["availability"] as string | null) ?? null,
+  };
+}
+
+export async function postVoucher(api: PartnerApi, facilityId: string, entitlementId: string): Promise<{ voucherIssuedAt: string }> {
+  const data = await api.call("POST", "partner-entitlements", "voucher", { facilityId, entitlementId });
+  if (!isObject(data) || !isString(data["voucherIssuedAt"])) malformed();
+  return { voucherIssuedAt: data["voucherIssuedAt"] };
 }

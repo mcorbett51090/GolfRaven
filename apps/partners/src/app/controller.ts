@@ -17,7 +17,7 @@
 
 import type { PartnerApi, SessionEndReason } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
-import type { AttestKind } from "../api/work-routes";
+import type { AttestKind, RedeemMethod, StockMoveKind } from "../api/work-routes";
 import type { SessionGrant } from "../api/types";
 import { pinSetupMode } from "../auth/pin-setup";
 import { signInWithPasskey } from "../auth/sign-in";
@@ -62,9 +62,11 @@ export interface AppController extends StepUp {
   submitTotp(code: string): Promise<void>;
   closePanel(): void;
 
-  /** S7b work screens (attest and course-QR; see work.ts). */
+  /** S7b/S7c work screens (attest, course-QR, stock, hand-over; see work.ts). */
   openAttest(facilityId: string): void;
   openCourseQr(facilityId: string): void;
+  openStock(facilityId: string): void;
+  openHandover(facilityId: string): void;
   closeWork(): void;
   setWorkFacility(facilityId: string): void;
   setAttestMode(mode: "online" | "offline"): void;
@@ -79,6 +81,14 @@ export interface AppController extends StepUp {
   refreshSale(): Promise<void>;
   loadPrintedQr(): Promise<void>;
   printQr(): Promise<void>;
+  loadStock(): Promise<void>;
+  submitStockMove(trailId: string, kind: StockMoveKind, qty: number, note: string | null): Promise<void>;
+  loadCollectQueue(): Promise<void>;
+  setRedeemMethod(method: RedeemMethod): void;
+  mintHandover(entitlementId: string): Promise<void>;
+  dismissHandoverMint(): void;
+  submitRedeem(entitlementId: string, credential: string): Promise<void>;
+  submitVoucher(entitlementId: string): Promise<void>;
 }
 
 export interface ControllerWebAuthn {
@@ -289,6 +299,8 @@ export function createController(deps: ControllerDeps): AppController {
 
     openAttest: (facilityId) => work.openAttest(facilityId),
     openCourseQr: (facilityId) => work.openCourseQr(facilityId),
+    openStock: (facilityId) => work.openStock(facilityId),
+    openHandover: (facilityId) => work.openHandover(facilityId),
     closeWork: () => work.closeWork(),
     setWorkFacility: (facilityId) => work.setFacility(facilityId),
     setAttestMode: (mode) => work.setAttestMode(mode),
@@ -303,6 +315,14 @@ export function createController(deps: ControllerDeps): AppController {
     refreshSale: () => work.refreshSale(),
     loadPrintedQr: () => work.loadPrintedQr(),
     printQr: () => work.printQr(),
+    loadStock: () => work.loadStock(),
+    submitStockMove: (trailId, kind, qty, note) => work.submitStockMove(trailId, kind, qty, note),
+    loadCollectQueue: () => work.loadCollectQueue(),
+    setRedeemMethod: (method) => work.setRedeemMethod(method),
+    mintHandover: (entitlementId) => work.mintHandover(entitlementId),
+    dismissHandoverMint: () => work.dismissHandoverMint(),
+    submitRedeem: (entitlementId, credential) => work.submitRedeem(entitlementId, credential),
+    submitVoucher: (entitlementId) => work.submitVoucher(entitlementId),
 
     signOut: () => end(() => api.signOut(), "sign-out-offline", "signed-out"),
 

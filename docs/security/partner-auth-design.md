@@ -1999,7 +1999,7 @@ Numbering: **this section 27.** S2b (parallel) claims section 25 and S3 claims s
 ### 27.3 Not built, honestly
 
 - Camera scan of a player QR into the token field.
-- S7c–S7d screens (hand-over, stock, manager/operator/admin invite and member tools).
+- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29).
 - Offers-redeem (S3 seam / P5.1b).
 - Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
 
@@ -2007,3 +2007,32 @@ Numbering: **this section 27.** S2b (parallel) claims section 25 and S3 claims s
 
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).
+
+## 29. As built: S7c (hand-over and stock screens; `apps/partners`)
+
+Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parallel Edge/DB half) claims section 28; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page talks to the Edge routes S5 ships (`stock-admin`, `partner-entitlements`).
+
+### 29.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `stock-admin` and `partner-entitlements`; `connect-src` gains two path-scoped sources.
+- **Typed work routes** (`src/api/work-routes.ts`): stock read/move; collect queue; hand-over mint (plaintext once); redeem (`staff_scan` / `hand_over_token`); voucher. Response bodies checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Hand over a marker** and **Stock** beside attest and course-QR. Every A1 action calls `requirePin("A1")` then the action in the same turn. Hand-over token plaintext lives only in `work.minted` until dismissed.
+- **Fake partner server** answers the two new functions in-memory (PIN-grant consume on A1) so the page's unit cells run without the S5 Edge tree on this branch.
+
+### 29.2 Decisions and departures
+
+- **Hand-over token shape is checked without a regexp** (same V8 last-match reason as the session token).
+- **Queue mint/voucher buttons** sit on each collect row; redeem uses a shared form (entitlement id + credential) so a pasted id still works when the queue is empty.
+- **Stock move kinds** match the Edge allow-list (never `redeemed` / `voucher_redeemed`).
+
+### 29.3 Not built, honestly
+
+- Camera scan into redeem credential fields.
+- S7d manager/operator/admin screens.
+- Offline-code redeem (P5.1b).
+- Merging with S5 will conflict textually in enumeration files the way S7b notes for S2b/S3.
+
+### 29.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 761 tests, all pass** (extends `work.test.ts`: stock load + A1 move; hand-over mint + staff_scan redeem after PIN; request bodies contain no PIN digits).

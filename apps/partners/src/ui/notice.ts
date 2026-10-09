@@ -22,6 +22,10 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "pin-rotated": "notice.pinRotated",
   "token-minted": "notice.tokenMinted",
   "printed-ok": "notice.printedOk",
+  "stock-moved": "notice.stockMoved",
+  "handover-minted": "notice.handoverMinted",
+  "redeem-ok": "notice.redeemOk",
+  "voucher-ok": "notice.voucherOk",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {
