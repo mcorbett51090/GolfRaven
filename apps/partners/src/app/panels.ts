@@ -188,7 +188,8 @@ export function createPanels(deps: PanelDeps): Panels {
             if (cur !== null) host.set({ ...cur, panel: { kind: "email-proof", step: "send", purpose: "pin", busy: false, notice: err(e, "pin") } });
             return;
           }
-          if (e.kind === "conflict" && e.code === "pin_already_set") return show({ mode: "change", busy: false, notice: err(e, "pin") });
+          // a PIN already exists (a recovery, another device): the forced "first PIN" is moot, so it may be left, and a change is offered instead
+          if (e.kind === "conflict" && e.code === "pin_already_set") return show({ mode: "change", busy: false, notice: err(e, "pin"), ...(panel.forced ? { canSkip: true } : {}) });
           if (e.kind === "conflict" && e.code === "pin_must_change") return show({ mode: "set", busy: false, notice: err(e, "pin") });
           // the server will not give THIS person a PIN (an operator or admin has none) or already has one: the forced first PIN may then be left
           const refused = e.kind === "forbidden" || e.kind === "conflict";
