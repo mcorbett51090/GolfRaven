@@ -1914,3 +1914,33 @@ A later harness / Deno integration run should record file and test counts here t
 ### 22.4 Seams left for the Edge half
 
 `partner-invites`: `POST invites` (`partner_invite_create_for_partner`), `GET invites`, `DELETE invites/{id}`, `POST invites/accept/start` (`partner_invite_email_for_token`), `accept/verify` (`partner_invite_accept`, then close the GoTrue session AFTER it returns), `POST invites/accept` (branch E). `partner-members`: `members/{id}/revoke` (`partner_member_revoke_for_partner(target, org)`), `recover`, `pin-reset`, `totp-reset`, `orgs/{id}/sessions/revoke-all`, `credentials` (options / register / list / revoke). `enrolments/accept/*` (`partner_enrolment_token_*`), `POST credentials` in enrolment mode (`partner_credential_register_first`; the Edge passes the challenge from `accept/verify`, the attestation object and client data as raw bytes, the credential id and the COSE key). `retention-purge` gains six steps. Every status above is committed by the handler.
+
+## 23. As built: S1.5 (Edge half)
+
+### 23.1 What was built
+
+The two Edge Functions and the shared modules behind them; **no migration** (0054 is untouched). `privileged.ts` stays the one database site.
+
+- **`partner-invites`** (`_shared/partner/invites-handler.ts`): `POST invites`, `GET invites`, `DELETE invites/{id}`, `POST invites/accept/start`, `.../accept/verify`, `POST invites/accept` (branch E), `POST enrolments/accept/start`, `.../accept/verify`, and `POST credentials` in enrolment mode (the first credential and the first session).
+- **`partner-members`** (`_shared/partner/members-handler.ts`): `POST members/{id}/revoke | recover | pin-reset | totp-reset`, `POST orgs/{id}/sessions/revoke-all`, `POST admin/enrolments`, `GET | POST credentials`, `POST credentials/options`, `DELETE credentials/{id}`. Every route is a session route.
+- **Shared**: `handler-kit.ts` (route table with `{id}` uuid segments, the one port-error map, the registration-refusal map), `invites-shape.ts`, `members-shape.ts`, `registration-shape.ts` (strict bodies, canonical base64url, unknown keys refused), `token.ts` (`gr_inv_` and `gr_enr_` tokens beside `gr_ps_`), `ports.ts` (`PartnerInviteMintTx`, `PartnerInvitesTx`, `PartnerMembersTx`, `RegistrationVerifier`, `PartnerInvalidArgument`), `webauthn-port.ts` (`registrationVerifier` over the S0 wrapper's `verifyRegistration` / `registrationOptions`).
+- **`privileged.ts`**: every new method is a `select private.*(...)` in 0054's argument order. The minter transaction and the bound transaction carry more methods, not more kinds: `withPartnerMint` and `withPartnerSession` remain the only callers of their kinds (the `privileged-mint-scope` allow-list is unchanged). `retentionPurgeSteps` gains the six `purge_partner_*` steps.
+- `supabase/config.toml` (`verify_jwt = false` for both), the three CI function lists, and the unit suites that enumerate partner functions.
+
+### 23.2 Decisions and departures
+
+- **The invite OTP may create the account** (`shouldCreateUser: true`, `partnerInviteEmailOtp`). 6.1 branch N is for a person with no account, and `partner_auth_identity` needs an `auth.users` row, so the plain proof sender (`shouldCreateUser: false`) cannot reach them. The address sent to is always the invite row's, never a client's, so a token holder cannot make an account for an address of their choosing. Enrolment tokens use `partnerEmailOtp` (the person exists).
+- **Pre-authentication buckets are `edge_system` buckets** (design 8), through a new `PartnerDb.hitSystemRateLimit` over the existing `hitSystemRateLimit`: 3 sends and 10 code attempts per token an hour, and 3 invites a day per invitee address (a hash). A bucket is hit only for a token that EXISTS, so made-up tokens cannot grow the table. A wrong emailed code never reaches the database, so the 10-attempt counter in 0054 does not see it; the verify bucket is what bounds code guessing beyond GoTrue's own limits.
+- **`accept/verify` answers one 403** for an unknown or dead token, a wrong code, a limited token, a GoTrue session without an id and every refusal of the definer; only `existing_member_sign_in` and `recover_required` (reachable by the owner of the mailbox alone) are 409. `accept/start` answers one constant body, including when the mailer fails.
+- **`POST credentials` lives in both functions**: enrolment mode (no bearer, minter lane) in `partner-invites`, second credential (session, A2 + reauth) in `partner-members`.
+- **The relying party for a second credential is read through the minter** (`withMint(rpConfig)`), because `edge_partner` cannot execute `partner_rp_config_read`; the ceremony is verified with no session transaction open, and only then does the A2 definer run, so its 30-second PIN grant is not spent waiting on the wrapper.
+- **`PartnerInvalidArgument`** (22023) maps to 422: an action on oneself or a time in the future is not a 500.
+- **`credentials/options` reads the person** (`credentialSubject`: the session's user id for the WebAuthn user handle, and the address for the authenticator's label), because the definer returns neither.
+
+### 23.3 Not built, honestly
+
+- `PATCH credentials/{id}` (the display note): 0054 has no definer for it.
+- The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
+- Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
+- The PWA screens and `apps/partners` client; the out-of-band notice of a credential add (U1) is still an `audit_log` row.
+- `gr_enr_` is not on `getActorFromRequest`'s refusal list (it is never a bearer); add it if a bearer use ever appears.

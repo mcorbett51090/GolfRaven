@@ -52,8 +52,8 @@ describe("every authenticated Edge function authenticates through getActorFromRe
     .map((n) => ({ name: n, path: join(FUNCTIONS, n, "index.ts") }));
   // the system functions authenticate a SCHEDULER or a signed webhook, not a user: they never mint an Actor
   const SYSTEM = new Set(["import-catalog", "retention-purge", "signin-revocation-drain"]);
-  // the partner lane (S1.2, 0049) authenticates a partner SESSION TOKEN through its own binder, never a player identity: it must not call getActorFromRequest at all (which refuses gr_ps_ tokens)
-  const PARTNER_LANE = new Set(["partner-session"]);
+  // the partner lane (S1.2, 0049; S1.5, 0054) authenticates a partner SESSION TOKEN through its own binder (or, for the accept routes, an emailed code and an invite token), never a player identity: it must not call getActorFromRequest at all (which refuses gr_ps_ tokens)
+  const PARTNER_LANE = new Set(["partner-session", "partner-invites", "partner-members"]);
 
   it("the user-facing entrypoints all call it, inside handleRequest", () => {
     const users = entrypoints.filter((e) => !SYSTEM.has(e.name) && !PARTNER_LANE.has(e.name));

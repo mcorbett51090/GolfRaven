@@ -14,6 +14,8 @@ import { parseChallengeToken, parseEmptyBody, parseReauthBody, parseVerifyBody, 
 import { challengeToken, credentialJson, NOW_MS } from "./partner-fakes.ts";
 
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
+/** The partner lane's Edge Functions (design 4.5): each is a directory with an `index.ts`, `verify_jwt = false`, and no use of the player identity. */
+const PARTNER_FUNCTIONS = ["partner-session", "partner-invites", "partner-members"];
 const REPO = join(import.meta.dirname, "..", "..", "..");
 
 describe("cors.ts", () => {
@@ -207,14 +209,14 @@ function code(text: string): string {
 }
 
 function partnerFiles(): string[] {
-  const dirs = [join(FUNCTIONS, "_shared", "partner"), join(FUNCTIONS, "partner-session")];
+  const dirs = [join(FUNCTIONS, "_shared", "partner"), ...PARTNER_FUNCTIONS.map((f) => join(FUNCTIONS, f))];
   return dirs.flatMap((d) => readdirSync(d).filter((f) => f.endsWith(".ts")).map((f) => join(d, f)));
 }
 
 describe("PA-11: the partner modules never log", () => {
   it("finds the modules it is meant to scan", () => {
     const names = partnerFiles().map((p) => p.split("/").slice(-2).join("/"));
-    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts"]) expect(names).toContain(n);
+    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts", "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts"]) expect(names).toContain(n);
   });
 
   it("no `console` identifier appears anywhere in code (comments and strings aside) in the partner modules, the function entrypoint or the partner lane section of privileged.ts", () => {
@@ -260,25 +262,40 @@ describe("S1.3: the PIN never reaches the Edge, and the contract is importable b
   });
 });
 
-describe("the entrypoint and the configuration", () => {
-  const entry = readFileSync(join(FUNCTIONS, "partner-session", "index.ts"), "utf8");
-  it("partner-session/index.ts never calls getActorFromRequest (a partner token is never a Supabase identity), reads no environment and opens no connection", () => {
-    const c = code(entry);
-    expect(c).not.toMatch(/getActorFromRequest|withOwnership|Deno\.env|createClient|postgres/);
-    expect(c).toMatch(/handlePartnerSessionRequest/);
-    expect(c).toMatch(/loadPartnerCorsOrigin\(\)/);
+describe("the entrypoints and the configuration", () => {
+  const HANDLERS: Readonly<Record<string, string>> = {
+    "partner-session": "handlePartnerSessionRequest",
+    "partner-invites": "handlePartnerInvitesRequest",
+    "partner-members": "handlePartnerMembersRequest",
+  };
+
+  it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* entrypoint is named here", () => {
+    const onDisk = readdirSync(FUNCTIONS, { withFileTypes: true }).filter((d) => d.isDirectory() && d.name.startsWith("partner-")).map((d) => d.name).sort();
+    expect(onDisk).toEqual([...PARTNER_FUNCTIONS].sort());
+    expect(Object.keys(HANDLERS).sort()).toEqual([...PARTNER_FUNCTIONS].sort());
   });
+
+  for (const fn of PARTNER_FUNCTIONS) {
+    it(`${fn}/index.ts never calls getActorFromRequest (a partner token is never a Supabase identity), reads no environment and opens no connection`, () => {
+      const c = code(readFileSync(join(FUNCTIONS, fn, "index.ts"), "utf8"));
+      expect(c).not.toMatch(/getActorFromRequest|withOwnership|Deno\.env|createClient|postgres/);
+      expect(c).toMatch(new RegExp(HANDLERS[fn]!));
+      expect(c).toMatch(/loadPartnerCorsOrigin\(\)/);
+    });
+  }
 
   it("no partner module imports getActorFromRequest or reaches GoTrue", () => {
     for (const f of partnerFiles()) expect(code(readFileSync(f, "utf8")), f).not.toMatch(/getActorFromRequest|supabase-js|createClient|auth\.getUser/);
   });
 
-  it("supabase/config.toml sets verify_jwt = false for partner-session (and for no player function)", () => {
+  it("supabase/config.toml sets verify_jwt = false for every partner function (and for no player function)", () => {
     const toml = readFileSync(join(REPO, "supabase", "config.toml"), "utf8");
-    const m = /\[functions\.partner-session\]([\s\S]*?)(?=\n\[|$)/.exec(toml);
-    expect(m, "a [functions.partner-session] table").not.toBeNull();
-    expect(m![1]!.replace(/^\s*#.*$/gm, "")).toMatch(/^\s*verify_jwt\s*=\s*false\s*$/m);
+    for (const fn of PARTNER_FUNCTIONS) {
+      const m = new RegExp(`\\[functions\\.${fn}\\]([\\s\\S]*?)(?=\\n\\[|$)`).exec(toml);
+      expect(m, `a [functions.${fn}] table`).not.toBeNull();
+      expect(m![1]!.replace(/^\s*#.*$/gm, ""), fn).toMatch(/^\s*verify_jwt\s*=\s*false\s*$/m);
+    }
     const others = [...toml.matchAll(/\[functions\.([a-z-]+)\]/g)].map((x) => x[1]);
-    expect(others).toEqual(["partner-session"]);
+    expect(others).toEqual([...PARTNER_FUNCTIONS]);
   });
 });

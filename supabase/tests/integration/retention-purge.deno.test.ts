@@ -217,8 +217,11 @@ retentionTest("E5: one run purges EACH retention class past its retention, and k
 
   const r = await run(realDeps());
   assertEquals(r.status, 200, JSON.stringify(r.raw));
-  assertEquals(r.steps.map((s) => s.name), ["fix_coords", "install_link_tombstones", "signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets"]);
-  for (const s of r.steps) assert(s.purged >= 1, `${s.name} purged something: ${JSON.stringify(s)}`);
+  const PARTNER_STEPS = ["partner_challenges", "partner_sessions", "partner_credentials", "partner_invites", "partner_enrolment_tokens", "partner_sign_in_failures"];
+  assertEquals(r.steps.map((s) => s.name), ["fix_coords", "install_link_tombstones", "signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets", ...PARTNER_STEPS]);
+  // the six player-lane classes were seeded above; the six partner classes (0054) are proven to RUN here (edge_system holds EXECUTE on each) and are seeded in matrix 32
+  for (const s of r.steps.filter((x) => !PARTNER_STEPS.includes(x.name))) assert(s.purged >= 1, `${s.name} purged something: ${JSON.stringify(s)}`);
+  for (const s of r.steps.filter((x) => PARTNER_STEPS.includes(x.name))) assertEquals(s.status, "done", `${s.name}: ${JSON.stringify(s)}`);
   assertEquals(r.complete, true);
 
   // purged: past retention
