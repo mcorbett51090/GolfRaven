@@ -2089,3 +2089,38 @@ Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055`
 ### 28.4 Verification run for this slice
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 36's **65/65** cells; all other pgTAP matrices (**5286** tests PASS); partner serialisation; **partner stock concurrency** (`test-partner-stock-concurrency.sh`: six last-unit rounds, same-entitlement race, play guard at a real commit); review-account tool checks; Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest stock + entitlements handler suites (status map, hash-only hand-over token, strict shapes, bucket order). CI on PR #69 tip `b433f81`: all three checks green.
+
+## 30. As built: S6 (programme and sponsors)
+
+Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055` / matrix `33` / section 25; S3–S5 claim 0056–0058 / 34–36 / 26–28; **§29 is reserved for S7c UI.** Nothing from 0001–0058 is edited.
+
+### 30.1 What was built
+
+**Migration `0059_partner_programme_sponsors.sql`** (database half) and **matrix `37_partner_programme_sponsors.sql`** (58 cells; both harness modes when green). Edge half is not in this commit.
+
+- **`private.partner_bound_operator_at_trail(trail)`** — policy predicate (EXECUTE for nobody but the owner; in the 14(c) reader list). True when this transaction carries a partner binding whose member is an operator of the trail (or admin via `has_trail_scope`).
+- **Programme (A0/A3, operator of the trail):** `partner_trail_programme_read_for_partner`, `partner_facility_programme_list_for_partner`, `partner_trail_programme_upsert_for_partner` (`web_player_flow` true → `22023`; statuses `ok | not_found`), `partner_facility_programme_upsert_for_partner` (statuses `ok | no_trail`; never writes `pin_epoch`).
+- **Offers (A0/A3):** `partner_offers_list_for_partner` (full budget / eligibility columns, every status); `partner_offer_upsert_for_partner` (draft create/edit; `ok | not_found | not_draft | bad_funder`); `partner_offer_approve_for_partner` (**admin only**, draft → live); `partner_offer_end_for_partner` (operator of the trail or admin, live → ended).
+- **Sponsorships (A0/A3, AT(20)):** `partner_sponsorships_list_for_partner`; `partner_sponsorship_upsert_for_partner` (draft; sponsor_org must be `kind = sponsor`); `partner_sponsorship_approve_for_partner` (draft → live; when scope is `special_marker` or `both`, every `facility_programme` with `holds_special_marker` must have `special_marker_stock.on_hand >= 1` or the status is `stock_short` and nothing changes).
+- **Rollups (A0):** `partner_operator_rollup_for_partner`, `partner_sponsor_rollup_for_partner` (scope via the sponsorship's trail).
+- **Binding-keyed policies:** 14 `private_definer` policies (`pd_partner_programme_*`) on `trail_programme`, `facility_programme`, `offer`, `sponsorship`, `operator_rollup`, `sponsor_rollup`, and `special_marker_stock`. **None reads a GUC.** Existing `pd_marker_scan_*`, `pd_partner_attest_*`, `pd_partner_review_*`, and `pd_read_sponsorship` stay.
+
+### 30.2 Decisions and departures, and why
+
+- **Offer approve means draft → live in one step** (no separate `approved` stop). Keeps the portal machine simple; `approved` remains a legal enum value for other writers.
+- **Admin-only offer approve** mirrors S4's held-review resolve (`partner_authorize` with an operator role array, then `is_admin` or `42501`).
+- **AT(20) is a status, not a raise** — `stock_short` commits so the Edge can map it to 422 without rolling back an unrelated write in the same request transaction.
+- **Column grants exclude `pin_epoch`** on facility_programme programme writers; the 0046 epoch rotation path stays the only partner write of that column.
+
+### 30.3 Not built, honestly
+
+- **Settlement-export AT(17)** and any P5.1b settlement writer.
+- **Rollups-refresh writer** (rows are read-only here; ops/catalog still seed them).
+- **offers-redeem** and the issuance staff gate **AT(10)**.
+- **Edge half** (`programme-config`, `offers-admin`, `sponsorships-admin`) — database only in this commit.
+- **S7d / S7c UI** (portal screens; §29 reserved for S7c).
+- **No mutation pass** was run for this slice.
+
+### 30.4 Verification
+
+Focused restricted-style apply of migrations 0001–0059 + helpers + matrix 37 on this tip: **58/58** cells PASS. `definer_policy_exprs.txt` regenerated for the fourteen `pd_partner_programme_*` policies. Full `HARNESS_MODE=restricted tools/db/test.sh` (all matrices + Deno) still pending on CI / a complete local harness run.

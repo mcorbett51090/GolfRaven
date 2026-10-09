@@ -79,3 +79,5 @@ private.partner_bound_manager_at(p_facility_id text)
 private.partner_bound_staff_any()
 # 0057 (S4 receipts and review): one policy predicate outside the *_for_partner family reads the partner binding (admin-only queue and resolve policies). EXECUTE for nobody but the owner.
 private.partner_bound_admin()
+# 0059 (S6 programme and sponsors): one policy predicate outside the *_for_partner family reads the partner binding (operator-at-trail programme / offer / sponsorship / rollup policies). EXECUTE for nobody but the owner.
+private.partner_bound_operator_at_trail(p_trail_id text)
