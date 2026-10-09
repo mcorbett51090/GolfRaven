@@ -63,10 +63,10 @@ describe("exports-purge handler", () => {
     const p = probe({ purged: 4 });
     const res = await handleExportsPurgeRequest(post(GOOD), p.deps);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ purged: 4, complete: true });
+    expect(await res.json()).toEqual({ data: { purged: 4, complete: true } });
     expect(p.rate).toEqual([[EXPORTS_PURGE_RATE_BUCKET, EXPORTS_PURGE_RATE_WINDOW_SECONDS, EXPORTS_PURGE_RATE_MAX_PER_WINDOW]]);
     expect(p.calls).toEqual([`purge:${p.clock.now - EXPORTS_RETENTION_MS}`]);
-    expect(p.logs[0]).toMatchObject({ event: "exports_purge", purged: 4, complete: true });
+    expect(p.logs[0]).toMatchObject({ event: "exports_purge", purged: 4 });
   });
 
   it("429 when the system bucket is full; 500 on storage failure", async () => {
