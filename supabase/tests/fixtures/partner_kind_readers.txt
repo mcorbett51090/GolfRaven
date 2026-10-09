@@ -63,3 +63,12 @@ private.partner_totp_enrol_apply()
 private.partner_totp_confirm_apply(p_code text)
 private.partner_totp_verify_apply(p_code text)
 private.partner_totp_mfa_clear()
+# 0054 (partner invites / enrolment / members, S1.5): six functions outside the *_for_partner family read the binding kind, each ONLY to REFUSE any bound transaction (the 0041 rule: a minter binds
+# nothing). The four accept / email definers and register_first are the minter lane's (owned by partner_session_issuer, EXECUTE for edge_partner_minter); partner_challenge_issue_register is the
+# issuer-only producer of a register challenge. None reads a kind as authority, none writes the binding.
+private.partner_challenge_issue_register(p_user_id uuid, p_ref_kind smallint, p_ref_id uuid, p_accepted_at_us bigint)
+private.partner_invite_email_for_token(p_token_hash text)
+private.partner_invite_accept(p_token_hash text, p_verified_uid uuid, p_gotrue_session_id uuid)
+private.partner_enrolment_token_email_for_token(p_token_hash text)
+private.partner_enrolment_token_accept(p_token_hash text, p_verified_uid uuid, p_gotrue_session_id uuid)
+private.partner_credential_register_first(p_token_hash text, p_user_id uuid, p_ref_kind smallint, p_ref_id uuid, p_nonce bytea, p_exp bigint, p_mac bytea, p_attestation_object bytea, p_client_data_json bytea, p_credential_id bytea, p_public_key bytea, p_transports text[])

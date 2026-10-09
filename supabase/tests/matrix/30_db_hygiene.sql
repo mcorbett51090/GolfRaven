@@ -10,13 +10,14 @@ SELECT plan(38);
 -- ----------------------------------------------------------------------------
 -- 1. The six purge definers: identity, owner and exposure unchanged; the batch is taken once
 -- ----------------------------------------------------------------------------
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%'), 6, 'the six purge definers exist (a seventh would have to be given the same treatment)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%'), 12, 'the twelve purge definers exist (the six of 0033 / 0040 / 0050 and the six partner purges of 0054; a thirteenth would have to be given the same treatment)');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%'
-             AND p.prosecdef AND p.proowner = 'private_definer'::regrole AND p.proconfig = ARRAY['search_path=""']), 6, 'all six: SECURITY DEFINER, owned by private_definer, search_path = ''''');
+             AND p.prosecdef AND p.proowner = 'private_definer'::regrole AND p.proconfig = ARRAY['search_path=""']), 12, 'all twelve: SECURITY DEFINER, owned by private_definer, search_path = ''''');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%'
              AND (p.prosrc ~ '\mIN \(\s*SELECT' OR p.prosrc ~* 'WITH\s+\w+\s+AS\s+MATERIALIZED')), 0, 'none of the six keeps the per-row-rescanned IN (SELECT ... LIMIT) shape (or the MATERIALIZED / USING shape 0050 measured and rejected)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND p.prosrc ~ '= ANY \(ARRAY\('),
-          ARRAY['purge_consumed_nonce', 'purge_fix_coords', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'], 'the four single-key purges take the batch as an InitPlan array: = ANY (ARRAY(SELECT key ... LIMIT n))');
+          ARRAY['purge_consumed_nonce', 'purge_fix_coords', 'purge_partner_challenges', 'purge_partner_credentials', 'purge_partner_enrolment_tokens', 'purge_partner_invites', 'purge_partner_sessions', 'purge_partner_sign_in_failures', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'],
+  'the ten single-key purges take the batch as an InitPlan array: = ANY (ARRAY(SELECT key ... LIMIT n))');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND p.prosrc ~ 'FOR v_row IN'),
           ARRAY['purge_install_link_tombstones', 'purge_rate_limit_buckets'], 'the two composite-key purges read the batch once and delete by primary key in a loop');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ '\mctid\M'), 0, 'no purge uses ctid (private_definer holds column-level SELECT only on install_link_account)');
@@ -33,10 +34,10 @@ SELECT is((SELECT array_agg(p.proname::text || ':' || r.n ORDER BY p.proname, r.
            FROM pg_proc p CROSS JOIN (VALUES ('anon'), ('authenticated'), ('edge_actor'), ('edge_gateway'), ('edge_partner')) AS r(n)
            WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND has_function_privilege(r.n, p.oid, 'EXECUTE')), NULL, 'no client role, no edge_actor, no edge_gateway and no edge_partner may EXECUTE any purge');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND has_function_privilege('edge_system', p.oid, 'EXECUTE')),
-          ARRAY['purge_consumed_nonce', 'purge_fix_coords', 'purge_install_link_tombstones', 'purge_rate_limit_buckets', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'], 'edge_system may EXECUTE all six (as before)');
+          ARRAY['purge_consumed_nonce', 'purge_fix_coords', 'purge_install_link_tombstones', 'purge_partner_challenges', 'purge_partner_credentials', 'purge_partner_enrolment_tokens', 'purge_partner_invites', 'purge_partner_sessions', 'purge_partner_sign_in_failures', 'purge_rate_limit_buckets', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'], 'edge_system may EXECUTE all twelve (the six as before and the six of 0054)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND has_function_privilege('service_role', p.oid, 'EXECUTE')),
-          ARRAY['purge_consumed_nonce', 'purge_install_link_tombstones', 'purge_rate_limit_buckets', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'], 'service_role may EXECUTE the five it could before (never purge_fix_coords)');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND p.proacl::text ~ '(^\{|,)=X/'), 0, 'PUBLIC has EXECUTE on none of the six');
+          ARRAY['purge_consumed_nonce', 'purge_install_link_tombstones', 'purge_rate_limit_buckets', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'], 'service_role may EXECUTE the five it could before (never purge_fix_coords, never a partner purge)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'purge\_%' AND p.proacl::text ~ '(^\{|,)=X/'), 0, 'PUBLIC has EXECUTE on none of the twelve');
 -- the registry rows are untouched by 0050 (the notes name 0033 / 0040 / 0041, never 0050)
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE schema_name = 'private' AND function_name LIKE 'purge\_%' AND note LIKE '%0050%'), 0, 'private.function_inventory is unchanged for the purges: 0050 rewrote bodies only');
 

@@ -149,7 +149,7 @@ SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_
   'R5-L1: the verify, set, params and attempt definers and the A2 consumer are owned by partner_pin_verifier (the role that holds the ONLY column grant on pin_grant_until)');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_reauth_verifier'), ('partner_session_issuer'), ('partner_session_toucher')) r(n)
            CROSS JOIN (VALUES ('private.partner_pin_attempt(uuid, bytea)'), ('private.partner_pin_verify_apply(bytea)'), ('private.partner_pin_set_apply(text, bytea, bytea, integer, bytea)'),
-                              ('private.partner_pin_params_read()'), ('private.partner_pin_grant_consume_fresh(integer)'), ('private.partner_pin_core(uuid, bytea, bytea)'), ('private.partner_binding_user()')) f(sig)
+                              ('private.partner_pin_params_read()'), ('private.partner_pin_grant_consume_fresh(integer)'), ('private.partner_pin_core(uuid, bytea, bytea)')) f(sig)
            WHERE has_function_privilege(r.n, f.sig::regprocedure, 'EXECUTE')), NULL::text[],
   'the verifier internals and the pepper core: no client role, no edge role and no other owner role can execute them');
 SELECT is((SELECT array_agg(f.sig ORDER BY f.sig) FROM (VALUES ('private.partner_pin_verify_apply(bytea)'), ('private.partner_pin_set_apply(text, bytea, bytea, integer, bytea)'), ('private.partner_pin_params_read()'), ('private.partner_pin_grant_consume_fresh(integer)'),
@@ -162,9 +162,9 @@ SELECT is((SELECT array_agg(f.sig ORDER BY f.sig) FROM (VALUES ('private.partner
 SELECT is((SELECT array_agg(f.sig || ' -> ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END || ':' || a.privilege_type || ':' || a.grantor::regrole::text ORDER BY f.sig, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END)
            FROM (VALUES ('private.partner_pin_core(uuid, bytea, bytea)'), ('private.partner_binding_user()')) f(sig)
            CROSS JOIN LATERAL aclexplode((SELECT p.proacl FROM pg_proc p WHERE p.oid = f.sig::regprocedure)) a),
-  ARRAY['private.partner_binding_user() -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> partner_totp_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> private_definer:EXECUTE:private_definer',
+  ARRAY['private.partner_binding_user() -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> partner_session_toucher:EXECUTE:private_definer', 'private.partner_binding_user() -> partner_totp_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> private_definer:EXECUTE:private_definer',
         'private.partner_pin_core(uuid, bytea, bytea) -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_pin_core(uuid, bytea, bytea) -> private_definer:EXECUTE:private_definer'],
-  'N1: partner_pin_core has exactly two ACL entries (pin verifier + owner); partner_binding_user has three (pin verifier, totp verifier from 0053, owner); no PUBLIC, no edge role');
+  'N1: partner_pin_core has exactly two ACL entries (pin verifier + owner); partner_binding_user has four (pin verifier, totp verifier from 0053, the toucher from 0054 for its member-revoke policy, owner); no PUBLIC, no edge role');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_reauth_verifier'), ('partner_session_issuer'), ('partner_session_toucher')) r(n)
            WHERE has_any_column_privilege(r.n, 'app.partner_pin', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, 'app.partner_pin', 'DELETE,TRUNCATE,TRIGGER')), 0,
   'PA-1: no client role, no edge role, no service_role and no other owner role holds ANY privilege on app.partner_pin');
@@ -175,12 +175,13 @@ SELECT is((has_column_privilege('private_definer', 'app.partner_pin', 'user_id',
            has_any_column_privilege('private_definer', 'app.partner_pin', 'INSERT,UPDATE'), has_table_privilege('private_definer', 'app.partner_pin', 'DELETE'))::text,
   '(t,f,f,f,t)', 'private_definer holds SELECT (user_id) and DELETE (the delete_my_data window pair) and cannot read the verifier or the salt or write anything');
 SELECT is((SELECT array_agg(pol.polname::text || ':' || pol.polcmd::text ORDER BY pol.polname) FROM pg_policy pol WHERE pol.polrelid = 'app.partner_pin'::regclass AND pol.polname NOT LIKE 'zz28%'),
-  ARRAY['pd_delete_partner_pin_user_id:d', 'pd_delete_partner_pin_user_id_r:r', 'ppv_insert_partner_pin:a', 'ppv_read_partner_pin:r', 'ppv_update_partner_pin:w'], 'the PIN table carries exactly the five registered policies');
+  ARRAY['pd_delete_partner_pin_user_id:d', 'pd_delete_partner_pin_user_id_r:r', 'pd_lastmember_delete_partner_pin:d', 'pd_lastmember_delete_partner_pin_r:r', 'ppv_insert_partner_pin:a', 'ppv_read_partner_pin:r', 'ppv_read_partner_pin_reach:r', 'ppv_update_partner_pin:w', 'ppv_update_partner_pin_reach:w'],
+  'the PIN table carries exactly the five registered policies of 0052, the two last-membership delete policies and the two reach-rule policies of 0054');
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.partner_pin'::regclass AND pol.polname LIKE 'ppv\_%'
            AND (pol.polroles <> ARRAY['partner_pin_verifier'::regrole::oid] OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') ~* 'current_setting|pg_settings' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') ~* 'current_setting|pg_settings'
               OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), pg_get_expr(pol.polwithcheck, pol.polrelid)) NOT LIKE '%partner_binding_user()%')), 0,
   'the OR rule: every verifier policy is TO partner_pin_verifier alone, keyed on the BINDING''s user and reads no settable GUC (nothing here can be planted)');
-SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.partner_pin'::regclass AND pol.polname LIKE 'pd\_%'
+SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.partner_pin'::regclass AND pol.polname LIKE 'pd\_%' AND pol.polname NOT LIKE 'pd\_lastmember\_%'
            AND (pol.polroles <> ARRAY['private_definer'::regrole::oid] OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') NOT LIKE '%AND (( SELECT private.partner_binding_kind() AS partner_binding_kind) IS DISTINCT FROM ''partner''::text))')), 0,
   'the delete_my_data window pair on the PIN table carries the partner conjunct as its top-level trailing AND (check 15)');
 SELECT is((has_column_privilege('private_definer', 'app.partner_session', 'pin_grant_until', 'UPDATE'), has_column_privilege('partner_pin_verifier', 'app.partner_session', 'pin_grant_until', 'UPDATE'),
@@ -491,8 +492,8 @@ SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C"
   'LOW-1: exactly the three PIN wrappers that write the session row use class A0_WRITE (otp-proof and reauth moved to A0_ENROL in 0053)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE '%\_for\_partner'
            AND regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ 'partner_authorize\([^;]*''A0''\)'),
-  ARRAY['partner_pin_params_for_partner'],
-  'LOW-1: GET pin stays A0 (read-only); otp-target / reauth options / credential moved to A0_ENROL in 0053');
+  ARRAY['partner_credential_list_for_partner', 'partner_invite_list_for_partner', 'partner_pin_params_for_partner'],
+  'LOW-1: GET pin stays A0 (read-only; otp-target / reauth options / credential moved to A0_ENROL in 0053), next to the two read-only list definers of 0054');
 SAVEPOINT a2_reauthexp;
 SELECT pg_temp.seed_step('mx', '{"pin_grant_s": 50, "reauth_s": -1}'::jsonb);
 SET LOCAL ROLE edge_partner;

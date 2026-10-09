@@ -408,7 +408,7 @@ SELECT private.bind_partner_session(:'th_op');
 RESET ROLE;
 -- pg_temp helpers are not executable as edge_partner; the binding survives RESET ROLE.
 SELECT throws_ok($$SELECT pg_temp.reset_totp('00000000-0000-0000-0000-4000000000d0')$$, '42501',
-  'partner_totp_reset_for_partner: only an admin may reset another person''s TOTP', 'PA-24: reset by non-admin (operator) → 42501');
+  'partner_totp_reset_for_partner: the reach rule does not cover this person', 'PA-24: reset by non-admin (operator) → 42501');
 ROLLBACK TO SAVEPOINT reset_op;
 
 SAVEPOINT reset_admin;

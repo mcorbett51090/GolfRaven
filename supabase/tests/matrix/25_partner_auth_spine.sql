@@ -92,16 +92,20 @@ SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c
 SELECT is((SELECT count(*)::int FROM pg_namespace n CROSS JOIN (VALUES ('edge_partner'), ('edge_partner_minter')) r(n)
            WHERE (n.nspname NOT LIKE 'pg\_temp%' AND has_schema_privilege(r.n, n.oid, 'CREATE')) OR (n.nspname <> 'private' AND n.nspname NOT IN ('public', 'tests', 'information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_schema_privilege(r.n, n.oid, 'USAGE'))), 0,
   'PA-1: and no CREATE anywhere (the always-open TEMP schema aside), and USAGE on no schema but private (plus the PUBLIC-open public, tests, pg_catalog and information_schema): in particular NONE on app');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
-          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_binding', 'partner_binding_kind', 'partner_pin_change_for_partner', 'partner_pin_params_for_partner', 'partner_pin_set_for_partner',
-                'partner_pin_verify_for_partner', 'partner_session_lock_for_partner', 'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner',
-                'partner_session_reauth_for_partner', 'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_totp_confirm_for_partner', 'partner_totp_enrol_for_partner',
+          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_binding', 'partner_binding_kind',
+                'partner_credential_list_for_partner', 'partner_credential_options_for_partner', 'partner_credential_register_for_partner', 'partner_credential_revoke_for_partner',
+                'partner_invite_accept_for_partner', 'partner_invite_create_for_partner', 'partner_invite_list_for_partner', 'partner_invite_revoke_for_partner',
+                'partner_member_recover_for_partner', 'partner_member_revoke_for_partner', 'partner_org_sessions_revoke_for_partner', 'partner_pin_change_for_partner',
+                'partner_pin_params_for_partner', 'partner_pin_reset_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner', 'partner_session_lock_for_partner',
+                'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
+                'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_totp_confirm_for_partner', 'partner_totp_enrol_for_partner',
                 'partner_totp_reset_for_partner', 'partner_totp_verify_for_partner', 'partner_whoami_for_partner', 'zz24_authz_for_partner'],
-  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3), the five of 0053 (S1.4), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
-          ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
-  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2), and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
+  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3), the five of 0053 (S1.4), the twelve of 0054 (S1.5), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
+          ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2) and the five of 0054 (S1.5), and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure,
              'private.partner_session_guard()'::regprocedure, 'private.partner_member_role_invariant()'::regprocedure, 'private.partner_scope_invariant()'::regprocedure)
            AND (SELECT count(*) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
@@ -1108,7 +1112,9 @@ SELECT is((SELECT array_agg(pol.polname::text ORDER BY pol.polname::text) FROM p
           ARRAY['pd_delete_partner_session_user_id', 'pd_delete_partner_session_user_id_r'],
   'PA-4c: the ONLY policies on partner_session that read a GUC are the delete_my_data DELETE / SELECT pair (the registry pass requires them); no UPDATE or INSERT policy does, for any role');
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid IN ('app.partner_member'::regclass, 'app.partner_scope'::regclass, 'app.admin_user'::regclass)
-           AND pol.polname ~ '^(pst|psi|psf|ppv|ptv|prv)_(update|insert|lock)' ), 0, 'R3-M1: no lock policy of any role exists on partner_member, partner_scope or admin_user');
+           AND pol.polname ~ '^(pst|psi|psf|ppv|ptv|prv)_(update|insert|lock)'
+             AND pol.polname NOT IN ('psi_insert_partner_member', 'psi_update_partner_member')), 0,
+  'R3-M1: no lock policy of any role exists on partner_member, partner_scope or admin_user (the two accept-activation policies of 0054 are not lock policies: they admit a row only while an accepted invite exists, matrix 32 PA-4c (iii))');
 ROLLBACK TO SAVEPOINT pa4c_ii;
 
 -- (iii) the delete_my_data WINDOW is closed under a partner binding: the DELETE / SELECT / set-null pairs on the four tables this migration creates carry
