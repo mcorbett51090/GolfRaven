@@ -2042,4 +2042,4 @@ The order is the members handler's (Origin, preflight, route and method, bearer,
 
 ### 27.4 Verification run for this slice
 
-Recorded when the local harness and unit suites have been run for this tree (see the PR). Expected: matrix 35's 44 cells; `verify-function-inventory` OK including the eleven new allow-list rows against `definer_policy_exprs.txt`; vitest `partner-review-handler.test.ts` and the updated enumerations; `apps/partners` typechecks (`PartnerDb` gained `withReview`).
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`): matrix 35's **44/44** cells pass; all other pgTAP matrices pass; partner serialisation and review-account tool checks pass. Deno integration typecheck requires every `PartnerDb` fake to implement `withReview` (same seam as `withAttest`). Remaining CI signal: full Deno integration suite + `verify-function-inventory` + vitest `partner-review-handler.test.ts` + `apps/partners` typecheck on this tip (see PR #68).
