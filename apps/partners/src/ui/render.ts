@@ -5,26 +5,16 @@
  */
 
 import type { WhoAmI } from "../api/types";
-import type { AppState, AppController, Notice } from "../app/controller";
+import type { AppState, AppController } from "../app/controller";
 import { translate, plural, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
+import { noticeElement } from "./notice";
+import { enrolView } from "./views-enrol";
+import { panelView } from "./views-panels";
 
 export interface RenderEnv {
   readonly locale: Locale;
   readonly setLocale: (l: Locale) => void;
-}
-
-const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
-  locked: "notice.locked",
-  "signed-out": "notice.signedOut",
-  expired: "notice.expired",
-  "sign-out-offline": "notice.signOutOffline",
-  "lock-offline": "notice.lockOffline",
-};
-
-function noticeText(n: Notice, locale: Locale): string {
-  if (n.kind === "error") return translate(locale, n.message.key, n.message.params);
-  return translate(locale, NOTICE_KEY[n.kind]);
 }
 
 function formatTime(iso: string, locale: Locale): string {
@@ -82,54 +72,82 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
   const langButton = h("button", { type: "button", class: "link", lang: locale === "en" ? "fr-CA" : "en", "aria-label": t("lang.toggle.label"), "data-testid": "lang-toggle", onclick: () => env.setLocale(locale === "en" ? "fr-CA" : "en") }, t("lang.toggle"));
   const header = h("header", { class: "bar" }, h("span", { class: "brand" }, t("app.name")), langButton);
 
-  const notice = (n: Notice | null) => (n === null ? null : h("p", { class: n.kind === "error" ? "notice error" : "notice", role: n.kind === "error" ? "alert" : "status", "data-testid": "notice" }, noticeText(n, locale)));
+  const notice = (n: Parameters<typeof noticeElement>[0]) => noticeElement(n, locale);
+  const lockAndSignOut = () => [
+    // Lock and Sign-out are NEVER disabled by a busy refresh (a refresh that never answers must not stand between a person and the lock); each takes effect at once
+    h("button", { type: "button", "data-testid": "lock", onclick: () => void controller.lock() }, t("home.lock")),
+    h("button", { type: "button", class: "danger", "data-testid": "sign-out", onclick: () => void controller.signOut() }, t("home.signOut")),
+  ];
 
   let main: HTMLElement;
-  let heading: HTMLElement;
-  if (state.screen === "signed-in") {
+  if (state.screen === "signed-in" && state.panel !== null) {
+    // a panel replaces the home screen; Lock and Sign out stay reachable from it (the forced first PIN has no other way out)
+    main = panelView(state.panel, controller, locale);
+    main.append(h("div", { class: "actions", "data-testid": "session-actions" }, ...lockAndSignOut()));
+  } else if (state.screen === "signed-in") {
     const busy = state.busy !== null;
-    heading = h("h1", { tabindex: "-1", "data-testid": "heading" }, t("home.title"));
+    const needsSecondFactor = state.session.aal < state.session.requiredAal;
     main = h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "signed-in" },
-      heading,
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("home.title")),
       notice(state.notice),
-      state.session.aal < state.session.requiredAal ? h("p", { class: "notice", role: "status", "data-testid": "aal-low" }, t("home.aalLow")) : null,
+      needsSecondFactor ? h("p", { class: "notice", role: "status", "data-testid": "aal-low" }, t("home.aalLow")) : null,
       h("section", {}, h("h2", {}, t("home.session.title")), sessionFields(state.session, locale)),
       h("section", {}, h("h2", {}, t("home.roles.title")), roles(state.session, locale)),
       h(
-        "div",
-        { class: "actions" },
-        h("button", { type: "button", disabled: busy, "data-testid": "refresh", onclick: () => void controller.refresh() }, t("home.refresh")),
-        // Lock and Sign-out are NEVER disabled by a busy refresh (a refresh that never answers must not stand between a person and the lock); each takes effect at once
-        h("button", { type: "button", "data-testid": "lock", onclick: () => void controller.lock() }, t("home.lock")),
-        h("button", { type: "button", class: "danger", "data-testid": "sign-out", onclick: () => void controller.signOut() }, t("home.signOut")),
+        "section",
+        {},
+        h("h2", {}, t("home.pin.title")),
+        h("p", { class: "muted" }, t("home.pin.hint")),
+        h("div", { class: "actions" }, h("button", { type: "button", disabled: busy, "data-testid": "pin-setup-open", onclick: () => void controller.openPinSetup() }, t("home.pin.button"))),
       ),
+      needsSecondFactor
+        ? h(
+            "section",
+            {},
+            h("h2", {}, t("home.totp.title")),
+            h(
+              "div",
+              { class: "actions" },
+              h("button", { type: "button", class: "primary", disabled: busy, "data-testid": "totp-open", onclick: () => void controller.openTotp("verify") }, t("home.totp.enter")),
+              h("button", { type: "button", disabled: busy, "data-testid": "totp-enrol-open", onclick: () => void controller.openTotp("enrol") }, t("home.totp.add")),
+            ),
+          )
+        : null,
+      h("div", { class: "actions" }, h("button", { type: "button", disabled: state.busy === "refresh", "data-testid": "refresh", onclick: () => void controller.refresh() }, t("home.refresh")), ...lockAndSignOut()),
       h("p", { class: "muted" }, t("home.lock.hint")),
       h("p", { class: "muted" }, t("home.reloadNote")),
       h("p", { class: "muted" }, t("home.later")),
     );
+  } else if (state.screen === "enrol") {
+    main = enrolView(state, controller, locale);
   } else if (state.screen === "signing-in") {
-    heading = h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title"));
     main = h(
       "main",
       { "aria-busy": "true", "data-screen": "signing-in" },
-      heading,
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title")),
       h("p", { role: "status", "data-testid": "busy" }, t("signIn.busy")),
       h("div", { class: "actions" }, h("button", { type: "button", "data-testid": "cancel", onclick: () => controller.cancelSignIn() }, t("signIn.cancel"))),
     );
   } else {
-    heading = h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title"));
     main = h(
       "main",
       { "data-screen": "signed-out" },
-      heading,
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title")),
       notice(state.notice),
       h("p", {}, t("signIn.lead")),
-      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", disabled: state.retryUntilMs !== undefined && Date.now() < state.retryUntilMs, "data-testid": "sign-in", onclick: () => void controller.signIn() }, t("signIn.button"))),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", class: "primary", disabled: state.retryUntilMs !== undefined && Date.now() < state.retryUntilMs, "data-testid": "sign-in", onclick: () => void controller.signIn() }, t("signIn.button")),
+        h("button", { type: "button", "data-testid": "have-invite", onclick: () => controller.startEnrol() }, t("signIn.haveInvite")),
+      ),
     );
   }
 
   root.replaceChildren(header, main);
-  heading.focus({ preventScroll: true });
+  // the first field of a form takes focus (so a screen-reader or keyboard user can type at once); otherwise the heading does
+  const target = main.querySelector<HTMLElement>("[data-autofocus]") ?? main.querySelector<HTMLElement>("h1");
+  target?.focus({ preventScroll: true });
 }

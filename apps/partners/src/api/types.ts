@@ -55,3 +55,43 @@ export interface WhoAmI {
 export interface ReauthResult {
   readonly reauthUntil: string;
 }
+
+/** `GET pin` (design 19.4): the salt and iteration count the browser derives with, or the state that has none. */
+export type PinParams =
+  | { readonly state: "ok"; readonly salt: string; readonly iterations: number; readonly retryAfterSeconds: number }
+  | { readonly state: "unset" | "must_change" | "locked" };
+
+/** `POST totp/enrol` (once): the seed and the otpauth URI. A secret: shown once, never stored by the page. */
+export interface TotpEnrolment {
+  readonly seed: string;
+  readonly otpauthUrl: string;
+  readonly issuer: string;
+  readonly period: number;
+  readonly digits: number;
+  readonly algo: string;
+}
+
+/** What `accept/verify` returns for an invite or an enrolment token: the create ceremony's options and the binding `POST credentials` echoes back. */
+export interface EnrolmentChallenge {
+  readonly options: unknown;
+  readonly challengeToken: string;
+  readonly expiresAt: string;
+  readonly userId: string;
+  readonly refKind: "invite" | "enrolment";
+  readonly refId: string;
+}
+
+/** `POST credentials` (201): what the page may know about the first session; the token itself stays inside the client. */
+export interface FirstSessionGrant {
+  readonly expiresAt: string;
+  readonly aal: number;
+  readonly enrolmentUntil: string;
+}
+
+/** The browser's `PublicKeyCredential` of a `navigator.credentials.create`, as the server's strict registration parser takes it. */
+export interface RegistrationJson {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  response: { clientDataJSON: string; attestationObject: string; transports?: string[] };
+}
