@@ -148,8 +148,8 @@ SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('serv
 SELECT is((SELECT bool_and(p.proacl::text !~ '(^\{|,)=') FROM pg_proc p WHERE p.oid IN ('private.course_pin_derive(text, date, integer)'::regprocedure, 'private.course_pin_matches(text, date, integer, text, timestamptz)'::regprocedure,
              'private.course_pin_from_key(text, text, date, integer)'::regprocedure, 'private.course_pin_epoch_at(text, timestamptz)'::regprocedure, 'private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)'::regprocedure)),
   true, 'the pepper: PUBLIC has no EXECUTE on any of them');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_derive' AND p.proname <> 'course_pin_derive'), ARRAY['course_pin_matches'],
-  'the derivation is called by exactly one function: the matcher');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_derive' AND p.proname <> 'course_pin_derive'), ARRAY['course_pin_matches', 'course_pin_show_for_partner'],
+  'the derivation is called by exactly two functions: the matcher (the player lane) and the staff lane''s today''s-PIN wrapper (0055, S2b: the screen and the app can never differ)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_matches' AND p.proname <> 'course_pin_matches'), ARRAY['course_pin_attempt_for_actor', 'marker_scan_for_actor'],
   'the matcher is called by exactly two functions: the PIN gate (course_pin_attempt_for_actor) and the scan (marker_scan_for_actor)');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)

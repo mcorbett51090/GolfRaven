@@ -1174,7 +1174,7 @@ $$;
 SELECT pass('every function''s actual edge_partner and edge_partner_minter EXECUTE grants match private.function_inventory (0047)');
 SELECT is(
   (SELECT array_agg(function_name::text ORDER BY function_name::text COLLATE "C") FROM private.function_inventory WHERE expected_edge_partner),
-  ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_attest_for_partner', 'partner_binding', 'partner_binding_kind',
+  ARRAY['bind_partner_session', 'course_pin_rotate_for_partner', 'course_pin_show_for_partner', 'course_qr_mint_for_partner', 'course_qr_print_key_for_partner', 'course_qr_print_read_for_partner', 'course_qr_print_write_for_partner', 'course_qr_refresh_for_partner', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_binding', 'partner_binding_kind',
         'partner_credential_list_for_partner', 'partner_credential_options_for_partner', 'partner_credential_register_for_partner', 'partner_credential_revoke_for_partner',
         'partner_entitlement_queue_for_partner', 'partner_entitlement_redeem_for_partner', 'partner_entitlement_voucher_for_partner',
         'partner_facility_programme_list_for_partner', 'partner_facility_programme_upsert_for_partner',
@@ -1193,7 +1193,7 @@ SELECT is(
         'partner_sponsor_rollup_for_partner', 'partner_sponsorship_approve_for_partner', 'partner_sponsorship_upsert_for_partner', 'partner_sponsorships_list_for_partner',
         'partner_staff_activity_for_partner', 'partner_stock_move_for_partner', 'partner_stock_read_for_partner', 'partner_totp_confirm_for_partner', 'partner_totp_enrol_for_partner',
         'partner_totp_reset_for_partner', 'partner_totp_verify_for_partner', 'partner_trail_programme_read_for_partner', 'partner_trail_programme_upsert_for_partner', 'partner_whoami_for_partner'],
-  'edge_partner executes EXACTLY the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3) the five of 0053 (S1.4) and the twelve of 0054 (S1.5) and the four of 0056 (S3) and the four of 0057 (S4) and the six of 0058 (S5) and the thirteen of 0059 (S6) and the three of 0060 (P5.1b)');
+  'edge_partner executes EXACTLY the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3) the five of 0053 (S1.4) and the twelve of 0054 (S1.5) and the seven of 0055 (S2b) and the four of 0056 (S3) and the four of 0057 (S4) and the six of 0058 (S5) and the thirteen of 0059 (S6) and the three of 0060 (P5.1b)');
 SELECT is((SELECT array_agg(function_name::text ORDER BY function_name::text COLLATE "C") FROM private.function_inventory WHERE expected_edge_partner_minter), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'], 'edge_partner_minter executes exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2) and the five of 0054 (S1.5)');
 SELECT tests.clear_actor();
 
