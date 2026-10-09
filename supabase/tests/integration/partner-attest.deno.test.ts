@@ -212,7 +212,9 @@ Deno.test("SP13: the failure counter of a refused verification COMMITS (read fro
 
 Deno.test("AT(13): four staff verify the SAME correct code at once: exactly one records it, the others are 409 (the primary key arbitrates)", DT, async () => {
   const player = await newPlayer();
-  const staff = await Promise.all([newMember("staff"), newMember("staff"), newMember("staff"), newMember("staff")]);
+  // sequential on purpose: each newMember takes the owner connection's temporary policies, which two concurrent calls would collide on
+  const staff: Member[] = [];
+  for (let i = 0; i < 4; i++) staff.push(await newMember("staff"));
   const c = await deviceCode(player);
   for (const m of staff) await grant(m);
   const results = await Promise.all(staff.map((m) => attest(m, "attest/offline", { facilityId: "fac_x", kind: "presence", handle: player.handle, code: c }, false)));
@@ -222,7 +224,7 @@ Deno.test("AT(13): four staff verify the SAME correct code at once: exactly one 
   assertEquals(await rawCountOf(`select count(*) as n from app.attestation where player_user_id = '${player.uid}'`), 1);
 });
 
-Deno.test("AT(1): staff at another facility and an operator cannot attest or read; staff cannot read staff-activity, a manager can", DT, async () => {
+Deno.test("AT(1): staff at another facility cannot attest or read; staff cannot read staff-activity, a manager can", DT, async () => {
   const staff = await newMember("staff");
   const player = await newPlayer();
   const jti = await newToken(player, "fac_y");
