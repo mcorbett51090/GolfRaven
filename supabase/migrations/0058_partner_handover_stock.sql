@@ -421,9 +421,9 @@ BEGIN
     RETURN;
   END IF;
 
-  -- attestation.token_jti is UNIQUE and tombstoned (0017): use the credential ref (check-in jti or handover:hash), never the entitlement id alone, so a later redeem of a reset row (or a second unit) cannot collide
+  -- attestation.token_jti is UNIQUE and tombstoned (0017). Prefix smh: so the tombstone does not collide with the check-in jti the staff_scan path also inserts under source entitlement_redeem (same PK).
   SELECT w.o_status, w.o_attestation_id INTO v_w
-  FROM private.partner_attest_write(v_uid, p_facility_id, v_ent.user_id, 'special_marker_handover', v_ref, v_ref, false, false, v_now, v_now) w;
+  FROM private.partner_attest_write(v_uid, p_facility_id, v_ent.user_id, 'special_marker_handover', 'smh:' || v_ref, v_ref, false, false, v_now, v_now) w;
   IF v_w.o_status <> 'ok' THEN
     RETURN QUERY SELECT v_w.o_status, NULL::uuid, NULL::text, NULL::text;
     RETURN;
