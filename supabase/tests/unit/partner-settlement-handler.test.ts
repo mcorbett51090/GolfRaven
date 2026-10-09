@@ -143,10 +143,10 @@ describe("settlement-export handler", () => {
     const { w, deps } = world();
     const res = await call(deps, { trailId: "trl_t", month: "2030-01-01" });
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.signedUrl).toBe("https://signed.test/settlement/trl_t/2030-01-01/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.csv");
-    expect(body.path).toBe("settlement/trl_t/2030-01-01/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.csv");
-    expect(body.lines[0].sponsorshipId).toBe(SPONSORSHIP);
+    const body = (await res.json()) as { data: { signedUrl: string; path: string; lines: Array<{ sponsorshipId: string }> } };
+    expect(body.data.signedUrl).toBe("https://signed.test/settlement/trl_t/2030-01-01/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.csv");
+    expect(body.data.path).toBe("settlement/trl_t/2030-01-01/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.csv");
+    expect(body.data.lines[0]!.sponsorshipId).toBe(SPONSORSHIP);
     expect(w.calls).toEqual(["db.hitRateLimit", "db.withSettlementExport", "tx.settlementExport:trl_t:2030-01-01", "storage.putSigned"]);
     expect(w.rate[0]).toMatchObject({ bucket: SETTLEMENT_BUCKET, max: SETTLEMENT_PER_MEMBER_PER_HOUR });
     expect(w.putArgs[0]?.expiresInSeconds).toBe(SETTLEMENT_SIGNED_URL_SECONDS);

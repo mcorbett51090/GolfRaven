@@ -135,7 +135,7 @@ describe("partner-offers-redeem handler", () => {
     const { w, deps } = world();
     const res = await call(deps, "GET", "queue?facilityId=fac_x", { headers: auth() });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ offerCodes: [{ offerCodeId: CODE, playerHandle: "player_b", faceValue: 5 }] });
+    expect(await res.json()).toEqual({ data: { offerCodes: [{ offerCodeId: CODE, offerId: "77000000-0000-0000-0000-000000000001", playerHandle: "player_b", expiresAt: "2030-01-01T12:00:00.000Z", faceValue: 5 }] } });
     expect(w.calls).toEqual(["db.hitRateLimit", "db.withOffersRedeem", "tx.offersQueue"]);
     expect(w.rate[0]).toEqual({ hash: expect.any(String), bucket: OFFERS_REDEEM_BUCKET, windowSeconds: 3600, max: OFFERS_REDEEM_PER_MEMBER_PER_HOUR });
     expect(w.committed).toEqual([true]);
@@ -148,7 +148,7 @@ describe("partner-offers-redeem handler", () => {
       body: { facilityId: "fac_x", offerCodeId: CODE, method: "staff_scan", credential: JTI },
     });
     expect(res.status).toBe(201);
-    expect(await res.json()).toEqual({ attestationId: okRedeem.attestationId });
+    expect(await res.json()).toEqual({ data: { attestationId: okRedeem.attestationId } });
     expect(w.args[0]).toEqual({ op: "redeemOffer", args: ["fac_x", CODE, "staff_scan", JTI] });
   });
 

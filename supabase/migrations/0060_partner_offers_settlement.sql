@@ -299,7 +299,7 @@ BEGIN
     pg_catalog.count(*)::bigint,
     pg_catalog.count(*) FILTER (WHERE oc.redeemed_offline)::bigint,
     pg_catalog.count(*) FILTER (WHERE oc.redeemed_by_staff IS NULL)::bigint,
-    pg_catalog.coalesce(pg_catalog.sum(o.face_value), 0)::numeric
+    CASE WHEN pg_catalog.sum(o.face_value) IS NULL THEN 0::numeric ELSE pg_catalog.sum(o.face_value) END
   FROM app.offer_code oc
   JOIN app.offer o ON o.id = oc.offer_id
   WHERE o.trail_id = p_trail_id AND oc.state = 'redeemed'
