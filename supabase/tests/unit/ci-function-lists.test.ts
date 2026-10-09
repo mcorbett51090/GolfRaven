@@ -122,6 +122,13 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
       ]) expect(listed).toContain(`supabase/functions/${fn}/index.ts`);
     });
   }
+  // Partner auth S2b (0055): the staff lane of the course QR is two more entrypoints; named here so a future edit that drops one fails with its own message.
+  for (const step of STEPS) {
+    it(`"${step}" lists the course-qr and qr-print entrypoints`, () => {
+      const listed = listedPaths(step);
+      for (const fn of ["course-qr", "qr-print"]) expect(listed).toContain(`supabase/functions/${fn}/index.ts`);
+    });
+  }
   it("the pure Deno suite step caches the partner session handler suite before running with --cached-only", () => {
     expect(runText("Run supabase/tests/deno-unit")).toContain("supabase/tests/deno-unit/partner-session-handler.deno.test.ts");
   });

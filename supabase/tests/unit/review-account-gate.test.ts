@@ -57,6 +57,8 @@ describe("every authenticated Edge function authenticates through getActorFromRe
     "partner-session",
     "partner-invites",
     "partner-members",
+    "course-qr",
+    "qr-print",
     "partner-attest",
     "partner-review",
     "stock-admin",
