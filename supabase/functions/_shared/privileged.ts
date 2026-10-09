@@ -91,6 +91,13 @@ import {
   type ReauthCredential,
   type ReauthInput,
   type RpConfig,
+  type TotpConfirmResult,
+  type TotpConfirmStatus,
+  type TotpEnrolResult,
+  type TotpEnrolStatus,
+  type TotpResetResult,
+  type TotpVerifyResult,
+  type TotpVerifyStatus,
 } from "./partner/ports.ts";
 import { parseAllowedOrigin } from "./partner/cors.ts";
 
@@ -3638,6 +3645,19 @@ function pinWriteResult(r: Record<string, unknown> | undefined, fn: string): Pin
   if (typeof status !== "string" || !PIN_WRITE_STATUSES.has(status)) throw new Error(`${fn} returned no usable status`);
   return { status: status as PinWriteStatus, retryAfterSeconds: Number(r?.o_retry_after ?? 0) };
 }
+const TOTP_ENROL_STATUSES: ReadonlySet<string> = new Set(["ok", "already_confirmed"]);
+const TOTP_CONFIRM_STATUSES: ReadonlySet<string> = new Set(["ok", "wrong", "locked", "unset", "already_confirmed", "wrong_session"]);
+const TOTP_VERIFY_STATUSES: ReadonlySet<string> = new Set(["ok", "wrong", "locked", "unset", "unconfirmed", "retry_after"]);
+const TOTP_RESET_STATUSES: ReadonlySet<string> = new Set(["ok", "unset"]);
+function isTotpEnrolStatus(v: unknown): v is TotpEnrolStatus {
+  return typeof v === "string" && TOTP_ENROL_STATUSES.has(v);
+}
+function isTotpConfirmStatus(v: unknown): v is TotpConfirmStatus {
+  return typeof v === "string" && TOTP_CONFIRM_STATUSES.has(v);
+}
+function isTotpVerifyStatus(v: unknown): v is TotpVerifyStatus {
+  return typeof v === "string" && TOTP_VERIFY_STATUSES.has(v);
+}
 
 function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
   return {
@@ -3705,6 +3725,47 @@ function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
       const r = rows[0];
       if (r?.o_status === "ok" && r.o_otp_proof_until instanceof Date) return { status: "ok", otpProofUntil: r.o_otp_proof_until.toISOString() };
       return { status: "refused", otpProofUntil: null };
+    },
+    async totpEnrol(): Promise<TotpEnrolResult> {
+      const rows = await trx`
+        select o_status, o_seed, o_seed_version::int as o_seed_version, o_issuer, o_period::int as o_period, o_digits::int as o_digits, o_algo
+        from private.partner_totp_enrol_for_partner()`;
+      const r = rows[0];
+      if (!isTotpEnrolStatus(r?.o_status)) throw new Error("partner_totp_enrol_for_partner returned no usable status");
+      if (r.o_status !== "ok") {
+        return { status: r.o_status, seed: null, seedVersion: null, issuer: null, period: null, digits: null, algo: null };
+      }
+      return {
+        status: "ok",
+        seed: bytesOf(r.o_seed),
+        seedVersion: Number(r.o_seed_version),
+        issuer: String(r.o_issuer),
+        period: Number(r.o_period),
+        digits: Number(r.o_digits),
+        algo: String(r.o_algo),
+      };
+    },
+    async totpConfirm(code: string): Promise<TotpConfirmResult> {
+      const rows = await trx`select o_status, o_retry_after::int as o_retry_after from private.partner_totp_confirm_for_partner(${code})`;
+      const r = rows[0];
+      if (!isTotpConfirmStatus(r?.o_status)) throw new Error("partner_totp_confirm_for_partner returned no usable status");
+      return { status: r.o_status, retryAfterSeconds: Number(r.o_retry_after ?? 0) };
+    },
+    async totpVerify(code: string): Promise<TotpVerifyResult> {
+      const rows = await trx`select o_status, o_retry_after::int as o_retry_after, o_mfa_until from private.partner_totp_verify_for_partner(${code})`;
+      const r = rows[0];
+      if (!isTotpVerifyStatus(r?.o_status)) throw new Error("partner_totp_verify_for_partner returned no usable status");
+      return {
+        status: r.o_status,
+        retryAfterSeconds: Number(r.o_retry_after ?? 0),
+        mfaUntil: r.o_mfa_until instanceof Date ? r.o_mfa_until.toISOString() : null,
+      };
+    },
+    async totpReset(targetUid: string): Promise<TotpResetResult> {
+      const rows = await trx`select o_status from private.partner_totp_reset_for_partner(${targetUid}::uuid)`;
+      const status = rows[0]?.o_status;
+      if (typeof status !== "string" || !TOTP_RESET_STATUSES.has(status)) throw new Error("partner_totp_reset_for_partner returned no usable status");
+      return { status: status as TotpResetResult["status"] };
     },
     async reauth(input: ReauthInput): Promise<{ status: string; reauthUntil: string | null }> {
       const rows = await trx`

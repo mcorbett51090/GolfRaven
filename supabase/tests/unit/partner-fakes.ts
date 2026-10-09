@@ -23,6 +23,10 @@ import {
   type ReauthCredential,
   type ReauthInput,
   type RpConfig,
+  type TotpConfirmResult,
+  type TotpEnrolResult,
+  type TotpResetResult,
+  type TotpVerifyResult,
   type VerifyAssertionRequest,
   type VerifyOutcome,
 } from "../../functions/_shared/partner/ports.ts";
@@ -84,6 +88,10 @@ export interface Fakes {
   readonly otpSent: string[];
   readonly otpVerified: Array<{ email: string; code: string }>;
   readonly otpProofSessionIds: string[];
+  /** what the TOTP ports were handed (S1.4) */
+  readonly totpConfirmCodes: string[];
+  readonly totpVerifyCodes: string[];
+  readonly totpResetTargets: string[];
   /** how many GoTrue sessions the fake OTP port has closed */
   readonly otpClosed: { count: number };
   /** the number of database transactions OPEN at the moment each GoTrue call was made (it must always be 0: a vendor call is never made inside a transaction) */
@@ -109,6 +117,10 @@ export interface Fakes {
     otpSessionId: string | null;
     otpProofThrows: Error | null;
     otpSendThrows: boolean;
+    totpEnrol: TotpEnrolResult;
+    totpConfirm: TotpConfirmResult;
+    totpVerify: TotpVerifyResult;
+    totpReset: TotpResetResult;
   };
 }
 
@@ -126,6 +138,9 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
   const otpSent: string[] = [];
   const otpVerified: Array<{ email: string; code: string }> = [];
   const otpProofSessionIds: string[] = [];
+  const totpConfirmCodes: string[] = [];
+  const totpVerifyCodes: string[] = [];
+  const totpResetTargets: string[] = [];
   const otpClosed = { count: 0 };
   const openTxAtOtpCall: number[] = [];
   const open = { count: 0 };
@@ -149,6 +164,18 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     otpSessionId: "22222222-2222-2222-2222-222222222222",
     otpProofThrows: null,
     otpSendThrows: false,
+    totpEnrol: {
+      status: "ok",
+      seed: bytes(32, 0xab),
+      seedVersion: 1,
+      issuer: "GolfRaven",
+      period: 30,
+      digits: 6,
+      algo: "SHA1",
+    },
+    totpConfirm: { status: "ok", retryAfterSeconds: 0 },
+    totpVerify: { status: "ok", retryAfterSeconds: 0, mfaUntil: "2030-01-01T12:05:00.000Z" },
+    totpReset: { status: "ok" },
     ...over,
   };
   const maybeThrow = (where: string) => {
@@ -230,6 +257,25 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       otpProofSessionIds.push(gotrueSessionId);
       if (state.otpProofThrows !== null) throw state.otpProofThrows;
       return state.otpProofStatus === "ok" ? { status: "ok" as const, otpProofUntil: "2030-01-01T12:10:00.000Z" } : { status: "refused" as const, otpProofUntil: null };
+    },
+    async totpEnrol() {
+      calls.push("session.totpEnrol");
+      return state.totpEnrol;
+    },
+    async totpConfirm(code: string) {
+      calls.push("session.totpConfirm");
+      totpConfirmCodes.push(code);
+      return state.totpConfirm;
+    },
+    async totpVerify(code: string) {
+      calls.push("session.totpVerify");
+      totpVerifyCodes.push(code);
+      return state.totpVerify;
+    },
+    async totpReset(targetUid: string) {
+      calls.push("session.totpReset");
+      totpResetTargets.push(targetUid);
+      return state.totpReset;
     },
     async reauth(input: ReauthInput) {
       calls.push("session.reauth");
@@ -320,7 +366,28 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       return { token, hash };
     },
   };
-  return { deps, calls, tx, mintInputs, reauthInputs, verifyRequests, sessionHashes, rateLimitHits, pinVerifyInputs, pinSetInputs, pinChangeInputs, otpSent, otpVerified, otpProofSessionIds, otpClosed, openTxAtOtpCall, state };
+  return {
+    deps,
+    calls,
+    tx,
+    mintInputs,
+    reauthInputs,
+    verifyRequests,
+    sessionHashes,
+    rateLimitHits,
+    pinVerifyInputs,
+    pinSetInputs,
+    pinChangeInputs,
+    otpSent,
+    otpVerified,
+    otpProofSessionIds,
+    totpConfirmCodes,
+    totpVerifyCodes,
+    totpResetTargets,
+    otpClosed,
+    openTxAtOtpCall,
+    state,
+  };
 }
 
 /** A partner session token (well-formed) and its sha256. */

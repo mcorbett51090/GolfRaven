@@ -169,6 +169,8 @@ describe("PA-11: a Supabase JWT (or any foreign bearer) is the ONE 401 on every 
     ["GET", "session"], ["POST", "sign-out"], ["POST", "lock"], ["POST", "reauth/options"], ["POST", "reauth"],
     // S1.3: the step-up PIN and the email proof are session routes too
     ["GET", "pin"], ["POST", "step-up/pin"], ["POST", "pin/set"], ["POST", "pin/change"], ["POST", "otp-proof/start"], ["POST", "otp-proof/verify"],
+    // S1.4: operator/admin TOTP
+    ["POST", "totp/enrol"], ["POST", "totp/confirm"], ["POST", "step-up/totp"],
   ];
   it("a JWT, a wrong-length partner token, a wrong prefix, another scheme and no header are all refused identically", async () => {
     const f = makeFakes();
@@ -527,6 +529,13 @@ describe("PA-11: nothing is ever logged", () => {
       [{ otpSendThrows: true }, "POST", "otp-proof/start", authed(), {}],
       [{}, "POST", "otp-proof/verify", authed(), { code: "123456" }],
       [{ otpVerifyOk: false }, "POST", "otp-proof/verify", authed(), { code: "123456" }],
+      // S1.4: TOTP enrol / confirm / step-up
+      [{}, "POST", "totp/enrol", authed(), {}],
+      [{ totpEnrol: { status: "already_confirmed", seed: null, seedVersion: null, issuer: null, period: null, digits: null, algo: null } }, "POST", "totp/enrol", authed(), {}],
+      [{}, "POST", "totp/confirm", authed(), { code: "123456" }],
+      [{ totpConfirm: { status: "wrong", retryAfterSeconds: 0 } }, "POST", "totp/confirm", authed(), { code: "123456" }],
+      [{}, "POST", "step-up/totp", authed(), { code: "123456" }],
+      [{ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } }, "POST", "step-up/totp", authed(), { code: "123456" }],
     ];
     for (const [state, method, path, headers, body] of matrix) {
       const f = makeFakes(state);

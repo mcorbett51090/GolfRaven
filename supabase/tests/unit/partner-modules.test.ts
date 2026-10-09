@@ -214,7 +214,7 @@ function partnerFiles(): string[] {
 describe("PA-11: the partner modules never log", () => {
   it("finds the modules it is meant to scan", () => {
     const names = partnerFiles().map((p) => p.split("/").slice(-2).join("/"));
-    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts"]) expect(names).toContain(n);
+    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts"]) expect(names).toContain(n);
   });
 
   it("no `console` identifier appears anywhere in code (comments and strings aside) in the partner modules, the function entrypoint or the partner lane section of privileged.ts", () => {

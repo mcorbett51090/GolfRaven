@@ -67,7 +67,10 @@ BEGIN
          | (pg_catalog.get_byte(v_hmac, v_offset + 1)::bigint << 16)
          | (pg_catalog.get_byte(v_hmac, v_offset + 2)::bigint << 8)
          |  pg_catalog.get_byte(v_hmac, v_offset + 3)::bigint;
-  RETURN pg_catalog.lpad((v_bin % (10::bigint ^ p_digits))::text, p_digits, '0');
+  -- NOTE: in PostgreSQL `^` is bitwise XOR, not exponentiation. Use an explicit modulus table.
+  RETURN pg_catalog.lpad(
+    (v_bin % (CASE p_digits WHEN 6 THEN 1000000::bigint WHEN 7 THEN 10000000::bigint ELSE 100000000::bigint END))::text,
+    p_digits, '0');
 END
 $$;
 

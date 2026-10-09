@@ -106,6 +106,41 @@ export interface PinWriteResult {
   readonly retryAfterSeconds: number;
 }
 
+/** POST totp/enrol (partner_totp_enrol_for_partner): the derived seed once, or a returned refusal (`already_confirmed`). */
+export type TotpEnrolStatus = "ok" | "already_confirmed";
+export interface TotpEnrolResult {
+  readonly status: TotpEnrolStatus;
+  /** The derived seed bytes (`ok` only); never stored. The handler base32-encodes them for the client. */
+  readonly seed: Uint8Array | null;
+  readonly seedVersion: number | null;
+  readonly issuer: string | null;
+  readonly period: number | null;
+  readonly digits: number | null;
+  readonly algo: string | null;
+}
+
+/** POST totp/confirm (partner_totp_confirm_for_partner): every refusal a RETURNED status so the failure counter commits. */
+export type TotpConfirmStatus = "ok" | "wrong" | "locked" | "unset" | "already_confirmed" | "wrong_session";
+export interface TotpConfirmResult {
+  readonly status: TotpConfirmStatus;
+  readonly retryAfterSeconds: number;
+}
+
+/** POST step-up/totp (partner_totp_verify_for_partner): on `ok` the session is aal 2 with mfa_until. */
+export type TotpVerifyStatus = "ok" | "wrong" | "locked" | "unset" | "unconfirmed" | "retry_after";
+export interface TotpVerifyResult {
+  readonly status: TotpVerifyStatus;
+  readonly retryAfterSeconds: number;
+  /** ISO time the MFA window expires (`ok` only). */
+  readonly mfaUntil: string | null;
+}
+
+/** POST members/{id}/totp-reset (partner_totp_reset_for_partner): admin only; no public route on partner-session yet (S1.4 lite). */
+export type TotpResetStatus = "ok" | "unset";
+export interface TotpResetResult {
+  readonly status: TotpResetStatus;
+}
+
 /** One transaction as `edge_partner`, bound to the presented session. Every method is a `_for_partner` definer that begins with `partner_authorize`. */
 export interface PartnerSessionTx {
   whoami(): Promise<unknown>;
@@ -127,6 +162,14 @@ export interface PartnerSessionTx {
   otpTarget(): Promise<string | null>;
   /** Records the email proof bound to a fresh GoTrue session of this person: `refused` when the session is not fresh for this person or was already used for a proof. */
   otpProof(gotrueSessionId: string): Promise<{ readonly status: "ok" | "refused"; readonly otpProofUntil: string | null }>;
+  /** POST totp/enrol: bumps seed_version, returns the derived seed once (PA-24). 42501 without an enrolment window or email proof; 55000 when the Vault key is missing. */
+  totpEnrol(): Promise<TotpEnrolResult>;
+  /** POST totp/confirm: confirms the unconfirmed seed in the same session that enrolled. */
+  totpConfirm(code: string): Promise<TotpConfirmResult>;
+  /** POST step-up/totp: evaluates a 6-digit code; on `ok` sets aal 2 and mfa_until. A returned status for every refusal: the transaction COMMITS. */
+  totpVerify(code: string): Promise<TotpVerifyResult>;
+  /** Admin reset of another person's TOTP (port only until members/{id}/totp-reset is wired). */
+  totpReset(targetUid: string): Promise<TotpResetResult>;
 }
 
 /**
