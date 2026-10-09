@@ -436,6 +436,99 @@ export interface PartnerReviewTx {
   resolveHeldEntitlement(entitlementId: string, approve: boolean): Promise<ResolveHeldResult>;
 }
 
+/** The stock movements a member may record (0058): redeemed and voucher_redeemed are written only by the redeem path. */
+export type StockMoveKind = "delivered" | "transfer_in" | "transfer_out" | "count_adjustment" | "damaged";
+export const STOCK_MOVE_KINDS: readonly StockMoveKind[] = ["delivered", "transfer_in", "transfer_out", "count_adjustment", "damaged"];
+/** What `partner_stock_move_for_partner` answers (0058). Every status except a raise is a returned value. */
+export type StockMoveStatus = "ok" | "no_stock_row" | "short" | "over_cap";
+export interface StockMoveResult {
+  readonly status: StockMoveStatus;
+  /** The stock after the move on `ok`; the unchanged stock on `short` and `over_cap`; null on `no_stock_row`. */
+  readonly onHand: number | null;
+  /** The refreshed availability (`in_stock`, `low`, `out`) on `ok` only. */
+  readonly availability: string | null;
+}
+/** One row of the facility stock read (0058). */
+export interface StockRow {
+  readonly trailId: string;
+  readonly onHand: number;
+  readonly lowThreshold: number;
+  readonly status: string | null;
+  readonly lastCountedAt: string | null;
+}
+
+/** One transaction as `edge_partner` for the `stock-admin` routes. Every method is a `_for_partner` definer that begins with `partner_authorize` (class A0 for the read, A1 for a movement); staff or manager of the facility. */
+export interface PartnerStockTx {
+  /** GET stock (class A0). */
+  stockRead(facilityId: string): Promise<StockRow[]>;
+  /** POST stock/move (class A1). */
+  stockMove(facilityId: string, trailId: string, kind: StockMoveKind, qty: number, note: string | null): Promise<StockMoveResult>;
+}
+
+/** What `partner_handover_mint_for_partner` answers (0058). */
+export type HandoverMintStatus = "ok" | "not_found" | "not_redeemable" | "wrong_facility" | "no_stock_row" | "token_exists";
+export interface HandoverMintResult {
+  readonly status: HandoverMintStatus;
+  /** Present only on `ok`. */
+  readonly expiresAt: string | null;
+}
+/** The redemption methods of this slice (0058). `offline_code` is refused by the database (22023) and is not a method the Edge accepts. */
+export type RedeemMethod = "staff_scan" | "hand_over_token";
+export const REDEEM_METHODS: readonly RedeemMethod[] = ["staff_scan", "hand_over_token"];
+/** What `partner_entitlement_redeem_for_partner` answers (0058; `no_programme` can only come from the shared attest writer and is mapped defensively). */
+export type RedeemStatus =
+  | "ok"
+  | "not_found"
+  | "not_redeemable"
+  | "wrong_facility"
+  | "token_invalid"
+  | "wrong_player"
+  | "replayed"
+  | "no_stock_row"
+  | "out_of_stock"
+  | "no_facility"
+  | "cold_start_cap"
+  | "no_programme";
+export interface RedeemResult {
+  readonly status: RedeemStatus;
+  /** The `special_marker_handover` attestation, on `ok` only. */
+  readonly attestationId: string | null;
+  /** `redeemed` or `voucher_redeemed`, on `ok` only. */
+  readonly movement: string | null;
+  /** The refreshed availability on `ok`; `out` on `out_of_stock`. */
+  readonly availability: string | null;
+}
+/** One row of the collect queue (0058): the player is shown by handle only. */
+export interface EntitlementQueueRow {
+  readonly entitlementId: string;
+  readonly trailId: string;
+  readonly state: string;
+  readonly playerHandle: string | null;
+  readonly activatedAt: string | null;
+  readonly voucherIssuedAt: string | null;
+}
+/** What `partner_entitlement_voucher_for_partner` answers (0058). */
+export type VoucherStatus = "ok" | "not_found" | "not_redeemable" | "no_stock_row";
+export interface VoucherResult {
+  readonly status: VoucherStatus;
+  readonly voucherIssuedAt: string | null;
+}
+
+/**
+ * One transaction as `edge_partner` for the `partner-entitlements` routes. Every method is a `_for_partner` definer that begins with `partner_authorize` (class A0 for the queue, A1 for the three writes);
+ * staff or manager of the facility. The hand-over token PLAINTEXT never reaches this port: the handler passes the SHA-256 and the database stores only that.
+ */
+export interface PartnerEntitlementsTx {
+  /** GET collect (class A0). */
+  collectQueue(facilityId: string): Promise<EntitlementQueueRow[]>;
+  /** POST handover/mint (class A1): stores the hash of a token the Edge generated. */
+  mintHandover(facilityId: string, entitlementId: string, tokenHash: string): Promise<HandoverMintResult>;
+  /** POST redeem (class A1): `credential` is a check-in jti (staff_scan) or the SHA-256 hex of the hand-over token (hand_over_token). */
+  redeem(facilityId: string, entitlementId: string, method: RedeemMethod, credential: string): Promise<RedeemResult>;
+  /** POST voucher (class A1): redeemable becomes owed at this facility. */
+  voucher(facilityId: string, entitlementId: string): Promise<VoucherResult>;
+}
+
 /**
  * The email OTP of the proof (6.1, 6.3), through GoTrue with the ANON key, as the player flow already does (E19): `send` mails a one-time code to the member's own address; `verify` proves the mailbox and returns the
  * GoTrue session the verification created, which the database then checks (it must exist, for THIS person, fresh) and which the caller closes AFTER the proof is recorded, on every path. A wrong or expired code is
@@ -461,6 +554,10 @@ export interface PartnerDb {
   withAttest<T>(tokenHash: string, op: (s: PartnerAttestTx) => Promise<T>): Promise<T>;
   /** `withSession` for the `partner-review` routes (queue, sla, resolve): the same bound transaction, the review definers of 0057 (S4). */
   withReview<T>(tokenHash: string, op: (s: PartnerReviewTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `stock-admin` routes (stock read, stock move): the same bound transaction, the stock definers of 0058 (S5). */
+  withStock<T>(tokenHash: string, op: (s: PartnerStockTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `partner-entitlements` routes (collect, hand-over mint, redeem, voucher): the same bound transaction, the hand-over definers of 0058 (S5). */
+  withEntitlements<T>(tokenHash: string, op: (s: PartnerEntitlementsTx) => Promise<T>): Promise<T>;
   /** One hit of a per-member bucket, in its OWN short transaction, committed before any request transaction opens (the pool-deadlock rule of `hitRateLimitForActor`). */
   hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
   /** One hit of a SYSTEM bucket (design 8: nothing is bound before authentication, so the buckets keyed on an object the caller cannot choose, the invite token and the target mailbox, are `edge_system` buckets), in its own short transaction. */

@@ -272,6 +272,12 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     withReview() {
       return Promise.reject(new Error("fake partner server: review is not implemented (S7d)"));
     },
+    withStock() {
+      return Promise.reject(new Error("fake partner server: stock is not implemented (S7c)"));
+    },
+    withEntitlements() {
+      return Promise.reject(new Error("fake partner server: entitlements are not implemented (S7c)"));
+    },
     async hitSystemRateLimit() {
       return { ok: true, retryAfterSeconds: 0 };
     },

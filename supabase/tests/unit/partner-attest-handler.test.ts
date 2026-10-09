@@ -89,6 +89,8 @@ function world(): { w: World; deps: PartnerAttestDeps } {
       return r;
     },
     withReview: reject,
+    withStock: reject,
+    withEntitlements: reject,
     async hitRateLimit(hash, bucket, windowSeconds, max) {
       w.calls.push("db.hitRateLimit");
       w.rate.push({ hash, bucket, windowSeconds, max });

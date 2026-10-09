@@ -277,7 +277,7 @@ SELECT is((SELECT state::text || '|' || voucher_facility_id FROM app.entitlement
 SELECT is(pg_temp.mv('sx', 'fac_x', 'trl_t', 'delivered', 2, 'restock'), 'ok|2|low', 'restock after voucher');
 SELECT is(pg_temp.mint('sx', 'fac_x', '50000000-0000-0000-0000-000000000001', repeat('11', 32)), 'ok|true', 'mint for a vouchered entitlement owed here');
 SELECT is(pg_temp.red('sx', 'fac_x', '50000000-0000-0000-0000-000000000001', 'hand_over_token', repeat('11', 32)), 'ok|voucher_redeemed|low', 'AT(21): voucher_redeemed movement');
-SELECT is((SELECT kind::text FROM app.special_marker_stock_movement WHERE entitlement_id = '50000000-0000-0000-0000-000000000001' ORDER BY at DESC LIMIT 1), 'voucher_redeemed', 'movement kind is voucher_redeemed');
+SELECT is((SELECT count(*)::int FROM app.special_marker_stock_movement WHERE entitlement_id = '50000000-0000-0000-0000-000000000001' AND kind = 'voucher_redeemed'), 1, 'movement kind is voucher_redeemed');
 
 -- statuses and refusals
 SELECT is(pg_temp.red('sx', 'fac_x', '51000000-0000-0000-0000-000000003699', 'staff_scan', '36200000-0000-0000-0000-000000000002'), 'not_found||', 'unknown entitlement is not_found');

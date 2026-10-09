@@ -2043,3 +2043,41 @@ The order is the members handler's (Origin, preflight, route and method, bearer,
 ### 27.4 Verification run for this slice
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 35's **44/44** cells; all other pgTAP matrices; partner serialisation and review-account tool checks; Deno integration **382/382** (every `PartnerDb` fake implements `withReview`; PA-13b includes the four 0057 wrappers). `definer_policy_exprs.txt` matches live `pg_get_expr` for the eleven review policies (INSERT on `review_item` uses the catalog's AND-chain form). Vitest `partner-review-handler` + `partner-attest-handler` (60) and `apps/partners` typecheck pass locally. Remaining: CI on PR #68.
+
+## 28. As built: S5 (hand-over and stock)
+
+Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055` / matrix `33` / section 25; S3–S4 claim 0056–0057 / 34–35 / 26–27. Nothing from 0001–0057 is edited.
+
+### 28.1 What was built
+
+**Migration `0058_partner_handover_stock.sql`** and **matrix `36_partner_stock_handover.sql`** (65 cells), then Edge functions **`stock-admin`** and **`partner-entitlements`**.
+
+- **Stock (A0/A1, staff or manager):** `partner_stock_read_for_partner`, `partner_stock_move_for_partner` (delivered / transfer_in / transfer_out / count_adjustment / damaged; never `redeemed` / `voucher_redeemed`), `partner_stock_availability_refresh` (owner-only). Statuses `ok | no_stock_row | short | over_cap`.
+- **Collect queue (A0):** `partner_entitlement_queue_for_partner` — redeemable of trails the facility stocks, and vouchered owed here; player by handle only.
+- **Hand-over token:** `app.partner_handover_token` (hash only, FORCE RLS, no edge grants); `partner_handover_mint_for_partner` (A1) stores SHA-256 of an Edge-generated `gr_ho_…` token for 15 minutes.
+- **Redeem (A1, AT(8)/AT(21)):** `partner_entitlement_redeem_for_partner` — `staff_scan` (check-in jti) or `hand_over_token` (hash); `offline_code` is 22023. Stock `FOR UPDATE`; `out_of_stock` changes nothing (voucher separately). Movement `redeemed` or `voucher_redeemed`; one `special_marker_handover` attestation (`token_jti` = `smh:<credential ref>` so it does not collide with the entitlement_redeem nonce). Self-redeem 22023.
+- **Voucher (A1):** `partner_entitlement_voucher_for_partner` — redeemable → vouchered at this facility.
+- **Binding-keyed policies:** 17 `private_definer` policies on stock, movement, availability, entitlement, play guard read, hand-over token, `consumed_nonce` (`entitlement_redeem`), and attestation (`special_marker_handover`). No GUC windows.
+
+**Edge**
+
+| Function | Routes |
+|---|---|
+| `stock-admin` | `GET stock`, `POST stock/move` |
+| `partner-entitlements` | `GET collect`, `POST handover/mint` (plaintext once), `POST redeem`, `POST voucher` |
+
+`out_of_stock` and `replayed` → 409; cold-start → 429; expected refusals → 422; missing scope/PIN → 403.
+
+### 28.2 Decisions and departures
+
+- **Attestation jti is `smh:` + credential ref**, not the entitlement id: the 0017 tombstone and the staff_scan `entitlement_redeem` nonce must not share a primary key, and a later redeem of a reset row must not collide.
+- **Status gates read entitlements without `FOR UPDATE` first:** `SELECT FOR UPDATE` also applies UPDATE RLS, which only opens redeemable/vouchered rows, so a re-redeem of a redeemed row would otherwise look like `not_found`.
+- **Race for the last unit** is proved in-matrix by sequential redeems at `on_hand = 1` (CHECK + row lock). A two-session script is a documented seam if product wants an explicit parallel proof.
+
+### 28.3 Not built, honestly
+
+- **`offline_code` redemption** and **offers-redeem** (P5.1b).
+- **Partners PWA hand-over/stock screens (S7c).**
+- **Creating a stock row** from the partner lane (catalog/ops owns rows).
+- **Paired transfer** (transfer_out here + transfer_in there are two moves).
+- Merge notes: S2b still edits the same enumeration files; lists here include S3–S5 names.

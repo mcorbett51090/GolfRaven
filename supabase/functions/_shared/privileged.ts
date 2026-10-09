@@ -96,15 +96,29 @@ import {
   type AttestKind,
   type AttestResult,
   type AttestStatus,
+  type EntitlementQueueRow,
+  type HandoverMintResult,
+  type HandoverMintStatus,
   type HeldQueueRow,
   type PartnerAttestTx,
   type PartnerDb,
+  type PartnerEntitlementsTx,
   type PartnerReviewTx,
+  type PartnerStockTx,
+  type RedeemMethod,
+  type RedeemResult,
+  type RedeemStatus,
   type ResolveHeldResult,
   type ResolveHeldStatus,
   type ReviewSlaSummary,
   type ShiftLogRow,
   type StaffActivityRow,
+  type StockMoveKind,
+  type StockMoveResult,
+  type StockMoveStatus,
+  type StockRow,
+  type VoucherResult,
+  type VoucherStatus,
   type PartnerInviteMintTx,
   type PartnerInvitesTx,
   type PartnerMembersTx,
@@ -4165,6 +4179,92 @@ function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
   };
 }
 
+/** The stock definers of 0058 (S5). Every status is a returned row, so a refusal COMMITS. */
+const STOCK_MOVE_STATUSES: ReadonlySet<string> = new Set(["ok", "no_stock_row", "short", "over_cap"]);
+function buildPartnerStockTx(trx: TxSql): PartnerStockTx {
+  return {
+    async stockRead(facilityId: string): Promise<StockRow[]> {
+      const rows = await trx`
+        select o_trail_id, o_on_hand::int as o_on_hand, o_low_threshold::int as o_low_threshold, o_status, o_last_counted_at
+        from private.partner_stock_read_for_partner(${facilityId}::text)`;
+      return rows.map((r) => ({
+        trailId: String(r.o_trail_id),
+        onHand: Number(r.o_on_hand),
+        lowThreshold: Number(r.o_low_threshold),
+        status: textOrNull(r.o_status),
+        lastCountedAt: isoOrNull(r.o_last_counted_at),
+      }));
+    },
+    async stockMove(facilityId: string, trailId: string, kind: StockMoveKind, qty: number, note: string | null): Promise<StockMoveResult> {
+      const rows = await trx`
+        select o_status, o_on_hand::int as o_on_hand, o_availability
+        from private.partner_stock_move_for_partner(${facilityId}::text, ${trailId}::text, ${kind}::text, ${qty}::int, ${note}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !STOCK_MOVE_STATUSES.has(r.o_status)) throw new Error("partner_stock_move_for_partner returned no usable status");
+      return { status: r.o_status as StockMoveStatus, onHand: r.o_on_hand === null || r.o_on_hand === undefined ? null : Number(r.o_on_hand), availability: textOrNull(r.o_availability) };
+    },
+  };
+}
+
+/** The hand-over definers of 0058 (S5). Every status is a returned row, so a refusal COMMITS; the token hash is the only form of a hand-over token that reaches the database. */
+const HANDOVER_MINT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_redeemable", "wrong_facility", "no_stock_row", "token_exists"]);
+const REDEEM_STATUSES: ReadonlySet<string> = new Set([
+  "ok",
+  "not_found",
+  "not_redeemable",
+  "wrong_facility",
+  "token_invalid",
+  "wrong_player",
+  "replayed",
+  "no_stock_row",
+  "out_of_stock",
+  "no_facility",
+  "cold_start_cap",
+  "no_programme",
+]);
+const VOUCHER_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_redeemable", "no_stock_row"]);
+function buildPartnerEntitlementsTx(trx: TxSql): PartnerEntitlementsTx {
+  return {
+    async collectQueue(facilityId: string): Promise<EntitlementQueueRow[]> {
+      const rows = await trx`
+        select o_entitlement_id::text as o_entitlement_id, o_trail_id, o_state, o_player_handle, o_activated_at, o_voucher_issued_at
+        from private.partner_entitlement_queue_for_partner(${facilityId}::text)`;
+      return rows.map((r) => ({
+        entitlementId: String(r.o_entitlement_id),
+        trailId: String(r.o_trail_id),
+        state: String(r.o_state),
+        playerHandle: textOrNull(r.o_player_handle),
+        activatedAt: isoOrNull(r.o_activated_at),
+        voucherIssuedAt: isoOrNull(r.o_voucher_issued_at),
+      }));
+    },
+    async mintHandover(facilityId: string, entitlementId: string, tokenHash: string): Promise<HandoverMintResult> {
+      const rows = await trx`
+        select o_status, o_expires_at
+        from private.partner_handover_mint_for_partner(${facilityId}::text, ${entitlementId}::uuid, ${tokenHash}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !HANDOVER_MINT_STATUSES.has(r.o_status)) throw new Error("partner_handover_mint_for_partner returned no usable status");
+      return { status: r.o_status as HandoverMintStatus, expiresAt: isoOrNull(r.o_expires_at) };
+    },
+    async redeem(facilityId: string, entitlementId: string, method: RedeemMethod, credential: string): Promise<RedeemResult> {
+      const rows = await trx`
+        select o_status, o_attestation_id::text as o_attestation_id, o_movement, o_availability
+        from private.partner_entitlement_redeem_for_partner(${facilityId}::text, ${entitlementId}::uuid, ${method}::text, ${credential}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !REDEEM_STATUSES.has(r.o_status)) throw new Error("partner_entitlement_redeem_for_partner returned no usable status");
+      return { status: r.o_status as RedeemStatus, attestationId: textOrNull(r.o_attestation_id), movement: textOrNull(r.o_movement), availability: textOrNull(r.o_availability) };
+    },
+    async voucher(facilityId: string, entitlementId: string): Promise<VoucherResult> {
+      const rows = await trx`
+        select o_status, o_voucher_issued_at
+        from private.partner_entitlement_voucher_for_partner(${facilityId}::text, ${entitlementId}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !VOUCHER_STATUSES.has(r.o_status)) throw new Error("partner_entitlement_voucher_for_partner returned no usable status");
+      return { status: r.o_status as VoucherStatus, voucherIssuedAt: isoOrNull(r.o_voucher_issued_at) };
+    },
+  };
+}
+
 /** The partner sign-in minter's transaction (kind "partner_mint": the ONE caller of that kind, the lint's `privileged-mint-scope` rule keeps it so). */
 export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMintTx) => Promise<T>): Promise<T> {
   try {
@@ -4177,11 +4277,11 @@ export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMi
 const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 
 /** A transaction as `edge_partner`, bound to the session whose token hash this is. A malformed hash is refused without a database round trip, with the same error as an unknown one. */
-export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx) => Promise<T>): Promise<T> {
+export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx) => Promise<T>): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
   try {
     return await openScopedTx("partner", partnerBind(tokenHash), (trx) =>
-      op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx), ...buildPartnerAttestTx(trx), ...buildPartnerReviewTx(trx) }),
+      op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx), ...buildPartnerAttestTx(trx), ...buildPartnerReviewTx(trx), ...buildPartnerStockTx(trx), ...buildPartnerEntitlementsTx(trx) }),
     );
   } catch (err) {
     return mapPartnerDbError(err);
@@ -4218,6 +4318,8 @@ export const partnerDb: PartnerDb = {
   withMembers: withPartnerSession,
   withAttest: withPartnerSession,
   withReview: withPartnerSession,
+  withStock: withPartnerSession,
+  withEntitlements: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
   hitSystemRateLimit: hitSystemRateLimitForPartner,
 };

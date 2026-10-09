@@ -15,7 +15,9 @@ import { challengeToken, credentialJson, NOW_MS } from "./partner-fakes.ts";
 
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
 /** The partner lane's Edge Functions (design 4.5): each is a directory with an `index.ts`, `verify_jwt = false`, and no use of the player identity. */
-const PARTNER_FUNCTIONS = ["partner-session", "partner-invites", "partner-members", "partner-attest", "partner-review"];
+/** `stock-admin` is named for its resource (the design names it so), not with the `partner-` prefix; it is still a partner-lane function. */
+const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin"];
+const PARTNER_FUNCTIONS = ["partner-session", "partner-invites", "partner-members", "partner-attest", "partner-review", "stock-admin", "partner-entitlements"];
 const REPO = join(import.meta.dirname, "..", "..", "..");
 
 describe("cors.ts", () => {
@@ -216,7 +218,7 @@ function partnerFiles(): string[] {
 describe("PA-11: the partner modules never log", () => {
   it("finds the modules it is meant to scan", () => {
     const names = partnerFiles().map((p) => p.split("/").slice(-2).join("/"));
-    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts", "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts", "partner-attest/index.ts", "partner/attest-handler.ts", "partner/attest-shape.ts", "partner-review/index.ts", "partner/review-handler.ts", "partner/review-shape.ts"]) expect(names).toContain(n);
+    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts", "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts", "partner-attest/index.ts", "partner/attest-handler.ts", "partner/attest-shape.ts", "partner-review/index.ts", "partner/review-handler.ts", "partner/review-shape.ts", "stock-admin/index.ts", "partner/stock-handler.ts", "partner/stock-shape.ts", "partner-entitlements/index.ts", "partner/entitlements-handler.ts", "partner/entitlements-shape.ts"]) expect(names).toContain(n);
   });
 
   it("no `console` identifier appears anywhere in code (comments and strings aside) in the partner modules, the function entrypoint or the partner lane section of privileged.ts", () => {
@@ -269,10 +271,12 @@ describe("the entrypoints and the configuration", () => {
     "partner-members": "handlePartnerMembersRequest",
     "partner-attest": "handlePartnerAttestRequest",
     "partner-review": "handlePartnerReviewRequest",
+    "stock-admin": "handlePartnerStockRequest",
+    "partner-entitlements": "handlePartnerEntitlementsRequest",
   };
 
-  it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* entrypoint is named here", () => {
-    const onDisk = readdirSync(FUNCTIONS, { withFileTypes: true }).filter((d) => d.isDirectory() && d.name.startsWith("partner-")).map((d) => d.name).sort();
+  it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* (or stock-admin) entrypoint is named here", () => {
+    const onDisk = readdirSync(FUNCTIONS, { withFileTypes: true }).filter((d) => d.isDirectory() && (d.name.startsWith("partner-") || UNPREFIXED_PARTNER_FUNCTIONS.includes(d.name))).map((d) => d.name).sort();
     expect(onDisk).toEqual([...PARTNER_FUNCTIONS].sort());
     expect(Object.keys(HANDLERS).sort()).toEqual([...PARTNER_FUNCTIONS].sort());
   });

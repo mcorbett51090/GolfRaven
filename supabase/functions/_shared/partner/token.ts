@@ -42,6 +42,9 @@ export async function sha256Hex(text: string): Promise<string> {
 export const PARTNER_INVITE_PREFIX = "gr_inv_";
 /** The enrolment token (recovery 6.5, admin 6.4): `gr_enr_` + 43 base64url characters, handed by a manager or an admin to the person it belongs to. */
 export const PARTNER_ENROLMENT_PREFIX = "gr_enr_";
+/** The hand-over token (S5): `gr_ho_` + 43 base64url characters (32 random bytes), shown to the player once, typed or scanned by staff within 15 minutes; only its SHA-256 reaches the database. */
+export const PARTNER_HANDOVER_PREFIX = "gr_ho_";
+export const PARTNER_HANDOVER_TOKEN_RE = /^gr_ho_[A-Za-z0-9_-]{43}$/;
 export const PARTNER_INVITE_TOKEN_RE = /^gr_inv_[A-Za-z0-9_-]{43}$/;
 export const PARTNER_ENROLMENT_TOKEN_RE = /^gr_enr_[A-Za-z0-9_-]{43}$/;
 
@@ -67,6 +70,10 @@ export function newPartnerInviteToken(): Promise<NewSessionToken> {
 
 export function newPartnerEnrolmentToken(): Promise<NewSessionToken> {
   return newOpaqueToken(PARTNER_ENROLMENT_PREFIX);
+}
+
+export function newPartnerHandoverToken(): Promise<NewSessionToken> {
+  return newOpaqueToken(PARTNER_HANDOVER_PREFIX);
 }
 
 /** The token of an `Authorization: Bearer gr_ps_...` header, or null for anything else (a Supabase JWT, another scheme, a malformed token, no header). Never throws, never inspects another shape of token. */

@@ -96,6 +96,8 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
     withMembers: () => Promise.reject(new Error("not used")),
     withAttest: () => Promise.reject(new Error("not used")),
     withReview: () => Promise.reject(new Error("not used")),
+    withStock: () => Promise.reject(new Error("not used")),
+    withEntitlements: () => Promise.reject(new Error("not used")),
     hitRateLimit: () => Promise.reject(new Error("not used")),
     hitSystemRateLimit: () => Promise.reject(new Error("not used")),
   };
