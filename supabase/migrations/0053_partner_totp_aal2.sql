@@ -720,7 +720,7 @@ AS $$
 DECLARE
   v_id uuid;
 BEGIN
-  -- No `$` in the body: check 14 (a0) refuses any chr(36) in a *_for_partner (and we keep the same shape here for the ops twin).
+  -- Check 14 (a0) refuses any dollar-sign in a *_for_partner body (comments included); keep this ops twin clean the same way.
   IF p_user_id IS NULL OR p_token_hash IS NULL
      OR pg_catalog.char_length(p_token_hash) <> 64
      OR p_token_hash !~ '^[0-9a-f]{64}' THEN
@@ -754,7 +754,7 @@ BEGIN
   IF NOT private.is_admin(v_uid) THEN
     RAISE EXCEPTION 'partner_admin_enrolment_issue_for_partner: only an admin may issue an admin enrolment token' USING ERRCODE = '42501';
   END IF;
-  -- No `$` (check 14 a0): length + anchored-prefix regex is the same 64-hex check.
+  -- Check 14 (a0): no dollar-sign in the body; length + anchored-prefix regex is the 64-hex check.
   IF p_user_id IS NULL OR p_user_id = v_uid OR p_token_hash IS NULL
      OR pg_catalog.char_length(p_token_hash) <> 64
      OR p_token_hash !~ '^[0-9a-f]{64}' THEN

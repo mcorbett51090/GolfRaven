@@ -403,9 +403,10 @@ SELECT pg_temp.seed_totp('00000000-0000-0000-0000-4000000000d0', 1, true, NULL);
 SELECT pg_temp.seed_step('op', '{"mfa_s": 240}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
+RESET ROLE;
+-- pg_temp helpers are not executable as edge_partner; the binding survives RESET ROLE.
 SELECT throws_ok($$SELECT pg_temp.reset_totp('00000000-0000-0000-0000-4000000000d0')$$, '42501',
   'partner_totp_reset_for_partner: only an admin may reset another person''s TOTP', 'PA-24: reset by non-admin (operator) → 42501');
-RESET ROLE;
 ROLLBACK TO SAVEPOINT reset_op;
 
 SAVEPOINT reset_admin;
@@ -431,9 +432,9 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op1');
 SELECT is(private.zz31_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A0_ENROL'), '00000000-0000-0000-0000-3000000000c1'::uuid,
   'PA-28: aal1 operator with NO confirmed TOTP: A0_ENROL ok');
+RESET ROLE;
 SELECT is(split_part(pg_temp.enrol(), '|', 1), 'ok', 'PA-28: ... totp/enrol reachable');
 SELECT is(pg_temp.confirm(pg_temp.hotp_at(pg_temp.seed_of('00000000-0000-0000-0000-3000000000c1', 1), 0)), 'ok|0', 'PA-28: ... totp/confirm reachable');
-RESET ROLE;
 ROLLBACK TO SAVEPOINT pa28_before;
 
 SAVEPOINT pa28_otp;
