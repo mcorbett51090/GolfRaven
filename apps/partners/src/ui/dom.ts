@@ -35,8 +35,11 @@ export interface Props {
   readonly required?: boolean;
   readonly novalidate?: boolean;
   readonly "aria-describedby"?: string;
+  readonly value?: string;
+  readonly selected?: boolean;
   readonly onclick?: (ev: MouseEvent) => void;
   readonly onsubmit?: (ev: SubmitEvent) => void;
+  readonly onchange?: (ev: Event) => void;
 }
 
 /** Builds `<tag>` with the given attributes and children. Event handlers are attached with `addEventListener`, never as attributes (CSP has no `unsafe-inline`). */
@@ -46,6 +49,7 @@ export function h(tag: string, props: Props = {}, ...children: Child[]): HTMLEle
     if (value === undefined || value === false) continue;
     if (name === "onclick") el.addEventListener("click", value as (ev: MouseEvent) => void);
     else if (name === "onsubmit") el.addEventListener("submit", value as (ev: SubmitEvent) => void);
+    else if (name === "onchange") el.addEventListener("change", value as (ev: Event) => void);
     else if (value === true) el.setAttribute(name, "");
     else el.setAttribute(name, String(value));
   }

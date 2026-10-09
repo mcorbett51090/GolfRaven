@@ -18,6 +18,10 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "pin-changed": "notice.pinChanged",
   "totp-confirmed": "notice.totpConfirmed",
   "totp-verified": "notice.totpVerified",
+  "attest-ok": "notice.attestOk",
+  "pin-rotated": "notice.pinRotated",
+  "token-minted": "notice.tokenMinted",
+  "printed-ok": "notice.printedOk",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {

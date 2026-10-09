@@ -1977,3 +1977,33 @@ Closes the seams 20.5 left for S1.3, S1.4 and S1.5, now that their Edge routes e
 ### 24.4 Tests
 
 `pin.test.ts` (the four shared vectors, node's PBKDF2 as an independent oracle, every deny-list entry refused with no key derived, the work-factor and salt bounds), `step-up.test.ts` and `pin-setup.test.ts` (the real `partner-session` handler over the fake: the request body is exactly `{ derived }`, the PIN's digits in no request, wrong, back-off, lock, unset, must-change, hostile parameters), `registration.test.ts` (options strength; the serialised ceremony accepted by the server's own `parseEnrolCredentialBody`), `client-enrol.test.ts`, `enrol.test.ts` (token, code, passkey, first session, forced PIN, and the credential the page created **signs in afterwards**), `panels.test.ts` (prompt, set / change, proof, TOTP), plus source-scan, CSP, build-output and bundle-input cells. The Playwright suite adds six cells in real Chromium under the real CSP (invite link to first PIN, the PIN prompt, zero violations, nothing in storage, no PIN digits on the wire). `fake-partner-server.ts` now runs the real `partner-invites` handler with working in-memory PIN, email proof, TOTP, enrolment and a registration verifier that parses the attestation object.
+
+## 27. As built: S7b (attest and course-QR screens; `apps/partners`)
+
+Numbering: **this section 27.** S2b (parallel) claims section 25 and S3 claims section 26; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page is the only thing that moved. It talks to the Edge routes S2b and S3 ship (`partner-attest`, `course-qr`, `qr-print`).
+
+### 27.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`. `connect-src` gains three path-scoped sources; `Permissions-Policy` is `camera=(self)` (paste-only attest today; a later scan into the token field needs no header change).
+- **`call()` query object.** GET routes that need `?facilityId=` take a closed `{ key: value }` map (facility-id charset), appended after the path is validated so a route string still cannot carry `?` or `#`.
+- **Typed work routes** (`src/api/work-routes.ts`): online/offline attest, shift-log, staff-activity, course PIN, rotate, mint, refresh, printed QR read/write. Response bodies are checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Attest a player** and **Course QR**. Every A1 action calls `requirePin("A1")` then the action in the same turn (24.3). Rotate PIN is A2: `reauthWithPasskey` then `requirePin("A2")` then rotate. Printed-QR write is A3: refused in the UI when `aal < 2`.
+- **Fake partner server** answers the three new functions in-memory (PIN-grant consume on A1, reauth window on A2, aal/mfa on A3) so the page's unit cells run without the S2b/S3 Edge trees on this branch.
+
+### 27.2 Decisions and departures
+
+- **`state.work` on signed-in**, not a new top-level `AppState` screen. The PIN prompt is `state.panel`; keeping work under signed-in means `requirePin` needs no second host. Design 20.5's "new AppState branch" is met as a new view branch of signed-in.
+- **Online attest token is pasted** (the check-in jti). Camera policy is open; a BarcodeDetector scan is not built.
+- **Staff-activity and shift-log** are A0 reads on the attest screen (no PIN). Staff who are not managers will get 403 from the server for staff-activity; the page does not hide the button by role (the session's role list has no per-facility rank beyond membership).
+
+### 27.3 Not built, honestly
+
+- Camera scan of a player QR into the token field.
+- S7c–S7d screens (hand-over, stock, manager/operator/admin invite and member tools).
+- Offers-redeem (S3 seam / P5.1b).
+- Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
+
+### 27.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).

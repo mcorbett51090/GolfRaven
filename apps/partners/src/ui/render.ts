@@ -11,6 +11,7 @@ import { h } from "./dom";
 import { noticeElement } from "./notice";
 import { enrolView } from "./views-enrol";
 import { panelView } from "./views-panels";
+import { workView } from "./views-work";
 
 export interface RenderEnv {
   readonly locale: Locale;
@@ -81,12 +82,16 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
 
   let main: HTMLElement;
   if (state.screen === "signed-in" && state.panel !== null) {
-    // a panel replaces the home screen; Lock and Sign out stay reachable from it (the forced first PIN has no other way out)
+    // a panel replaces the home / work screen; Lock and Sign out stay reachable from it (the forced first PIN has no other way out)
     main = panelView(state.panel, controller, locale);
+    main.append(h("div", { class: "actions", "data-testid": "session-actions" }, ...lockAndSignOut()));
+  } else if (state.screen === "signed-in" && state.work !== null) {
+    main = workView(state, controller, locale);
     main.append(h("div", { class: "actions", "data-testid": "session-actions" }, ...lockAndSignOut()));
   } else if (state.screen === "signed-in") {
     const busy = state.busy !== null;
     const needsSecondFactor = state.session.aal < state.session.requiredAal;
+    const firstFacility = state.session.memberships.flatMap((m) => m.facilityIds)[0] ?? "";
     main = h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "signed-in" },
@@ -95,6 +100,18 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
       needsSecondFactor ? h("p", { class: "notice", role: "status", "data-testid": "aal-low" }, t("home.aalLow")) : null,
       h("section", {}, h("h2", {}, t("home.session.title")), sessionFields(state.session, locale)),
       h("section", {}, h("h2", {}, t("home.roles.title")), roles(state.session, locale)),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("home.work.title")),
+        h("p", { class: "muted" }, t("home.work.hint")),
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", class: "primary", disabled: busy || needsSecondFactor, "data-testid": "open-attest", onclick: () => controller.openAttest(firstFacility) }, t("home.work.attest")),
+          h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-course-qr", onclick: () => controller.openCourseQr(firstFacility) }, t("home.work.courseQr")),
+        ),
+      ),
       h(
         "section",
         {},

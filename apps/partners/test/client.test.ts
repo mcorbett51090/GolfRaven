@@ -45,7 +45,7 @@ function happy(call: Recorded): Response {
 }
 
 /** Most tests exercise `call()` against a second, later partner function, so the default test client allows one; the allow-list tests use PARTNER_FUNCTIONS itself. */
-const TEST_FUNCTIONS = [...PARTNER_FUNCTIONS, "partner-attest"];
+const TEST_FUNCTIONS = [...PARTNER_FUNCTIONS, "later-fn"];
 
 function make(responder: (c: Recorded) => Response | Promise<Response> = happy, over: Partial<PartnerApiConfig> = {}) {
   const s = stubFetch(responder);
@@ -116,7 +116,7 @@ describe("requests: headers and credentials mode", () => {
     await m.api.session();
     await m.api.reauthOptions();
     await m.api.reauth({ challengeToken: CHALLENGE, credential: CRED });
-    await m.api.call("POST", "partner-attest", "scan", { a: 1 }).catch(() => undefined);
+    await m.api.call("POST", "later-fn", "scan", { a: 1 }).catch(() => undefined);
     await m.api.lock();
     return m.calls;
   }
@@ -417,31 +417,41 @@ describe("error mapping", () => {
 describe("call(): authenticated requests to later partner functions", () => {
   it("attaches the same headers and credentials mode and applies the same 401 handling", async () => {
     let phase = 0;
-    const m = make((c) => (phase === 0 ? happy(c) : c.url.endsWith("/partner-attest/scan") ? jsonResponse(200, { data: { ok: true } }) : jsonResponse(401, { error: { code: "unauthenticated", message: "x" } })));
+    const m = make((c) => (phase === 0 ? happy(c) : c.url.endsWith("/later-fn/scan") ? jsonResponse(200, { data: { ok: true } }) : jsonResponse(401, { error: { code: "unauthenticated", message: "x" } })));
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     phase = 1;
     m.calls.length = 0;
-    expect(await m.api.call("POST", "partner-attest", "scan", { a: 1 })).toEqual({ ok: true });
-    expect(m.calls[0]!.url).toBe(`${BASE}/partner-attest/scan`);
+    expect(await m.api.call("POST", "later-fn", "scan", { a: 1 })).toEqual({ ok: true });
+    expect(m.calls[0]!.url).toBe(`${BASE}/later-fn/scan`);
     expect(m.calls[0]!.headers["authorization"]).toBe(`Bearer ${VALID_TOKEN}`);
     expect(m.calls[0]!.headers["content-type"]).toBe("application/json");
     expect(m.calls[0]!.init.credentials).toBe("omit");
-    await kindOf(m.api.call("GET", "partner-attest", "other"));
+    await kindOf(m.api.call("GET", "later-fn", "other"));
     expect(m.api.hasSession()).toBe(false);
   });
 
   it("refuses a function name or route that could change the path", async () => {
     const m = await signedIn();
-    for (const [fn, route] of [["..", "x"], ["a/b", "x"], ["partner-attest", "../x"], ["partner-attest", "x?y=1"], ["partner-attest", "x#y"], ["partner-attest", "//evil.test"], ["Partner", "x"], ["", "x"], ["partner-attest", "a:b"]] as const) {
+    for (const [fn, route] of [["..", "x"], ["a/b", "x"], ["later-fn", "../x"], ["later-fn", "x?y=1"], ["later-fn", "x#y"], ["later-fn", "//evil.test"], ["Partner", "x"], ["", "x"], ["later-fn", "a:b"]] as const) {
       expect(((await kindOf(m.api.call("GET", fn, route))) as PartnerApiError).kind, `${fn} ${route}`).toBe("bad_request");
     }
     expect(m.calls).toEqual([]);
     expect(m.api.hasSession()).toBe(true);
   });
 
+  it("accepts a closed query object and refuses a bad key or value", async () => {
+    const m = make((c) => (c.url.includes("/partner-attest/shift-log?") ? jsonResponse(200, { data: { entries: [] } }) : happy(c)));
+    await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
+    m.calls.length = 0;
+    expect(await m.api.call("GET", "partner-attest", "shift-log", undefined, { facilityId: "fac_a" })).toEqual({ entries: [] });
+    expect(m.calls[0]!.url).toBe(`${BASE}/partner-attest/shift-log?facilityId=fac_a`);
+    expect(((await kindOf(m.api.call("GET", "partner-attest", "shift-log", undefined, { "bad key": "x" }))) as PartnerApiError).kind).toBe("bad_request");
+    expect(((await kindOf(m.api.call("GET", "partner-attest", "shift-log", undefined, { facilityId: "a/b" }))) as PartnerApiError).kind).toBe("bad_request");
+  });
+
   it("without a session it makes no request", async () => {
     const m = make();
-    expect(((await kindOf(m.api.call("GET", "partner-attest", "x"))) as PartnerApiError).kind).toBe("unauthenticated");
+    expect(((await kindOf(m.api.call("GET", "later-fn", "x"))) as PartnerApiError).kind).toBe("unauthenticated");
     expect(m.calls).toEqual([]);
   });
 });
@@ -458,7 +468,7 @@ describe("call(): the bearer goes only to the partner-function allow-list (LOW-3
     const m = strict();
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     m.calls.length = 0;
-    for (const fn of ["partner-attest", "other-fn", "rest", "auth", "me-export", "partner-session2", "partner"]) {
+    for (const fn of ["partner-offers-redeem", "other-fn", "rest", "auth", "me-export", "partner-session2", "partner"]) {
       expect(((await kindOf(m.api.call("POST", fn, "x", {}))) as PartnerApiError).kind, fn).toBe("bad_request");
     }
     expect(m.calls).toEqual([]);
@@ -758,7 +768,7 @@ describe("storage: the token is never written anywhere", () => {
     await m.api.session();
     await m.api.reauthOptions();
     await m.api.reauth({ challengeToken: CHALLENGE, credential: CRED });
-    await m.api.call("POST", "partner-attest", "scan", {}).catch(() => undefined);
+    await m.api.call("POST", "later-fn", "scan", {}).catch(() => undefined);
     await m.api.lock();
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     await m.api.signOut();
