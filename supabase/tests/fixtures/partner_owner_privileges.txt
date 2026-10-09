@@ -127,6 +127,7 @@
 {"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea,smallint,uuid,bigint)"}
 {"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_cose_parse(bytea)"}
 {"privilege": "EXECUTE", "role_name": "partner_session_issuer", "column_name": null, "object_kind": "function", "object_name": "private.partner_sessions_evict_oldest(uuid,integer)"}
+{"privilege": "EXECUTE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_kind()"}
 {"privilege": "EXECUTE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_user()"}
 {"privilege": "EXECUTE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "function", "object_name": "private.partner_reach_covers_org(uuid,uuid,uuid)"}
 {"privilege": "INSERT", "role_name": "partner_session_issuer", "column_name": "invited_by", "object_kind": "column", "object_name": "app.partner_member"}

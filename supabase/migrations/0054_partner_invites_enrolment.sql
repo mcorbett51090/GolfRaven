@@ -229,6 +229,7 @@ FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.partner_reach_covers_org(uuid, uuid, uuid) TO partner_session_toucher;
 GRANT EXECUTE ON FUNCTION private.partner_reach_covers(uuid, uuid) TO partner_pin_verifier;
 GRANT EXECUTE ON FUNCTION private.partner_binding_user() TO partner_session_toucher;
+GRANT EXECUTE ON FUNCTION private.partner_binding_kind() TO partner_session_toucher;
 -- the issuer: the register challenge verifier and issuer, the identity helper, the COSE parser and its CBOR head reader (plain plpgsql, not SECURITY DEFINER: the caller needs both), the audit writer
 GRANT EXECUTE ON FUNCTION private.partner_challenge_verify(smallint, bigint, bytea, uuid, bytea, smallint, uuid, bigint) TO partner_session_issuer;
 GRANT EXECUTE ON FUNCTION private.partner_challenge_issue_register(uuid, smallint, uuid, bigint) TO partner_session_issuer;
@@ -387,6 +388,74 @@ CREATE POLICY psi_update_partner_member ON app.partner_member FOR UPDATE TO part
     SELECT 1 FROM app.partner_invite i
     WHERE i.org_id = partner_member.org_id AND i.role = partner_member.role AND i.accepted_by = partner_member.user_id AND i.invited_by = partner_member.invited_by
       AND i.accepted_at IS NOT NULL AND i.accepted_at > now() - interval '2 minutes' AND i.revoked_at IS NULL AND i.registered_credential_id IS NULL));
+
+-- 3e. IMMUTABILITY GUARDS (the OR rule, 5.4 item 2): permissive policies are OR-ed, and an UPDATE passes when the OLD row matches ANY policy's USING and the NEW row ANY policy's WITH CHECK, so the
+-- policies above cannot, alone, stop an UPDATE from moving an accepted invite back through the "live" policy. These triggers state what must never change, for every writer. Plain trigger
+-- functions (as app.partner_credential_guard of 0047): no EXECUTE for any role, the FK ON DELETE SET NULL actions (accepted_by, revoked_by, issued_by, registered_credential_id) stay allowed.
+CREATE FUNCTION app.partner_invite_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  IF (NEW.id, NEW.org_id, NEW.role, NEW.facility_id, NEW.trail_id, NEW.invited_by, NEW.invitee_email, NEW.token_hash, NEW.expires_at, NEW.created_at)
+     IS DISTINCT FROM (OLD.id, OLD.org_id, OLD.role, OLD.facility_id, OLD.trail_id, OLD.invited_by, OLD.invitee_email, OLD.token_hash, OLD.expires_at, OLD.created_at) THEN
+    RAISE EXCEPTION 'partner_invite: identity, role, scope, address, token and expiry never change (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF OLD.accepted_at IS NOT NULL AND (NEW.accepted_at IS DISTINCT FROM OLD.accepted_at OR (NEW.accepted_by IS DISTINCT FROM OLD.accepted_by AND NEW.accepted_by IS NOT NULL)) THEN
+    RAISE EXCEPTION 'partner_invite: an acceptance is final (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND (NEW.revoked_at IS DISTINCT FROM OLD.revoked_at OR (NEW.revoked_by IS DISTINCT FROM OLD.revoked_by AND NEW.revoked_by IS NOT NULL)) THEN
+    RAISE EXCEPTION 'partner_invite: a revocation is final (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.accepted_at IS NOT NULL AND NEW.revoked_at IS NOT NULL THEN
+    RAISE EXCEPTION 'partner_invite: an invite is accepted or revoked, never both (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.attempts < OLD.attempts THEN
+    RAISE EXCEPTION 'partner_invite: attempts never decrease (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.registered_credential_id IS DISTINCT FROM OLD.registered_credential_id
+     AND NEW.registered_credential_id IS NOT NULL AND (OLD.registered_credential_id IS NOT NULL OR NEW.accepted_at IS NULL) THEN
+    RAISE EXCEPTION 'partner_invite: one registration per acceptance (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER partner_invite_guard_trg BEFORE UPDATE ON app.partner_invite
+FOR EACH ROW EXECUTE FUNCTION app.partner_invite_guard();
+
+CREATE FUNCTION app.partner_enrolment_token_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  IF (NEW.id, NEW.user_id, NEW.purpose, NEW.token_hash, NEW.expires_at, NEW.created_at)
+     IS DISTINCT FROM (OLD.id, OLD.user_id, OLD.purpose, OLD.token_hash, OLD.expires_at, OLD.created_at) THEN
+    RAISE EXCEPTION 'partner_enrolment_token: person, purpose, token and expiry never change (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.issued_by IS DISTINCT FROM OLD.issued_by AND NEW.issued_by IS NOT NULL THEN
+    RAISE EXCEPTION 'partner_enrolment_token: the issuer may only be erased (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS DISTINCT FROM OLD.consumed_at THEN
+    RAISE EXCEPTION 'partner_enrolment_token: a consumption is final (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at THEN
+    RAISE EXCEPTION 'partner_enrolment_token: a revocation is final (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.consumed_at IS NOT NULL AND NEW.revoked_at IS NOT NULL THEN
+    RAISE EXCEPTION 'partner_enrolment_token: a token is consumed or revoked, never both (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.attempts < OLD.attempts THEN
+    RAISE EXCEPTION 'partner_enrolment_token: attempts never decrease (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  IF NEW.registered_credential_id IS DISTINCT FROM OLD.registered_credential_id
+     AND NEW.registered_credential_id IS NOT NULL AND (OLD.registered_credential_id IS NOT NULL OR NEW.consumed_at IS NULL) THEN
+    RAISE EXCEPTION 'partner_enrolment_token: one registration per acceptance (id=%)', OLD.id USING ERRCODE = '23514';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER partner_enrolment_token_guard_trg BEFORE UPDATE ON app.partner_enrolment_token
+FOR EACH ROW EXECUTE FUNCTION app.partner_enrolment_token_guard();
 
 -- ============================================================================
 -- 4. The toucher's writers (6.5): the member revoke, the credential revokes, the oldest-session eviction. Each is subject-based and EXECUTE for private_definer (and, for the eviction, the issuer)
@@ -1800,11 +1869,13 @@ VALUES
   ('private', 'partner_credentials_revoke_user', 'p_user_id uuid, p_revoked_by uuid, p_reason text, p_created_after timestamp with time zone', false, false, false, false, false, false, false, '0054 (6.5): owned by partner_session_toucher; revokes every active credential of a person, or those created after T; EXECUTE for private_definer only'),
   ('private', 'partner_enrolment_token_accept', 'p_token_hash text, p_verified_uid uuid, p_gotrue_session_id uuid', false, false, false, false, false, false, true, '0054 (6.1, 6.4, 6.5): edge_partner_minter only; owned by partner_session_issuer; recover / admin token accept + register challenge (ref kind 2)'),
   ('private', 'partner_enrolment_token_email_for_token', 'p_token_hash text', false, false, false, false, false, false, true, '0054 (6.1, 6.4, 6.5): edge_partner_minter only; owned by partner_session_issuer; the person''s auth email for a LIVE token or no row'),
+  ('app', 'partner_enrolment_token_guard', '', false, false, false, false, false, false, false, '0054 (OR rule): trigger function (BEFORE UPDATE on app.partner_enrolment_token): person, purpose and token never change, a consumption and a revocation are final, attempts never decrease, one registration per acceptance; never EXECUTEd directly by any role'),
   ('private', 'partner_invite_accept', 'p_token_hash text, p_verified_uid uuid, p_gotrue_session_id uuid', false, false, false, false, false, false, true, '0054 (6.1, PA-14, PA-23): edge_partner_minter only; owned by partner_session_issuer; branch N accept + register challenge; every outcome a status'),
   ('private', 'partner_invite_accept_core', 'p_token_hash text, p_uid uuid, p_gotrue_session_id uuid, p_mode text', false, false, false, false, false, false, false, '0054 (6.1): owned by partner_session_issuer; the accept order shared by branch N and branch E; EXECUTE for private_definer only (the minter wrapper has the same owner)'),
   ('private', 'partner_invite_accept_for_partner', 'p_token_hash text', false, false, false, false, false, true, false, '0054 (6.1 branch E, PA-23): edge_partner only; class A2; the session user''s confirmed email must equal the invite''s'),
   ('private', 'partner_invite_create_for_partner', 'p_org_id uuid, p_role app.partner_role, p_invitee_email text, p_token_hash text', false, false, false, false, false, true, false, '0054 (6.1, PA-15): edge_partner only; class A2; explicit role arrays, grant subset, 72 h, sponsor refused'),
   ('private', 'partner_invite_email_for_token', 'p_token_hash text', false, false, false, false, false, false, true, '0054 (6.1): edge_partner_minter only; owned by partner_session_issuer; the address of a LIVE invite or no row'),
+  ('app', 'partner_invite_guard', '', false, false, false, false, false, false, false, '0054 (OR rule): trigger function (BEFORE UPDATE on app.partner_invite): identity and token never change, an acceptance and a revocation are final, attempts never decrease, one registration per acceptance; never EXECUTEd directly by any role'),
   ('private', 'partner_invite_list_for_partner', 'p_org_id uuid', false, false, false, false, false, true, false, '0054 (6.1): edge_partner only; class A0; invites within the actor''s scope'),
   ('private', 'partner_invite_revoke_for_partner', 'p_invite_id uuid', false, false, false, false, false, true, false, '0054 (6.1): edge_partner only; class A2'),
   ('private', 'partner_member_last_membership', '', false, false, false, false, false, false, false, '0054 (5.2, PA-29): trigger function; deletes the PIN (and, for a non-admin, the TOTP) of a person left with no active membership; EXECUTE for nobody'),
@@ -1937,6 +2008,7 @@ INSERT INTO private.partner_owner_privilege (role_name, object_kind, object_name
   ('partner_session_issuer', 'column', 'app.partner_member', 'UPDATE', 'invited_by'),
   ('partner_session_issuer', 'column', 'app.partner_member', 'UPDATE', 'revoked_at'),
   ('partner_session_issuer', 'column', 'app.partner_member', 'UPDATE', 'role'),
+  ('partner_session_toucher', 'function', 'private.partner_binding_kind()', 'EXECUTE', NULL),
   ('partner_session_toucher', 'function', 'private.partner_binding_user()', 'EXECUTE', NULL),
   ('partner_session_toucher', 'function', 'private.partner_reach_covers_org(uuid,uuid,uuid)', 'EXECUTE', NULL),
   ('partner_session_toucher', 'column', 'app.partner_credential', 'SELECT', 'created_at'),
