@@ -223,6 +223,19 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         async pinChange(): Promise<never> {
           throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
         },
+        // S1.4 TOTP surface: fail closed. The S7 PIN/TOTP screens will implement these in this fake.
+        async totpEnrol(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
+        async totpConfirm(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
+        async totpVerify(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
+        async totpReset(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
         async otpTarget() {
           return null; // no mailbox: the email proof cannot start
         },
