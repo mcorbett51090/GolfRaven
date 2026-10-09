@@ -127,8 +127,8 @@ export function adminView(state: SignedInState, controller: AppController, local
         h("label", { class: "field" }, h("span", {}, t("programme.sponsorshipId")), h("input", { name: "specialMarkerSponsorshipId", type: "text", "data-testid": "programme-sponsorship", disabled: busy })),
         h("label", { class: "field" }, h("span", {}, t("programme.feeModel")), h("input", { name: "feeModel", type: "text", "data-testid": "programme-fee-model", disabled: busy })),
         h("label", { class: "field" }, h("span", {}, t("programme.feeAmount")), h("input", { name: "feeAmount", type: "number", "data-testid": "programme-fee-amount", disabled: busy })),
-        h("label", { class: "field" }, h("span", {}, t("programme.startsOn")), h("input", { name: "startsOn", type: "text", placeholder: "YYYY-MM-DD", "data-testid": "programme-starts", disabled: busy })),
-        h("label", { class: "field" }, h("span", {}, t("programme.endsOn")), h("input", { name: "endsOn", type: "text", placeholder: "YYYY-MM-DD", "data-testid": "programme-ends", disabled: busy })),
+        h("label", { class: "field" }, h("span", {}, t("programme.startsOn")), h("input", { name: "startsOn", type: "text", "data-testid": "programme-starts", disabled: busy })),
+        h("label", { class: "field" }, h("span", {}, t("programme.endsOn")), h("input", { name: "endsOn", type: "text", "data-testid": "programme-ends", disabled: busy })),
         h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "programme-trail-save" }, t("programme.trail.save"))),
       ),
       h(
@@ -382,7 +382,10 @@ export function adminView(state: SignedInState, controller: AppController, local
     );
   }
 
-  // rollups
+  if (work.kind !== "rollups") {
+    return h("main", { "data-screen": "admin" }, h("h1", { tabindex: "-1", "data-testid": "heading" }, t("home.admin.title")), back(controller, locale, busy));
+  }
+
   return h(
     "main",
     { "aria-busy": busy ? "true" : "false", "data-screen": "rollups" },
