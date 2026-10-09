@@ -15,7 +15,7 @@ import { challengeToken, credentialJson, NOW_MS } from "./partner-fakes.ts";
 
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
 /** The partner lane's Edge Functions (design 4.5): each is a directory with an `index.ts`, `verify_jwt = false`, and no use of the player identity. */
-const PARTNER_FUNCTIONS = ["partner-session", "partner-invites", "partner-members", "partner-attest"];
+const PARTNER_FUNCTIONS = ["partner-session", "partner-invites", "partner-members", "partner-attest", "partner-review"];
 const REPO = join(import.meta.dirname, "..", "..", "..");
 
 describe("cors.ts", () => {
@@ -216,7 +216,7 @@ function partnerFiles(): string[] {
 describe("PA-11: the partner modules never log", () => {
   it("finds the modules it is meant to scan", () => {
     const names = partnerFiles().map((p) => p.split("/").slice(-2).join("/"));
-    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts", "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts", "partner-attest/index.ts", "partner/attest-handler.ts", "partner/attest-shape.ts"]) expect(names).toContain(n);
+    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts", "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts", "partner-attest/index.ts", "partner/attest-handler.ts", "partner/attest-shape.ts", "partner-review/index.ts", "partner/review-handler.ts", "partner/review-shape.ts"]) expect(names).toContain(n);
   });
 
   it("no `console` identifier appears anywhere in code (comments and strings aside) in the partner modules, the function entrypoint or the partner lane section of privileged.ts", () => {
@@ -268,6 +268,7 @@ describe("the entrypoints and the configuration", () => {
     "partner-invites": "handlePartnerInvitesRequest",
     "partner-members": "handlePartnerMembersRequest",
     "partner-attest": "handlePartnerAttestRequest",
+    "partner-review": "handlePartnerReviewRequest",
   };
 
   it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* entrypoint is named here", () => {

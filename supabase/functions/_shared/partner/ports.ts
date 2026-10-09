@@ -391,6 +391,51 @@ export interface PartnerAttestTx {
   staffActivity(facilityId: string, days: number): Promise<StaffActivityRow[]>;
 }
 
+/** What `partner_resolve_held_*_for_partner` answers (0057). Every status except a raise is a returned value. */
+export type ResolveHeldStatus = "ok" | "not_found" | "not_held" | "budget_short";
+export interface ResolveHeldResult {
+  readonly status: ResolveHeldStatus;
+  /** Present only on `ok`: the resulting offer_code_state or entitlement_state. */
+  readonly state: string | null;
+}
+/** One row of the held-review queue (0057). */
+export interface HeldQueueRow {
+  readonly kind: "offer_code" | "entitlement" | "review_item";
+  readonly id: string;
+  readonly subjectTable: string;
+  readonly subjectId: string;
+  readonly userId: string | null;
+  readonly handle: string | null;
+  readonly facilityId: string | null;
+  readonly trailId: string | null;
+  readonly holdDetail: unknown;
+  readonly reservedAmount: number | null;
+  readonly heldAt: string | null;
+  readonly slaBreached: boolean;
+  readonly reviewKind: string | null;
+}
+/** The SLA summary the ops alert surface reads (0057). */
+export interface ReviewSlaSummary {
+  readonly heldOfferCodes: number;
+  readonly heldEntitlements: number;
+  readonly openReviewItems: number;
+  readonly slaBreachedRewards: number;
+  readonly slaBreachedReviewItems: number;
+  readonly slaHours: number;
+}
+
+/** One transaction as `edge_partner` for the `partner-review` routes. Every method is a `_for_partner` definer that begins with `partner_authorize` (class A3 for resolve, A0 for the reads); ADMIN only. */
+export interface PartnerReviewTx {
+  /** GET queue (class A0, admin). */
+  heldQueue(): Promise<HeldQueueRow[]>;
+  /** GET sla (class A0, admin). */
+  reviewSla(): Promise<ReviewSlaSummary>;
+  /** POST resolve/offer-code (class A3, admin). */
+  resolveHeldOfferCode(codeId: string, approve: boolean): Promise<ResolveHeldResult>;
+  /** POST resolve/entitlement (class A3, admin). */
+  resolveHeldEntitlement(entitlementId: string, approve: boolean): Promise<ResolveHeldResult>;
+}
+
 /**
  * The email OTP of the proof (6.1, 6.3), through GoTrue with the ANON key, as the player flow already does (E19): `send` mails a one-time code to the member's own address; `verify` proves the mailbox and returns the
  * GoTrue session the verification created, which the database then checks (it must exist, for THIS person, fresh) and which the caller closes AFTER the proof is recorded, on every path. A wrong or expired code is
@@ -414,6 +459,8 @@ export interface PartnerDb {
   withMembers<T>(tokenHash: string, op: (s: PartnerMembersTx) => Promise<T>): Promise<T>;
   /** `withSession` for the `partner-attest` routes (attest, offline attest, shift-log, staff-activity): the same bound transaction, the attest definers of 0056 (S3). */
   withAttest<T>(tokenHash: string, op: (s: PartnerAttestTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `partner-review` routes (queue, sla, resolve): the same bound transaction, the review definers of 0057 (S4). */
+  withReview<T>(tokenHash: string, op: (s: PartnerReviewTx) => Promise<T>): Promise<T>;
   /** One hit of a per-member bucket, in its OWN short transaction, committed before any request transaction opens (the pool-deadlock rule of `hitRateLimitForActor`). */
   hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
   /** One hit of a SYSTEM bucket (design 8: nothing is bound before authentication, so the buckets keyed on an object the caller cannot choose, the invite token and the target mailbox, are `edge_system` buckets), in its own short transaction. */

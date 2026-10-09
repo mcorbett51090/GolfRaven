@@ -269,6 +269,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     withAttest() {
       return Promise.reject(new Error("fake partner server: attest is not implemented (S7b)"));
     },
+    withReview() {
+      return Promise.reject(new Error("fake partner server: review is not implemented (S7d)"));
+    },
     async hitSystemRateLimit() {
       return { ok: true, retryAfterSeconds: 0 };
     },

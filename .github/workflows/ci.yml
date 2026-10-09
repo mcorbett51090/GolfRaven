@@ -407,6 +407,7 @@ jobs:
             supabase/functions/partner-invites/index.ts \
             supabase/functions/partner-members/index.ts \
             supabase/functions/partner-attest/index.ts \
+            supabase/functions/partner-review/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -469,6 +470,7 @@ jobs:
             supabase/functions/partner-invites/index.ts \
             supabase/functions/partner-members/index.ts \
             supabase/functions/partner-attest/index.ts \
+            supabase/functions/partner-review/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -551,6 +553,7 @@ jobs:
             supabase/functions/partner-invites/index.ts \
             supabase/functions/partner-members/index.ts \
             supabase/functions/partner-attest/index.ts \
+            supabase/functions/partner-review/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts 2>&1)
           TAMPER_EXIT=$?

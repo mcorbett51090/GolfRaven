@@ -593,6 +593,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     withInvites: runSession,
     withMembers: runSession,
     withAttest: () => Promise.reject(new Error("not used: the attest handler has its own fake (partner-attest-handler.test.ts)")),
+    withReview: () => Promise.reject(new Error("not used: the review handler has its own fake (partner-review-handler.test.ts)")),
     async hitRateLimit(hash, bucket, windowSeconds, max) {
       calls.push("db.hitRateLimit");
       rateLimitHits.push({ hash, bucket, windowSeconds, max });

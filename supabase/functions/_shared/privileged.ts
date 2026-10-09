@@ -96,8 +96,13 @@ import {
   type AttestKind,
   type AttestResult,
   type AttestStatus,
+  type HeldQueueRow,
   type PartnerAttestTx,
   type PartnerDb,
+  type PartnerReviewTx,
+  type ResolveHeldResult,
+  type ResolveHeldStatus,
+  type ReviewSlaSummary,
   type ShiftLogRow,
   type StaffActivityRow,
   type PartnerInviteMintTx,
@@ -4099,6 +4104,67 @@ function buildPartnerAttestTx(trx: TxSql): PartnerAttestTx {
   };
 }
 
+/** The review definers of 0057 (S4). Every status is a returned row, so a refusal COMMITS. */
+const RESOLVE_HELD_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_held", "budget_short"]);
+const QUEUE_KINDS: ReadonlySet<string> = new Set(["offer_code", "entitlement", "review_item"]);
+function resolveHeldOf(r: Record<string, unknown> | undefined, fn: string): ResolveHeldResult {
+  if (typeof r?.o_status !== "string" || !RESOLVE_HELD_STATUSES.has(r.o_status)) throw new Error(`${fn} returned no usable status`);
+  return { status: r.o_status as ResolveHeldStatus, state: textOrNull(r.o_state) };
+}
+function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
+  return {
+    async heldQueue(): Promise<HeldQueueRow[]> {
+      const rows = await trx`
+        select o_kind, o_id::text as o_id, o_subject_table, o_subject_id::text as o_subject_id, o_user_id::text as o_user_id,
+               o_handle, o_facility_id, o_trail_id, o_hold_detail, o_reserved_amount, o_held_at, o_sla_breached, o_review_kind
+        from private.partner_held_queue_for_partner()`;
+      return rows.map((r) => {
+        if (typeof r.o_kind !== "string" || !QUEUE_KINDS.has(r.o_kind)) throw new Error("partner_held_queue_for_partner returned an unknown kind");
+        return {
+          kind: r.o_kind as HeldQueueRow["kind"],
+          id: String(r.o_id),
+          subjectTable: String(r.o_subject_table),
+          subjectId: String(r.o_subject_id),
+          userId: textOrNull(r.o_user_id),
+          handle: textOrNull(r.o_handle),
+          facilityId: textOrNull(r.o_facility_id),
+          trailId: textOrNull(r.o_trail_id),
+          holdDetail: r.o_hold_detail ?? null,
+          reservedAmount: r.o_reserved_amount === null || r.o_reserved_amount === undefined ? null : Number(r.o_reserved_amount),
+          heldAt: isoOrNull(r.o_held_at),
+          slaBreached: r.o_sla_breached === true,
+          reviewKind: textOrNull(r.o_review_kind),
+        };
+      });
+    },
+    async reviewSla(): Promise<ReviewSlaSummary> {
+      const rows = await trx`
+        select o_held_offer_codes::int as o_held_offer_codes, o_held_entitlements::int as o_held_entitlements,
+               o_open_review_items::int as o_open_review_items, o_sla_breached_rewards::int as o_sla_breached_rewards,
+               o_sla_breached_review_items::int as o_sla_breached_review_items, o_sla_hours::int as o_sla_hours
+        from private.partner_review_sla_for_partner()`;
+      const r = rows[0];
+      if (r === undefined) throw new Error("partner_review_sla_for_partner returned no row");
+      return {
+        heldOfferCodes: Number(r.o_held_offer_codes),
+        heldEntitlements: Number(r.o_held_entitlements),
+        openReviewItems: Number(r.o_open_review_items),
+        slaBreachedRewards: Number(r.o_sla_breached_rewards),
+        slaBreachedReviewItems: Number(r.o_sla_breached_review_items),
+        slaHours: Number(r.o_sla_hours),
+      };
+    },
+    async resolveHeldOfferCode(codeId: string, approve: boolean): Promise<ResolveHeldResult> {
+      const rows = await trx`select o_status, o_state from private.partner_resolve_held_offer_code_for_partner(${codeId}::uuid, ${approve}::boolean)`;
+      return resolveHeldOf(rows[0], "partner_resolve_held_offer_code_for_partner");
+    },
+    async resolveHeldEntitlement(entitlementId: string, approve: boolean): Promise<ResolveHeldResult> {
+      const rows = await trx`select o_status, o_state from private.partner_resolve_held_entitlement_for_partner(${entitlementId}::uuid, ${approve}::boolean)`;
+      return resolveHeldOf(rows[0], "partner_resolve_held_entitlement_for_partner");
+    },
+  };
+}
+
 /** The partner sign-in minter's transaction (kind "partner_mint": the ONE caller of that kind, the lint's `privileged-mint-scope` rule keeps it so). */
 export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMintTx) => Promise<T>): Promise<T> {
   try {
@@ -4111,10 +4177,12 @@ export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMi
 const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 
 /** A transaction as `edge_partner`, bound to the session whose token hash this is. A malformed hash is refused without a database round trip, with the same error as an unknown one. */
-export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx) => Promise<T>): Promise<T> {
+export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx) => Promise<T>): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
   try {
-    return await openScopedTx("partner", partnerBind(tokenHash), (trx) => op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx), ...buildPartnerAttestTx(trx) }));
+    return await openScopedTx("partner", partnerBind(tokenHash), (trx) =>
+      op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx), ...buildPartnerAttestTx(trx), ...buildPartnerReviewTx(trx) }),
+    );
   } catch (err) {
     return mapPartnerDbError(err);
   }
@@ -4149,6 +4217,7 @@ export const partnerDb: PartnerDb = {
   withInvites: withPartnerSession,
   withMembers: withPartnerSession,
   withAttest: withPartnerSession,
+  withReview: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
   hitSystemRateLimit: hitSystemRateLimitForPartner,
 };
