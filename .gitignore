@@ -86,3 +86,8 @@ srv.pid
 
 # vitest run artifacts
 .vitest/
+
+# Deno must not write a lock under supabase/functions/ (service-role-lint
+# rejects any deno.lock there: transitive remotes are not pinned targets).
+# Integration tests use supabase/tests/deno.lock (sibling of functions/).
+supabase/functions/deno.lock
