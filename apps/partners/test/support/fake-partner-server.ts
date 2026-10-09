@@ -636,7 +636,146 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         return { token, hash: await sha256Hex(token) };
       },
     });
-  const innerHandler = (req: Request) => (new URL(req.url).pathname.includes("/partner-invites/") ? invitesHandler(req) : sessionHandler(req));
+  const cors = { "content-type": "application/json", "access-control-allow-origin": opts.pageOrigin, "access-control-expose-headers": "Retry-After", vary: "Origin" };
+  const ok = (status: number, data: unknown) => new Response(JSON.stringify({ data }), { status, headers: cors });
+  const err = (status: number, code: string) => new Response(JSON.stringify({ error: { code, message: code } }), { status, headers: cors });
+
+  /** Bearer → live session, or null. */
+  async function sessionOf(req: Request): Promise<FakeSession | null> {
+    const h = req.headers.get("authorization");
+    if (h === null || !h.startsWith("Bearer ")) return null;
+    const hash = await sha256Hex(h.slice("Bearer ".length));
+    if (state.revokedSessions.has(hash)) return null;
+    return sessions.get(hash) ?? null;
+  }
+
+  /** A1: consume a live PIN grant, or 403. */
+  function takePinGrant(session: FakeSession): Response | null {
+    if (session.pinGrantUntil === null || session.pinGrantUntil <= Date.now()) return err(403, "pin_grant_required");
+    session.pinGrantUntil = null;
+    return null;
+  }
+
+  const workState = {
+    pinEpoch: 1,
+    minted: new Map<string, { facilityId: string; nonceHash: string; expiresAt: number }>(),
+    printed: new Map<string, { qrKid: string; sig: string; printedAt: string }>(),
+    usedTokens: new Set<string>(),
+    usedCodes: new Set<string>(),
+  };
+
+  async function workHandler(req: Request): Promise<Response> {
+    if (req.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "access-control-allow-origin": opts.pageOrigin,
+          "access-control-allow-methods": "GET, POST, OPTIONS",
+          "access-control-allow-headers": "authorization, content-type",
+          "access-control-max-age": "600",
+          vary: "Origin",
+        },
+      });
+    }
+    const url = new URL(req.url);
+    const parts = url.pathname.split("/").filter((p) => p.length > 0);
+    const fnIdx = parts.findIndex((p) => p === "partner-attest" || p === "course-qr" || p === "qr-print");
+    if (fnIdx < 0) return err(404, "not_found");
+    const fn = parts[fnIdx]!;
+    const route = parts.slice(fnIdx + 1).join("/");
+    const session = await sessionOf(req);
+    if (session === null) return err(401, "unauthenticated");
+
+    if (fn === "partner-attest") {
+      if (route === "attest" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { token?: string; facilityId?: string; kind?: string };
+        if (typeof body.token !== "string" || workState.usedTokens.has(body.token)) return err(409, "replayed");
+        workState.usedTokens.add(body.token);
+        return ok(201, { attestationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", held: false });
+      }
+      if (route === "attest/offline" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { handle?: string; code?: string };
+        const key = `${body.handle}:${body.code}`;
+        if (workState.usedCodes.has(key)) return err(409, "replayed");
+        if (body.code === "000000") return err(422, "verification_failed");
+        workState.usedCodes.add(key);
+        return ok(201, { attestationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", held: false });
+      }
+      if (route === "shift-log" && req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        return ok(200, { entries: [{ id: "1", facilityId, createdAt: new Date().toISOString(), kind: "presence", playerHandle: "player_one", staffHandle: "staff_one" }] });
+      }
+      if (route === "staff-activity" && req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        return ok(200, { activity: [{ staffUserId: USER_ID, facilityId, day: "2026-10-09", attests: 1, activations: 0, anomalies: 0 }] });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "course-qr") {
+      if (route === "pin" && req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        return ok(200, { facilityId, pin: "4242", localDate: "2026-10-09", validUntil: new Date(Date.now() + 86_400_000).toISOString(), pinEpoch: workState.pinEpoch });
+      }
+      if (route === "pin/rotate" && req.method === "POST") {
+        // A2: need reauth window and a PIN grant
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { facilityId?: string };
+        workState.pinEpoch += 1;
+        return ok(200, { facilityId: body.facilityId ?? "", pinEpoch: workState.pinEpoch });
+      }
+      if (route === "tokens" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { facilityId?: string };
+        const facilityId = body.facilityId ?? "";
+        const nonceHash = "a".repeat(64);
+        const issuedAt = new Date().toISOString();
+        const expiresAt = new Date(Date.now() + 120_000).toISOString();
+        workState.minted.set(nonceHash, { facilityId, nonceHash, expiresAt: Date.now() + 120_000 });
+        return ok(201, { facilityId, token: "rotating.token.example", link: `https://golfraven.example/q/m#rotating.token.example`, nonceHash, kid: "kid1", issuedAt, expiresAt });
+      }
+      if (route === "tokens/refresh" && req.method === "POST") {
+        const body = (await req.json()) as { nonceHash?: string };
+        const row = body.nonceHash !== undefined ? workState.minted.get(body.nonceHash) : undefined;
+        if (row === undefined) return err(404, "not_found");
+        return ok(200, { state: "live", secondsLeft: Math.max(0, Math.floor((row.expiresAt - Date.now()) / 1000)) });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "qr-print") {
+      if (req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        const row = workState.printed.get(facilityId);
+        if (row === undefined) return err(404, "not_printed");
+        return ok(200, { facilityId, qrKid: row.qrKid, sig: row.sig, printedAt: row.printedAt, revoked: false, revokedAt: null });
+      }
+      if (req.method === "POST") {
+        if (session.aal < 2 || session.mfaUntil === null || session.mfaUntil <= Date.now()) return err(403, "aal_required");
+        const body = (await req.json()) as { facilityId?: string };
+        const facilityId = body.facilityId ?? "";
+        const printedAt = new Date().toISOString();
+        const row = { qrKid: "printkid", sig: "f".repeat(128), printedAt };
+        workState.printed.set(facilityId, row);
+        return ok(201, { facilityId, qrKid: row.qrKid, sig: row.sig, printedAt, revoked: false, revokedAt: null, link: null, changed: true });
+      }
+    }
+    return err(404, "not_found");
+  }
+
+  const innerHandler = (req: Request) => {
+    const path = new URL(req.url).pathname;
+    if (path.includes("/partner-invites/")) return invitesHandler(req);
+    if (path.includes("/partner-attest/") || path.includes("/course-qr/") || path.includes("/qr-print")) return workHandler(req);
+    return sessionHandler(req);
+  };
 
   const handler = async (req: Request): Promise<Response> => {
     const body = req.method === "GET" || req.method === "OPTIONS" ? "" : await req.clone().text();
@@ -650,7 +789,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       referer: req.headers.get("referer"),
       body,
     });
-    const route = new URL(req.url).pathname.split(/\/partner-(?:session|invites)\//)[1] ?? "";
+    const route = new URL(req.url).pathname.split(/\/(?:partner-(?:session|invites|attest)|course-qr|qr-print)\//)[1] ?? "";
     if (req.method !== "OPTIONS" && state.hang.has(route)) {
       return await new Promise<Response>((resolve) => {
         held.push(() => resolve(new Response(null, { status: 503 })));
@@ -691,6 +830,11 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       seed();
       for (const release of held.splice(0)) release();
       Object.assign(state, { revokedSessions: new Set<string>(), lockCalls: 0, signOutCalls: 0, reauthLimit: Number.POSITIVE_INFINITY, reauthHits: 0, unavailable: false, reauthUntil: null, hang: new Set<string>(), delayAfter: {}, optionsRetryAfter: null, otpCode: "123456", mailed: [], acceptOutcome: null, pinGrantsIssued: 0 });
+      workState.pinEpoch = 1;
+      workState.minted.clear();
+      workState.printed.clear();
+      workState.usedTokens.clear();
+      workState.usedCodes.clear();
     },
     async seedPin(pin, o = {}) {
       const user = users.get(o.userId ?? USER_ID);

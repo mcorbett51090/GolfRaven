@@ -10,7 +10,7 @@ export interface UiMessage {
   readonly params?: Params;
 }
 
-export type ErrorContext = "sign-in" | "session" | "enrol" | "pin" | "proof" | "totp";
+export type ErrorContext = "sign-in" | "session" | "enrol" | "pin" | "proof" | "totp" | "attest" | "course-qr";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
@@ -40,6 +40,20 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (kind === "forbidden") return { key: "enrol.refused" };
     if (kind === "gone") return { key: "enrol.expired" };
     if (kind === "conflict") return { key: "enrol.conflict" };
+  }
+  if (context === "attest") {
+    if (code === "self_attestation_refused") return { key: "attest.self" };
+    if (code === "token_invalid") return { key: "attest.tokenBad" };
+    if (code === "verification_failed") return { key: "attest.verifyFailed" };
+    if (code === "replayed") return { key: "attest.replayed" };
+    if (code === "no_programme") return { key: "attest.noProgramme" };
+    if (code === "cold_start_cap") return { key: "attest.coldStart" };
+    if (kind === "conflict") return { key: "attest.replayed" };
+    if (kind === "unprocessable") return { key: "attest.verifyFailed" };
+  }
+  if (context === "course-qr") {
+    if (code === "no_programme") return { key: "courseQr.noProgramme" };
+    if (code === "not_printed") return { key: "courseQr.notPrinted" };
   }
   return null;
 }

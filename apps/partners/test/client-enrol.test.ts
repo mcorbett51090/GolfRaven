@@ -56,8 +56,8 @@ beforeEach(() => {
 afterEach(() => spies.restore());
 
 describe("the partner function list (the CSP's connect-src and the bearer allow-list are one list)", () => {
-  it("names the three partner functions, so partner-invites and partner-members are path-scoped in connect-src", () => {
-    expect([...PARTNER_FUNCTIONS]).toEqual(["partner-session", "partner-invites", "partner-members"]);
+  it("names the partner functions, so invites, members, attest, course-qr and qr-print are path-scoped in connect-src", () => {
+    expect([...PARTNER_FUNCTIONS]).toEqual(["partner-session", "partner-invites", "partner-members", "partner-attest", "course-qr", "qr-print"]);
     expect(INVITES_FUNCTION).toBe("partner-invites");
   });
 });
@@ -188,10 +188,11 @@ describe("the bearer never goes to a pre-session route, and call() still guards 
     expect(calls[0]!.headers["authorization"]).toBeUndefined();
   });
 
-  it("partner-invites is a function a session call may reach (invite list / create later), partner-attest is not", async () => {
-    const { api } = make((c) => (c.url.endsWith("/partner-invites/invites") ? jsonResponse(200, { data: { invites: [] } }) : happy(c)));
+  it("partner-invites and partner-attest are on the allow-list; a not-yet-built partner function is not", async () => {
+    const { api } = make((c) => (c.url.endsWith("/partner-invites/invites") || c.url.includes("/partner-attest/") ? jsonResponse(200, { data: { invites: [] } }) : happy(c)));
     await api.registerFirst({ challenge: CHALLENGE_OBJ, credential: CREDENTIAL });
     await expect(api.call("GET", "partner-invites", "invites")).resolves.toEqual({ invites: [] });
-    expect((await err((api as PartnerApi).call("GET", "partner-attest", "x"))).kind).toBe("bad_request");
+    await expect(api.call("GET", "partner-attest", "shift-log", undefined, { facilityId: "fac_a" })).resolves.toEqual({ invites: [] });
+    expect((await err((api as PartnerApi).call("GET", "partner-offers-redeem", "x"))).kind).toBe("bad_request");
   });
 });

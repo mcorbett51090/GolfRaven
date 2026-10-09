@@ -2289,3 +2289,33 @@ Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited
 **Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
 
 **Verification:** on this branch, `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38. CI green with §32.4 tip.
+
+## 34. As built: S7b (attest and course-QR screens; `apps/partners`)
+
+Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4; S4 landed on main first via #73, so this UI as-built takes the next free section.) S2b (parallel) claims section 25 and S3 claims section 26; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page is the only thing that moved. It talks to the Edge routes S2b and S3 ship (`partner-attest`, `course-qr`, `qr-print`).
+
+### 34.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`. `connect-src` gains three path-scoped sources; `Permissions-Policy` is `camera=(self)` (paste-only attest today; a later scan into the token field needs no header change).
+- **`call()` query object.** GET routes that need `?facilityId=` take a closed `{ key: value }` map (facility-id charset), appended after the path is validated so a route string still cannot carry `?` or `#`.
+- **Typed work routes** (`src/api/work-routes.ts`): online/offline attest, shift-log, staff-activity, course PIN, rotate, mint, refresh, printed QR read/write. Response bodies are checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Attest a player** and **Course QR**. Every A1 action calls `requirePin("A1")` then the action in the same turn (24.3). Rotate PIN is A2: `reauthWithPasskey` then `requirePin("A2")` then rotate. Printed-QR write is A3: refused in the UI when `aal < 2`.
+- **Fake partner server** answers the three new functions in-memory (PIN-grant consume on A1, reauth window on A2, aal/mfa on A3) so the page's unit cells run without the S2b/S3 Edge trees on this branch.
+
+### 34.2 Decisions and departures
+
+- **`state.work` on signed-in**, not a new top-level `AppState` screen. The PIN prompt is `state.panel`; keeping work under signed-in means `requirePin` needs no second host. Design 20.5's "new AppState branch" is met as a new view branch of signed-in.
+- **Online attest token is pasted** (the check-in jti). Camera policy is open; a BarcodeDetector scan is not built.
+- **Staff-activity and shift-log** are A0 reads on the attest screen (no PIN). Staff who are not managers will get 403 from the server for staff-activity; the page does not hide the button by role (the session's role list has no per-facility rank beyond membership).
+
+### 34.3 Not built, honestly
+
+- Camera scan of a player QR into the token field.
+- S7c–S7d screens (hand-over, stock, manager/operator/admin invite and member tools).
+- Offers-redeem (S3 seam / P5.1b).
+- Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
+
+### 34.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).

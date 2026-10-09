@@ -7,8 +7,8 @@ sections 4.5 and 4.6; what S7a built and why: its "As built: S7a" section.
 **S7a is the shell, sign-in and session**: passkey sign-in, a signed-in home that shows the session, sign-out, lock, a reauth
 helper for later screens, EN and FR-CA strings, the CSP, and the tests that pin all of it. **S7a's second half (this README's "PIN step-up" and
 "Invites and enrolment" sections) closes the seams S1.3 to S1.5 left**: the browser-derived PIN, invite and enrolment acceptance with the first
-passkey and the forced first PIN, and the operator / admin second factor. The screens that do real work (course QR, attest, hand-over, stock,
-manager, operator, admin) are S7b to S7d.
+passkey and the forced first PIN, and the operator / admin second factor. **S7b adds the attest and course-QR shop-floor screens** (PIN before every A1
+action). Hand-over, stock, manager, operator and admin screens are S7c to S7d.
 
 ## The one rule that shapes everything
 
@@ -52,7 +52,7 @@ GOLFRAVEN_PARTNERS_API_BASE=https://<project>.supabase.co/functions/v1 pnpm --fi
 ```
 
 `GOLFRAVEN_PARTNERS_API_BASE` is the **functions root** of the partners API: the client calls `<base>/partner-session/<route>`,
-`<base>/partner-invites/<route>` (invite and enrolment acceptance, the first credential) and, later, `<base>/partner-attest/...`. It is baked into the bundle, and the CSP `connect-src` is built from it: one **path-scoped** source per partner
+`<base>/partner-invites/<route>`, `<base>/partner-attest/<route>`, `<base>/course-qr/<route>` and `<base>/qr-print`. It is baked into the bundle, and the CSP `connect-src` is built from it: one **path-scoped** source per partner
 function (`<base>/partner-session/`; the list is `src/api/partner-functions.json`, the same one the client's `call()` allow-list uses), never the
 whole API origin (the same host serves `/rest/v1` and every other edge function). The default is a placeholder on the
 reserved `.example` TLD (`https://partners-api.golfraven.example/functions/v1`) because the real host is owner question Q1;
@@ -65,8 +65,7 @@ inline script, eval, `new Function`, a storage API, a service worker, a source m
 on any bundle input that is not under `src/` or that comes from `node_modules`.
 
 `_headers` also carries `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and marks `/`, `/index.html` and `/invite` `Cache-Control: no-store`
-(the hashed `/assets/*` stay immutable). `Permissions-Policy: camera=()` is deliberate for S7a; **S7b (the course-QR scan screen) must change it
-to `camera=(self)`**.
+(the hashed `/assets/*` stay immutable). `Permissions-Policy: camera=(self)` from S7b (paste-only attest for now; a later scan into the token field can use the camera without another header change).
 
 ### Deploy checklist (operator steps; none are code)
 
@@ -78,7 +77,8 @@ to `camera=(self)`**.
 
 ## The CSP
 
-`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src <API origin>/functions/v1/partner-session/ <API origin>/functions/v1/partner-invites/ <API origin>/functions/v1/partner-members/; manifest-src 'self'; worker-src 'none';
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src` one path-scoped source per entry of `partner-functions.json`
+(`partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`); `manifest-src 'self'; worker-src 'none';
 object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`.
 Emitted by `scripts/lib/csp.mjs`, once as the response header and once as the `<meta>`. Stricter than design 4.6 in three places (no `'self'` in
 `connect-src`, no `data:` images, `worker-src 'none'`); see the design doc's "As built: S7a". Trusted Types is enforced by Chromium; Safari
@@ -171,8 +171,8 @@ renderer in the page (no dependency may be added), so the person types the key i
 
 | Not built | Seam |
 |---|---|
-| A1 / A2 screens that consume a grant (attest, hand-over, stock, rotate PIN) | `controller.requirePin(actionClass)`; `render.ts` draws any `state.panel`; a screen is a new `AppState` branch and `api.call(...)`. The grant is single-use: call `requirePin`, then make the action call, nothing in between |
-| A2 reauth in front of the PIN (adding a credential, member actions) | `reauthWithPasskey(api, ...)` (`src/auth/reauth.ts`) is exported; no screen needs it yet |
+| Camera scan of a player check-in QR into the attest token field | `camera=(self)` is open; the field is paste-only today |
+| Hand-over, stock, manager / operator / admin screens (S7c–S7d) | `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
 | Invite create / list / revoke, branch E (an existing member joins another org), member recovery, credential list | `partner-invites` and `partner-members` are in the CSP and the `call()` allow-list; the pre-session half is built, the session half is not |
 | A QR for the TOTP seed | none: the seed and the `otpauth://` link are shown as text |
 | Offline behaviour | none |

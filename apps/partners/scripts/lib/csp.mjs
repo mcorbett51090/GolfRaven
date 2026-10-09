@@ -75,8 +75,8 @@ export function buildCsp(apiBase, opts = {}) {
  * Chromium, from the back/forward cache (a page whose main resource is no-store is not bfcache-eligible there). The hashed `/assets/*` stay immutable.
  * They are separate blocks from `/assets/*` and match disjoint paths, so no request gets two `Cache-Control` values.
  *
- * Permissions-Policy: `camera=()` is deliberate for S7a, which scans nothing. S7b (the course-QR scan screen) must change it to `camera=(self)`: a camera
- * that stays `()` makes `getUserMedia` fail silently, and the generated header is the only place that policy lives.
+ * Permissions-Policy: `camera=(self)` from S7b (the attest / course-QR screens). S7a kept `camera=()`; scanning a player token QR into the attest
+ * field is not built yet (paste only), but the policy is open so a later build of the same screen can call `getUserMedia` without another header change.
  *
  * @param {string} apiBase the functions root (see buildCsp)
  */
@@ -88,7 +88,7 @@ export function buildHeadersFile(apiBase) {
     `  Strict-Transport-Security: max-age=31536000; includeSubDomains\n` +
     `  X-Content-Type-Options: nosniff\n` +
     `  Referrer-Policy: no-referrer\n` +
-    `  Permissions-Policy: publickey-credentials-get=(self), publickey-credentials-create=(self), camera=(), microphone=(), geolocation=(), payment=(), usb=()\n` +
+    `  Permissions-Policy: publickey-credentials-get=(self), publickey-credentials-create=(self), camera=(self), microphone=(), geolocation=(), payment=(), usb=()\n` +
     `  Cross-Origin-Opener-Policy: same-origin\n` +
     `  Cross-Origin-Resource-Policy: same-origin\n` +
     `  X-Robots-Tag: noindex, nofollow\n` +

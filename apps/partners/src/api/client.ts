@@ -123,8 +123,11 @@ export interface PartnerApi {
   reauthOptions(): Promise<ChallengeResponse>;
   /** `POST reauth`: a fresh passkey assertion by the session's own person. */
   reauth(input: { challengeToken: string; credential: AssertionJson }): Promise<ReauthResult>;
-  /** An authenticated call to another partner function on the same API origin (later screens: attest, hand-over, stock). Same headers, same error mapping, same 401 handling. */
-  call(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body?: unknown): Promise<unknown>;
+  /**
+   * An authenticated call to another partner function on the same API origin (attest, course-QR, hand-over, stock). Same headers, same error mapping, same 401 handling.
+   * `query` is optional GET parameters: closed key/value shapes only (no free-form encoding), appended after the path is validated so a route string still cannot carry `?` or `#`.
+   */
+  call(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body?: unknown, query?: Readonly<Record<string, string>>): Promise<unknown>;
   /** Wipes the token without any request. */
   forgetSession(): void;
   /** Called after the token is wiped, with the reason. Returns an unsubscribe function. */
@@ -410,11 +413,21 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
       return { reauthUntil: r.data["reauthUntil"] };
     },
 
-    async call(method, fn, route, body) {
+    async call(method, fn, route, body, query) {
       // the bearer is attached here, so the target is a closed shape: a function on the explicit partner allow-list (never any other path on the API host, and the
-      // same list the CSP's connect-src is built from), and a route of path-safe characters, no dot segments, no query, no fragment
+      // same list the CSP's connect-src is built from), and a route of path-safe characters, no dot segments, no query, no fragment. Query keys and values are a
+      // separate, closed charset (facility ids, day counts): they are not taken from a free-form string the caller could smuggle a second path into.
       if (!allowedFunctions.includes(fn) || !/^[a-z][a-z0-9-]{0,63}$/.test(fn) || !/^[A-Za-z0-9_~/-]{0,200}$/.test(route) || route.includes("//")) throw new PartnerApiError("bad_request");
-      return (await sendAuthed(method, fn, route, body)).data;
+      let path = route;
+      if (query !== undefined) {
+        const pairs: string[] = [];
+        for (const [k, v] of Object.entries(query)) {
+          if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(k) || typeof v !== "string" || !/^[A-Za-z0-9_.:-]{0,128}$/.test(v)) throw new PartnerApiError("bad_request");
+          pairs.push(`${k}=${v}`);
+        }
+        if (pairs.length > 0) path = `${route}?${pairs.join("&")}`;
+      }
+      return (await sendAuthed(method, fn, path, body)).data;
     },
 
     forgetSession: () => wipe("forgotten"),

@@ -6,6 +6,7 @@
  */
 
 import type { EnrolmentKind } from "../api/client";
+import type { AttestKind, AttestResult, CoursePin, MintedToken, PrintedQr, ShiftLogEntry, StaffActivityRow } from "../api/work-routes";
 import type { SessionGrant, TotpEnrolment, WhoAmI } from "../api/types";
 import type { ActionClass, PinProblem } from "../auth/step-up";
 import type { PinSetupMode } from "../auth/pin-setup";
@@ -16,7 +17,7 @@ export type Notice =
   /** Outcomes of accepting an invite or enrolment: already a member with a passkey, needs a manager's recovery, passkey saved but the first session could not be shown, or a code was sent. */
   | { readonly kind: "enrol-existing-member" | "enrol-recover-required" | "enrol-saved" | "enrol-code-sent" }
   /** Success notices of the signed-in screens. */
-  | { readonly kind: "pin-set" | "pin-changed" | "totp-confirmed" | "totp-verified" }
+  | { readonly kind: "pin-set" | "pin-changed" | "totp-confirmed" | "totp-verified" | "attest-ok" | "pin-rotated" | "token-minted" | "printed-ok" }
   | { readonly kind: "error"; readonly message: UiMessage };
 
 /** Which step of accepting an invite or an enrolment token the person is on. `token`: asks for the token (or, when it came in a link, for a press of "email me a code"). */
@@ -72,6 +73,28 @@ export interface TotpPanel {
 
 export type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
 
+/** The S7b work screens drawn in place of the signed-in home (design 24.3 → S7b). `null` means home. */
+export type WorkView =
+  | {
+      readonly kind: "attest";
+      readonly facilityId: string;
+      readonly mode: "online" | "offline";
+      readonly attestKind: AttestKind;
+      readonly busy: boolean;
+      readonly lastResult: AttestResult | null;
+      readonly shiftLog: readonly ShiftLogEntry[] | null;
+      readonly staffActivity: readonly StaffActivityRow[] | null;
+    }
+  | {
+      readonly kind: "course-qr";
+      readonly facilityId: string;
+      readonly busy: boolean;
+      readonly pin: CoursePin | null;
+      readonly sale: MintedToken | null;
+      readonly refreshLeft: number | null;
+      readonly printed: PrintedQr | null;
+    };
+
 export type AppState =
   /** `retryUntilMs`: after a 429 with a readable Retry-After, the sign-in button stays disabled until this time (epoch ms). */
   | { readonly screen: "signed-out"; readonly notice: Notice | null; readonly retryUntilMs?: number }
@@ -81,11 +104,13 @@ export type AppState =
       readonly screen: "signed-in";
       readonly grant: SessionGrant;
       readonly session: WhoAmI;
-      /** "refresh": a `GET session`; "panel": reading what a panel needs to open. */
-      readonly busy: "refresh" | "panel" | null;
+      /** "refresh": a `GET session`; "panel": reading what a panel needs to open; "work": an A1/A2/A3 action on a work screen. */
+      readonly busy: "refresh" | "panel" | "work" | null;
       readonly notice: Notice | null;
-      /** What is drawn instead of the home screen, or null for the home screen. */
+      /** What is drawn instead of the home / work screen, or null. */
       readonly panel: Panel | null;
+      /** Attest or course-QR work; null draws the home screen. */
+      readonly work: WorkView | null;
     };
 
 export type SignedInState = Extract<AppState, { screen: "signed-in" }>;

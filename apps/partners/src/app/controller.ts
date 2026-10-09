@@ -17,6 +17,7 @@
 
 import type { PartnerApi, SessionEndReason } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
+import type { AttestKind } from "../api/work-routes";
 import type { SessionGrant } from "../api/types";
 import { pinSetupMode } from "../auth/pin-setup";
 import { signInWithPasskey } from "../auth/sign-in";
@@ -27,8 +28,9 @@ import { createEnrolFlow } from "./enrol-flow";
 import { messageForError } from "./messages";
 import { createPanels, type PinSetupInput } from "./panels";
 import type { AppState, Notice } from "./state";
+import { createWorkScreens } from "./work";
 
-export type { AppState, EnrolState, Notice, Panel, SignedInState } from "./state";
+export type { AppState, EnrolState, Notice, Panel, SignedInState, WorkView } from "./state";
 
 export interface AppController extends StepUp {
   getState(): AppState;
@@ -59,6 +61,24 @@ export interface AppController extends StepUp {
   startTotpEnrol(): Promise<void>;
   submitTotp(code: string): Promise<void>;
   closePanel(): void;
+
+  /** S7b work screens (attest and course-QR; see work.ts). */
+  openAttest(facilityId: string): void;
+  openCourseQr(facilityId: string): void;
+  closeWork(): void;
+  setWorkFacility(facilityId: string): void;
+  setAttestMode(mode: "online" | "offline"): void;
+  setAttestKind(kind: AttestKind): void;
+  submitOnlineAttest(token: string): Promise<void>;
+  submitOfflineAttest(handle: string, code: string): Promise<void>;
+  loadShiftLog(): Promise<void>;
+  loadStaffActivity(days: number): Promise<void>;
+  loadCoursePin(): Promise<void>;
+  rotatePin(): Promise<void>;
+  mintToken(): Promise<void>;
+  refreshSale(): Promise<void>;
+  loadPrintedQr(): Promise<void>;
+  printQr(): Promise<void>;
 }
 
 export interface ControllerWebAuthn {
@@ -104,6 +124,7 @@ export function createController(deps: ControllerDeps): AppController {
     set: (next: AppState) => set(next),
   };
   const panels = createPanels({ api, host, nowMs });
+  const work = createWorkScreens({ api, host, stepUp: panels, webauthn: assertionDeps(deps.webauthn) });
   const enrol = createEnrolFlow({
     api,
     webauthn: creationDeps(deps.webauthn),
@@ -118,7 +139,7 @@ export function createController(deps: ControllerDeps): AppController {
         // unknown: ask for a PIN, the safe side
       }
       const panel = mode === "set" ? ({ kind: "pin-setup", mode: "set", forced: true, canSkip: false, busy: false, notice: null } as const) : null;
-      set({ screen: "signed-in", grant, session, busy: null, notice: null, panel });
+      set({ screen: "signed-in", grant, session, busy: null, notice: null, panel, work: null });
     },
   });
   /** The sign-in in progress; null when none, or once it was cancelled (the flow then drops whatever it produces). */
@@ -207,7 +228,7 @@ export function createController(deps: ControllerDeps): AppController {
           return;
         }
         abort = null;
-        set({ screen: "signed-in", grant, session, busy: null, notice: null, panel: null });
+        set({ screen: "signed-in", grant, session, busy: null, notice: null, panel: null, work: null });
       } catch (e) {
         if (!live()) {
           // cancelled: cancelSignIn() already showed signed-out; make sure nothing is held
@@ -265,6 +286,23 @@ export function createController(deps: ControllerDeps): AppController {
     startTotpEnrol: () => panels.startTotpEnrol(),
     submitTotp: (code) => panels.submitTotp(code),
     closePanel: () => panels.closePanel(),
+
+    openAttest: (facilityId) => work.openAttest(facilityId),
+    openCourseQr: (facilityId) => work.openCourseQr(facilityId),
+    closeWork: () => work.closeWork(),
+    setWorkFacility: (facilityId) => work.setFacility(facilityId),
+    setAttestMode: (mode) => work.setAttestMode(mode),
+    setAttestKind: (kind) => work.setAttestKind(kind),
+    submitOnlineAttest: (token) => work.submitOnlineAttest(token),
+    submitOfflineAttest: (handle, code) => work.submitOfflineAttest(handle, code),
+    loadShiftLog: () => work.loadShiftLog(),
+    loadStaffActivity: (days) => work.loadStaffActivity(days),
+    loadCoursePin: () => work.loadCoursePin(),
+    rotatePin: () => work.rotatePin(),
+    mintToken: () => work.mintToken(),
+    refreshSale: () => work.refreshSale(),
+    loadPrintedQr: () => work.loadPrintedQr(),
+    printQr: () => work.printQr(),
 
     signOut: () => end(() => api.signOut(), "sign-out-offline", "signed-out"),
 

@@ -61,9 +61,16 @@ describe("the policy", () => {
     for (const src of d.get("connect-src")!) expect(src).toMatch(/\/functions\/v1\/[a-z][a-z0-9-]*\/$/);
   });
 
-  it("connect-src names exactly partner-session, partner-invites (invite and enrolment acceptance, the first credential) and partner-members, each path-scoped", () => {
-    expect(d.get("connect-src")).toEqual([`${API}/partner-session/`, `${API}/partner-invites/`, `${API}/partner-members/`]);
-    expect(d.get("connect-src")!.join(" ")).not.toMatch(/partner-attest|rest\/v1|auth\/v1/);
+  it("connect-src names the partner functions of partner-functions.json (session, invites, members, attest, course-qr, qr-print), each path-scoped", () => {
+    expect(d.get("connect-src")).toEqual([
+      `${API}/partner-session/`,
+      `${API}/partner-invites/`,
+      `${API}/partner-members/`,
+      `${API}/partner-attest/`,
+      `${API}/course-qr/`,
+      `${API}/qr-print/`,
+    ]);
+    expect(d.get("connect-src")!.join(" ")).not.toMatch(/rest\/v1|auth\/v1|partner-offers/);
   });
 
   it("the CSP list and the client's bearer allow-list are the SAME list (partner-functions.json)", () => {
@@ -171,7 +178,9 @@ describe("the _headers file", () => {
   });
 
   it("withholds the powerful features the app never uses", () => {
-    for (const f of ["camera=()", "microphone=()", "geolocation=()", "payment=()", "usb=()"]) expect(text).toContain(f);
+    expect(text).toContain("camera=(self)");
+    for (const f of ["microphone=()", "geolocation=()", "payment=()", "usb=()"]) expect(text).toContain(f);
+    expect(text).not.toContain("camera=()");
   });
 
   it("gives no request two values for one header name (Cloudflare Pages joins repeated names across the matching blocks with a comma instead of replacing)", () => {
