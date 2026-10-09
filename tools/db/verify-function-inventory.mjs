@@ -780,14 +780,14 @@ SELECT '(a2) a *_for_partner function has an EXCEPTION ... WHEN block, which cou
 FROM body f
 WHERE f.b ~ '\\mexception\\s+when\\M'
 UNION ALL
-SELECT '(a3) a *_for_partner function whose private.partner_authorize class is not a string literal in A0 / A0_WRITE / A0_KEEPALIVE / A1 / A2 / A3 (SESSION and PEEK only for a function named in supabase/tests/fixtures/partner_session_class_functions.txt): ' || c.ident
+SELECT '(a3) a *_for_partner function whose private.partner_authorize class is not a string literal in A0 / A0_WRITE / A0_KEEPALIVE / A0_MFA / A0_ENROL / A1 / A2 / A3 (SESSION and PEEK only for a function named in supabase/tests/fixtures/partner_session_class_functions.txt): ' || c.ident
 FROM (
   SELECT f.ident,
          (regexp_match((regexp_match(f.kept, 'private\\.partner_authorize\\s*\\(([^;]*)\\)\\s*(?:;|$)', 'i'))[1], ',\\s*''([A-Za-z0-9_]+)''\\s*$'))[1] AS cls
   FROM fam f
 ) c
 WHERE c.cls IS NULL
-   OR (c.cls NOT IN ('A0', 'A0_WRITE', 'A0_KEEPALIVE', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY['private.partner_whoami_for_partner()', 'private.partner_session_revoke_for_partner()', 'private.partner_session_lock_for_partner()'] /* end_session_class_functions */)))
+   OR (c.cls NOT IN ('A0', 'A0_WRITE', 'A0_KEEPALIVE', 'A0_MFA', 'A0_ENROL', 'A1', 'A2', 'A3') AND NOT (c.cls IN ('SESSION', 'PEEK') AND c.ident = ANY (/* session_class_functions */ ARRAY['private.partner_whoami_for_partner()', 'private.partner_session_revoke_for_partner()', 'private.partner_session_lock_for_partner()'] /* end_session_class_functions */)))
 UNION ALL
 SELECT '(b) an edge_actor-executable definer outside the *_for_partner family evaluates partner scope: ' || n.nspname || '.' || p.proname
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -851,7 +851,7 @@ WHERE NOT EXISTS (SELECT 1 FROM depth d WHERE d.nspname = w.nspname AND d.relnam
 //   * supabase/tests/fixtures/partner_kind_readers.txt: functions OUTSIDE the *_for_partner family that may read the actor binding or kind = 'partner' (the binders and their
 //     helpers, the user-lane `_for_actor` definers that refuse a non-user binding, actor_uid()). Every entry was reviewed; a new reader is added HERE, after review, or put in the family.
 //   * supabase/tests/fixtures/partner_session_class_functions.txt: the *_for_partner functions that may use the SESSION or PEEK class (no scope, no aal gate: sign-out, lock, GET
-//     session). Empty today. A function acting on an object must use A0 / A0_KEEPALIVE / A1 / A2 / A3 with a facility or trail.
+//     session). Empty today. A function acting on an object must use A0 / A0_WRITE / A0_KEEPALIVE / A0_MFA / A0_ENROL / A1 / A2 / A3 with a facility or trail.
 // The check's SQL carries the SAME lists inline between marker comments (so the matrix twin in 10_function_inventory.sql is textually identical); this reader substitutes each fixture's
 // list between its markers, and the matrix twin is held to the fixtures by supabase/tests/unit/function-inventory-check-parity.test.ts.
 // KNOWN LIMIT of (c): it is a TRIPWIRE, not a proof. It lexes the body (comments dropped, strings kept) and looks for the literal 'partner', the table actor_binding and the helpers
