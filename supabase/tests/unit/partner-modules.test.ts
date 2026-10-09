@@ -16,7 +16,7 @@ import { challengeToken, credentialJson, NOW_MS } from "./partner-fakes.ts";
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
 /** The partner lane's Edge Functions (design 4.5): each is a directory with an `index.ts`, `verify_jwt = false`, and no use of the player identity. */
 /** Named for their resource (the design names them so), not with the `partner-` prefix; still partner-lane functions. */
-const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin", "programme-config", "offers-admin", "sponsorships-admin"];
+const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin", "programme-config", "offers-admin", "sponsorships-admin", "settlement-export"];
 const PARTNER_FUNCTIONS = [
   "partner-session",
   "partner-invites",
@@ -28,6 +28,8 @@ const PARTNER_FUNCTIONS = [
   "programme-config",
   "offers-admin",
   "sponsorships-admin",
+  "partner-offers-redeem",
+  "settlement-export",
 ];
 const REPO = join(import.meta.dirname, "..", "..", "..");
 
@@ -239,6 +241,8 @@ describe("PA-11: the partner modules never log", () => {
       "partner/entitlements-handler.ts", "partner/entitlements-shape.ts", "programme-config/index.ts", "partner/programme-handler.ts",
       "partner/programme-shape.ts", "offers-admin/index.ts", "partner/offers-handler.ts", "partner/offers-shape.ts", "partner/offer-eligibility.ts",
       "sponsorships-admin/index.ts", "partner/sponsorships-handler.ts", "partner/sponsorships-shape.ts",
+      "partner-offers-redeem/index.ts", "partner/offers-redeem-handler.ts", "partner/offers-redeem-shape.ts",
+      "settlement-export/index.ts", "partner/settlement-handler.ts", "partner/settlement-shape.ts",
     ]) expect(names).toContain(n);
   });
 
@@ -297,6 +301,8 @@ describe("the entrypoints and the configuration", () => {
     "programme-config": "handlePartnerProgrammeRequest",
     "offers-admin": "handlePartnerOffersAdminRequest",
     "sponsorships-admin": "handlePartnerSponsorshipsRequest",
+    "partner-offers-redeem": "handlePartnerOffersRedeemRequest",
+    "settlement-export": "handleSettlementExportRequest",
   };
 
   it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* (or unprefixed partner) entrypoint is named here", () => {

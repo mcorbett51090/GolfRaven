@@ -128,6 +128,8 @@ function world(): { w: World; deps: PartnerOffersAdminDeps } {
     withEntitlements: reject,
     withProgramme: reject,
     withSponsorships: reject,
+    withOffersRedeem: reject,
+    withSettlementExport: reject,
     async withOffersAdmin(_hash, op) {
       w.calls.push("db.withOffersAdmin");
       if (w.bindRefused) throw new PartnerSessionRefused();

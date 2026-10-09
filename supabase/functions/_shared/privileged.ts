@@ -111,11 +111,20 @@ import {
   type PartnerAttestTx,
   type PartnerDb,
   type PartnerEntitlementsTx,
+  type OfferQueueRow,
+  type OfferRedeemMethod,
+  type OfferRedeemResult,
+  type OfferRedeemStatus,
   type PartnerOffersAdminTx,
+  type PartnerOffersRedeemTx,
   type PartnerProgrammeTx,
   type PartnerReviewTx,
+  type PartnerSettlementExportTx,
   type PartnerSponsorshipsTx,
   type PartnerStockTx,
+  type SettlementExportResult,
+  type SettlementLine,
+  type ExportsStoragePort,
   type RedeemMethod,
   type RedeemResult,
   type RedeemStatus,
@@ -4514,6 +4523,122 @@ const REDEEM_STATUSES: ReadonlySet<string> = new Set([
   "no_programme",
 ]);
 const VOUCHER_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_redeemable", "no_stock_row"]);
+const OFFER_REDEEM_STATUSES: ReadonlySet<string> = new Set([
+  "ok",
+  "not_found",
+  "not_issued",
+  "expired",
+  "wrong_facility",
+  "token_invalid",
+  "wrong_player",
+  "replayed",
+  "no_facility",
+  "cold_start_cap",
+  "budget_short",
+]);
+function buildPartnerOffersRedeemTx(trx: TxSql): PartnerOffersRedeemTx {
+  return {
+    async offersQueue(facilityId: string): Promise<OfferQueueRow[]> {
+      const rows = await trx`
+        select o_offer_code_id::text as o_offer_code_id, o_offer_id::text as o_offer_id, o_player_handle, o_expires_at, o_face_value
+        from private.partner_offers_queue_for_partner(${facilityId}::text)`;
+      return rows.map((r) => ({
+        offerCodeId: String(r.o_offer_code_id),
+        offerId: String(r.o_offer_id),
+        playerHandle: textOrNull(r.o_player_handle),
+        expiresAt: isoOrNull(r.o_expires_at),
+        faceValue: numOrNull(r.o_face_value),
+      }));
+    },
+    async redeemOffer(facilityId: string, offerCodeId: string, method: OfferRedeemMethod, credential: string): Promise<OfferRedeemResult> {
+      const rows = await trx`
+        select o_status, o_attestation_id::text as o_attestation_id
+        from private.partner_offers_redeem_for_partner(${facilityId}::text, ${offerCodeId}::uuid, ${method}::text, ${credential}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !OFFER_REDEEM_STATUSES.has(r.o_status)) {
+        throw new Error("partner_offers_redeem_for_partner returned no usable status");
+      }
+      return { status: r.o_status as OfferRedeemStatus, attestationId: textOrNull(r.o_attestation_id) };
+    },
+  };
+}
+
+const SETTLEMENT_EXPORT_STATUSES: ReadonlySet<string> = new Set(["ok", "empty"]);
+function buildPartnerSettlementExportTx(trx: TxSql): PartnerSettlementExportTx {
+  return {
+    async settlementExport(trailId: string, month: string): Promise<SettlementExportResult> {
+      const rows = await trx`
+        select o_status, o_facility_id, o_month, o_funder, o_sponsorship_id::text as o_sponsorship_id,
+               o_redemptions, o_offline_count, o_unconfirmed_count, o_face_value_total
+        from private.partner_settlement_export_for_partner(${trailId}::text, ${month}::date)`;
+      const status = rows[0]?.o_status;
+      if (typeof status !== "string" || !SETTLEMENT_EXPORT_STATUSES.has(status)) {
+        throw new Error("partner_settlement_export_for_partner returned no usable status");
+      }
+      if (status === "empty") return { status: "empty", lines: [] };
+      const lines: SettlementLine[] = rows
+        .filter((r) => r.o_status === "ok" && typeof r.o_facility_id === "string")
+        .map((r) => ({
+          facilityId: String(r.o_facility_id),
+          month: dateOnlyOrNull(r.o_month) ?? month,
+          funder: String(r.o_funder),
+          sponsorshipId: textOrNull(r.o_sponsorship_id),
+          redemptions: Number(r.o_redemptions ?? 0),
+          offlineCount: Number(r.o_offline_count ?? 0),
+          unconfirmedCount: Number(r.o_unconfirmed_count ?? 0),
+          faceValueTotal: numOrNull(r.o_face_value_total) ?? 0,
+        }));
+      return { status: "ok", lines };
+    },
+  };
+}
+
+/**
+ * Storage port for the private `exports` bucket (AT(17)): upload + createSignedUrl via the service-role client; purge lists and deletes objects older than a cutoff.
+ * The only place outside a partner binding that may touch `storage.objects` for settlement files.
+ */
+export const exportsStorage: ExportsStoragePort = {
+  async putSigned(path, body, contentType, expiresInSeconds) {
+    const client = adminClient();
+    const { error: upErr } = await client.storage.from("exports").upload(path, body, { contentType, upsert: true });
+    if (upErr) throw new Error(`exportsStorage.putSigned: upload failed: ${upErr.message}`);
+    const { data, error: signErr } = await client.storage.from("exports").createSignedUrl(path, expiresInSeconds);
+    if (signErr || !data?.signedUrl) throw new Error(`exportsStorage.putSigned: createSignedUrl failed: ${signErr?.message ?? "no url"}`);
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+    return { path, signedUrl: data.signedUrl, expiresAt };
+  },
+  async purgeOlderThan(olderThanMs) {
+    const client = adminClient();
+    const cutoffIso = new Date(olderThanMs).toISOString();
+    let removed = 0;
+    // Walk top-level prefixes under the bucket (settlement/…); Storage list is shallow, so recurse one level of folders.
+    const queue: string[] = [""];
+    while (queue.length > 0) {
+      const prefix = queue.shift()!;
+      const { data, error } = await client.storage.from("exports").list(prefix === "" ? undefined : prefix, { limit: 1000 });
+      if (error) throw new Error(`exportsStorage.purgeOlderThan: list failed: ${error.message}`);
+      if (!data || data.length === 0) continue;
+      const toDelete: string[] = [];
+      for (const item of data) {
+        const full = prefix === "" ? item.name : `${prefix}/${item.name}`;
+        // Folders have id null and no metadata; files have created_at.
+        if (item.id === null && !item.metadata) {
+          queue.push(full);
+          continue;
+        }
+        const created = item.created_at ?? (item.metadata as { created_at?: string } | null)?.created_at;
+        if (typeof created === "string" && created < cutoffIso) toDelete.push(full);
+      }
+      if (toDelete.length > 0) {
+        const { error: delErr } = await client.storage.from("exports").remove(toDelete);
+        if (delErr) throw new Error(`exportsStorage.purgeOlderThan: remove failed: ${delErr.message}`);
+        removed += toDelete.length;
+      }
+    }
+    return removed;
+  },
+};
+
 function buildPartnerEntitlementsTx(trx: TxSql): PartnerEntitlementsTx {
   return {
     async collectQueue(facilityId: string): Promise<EntitlementQueueRow[]> {
@@ -4571,7 +4696,7 @@ const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 export async function withPartnerSession<T>(
   tokenHash: string,
   op: (
-    s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx & PartnerProgrammeTx & PartnerOffersAdminTx & PartnerSponsorshipsTx,
+    s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx & PartnerProgrammeTx & PartnerOffersAdminTx & PartnerSponsorshipsTx & PartnerOffersRedeemTx & PartnerSettlementExportTx,
   ) => Promise<T>,
 ): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
@@ -4588,6 +4713,8 @@ export async function withPartnerSession<T>(
         ...buildPartnerProgrammeTx(trx),
         ...buildPartnerOffersAdminTx(trx),
         ...buildPartnerSponsorshipsTx(trx),
+        ...buildPartnerOffersRedeemTx(trx),
+        ...buildPartnerSettlementExportTx(trx),
       }),
     );
   } catch (err) {
@@ -4630,6 +4757,8 @@ export const partnerDb: PartnerDb = {
   withProgramme: withPartnerSession,
   withOffersAdmin: withPartnerSession,
   withSponsorships: withPartnerSession,
+  withOffersRedeem: withPartnerSession,
+  withSettlementExport: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
   hitSystemRateLimit: hitSystemRateLimitForPartner,
 };

@@ -704,6 +704,76 @@ export interface VoucherResult {
   readonly voucherIssuedAt: string | null;
 }
 
+/** What `partner_offers_redeem_for_partner` answers (0060). Method of this slice is staff_scan only; offline_code is 22023. */
+export type OfferRedeemMethod = "staff_scan";
+export const OFFER_REDEEM_METHODS: readonly OfferRedeemMethod[] = ["staff_scan"];
+export type OfferRedeemStatus =
+  | "ok"
+  | "not_found"
+  | "not_issued"
+  | "expired"
+  | "wrong_facility"
+  | "token_invalid"
+  | "wrong_player"
+  | "replayed"
+  | "no_facility"
+  | "cold_start_cap"
+  | "budget_short";
+export interface OfferRedeemResult {
+  readonly status: OfferRedeemStatus;
+  readonly attestationId: string | null;
+}
+/** One row of the offer redeem queue (0060): the player is shown by handle only. */
+export interface OfferQueueRow {
+  readonly offerCodeId: string;
+  readonly offerId: string;
+  readonly playerHandle: string | null;
+  readonly expiresAt: string | null;
+  readonly faceValue: number | null;
+}
+
+/**
+ * One transaction as `edge_partner` for the `partner-offers-redeem` routes. Every method is a `_for_partner` definer that begins with `partner_authorize`
+ * (class A0 for the queue, A1 for redeem); staff or manager of the facility.
+ */
+export interface PartnerOffersRedeemTx {
+  /** GET queue (class A0). */
+  offersQueue(facilityId: string): Promise<OfferQueueRow[]>;
+  /** POST redeem (class A1): `credential` is a check-in jti (staff_scan). */
+  redeemOffer(facilityId: string, offerCodeId: string, method: OfferRedeemMethod, credential: string): Promise<OfferRedeemResult>;
+}
+
+/** One settlement line from `partner_settlement_export_for_partner` (0060). */
+export interface SettlementLine {
+  readonly facilityId: string;
+  readonly month: string;
+  readonly funder: string;
+  readonly sponsorshipId: string | null;
+  readonly redemptions: number;
+  readonly offlineCount: number;
+  readonly unconfirmedCount: number;
+  readonly faceValueTotal: number;
+}
+export type SettlementExportStatus = "ok" | "empty";
+export interface SettlementExportResult {
+  readonly status: SettlementExportStatus;
+  readonly lines: readonly SettlementLine[];
+}
+
+/** One transaction as `edge_partner` for `settlement-export` (0060). Class A3; operator of the trail (or admin). */
+export interface PartnerSettlementExportTx {
+  /** POST export (class A3): settlement lines for a trail month. */
+  settlementExport(trailId: string, month: string): Promise<SettlementExportResult>;
+}
+
+/** Storage port for settlement files in the private `exports` bucket (AT(17)): upload + signed URL; purge is the system lane. */
+export interface ExportsStoragePort {
+  /** Upload bytes under `exports/` and return a time-limited signed URL (7 days). */
+  putSigned(path: string, body: Uint8Array, contentType: string, expiresInSeconds: number): Promise<{ readonly path: string; readonly signedUrl: string; readonly expiresAt: string }>;
+  /** Delete objects whose created_at is older than `olderThanMs` (epoch ms). Returns how many were removed. */
+  purgeOlderThan(olderThanMs: number): Promise<number>;
+}
+
 /**
  * One transaction as `edge_partner` for the `partner-entitlements` routes. Every method is a `_for_partner` definer that begins with `partner_authorize` (class A0 for the queue, A1 for the three writes);
  * staff or manager of the facility. The hand-over token PLAINTEXT never reaches this port: the handler passes the SHA-256 and the database stores only that.
@@ -754,6 +824,10 @@ export interface PartnerDb {
   withOffersAdmin<T>(tokenHash: string, op: (s: PartnerOffersAdminTx) => Promise<T>): Promise<T>;
   /** `withSession` for the `sponsorships-admin` routes (list, upsert, approve): the same bound transaction, the sponsorship definers of 0059 (S6). */
   withSponsorships<T>(tokenHash: string, op: (s: PartnerSponsorshipsTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `partner-offers-redeem` routes (queue, redeem): the same bound transaction, the offer-redeem definers of 0060 (P5.1b). */
+  withOffersRedeem<T>(tokenHash: string, op: (s: PartnerOffersRedeemTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `settlement-export` route: the same bound transaction, the settlement definer of 0060 (P5.1b). */
+  withSettlementExport<T>(tokenHash: string, op: (s: PartnerSettlementExportTx) => Promise<T>): Promise<T>;
   /** One hit of a per-member bucket, in its OWN short transaction, committed before any request transaction opens (the pool-deadlock rule of `hitRateLimitForActor`). */
   hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
   /** One hit of a SYSTEM bucket (design 8: nothing is bound before authentication, so the buckets keyed on an object the caller cannot choose, the invite token and the target mailbox, are `edge_system` buckets), in its own short transaction. */

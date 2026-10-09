@@ -2123,12 +2123,53 @@ Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOff
 
 ### 30.3 Not built, honestly
 
-- **Settlement-export AT(17)** and any P5.1b settlement writer (Edge half of programme/offers/sponsorships is built; settlement is not).
+- **Settlement-export AT(17)** and **offers-redeem** — moved to **§32 (P5.1b)**; not part of the S6 tip.
 - **Rollups-refresh writer** (rows are read-only here; ops/catalog still seed them).
-- **offers-redeem** and the issuance staff gate **AT(10)**.
+- **Issuance staff gate AT(10)** (deferred; see §32.3).
 - **S7d / S7c UI** (portal screens; §29 reserved for S7c).
 - **No mutation pass** was run for this slice.
 
 ### 30.4 Verification
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on tip `5782bd8`: matrix 37's **58/58** cells; all other pgTAP matrices (**5344** tests PASS across 57 files, including updated 10 / 24 / 25 / 28 inventory and grant cells); Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest programme / offers / sponsorships handler suites plus related PartnerDb fakes (**96** focused cells; broader partner handler run **268**). `definer_policy_exprs.txt` holds the fourteen `pd_partner_programme_*` policies. CI on PR #71 tip `e2b11ac`: all three checks green.
+
+## 32. As built: P5.1b (offers-redeem + settlement-export + exports-purge)
+
+Numbering: **migration `0060`, matrix `38`, this section 32.** S6 claims `0059` / matrix `37` / section 30; **§31 is reserved.** Nothing from 0001–0059 is edited.
+
+### 32.1 What was built
+
+**Migration `0060_partner_offers_settlement.sql`** (database half) and **matrix `38_partner_offers_settlement.sql`**, then Edge functions **`partner-offers-redeem`**, **`settlement-export`**, and **`exports-purge`**.
+
+- **Binding-keyed policies** (never a GUC): offer_code select/update (issued→redeemed), offer budget select/update, play guard read via `offer_code.play_id`, attestation insert `kind=offer_redemption`, consumed_nonce for `offer_redemption`, settlement SELECT of redeemed codes on a trail the bound operator runs (or admin).
+- **`GRANT EXECUTE` on `app.consume_offer_budget` TO `private_definer`**; `GRANT UPDATE (budget_used)` on `app.offer`.
+- **`private.partner_offers_redeem_for_partner`** (A1, staff/manager): status-before-`FOR UPDATE` (0058 ordering); method `staff_scan` (player check-in jti); `offline_code` refused with `22023`. Statuses: `ok | not_found | not_issued | expired | wrong_facility | token_invalid | wrong_player | replayed | no_facility | cold_start_cap | budget_short`. Apply helper consumes budget, writes `offer_redemption` attestation via `partner_attest_write`, updates the code.
+- **`private.partner_offers_queue_for_partner`** (A0): issued codes at the facility with player handle.
+- **`private.partner_settlement_export_for_partner`** (A3, operator-at-trail or admin): lines with `facility_id`, `month`, `funder`, `sponsorship_id`, `redemptions`, `offline_count`, `unconfirmed_count`, `face_value_total`. Statuses `ok | empty`.
+
+| Function | Routes |
+|---|---|
+| `partner-offers-redeem` | `GET queue`, `POST redeem` |
+| `settlement-export` | `POST export` → CSV under `exports/`, signed URL (7 days) |
+| `exports-purge` | `POST` (system lane, service-role bearer): delete `exports/` objects older than 7 days |
+
+Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx` / `withSettlementExport` (merged into `withPartnerSession`), `ExportsStoragePort` / `exportsStorage` (service-role `createSignedUrl` + purge). Status map: redeem `ok` → 201; settlement `ok` → 200 with `{ path, signedUrl, expiresAt, lines }`; `empty` → 404; `42501` → 403; `22023` → 422. Per-member buckets (`partner-offers-redeem:member` 240/h, `settlement-export:member` 60/h). System bucket `exports-purge` 12/h.
+
+### 32.2 Decisions and departures, and why
+
+- **Budget before attest** in the apply helper — avoids an orphan `offer_redemption` attestation if `consume_offer_budget` raises `check_violation` (`budget_short`).
+- **`offline_code` out of this slice** — Edge shape and database both refuse with 22023 / 400; the offline PIN + profile-card path stays a later seam.
+- **Settlement CSV always includes `sponsorship_id`** (empty when null) so AT(20) attribution is visible on every line.
+- **`exports-purge` is the AT(17) lifecycle** when native Storage lifecycle is unavailable in the harness; signed URL expiry matches the 7-day retention.
+
+### 32.3 Not built, honestly
+
+- **`offline_code` offer redeem** (PIN step-up + profile-card name check; `fraud_signal` / `unconfirmed` after 24 h).
+- **Issuance staff gate AT(10)** — not on today's activate path; export ↔ redemption reconcile half is covered by settlement lines matching planted redemptions (matrix 38).
+- **Rollups-refresh writer** (still out of scope; S6 seam).
+- **S7 UI** (portal screens).
+- **No mutation pass** was run for this slice.
+
+### 32.4 Verification
+
+See tip commit message / restricted harness log after matrix 38 and Edge vitest land. Claims in-slice: **AT(17)** (signed URL after A3 role check + 7-day purge), **AT(20)** (settlement lines carry `sponsorship_id` for sponsor funder), **AT(10)** reconcile half (export matches redemptions); issuance staff gate deferred (§32.3).

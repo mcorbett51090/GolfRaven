@@ -22,8 +22,8 @@ const PARTICIPATIONS = new Set(["invited", "accepted", "declined", "left"]);
 const CONNECTIVITIES = new Set(["ok", "weak", "none"]);
 const QR_MODES = new Set(["rotating", "static_pin", "both"]);
 
-function parseTrailId(v: unknown): string | null {
-  // a trail id has the catalog id alphabet of a facility id
+/** A trail id uses the same catalog alphabet as a facility id. Exported for settlement-export and other trail-scoped shapes. */
+export function parseTrailId(v: unknown): string | null {
   return parseFacilityId(v);
 }
 

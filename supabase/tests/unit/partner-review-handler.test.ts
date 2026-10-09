@@ -92,6 +92,8 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
     withProgramme: () => Promise.reject(new Error("unused")),
     withOffersAdmin: () => Promise.reject(new Error("unused")),
     withSponsorships: () => Promise.reject(new Error("unused")),
+    withOffersRedeem: () => Promise.reject(new Error("unused")),
+    withSettlementExport: () => Promise.reject(new Error("unused")),
     async withReview(_hash, op) {
       calls.push("withReview");
       if (state.throwOn === "session") throw new PartnerSessionRefused();

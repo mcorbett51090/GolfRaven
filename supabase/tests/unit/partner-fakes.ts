@@ -599,6 +599,8 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     withProgramme: () => Promise.reject(new Error("not used: the programme handler has its own fake (partner-programme-handler.test.ts)")),
     withOffersAdmin: () => Promise.reject(new Error("not used: the offers-admin handler has its own fake (partner-offers-handler.test.ts)")),
     withSponsorships: () => Promise.reject(new Error("not used: the sponsorships handler has its own fake (partner-sponsorships-handler.test.ts)")),
+    withOffersRedeem: () => Promise.reject(new Error("not used: the offers-redeem handler has its own fake (partner-offers-redeem-handler.test.ts)")),
+    withSettlementExport: () => Promise.reject(new Error("not used: the settlement-export handler has its own fake (partner-settlement-handler.test.ts)")),
     async hitRateLimit(hash, bucket, windowSeconds, max) {
       calls.push("db.hitRateLimit");
       rateLimitHits.push({ hash, bucket, windowSeconds, max });

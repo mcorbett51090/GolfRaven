@@ -95,3 +95,13 @@ verify_jwt = false
 # partner auth S6 (docs/security/partner-auth-design.md 4.5, 30): every route carries `Bearer gr_ps_...`, which is NOT a Supabase JWT, so the gateway's own JWT check must be off (see partner-session above).
 # A mistakenly ENABLED gateway check fails closed. The function authenticates every route itself (the hashed `gr_ps_` bearer, bound in the database by private.bind_partner_session).
 verify_jwt = false
+
+[functions.partner-offers-redeem]
+# partner auth P5.1b (docs/security/partner-auth-design.md 4.5, 32): every route carries `Bearer gr_ps_...`, which is NOT a Supabase JWT, so the gateway's own JWT check must be off (see partner-session above).
+# A mistakenly ENABLED gateway check fails closed. The function authenticates every route itself (the hashed `gr_ps_` bearer, bound in the database by private.bind_partner_session).
+verify_jwt = false
+
+[functions.settlement-export]
+# partner auth P5.1b (docs/security/partner-auth-design.md 4.5, 32; AT(17)): every route carries `Bearer gr_ps_...`, which is NOT a Supabase JWT, so the gateway's own JWT check must be off (see partner-session above).
+# A mistakenly ENABLED gateway check fails closed. The function authenticates every route itself (the hashed `gr_ps_` bearer, bound in the database by private.bind_partner_session).
+verify_jwt = false

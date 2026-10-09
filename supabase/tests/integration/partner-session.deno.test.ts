@@ -165,6 +165,8 @@ Deno.test("PA-10: OPTIONS never opens a database connection (a counting database
     withProgramme: (h, op) => (calls++, partnerDb.withProgramme(h, op)),
     withOffersAdmin: (h, op) => (calls++, partnerDb.withOffersAdmin(h, op)),
     withSponsorships: (h, op) => (calls++, partnerDb.withSponsorships(h, op)),
+    withOffersRedeem: (h, op) => (calls++, partnerDb.withOffersRedeem(h, op)),
+    withSettlementExport: (h, op) => (calls++, partnerDb.withSettlementExport(h, op)),
     hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
     hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
   };
@@ -233,6 +235,8 @@ Deno.test("PA-11: a Supabase JWT sent to the partner function is 401 on every se
     withProgramme: (h, op) => (calls++, partnerDb.withProgramme(h, op)),
     withOffersAdmin: (h, op) => (calls++, partnerDb.withOffersAdmin(h, op)),
     withSponsorships: (h, op) => (calls++, partnerDb.withSponsorships(h, op)),
+    withOffersRedeem: (h, op) => (calls++, partnerDb.withOffersRedeem(h, op)),
+    withSettlementExport: (h, op) => (calls++, partnerDb.withSettlementExport(h, op)),
     hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
     hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
   };
