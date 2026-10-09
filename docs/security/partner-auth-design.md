@@ -2111,7 +2111,7 @@ Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055`
 | `offers-admin` | `GET offers`, `POST offers`, `POST offers/approve`, `POST offers/end` |
 | `sponsorships-admin` | `GET sponsorships`, `POST sponsorships`, `POST sponsorships/approve` |
 
-Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOffersAdmin`, `PartnerSponsorshipsTx` / `withSponsorships` (merged into `withPartnerSession` like `withStock`). Upsert eligibility is checked with `validateOfferEligibility` from `packages/rules` **before** the database (AT(14)). Status map: `ok` → 200; `not_found` / `no_trail` / `not_draft` / `not_live` / `bad_funder` / `bad_sponsor` / `stock_short` / `invalid_eligibility` → 422; `42501` → 403; `22023` → 422. Per-member buckets (`programme-config:member`, `offers-admin:member`, `sponsorships-admin:member`, 240 an hour each).
+Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOffersAdmin`, `PartnerSponsorshipsTx` / `withSponsorships` (merged into `withPartnerSession` like `withStock`). Upsert eligibility is checked with the Edge-local AT(14) schema gate in `offer-eligibility.ts` (closed money-mode aggregate names; `packages/rules` remains the full SSOT outside Edge) **before** the database. Status map: `ok` → 200; `not_found` / `no_trail` / `not_draft` / `not_live` / `bad_funder` / `bad_sponsor` / `stock_short` / `invalid_eligibility` → 422; `42501` → 403; `22023` → 422. Per-member buckets (`programme-config:member`, `offers-admin:member`, `sponsorships-admin:member`, 240 an hour each).
 
 ### 30.2 Decisions and departures, and why
 

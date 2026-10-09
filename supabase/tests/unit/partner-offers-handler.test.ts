@@ -1,7 +1,7 @@
 // supabase/tests/unit/partner-offers-handler.test.ts
 //
 // The `offers-admin` handler and its strict shapes (docs/security/partner-auth-design.md 12, 30; AT(14); slice S6, the Edge half of 0059), against an in-memory `PartnerDb`. Eligibility is validated with
-// packages/rules before any port is opened.
+// the Edge-local AT(14) schema gate (offer-eligibility.ts) before any port is opened.
 
 import { describe, expect, it } from "vitest";
 import {

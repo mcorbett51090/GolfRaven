@@ -1,8 +1,8 @@
 // supabase/functions/_shared/partner/offers-handler.ts
 //
 // The `offers-admin` handler (docs/security/partner-auth-design.md 4.5, 6.3, 12, 30; slice S6, the Edge half of migration 0059). Pure and unit-testable like stock-handler.ts: the database
-// (`PartnerDb`) is a PORT (`ports.ts`); this file reads no environment, opens no connection and writes no log line (PA-11). Eligibility is validated with `validateOfferEligibility` (AT(14)) before any
-// database write.
+// (`PartnerDb`) is a PORT (`ports.ts`); this file reads no environment, opens no connection and writes no log line (PA-11). Eligibility is validated with the Edge-local `validateOfferEligibility`
+// (AT(14) schema gate in offer-eligibility.ts; packages/rules remains the full SSOT outside Edge) before any database write.
 //
 // ROUTES (relative to the function; `GET offers` is `/offers-admin/offers`):
 //   GET  offers           ?trailId=     class A0: full offer list
