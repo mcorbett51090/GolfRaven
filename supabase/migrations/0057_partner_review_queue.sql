@@ -319,12 +319,18 @@ BEGIN
 END
 $assert_0057_resolve$;
 
+-- function_inventory is FORCE RLS; UPDATE needs the 0041 / 0047 pattern (INSERT still uses the 0017 owner policy).
+GRANT UPDATE ON private.function_inventory TO CURRENT_USER;
+CREATE POLICY current_user_edit_function_inventory_0057 ON private.function_inventory
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 UPDATE private.function_inventory
 SET note = 'P3f / 0057 (S4): the §9.2 review decision on a held offer code; p_resolved_by must be an admin. service_role and private_definer (the A3 partner wrapper calls it); no edge role'
 WHERE schema_name = 'app' AND function_name = 'resolve_held_offer_code';
 UPDATE private.function_inventory
 SET note = 'P3f / 0057 (S4): the §9.2 review decision on a held entitlement; p_resolved_by must be an admin. service_role and private_definer (the A3 partner wrapper calls it); no edge role'
 WHERE schema_name = 'app' AND function_name = 'resolve_held_entitlement';
+DROP POLICY current_user_edit_function_inventory_0057 ON private.function_inventory;
+REVOKE UPDATE ON private.function_inventory FROM CURRENT_USER;
 
 -- ============================================================================
 -- 5. Registries
