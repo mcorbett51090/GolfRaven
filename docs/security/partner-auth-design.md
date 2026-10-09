@@ -2085,3 +2085,7 @@ Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055`
 - **Creating a stock row** from the partner lane (catalog/ops owns rows).
 - **Paired transfer** (transfer_out here + transfer_in there are two moves).
 - Merge notes: S2b still edits the same enumeration files; lists here include S3–S5 names.
+
+### 28.4 Verification run for this slice
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 36's **65/65** cells; all other pgTAP matrices (**5286** tests PASS); partner serialisation and review-account tool checks; Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest stock + entitlements handler suites (status map, hash-only hand-over token, strict shapes, bucket order). Remaining: CI on PR #69.
