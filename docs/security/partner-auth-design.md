@@ -2074,6 +2074,10 @@ Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055`
 - **Status gates read entitlements without `FOR UPDATE` first:** `SELECT FOR UPDATE` also applies UPDATE RLS, which only opens redeemable/vouchered rows, so a re-redeem of a redeemed row would otherwise look like `not_found`.
 - **Race for the last unit** is proved in-matrix by sequential redeems at `on_hand = 1` (CHECK + row lock). A two-session script is a documented seam if product wants an explicit parallel proof.
 
+- **The hand-over token is the Edge's.** `POST handover/mint` generates 32 random bytes (`gr_ho_` + 43 base64url characters), hands the port only the SHA-256 and returns the plaintext once in the 201 body. `POST redeem` with `method: "hand_over_token"` takes the plaintext as `credential` and hashes it before the port; a bare SHA-256 or a uuid is a 400 for that method, so the hash is never a credential a client can present.
+- **Status map (Edge).** Every returned status commits. mint and redeem `ok` 201, voucher `ok` 200, stock move `ok` 200; `not_found` / `no_facility` 404; `not_redeemable`, `wrong_facility`, `token_invalid`, `wrong_player`, `no_stock_row`, `short`, `over_cap`, `token_exists` 422; `replayed` and `out_of_stock` 409 (`out_of_stock` is a state conflict that changed nothing: the caller vouchers next); `cold_start_cap` 429; 42501 403; 22023 (self-redeem, malformed) 422 and a rollback. `token_invalid` and `wrong_player` are one code on the wire (`token_invalid`), as in `partner-attest`.
+- **Per-member bucket** (`stock-admin:member`, `partner-entitlements:member`, 240 an hour each), taken in its own transaction before the request transaction opens.
+
 ### 28.3 Not built, honestly
 
 - **`offline_code` redemption** and **offers-redeem** (P5.1b).
