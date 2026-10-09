@@ -729,7 +729,7 @@ Each slice is one or more PRs, each independently gateable and each with an "as 
 - PA-4: **serialisation binds**: with an action transaction open, a member revoke and a **scope DELETE** issued from a second connection each **wait** (seen in `pg_locks`) and complete only after the action commits; a revoke issued while the revoker already holds the session lock makes the action wait and then see the revoke. Staff at A acting at B is `403`; a revoked member's next call is `403` on a live session; **reactivation, a membership DELETE then re-INSERT, an org-delete cascade and an `admin_user` delete then insert do not revive old sessions**; deleting the scope row refuses the next call (AT 1, authentication half).
 - PA-4c: **the OR rule and the planted GUC.** (i) With **all** existing `private_definer` policies and grants installed (the `0016:255` and `0016:341` pair included), an UPDATE of the bound user's `partner_member` row under a partner binding, `SET revoked_at = NULL, role = 'manager', invited_by = NULL` in particular, is refused or affects 0 rows. (ii) **As `edge_partner`, plant every GUC the repository uses** (the retired `app.partner.authority_touch`, `app.delete_my_data.target_user_id`, `app.offline_code.target_device_id`, the sign-in proof purge window and the fix-coordinate purge window), then call **each partner definer that writes `partner_session`** (the eight writers above) against **another user's session**: expect **0 rows** every time. (iii) Re-run (i) and (ii) **on every policy S1.5 adds** on `partner_member`, `partner_scope`, `partner_session`, `admin_user` or `partner_credential`; a failing planted-GUC case is a gate failure.
 - PA-4d: **the guard trigger (R4-L1), one cell per row of its table.** Each of `user_id`, `credential_id`, `token_hash`, `created_at`, each `mint_*` column, `mint_kind` and `enrolment_until` cannot be changed by a partner-bound definer on its own session (including `SET user_id = <other>, aal = 2`, which the author showed succeeds under the bare policy); `expires_at` cannot increase; `revoked_at` cannot go back to NULL; `aal` 2 and `mfa_until` are refused without a same-transaction TOTP verification and accepted with one; `pin_grant_until` is refused without a same-transaction correct PIN verification, refused above now + 60 s, and clearing is accepted; `reauth_until` is refused without a same-transaction `reauth` challenge row for this session; `otp_proof_until` is refused without a fresh GoTrue session for this user; `last_seen_at` cannot decrease.
-- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included. **(As built: S1.3 enabled A2, so the cell now reads "A3 is refused for every actor, admin included, and A2 is refused without its prerequisites": `25_partner_auth_spine.sql` PA-4b and `28_partner_pin_step_up.sql` section 5. A3 stays fail-closed until S1.4.)**
+- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included. **(As built: S1.3 enabled A2; S1.4 enabled A3. The cell now reads that A2 and A3 are refused without their prerequisites, not that the classes themselves are closed: `25_partner_auth_spine.sql` PA-4b, `28_partner_pin_step_up.sql` section 5, and `31_partner_totp_aal2.sql`.)**
 - PA-5: a facility org with a second scope row, or a non-facility scope, is refused by the trigger; a `sponsor` role in a facility org, or `staff` in an operator org, is refused.
 - PA-6: every view and table in 5.5 answers "denied" to `authenticated` for every actor, including `staff@X` with a valid JWT; `api.offer` and `api.my_offers()` return only live offers with NULL budget and eligibility columns **to a scoped member too**; a draft offer is invisible to a scoped member through every PostgREST path.
 - PA-7: the same signed challenge presented to 12 concurrent mints succeeds once (primary-key refusal); an expired, wrong-purpose, wrong-binding or tampered-HMAC challenge is refused; the HMAC encoding is pinned by a vector computed outside the database (as 0045's derivation is); `session/options` called 10,000 times leaves the `partner_auth_challenge` row count unchanged.
@@ -1812,3 +1812,70 @@ Gate counts, round 2:
 - DB harness, both modes: 41 files / 4164 pgTAP, Deno 349 passed / 0 failed.
 - gitleaks clean.
 - Mutants: 21 of 22 valid killed; 1 equivalent survivor.
+
+## 21. As built: S1.4
+
+### 21.1 What was built
+
+The partner (staff) **operator/admin TOTP factor**: `aal` 2, the five-minute MFA window, and class **A3** enabled.
+
+- **migration `0053_partner_totp_aal2.sql`** (all `CREATE` plus `CREATE OR REPLACE` of `partner_authorize`, `partner_session_lock_for_partner`, and the otp-proof / reauth / `GET pin` wrappers reclassed to `A0_ENROL`; 0001–0052 untouched):
+  - **`private.hotp`** (RFC 4226 over `public.hmac`, IMMUTABLE) and **`private.partner_totp_seed_derive`** (Vault secret `partner_totp_key`, fixed-width label `golfraven/partner-totp/v1` ‖ 0x00 ‖ user id ‖ `int4send(seed_version)`; the 0045 / 0052 derive shape). The seed is **derived, never stored**.
+  - **`app.partner_totp`**: one row per person (`user_id` PK), `seed_version`, enrolment / confirm state, `last_step` (replay), lockout counters. FORCE RLS; every privilege revoked from PUBLIC, `anon`, `authenticated` and `service_role`; **no Edge or client grant**. Written only by definers owned by **`partner_totp_verifier`** (R5-L1: the only role that may write `aal` / `mfa_until`).
+  - **Verifier-owned cores**: `partner_totp_attempt` / `verify_apply` / `enrol_apply` / `confirm_apply` / `mfa_clear` / `reset_apply`. Every counter outcome is a **returned status**, never a RAISE (0020). **`verify_apply` is the only code that sets `aal = 2` and `mfa_until = now + 5 min`.**
+  - **`partner_authorize`**: classes **`A0_MFA`** (always reachable at `aal` 1 so an operator/admin can step up) and **`A0_ENROL`** (reachable at `aal` 1 **only while** the person has no confirmed TOTP — PA-20 / PA-28); **A3 enabled** (`aal` 2 and `mfa_until > now()`); A1 / A2 accept A3 as the substitute for a PIN-less elevated member (6.3).
+  - **`_for_partner` family**: `totp` enrol / confirm / verify / reset; `partner_admin_enrolment_issue_for_partner` (A3); lock clears `mfa_until` through `partner_totp_mfa_clear`; otp-proof, reauth and `GET pin` reclassed to `A0_ENROL`.
+  - **Admin bootstrap (M4):** `private.partner_admin_bootstrap_token` (EXECUTE for nobody: ops SQL session as owner after inserting `admin_user`) and the A3 admin-issue wrapper.
+  - **`otp_proof` spend on TOTP enrol/confirm** (19.5 / MEDIUM-1 shape): each wrapper clears `otp_proof_until` in the same transaction on the `ok` outcome only.
+- **Edge**, `_shared/partner/`: **`totp-contract.ts`** (HOTP-SHA-1, base32 seed, otpauth URI; Web Crypto only); `ports.ts`, `session-shape.ts` and `session-handler.ts` carry the three routes. The Edge builds the otpauth URI from the seed bytea + params the database returns once; it never sees the Vault key.
+- **Routes** on `partner-session` (all POST; a dead session is the one 401 before any work):
+
+| Route | Class | Body | Answers |
+|---|---|---|---|
+| `POST totp/enrol` | A0_ENROL | `{}` | 200 `{ seed` (unpadded base32), `seedVersion`, `otpauthUrl`, `issuer`, `period`, `digits`, `algo` `}`; 409 `totp_already_confirmed`; 403 without enrolment window or email proof; 503 when Vault key missing |
+| `POST totp/confirm` | A0_ENROL | `{ code }` (exactly 6 digits) | 200 `{ confirmed: true }`; 403 `totp_wrong` / `totp_locked` (+ `Retry-After`); 409 `totp_not_set` / `totp_already_confirmed` / `totp_wrong_session` |
+| `POST step-up/totp` | A0_MFA | `{ code }` (exactly 6 digits) | 200 `{ mfaUntil, aal: 2 }`; 403 `totp_wrong` / `totp_locked`; 429 `totp_backoff`; 409 `totp_not_set` / `totp_unconfirmed` |
+
+  Every body is length-and-encoding only; unknown keys are 400 before any database work. Refusals the database returns **commit** (failure counters and lockout persist).
+- **pgTAP** `supabase/tests/matrix/31_partner_totp_aal2.sql` (plan 84): PA-20, PA-24, PA-28 against an independent seed / HOTP oracle.
+
+### 21.2 Brief item, fix, test
+
+| ID | Fix | Test |
+|---|---|---|
+| **PA-20** (HOTP, aal, A3) | SQL `private.hotp` = RFC 4226; `verify_apply` sets aal 2 + `mfa_until`; A0_MFA always / A0_ENROL while unconfirmed; A3 needs aal2 + fresh MFA; PIN-less A1/A2 substitution | matrix 31 (RFC / independent oracle, replay, ±1 step, lockout as status, aal 1 refusals, A3 cells); unit `partner-totp-vectors.test.ts` (RFC 6238 Appendix B SHA-1 → 6-digit truncation) |
+| **PA-24** (enrol / confirm / reset) | enrol refused once confirmed; first enrol needs enrolment or OTP proof; unconfirmed re-enrol bumps seed; confirm same session only; reset admin-only lite | matrix 31; unit `partner-totp-handler.test.ts` (enrol body, already_confirmed 409, confirm session statuses) |
+| **PA-28** (aal 1 enrol window) | A0_ENROL at aal 1 only with no confirmed TOTP; after confirm the same calls refuse at aal 1 | matrix 31 |
+| **HOTP RFC vector** | TypeScript `hotpSha1` matches node:crypto reference and the six Appendix B counters | `partner-totp-vectors.test.ts` |
+| **Lock clears `mfa_until`** | `partner_session_lock_for_partner` calls `partner_totp_mfa_clear` (verifier-owned) | matrix 31 (and the migration grants assertion) |
+| **`otp_proof` spend on enrol/confirm** | wrappers clear `otp_proof_until` on `ok` only (same transaction) | matrix 31 |
+| **Edge routes** | strict bodies, status→HTTP map, COMMIT on every status, otpauth assembly, Origin refusal | `partner-totp-handler.test.ts` |
+
+### 21.3 Departures from sections 4 to 6, and why
+
+- **D1. TOTP reset reach is admin-only lite (intentional).** Section 6.4's full higher-role reach rule (which admin may reset which operator/admin, and alerts) is **S1.5**. This slice's `partner_totp_reset_for_partner` is class A3, **admin-only**, target must be a different operator or admin; sessions of the target are revoked. The Edge **port** exists; no public `members/{id}/totp-reset` route is wired on `partner-session` yet (21.4).
+- **D2. The Edge assembles otpauth; the database returns seed + params.** Section 6.4's QR is a client concern. The migration returns `seed` bytea once plus issuer / period / digits / algo; `totp-contract.ts` builds the URI. No departure of substance.
+- **No other intentional departures** from §4.1 (aal gates / the aal 1 enrol exception), §5.1 (`partner_totp` derived seed) or §6.3–6.4 (HOTP, confirm-in-enrolling-session, A3, admin bootstrap) for what this slice built.
+
+### 21.4 Seams left for later slices
+
+- **S1.5, full reach / reset alerts.** Replace the admin-lite reset with the design's higher-role reach; alert on reset (and related membership events).
+- **PA-29, last-membership TOTP delete.** Revoking the last active membership of a user in `admin_user` must delete their PIN but **not** their TOTP; for a non-admin both go. Not built here.
+- **Edge public `members/{id}/totp-reset` route.** The database wrapper and the session port exist; the handler has no public path yet.
+- **PWA TOTP screens (S7).** Enrol QR, confirm, and step-up prompt; `apps/partners` still shows aal below required on the home and keeps screens closed — no TOTP UI in S7a.
+- **Fixture regen** if check / allow-list snapshots need a fresh catalog pass after merge (same pattern as 0050 / 0052).
+- **Operator steps at deploy:** provision Vault secret `partner_totp_key` (at least 32 random bytes; without it every TOTP route answers 503) and keep it in the secrets backup; first admin via `partner_admin_bootstrap_token` after `admin_user` insert.
+
+### 21.5 Verification run for this slice
+
+**Honest limit:** the full DB harness (`tools/db/test.sh`, both modes) and matrix 31 were **not** run end-to-end in this documentation pass. Matrix 31 (`plan(84)`) and migration 0053 are on the branch; do not treat pgTAP counts as observed here.
+
+What **did** pass in this environment (Node 24, vitest against the supabase unit config):
+
+| Suite | Result |
+|---|---|
+| `partner-totp-handler.test.ts` | pass (with `partner-totp-vectors`) |
+| `partner-totp-vectors.test.ts` | pass (RFC 6238 Appendix B SHA-1 vectors + otpauth assembly) |
+| **Combined** | **2 files, 22 tests, all pass** |
+
+A later harness / Deno integration run should record file and test counts here the way 19.7 and 18.7 do; until then only the unit figures above are claimed.
