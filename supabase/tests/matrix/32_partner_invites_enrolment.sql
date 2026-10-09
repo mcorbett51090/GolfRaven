@@ -13,7 +13,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(478);
+SELECT plan(483);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -38,6 +38,7 @@ CREATE POLICY zz32_audit ON app.audit_log FOR SELECT TO CURRENT_USER USING (true
 INSERT INTO app.partner_rp_config (rp_id, origin) VALUES ('partners.example.test', 'https://partners.example.test');
 
 -- principals made here (fixed ids, ee32...): a manager at Y, a second admin, a person at both X and Y, a staff member who is also an admin, a person with no membership, a second operator, three people to invite
+SET LOCAL ROLE service_role;
 INSERT INTO auth.users (id, email, email_confirmed_at) VALUES
   ('ee320000-0000-0000-0000-000000000001', 'manager-y@example.test', now()),
   ('ee320000-0000-0000-0000-000000000002', 'admin2@example.test', now()),
@@ -45,17 +46,24 @@ INSERT INTO auth.users (id, email, email_confirmed_at) VALUES
   ('ee320000-0000-0000-0000-000000000004', 'staff-admin@example.test', now()),
   ('ee320000-0000-0000-0000-000000000005', 'nomember@example.test', now()),
   ('ee320000-0000-0000-0000-000000000006', 'operator2@example.test', now()),
+  ('ee320000-0000-0000-0000-000000000007', 'rv@example.test', now()),
+  ('ee320000-0000-0000-0000-000000000008', 'rc@example.test', now()),
+  ('ee320000-0000-0000-0000-000000000009', 'em@example.test', now()),
+  ('ee320000-0000-0000-0000-00000000000a', 'eu@example.test', NULL),
   ('ee320000-0000-0000-0000-000000000011', 'newbie1@example.test', now()),
   ('ee320000-0000-0000-0000-000000000012', 'newbie2@example.test', now()),
   ('ee320000-0000-0000-0000-000000000013', 'unconfirmed@example.test', NULL);
-UPDATE auth.users SET email_confirmed_at = now() WHERE id IN ('00000000-0000-0000-0000-1000000000a1', '00000000-0000-0000-0000-1000000000a2', '00000000-0000-0000-0000-1000000000a3',
-  '00000000-0000-0000-0000-2000000000b1', '00000000-0000-0000-0000-3000000000c1', '00000000-0000-0000-0000-4000000000d0');
+RESET ROLE;
 INSERT INTO app.partner_member (user_id, org_id, role, invited_by) VALUES
   ('ee320000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002', 'manager', NULL),
   ('ee320000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000001', 'staff', NULL),
   ('ee320000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000002', 'staff', NULL),
   ('ee320000-0000-0000-0000-000000000004', '10000000-0000-0000-0000-000000000001', 'staff', NULL),
-  ('ee320000-0000-0000-0000-000000000006', '10000000-0000-0000-0000-000000000003', 'operator', NULL);
+  ('ee320000-0000-0000-0000-000000000006', '10000000-0000-0000-0000-000000000003', 'operator', NULL),
+  ('ee320000-0000-0000-0000-000000000008', '10000000-0000-0000-0000-000000000001', 'staff', NULL),
+  ('ee320000-0000-0000-0000-000000000009', '10000000-0000-0000-0000-000000000001', 'staff', NULL),
+  ('ee320000-0000-0000-0000-00000000000a', '10000000-0000-0000-0000-000000000001', 'staff', NULL);
+INSERT INTO app.partner_member (user_id, org_id, role, invited_by, revoked_at) VALUES ('ee320000-0000-0000-0000-000000000007', '10000000-0000-0000-0000-000000000001', 'staff', NULL, now());
 INSERT INTO app.admin_user (user_id) VALUES ('ee320000-0000-0000-0000-000000000002'), ('ee320000-0000-0000-0000-000000000004');
 
 CREATE FUNCTION pg_temp.th(p_label text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$ SELECT md5('s32:' || p_label) || md5('s32b:' || p_label) $f$;
@@ -125,8 +133,14 @@ $f$;
 CREATE FUNCTION pg_temp.us_of(p_t timestamptz) RETURNS bigint LANGUAGE sql AS $f$ SELECT (extract(epoch FROM p_t) * 1000000)::bigint $f$;
 CREATE FUNCTION pg_temp.b64u(p_b bytea) RETURNS text LANGUAGE sql AS $f$ SELECT rtrim(translate(encode(p_b, 'base64'), E'+/\n', '-_'), '=') $f$;
 -- a GoTrue session row for a person, `p_age` old
-CREATE FUNCTION pg_temp.gotrue(p_uid uuid, p_age interval DEFAULT interval '5 seconds') RETURNS uuid LANGUAGE sql AS $f$
-  INSERT INTO auth.sessions (id, user_id, created_at) VALUES (gen_random_uuid(), p_uid, now() - p_age) RETURNING id
+CREATE FUNCTION pg_temp.gotrue(p_uid uuid, p_age interval DEFAULT interval '5 seconds') RETURNS uuid LANGUAGE plpgsql AS $f$
+DECLARE g uuid;
+BEGIN
+  EXECUTE 'SET LOCAL ROLE service_role';
+  INSERT INTO auth.sessions (id, user_id, created_at) VALUES (gen_random_uuid(), p_uid, now() - p_age) RETURNING id INTO g;
+  EXECUTE 'RESET ROLE';
+  RETURN g;
+END
 $f$;
 -- the WebAuthn create ceremony, byte by byte (design 6.1, R4-L2): the COSE key, authenticatorData, the attestation object (fmt none) and clientDataJSON
 CREATE FUNCTION pg_temp.cose(p_x bytea DEFAULT decode(repeat('11', 32), 'hex'), p_y bytea DEFAULT decode(repeat('22', 32), 'hex')) RETURNS bytea LANGUAGE sql AS $f$
@@ -220,9 +234,9 @@ SELECT is((SELECT count(*)::int FROM (VALUES ('private.partner_reach_covers(uuid
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname IN ('partner_challenge_core', 'partner_challenge_verify')), 4,
   'the 5-argument partner_challenge_core / _verify (the matrix 26 vectors) still exist next to the two 8-argument overloads');
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE note LIKE '0054%' OR function_name IN ('partner_totp_reset_for_partner')), 39 + 1, 'registry: the 39 new 0054 functions (37 definers, 2 trigger functions) have a function_inventory row (and the replaced totp reset keeps its 0053 one)');
-SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r')), 35, 'registry: the 35 new 0054 policies are in private.definer_policy_allowlist');
-SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r')
-            AND (coalesce(using_expr, '') || coalesce(with_check_expr, '')) ~* 'current_setting|pg_settings'), 0, 'registry: none of the 35 reads a setting (every one is keyed on the binding, a row state, or the rule in the data)');
+SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_admin_issue', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r')), 36, 'registry: the 36 new 0054 policies are in private.definer_policy_allowlist');
+SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_admin_issue', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r')
+            AND (coalesce(using_expr, '') || coalesce(with_check_expr, '')) ~* 'current_setting|pg_settings'), 0, 'registry: none of the 36 reads a setting (every one is keyed on the binding, a row state, or the rule in the data)');
 
 -- ----------------------------------------------------------------------------
 -- 2. THE REGISTER CHALLENGE (5.1, PA-7b): the 8-argument HMAC against an independent oracle; refs only for purpose 2
@@ -307,6 +321,7 @@ CREATE FUNCTION pg_temp.u(p_who text) RETURNS uuid LANGUAGE sql IMMUTABLE AS $f$
     WHEN 'mx' THEN '00000000-0000-0000-0000-2000000000b1' WHEN 'mxr' THEN '00000000-0000-0000-0000-2000000000b2' WHEN 'op' THEN '00000000-0000-0000-0000-3000000000c1' WHEN 'ad' THEN '00000000-0000-0000-0000-4000000000d0'
     WHEN 'my' THEN 'ee320000-0000-0000-0000-000000000001' WHEN 'ad2' THEN 'ee320000-0000-0000-0000-000000000002' WHEN 'mu' THEN 'ee320000-0000-0000-0000-000000000003'
     WHEN 'sa' THEN 'ee320000-0000-0000-0000-000000000004' WHEN 'nm' THEN 'ee320000-0000-0000-0000-000000000005' WHEN 'op2' THEN 'ee320000-0000-0000-0000-000000000006'
+    WHEN 'rv' THEN 'ee320000-0000-0000-0000-000000000007' WHEN 'rc' THEN 'ee320000-0000-0000-0000-000000000008' WHEN 'em' THEN 'ee320000-0000-0000-0000-000000000009' WHEN 'eu' THEN 'ee320000-0000-0000-0000-00000000000a'
     WHEN 'nb1' THEN 'ee320000-0000-0000-0000-000000000011' WHEN 'nb2' THEN 'ee320000-0000-0000-0000-000000000012' WHEN 'nbu' THEN 'ee320000-0000-0000-0000-000000000013' END::uuid
 $f$;
 CREATE FUNCTION pg_temp.reach(p_actor text, p_target text) RETURNS boolean LANGUAGE plpgsql AS $f$
@@ -545,7 +560,7 @@ SELECT pg_temp.mk_inv('nr', '10000000-0000-0000-0000-000000000001', 'staff', 'ne
 SELECT pg_temp.mk_inv('na', '10000000-0000-0000-0000-000000000001', 'staff', 'newbie1@example.test') AS inv_na \gset
 SELECT pg_temp.mk_inv('nm', '10000000-0000-0000-0000-000000000001', 'staff', 'multi@example.test') AS inv_nm \gset
 SELECT pg_temp.mk_inv('nad', '10000000-0000-0000-0000-000000000001', 'staff', 'admin2@example.test') AS inv_nad \gset
-SELECT pg_temp.mk_inv('nrv', '10000000-0000-0000-0000-000000000001', 'manager', 'staff-x-revoked@example.test') AS inv_nrv \gset
+SELECT pg_temp.mk_inv('nrv', '10000000-0000-0000-0000-000000000001', 'manager', 'rv@example.test') AS inv_nrv \gset
 SELECT pg_temp.fix(format($$UPDATE app.partner_invite SET created_at = now() - interval '2 days', expires_at = now() - interval '1 hour' WHERE id = %L$$, :'inv_nx'));
 UPDATE app.partner_invite SET revoked_at = now(), revoked_by = '00000000-0000-0000-0000-2000000000b1' WHERE id = :'inv_nr';
 UPDATE app.partner_invite SET accepted_at = now() - interval '1 hour', accepted_by = 'ee320000-0000-0000-0000-000000000012' WHERE id = :'inv_na';
@@ -640,11 +655,11 @@ SELECT is(pg_temp.accept_n('n1', 'nb1', :'g_nb1'), 'not_found', 'PA-14: the toke
 ROLLBACK TO SAVEPOINT acc_ok;
 
 SAVEPOINT acc_reactivate;
-SELECT pg_temp.gotrue('00000000-0000-0000-0000-1000000000a2') AS g_sxr \gset
-SELECT is(pg_temp.accept_n('nrv', 'sxr', :'g_sxr'), 'ok', '6.1: a REVOKED member is accepted again');
-SELECT is((SELECT (role::text, revoked_at IS NULL)::text FROM app.partner_member WHERE user_id = '00000000-0000-0000-0000-1000000000a2' AND org_id = '10000000-0000-0000-0000-000000000001'), '(manager,t)',
+SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000007') AS g_rv \gset
+SELECT is(pg_temp.accept_n('nrv', 'rv', :'g_rv'), 'ok', '6.1: a REVOKED member is accepted again');
+SELECT is((SELECT (role::text, revoked_at IS NULL)::text FROM app.partner_member WHERE user_id = 'ee320000-0000-0000-0000-000000000007' AND org_id = '10000000-0000-0000-0000-000000000001'), '(manager,t)',
   '6.1: the membership is REACTIVATED with the INVITE''s role (manager), not the old one');
-SELECT is((SELECT count(*)::int FROM app.partner_member WHERE user_id = '00000000-0000-0000-0000-1000000000a2'), 1, '... in place: still one row');
+SELECT is((SELECT count(*)::int FROM app.partner_member WHERE user_id = 'ee320000-0000-0000-0000-000000000007'), 1, '... in place: still one row');
 ROLLBACK TO SAVEPOINT acc_reactivate;
 
 -- ----------------------------------------------------------------------------
@@ -945,7 +960,9 @@ SELECT pg_temp.bind(:'th_ad2');
 SELECT is(pg_temp.call_a2('ad2', format($q$SELECT o_status FROM private.partner_member_recover_for_partner('00000000-0000-0000-0000-4000000000d0', %L)$q$, pg_temp.hh('rec15'))), 'ok', 'PA-25: ... and another admin recovers the first');
 ROLLBACK TO SAVEPOINT recover_admin2;
 SAVEPOINT recover_noemail;
+SET LOCAL ROLE service_role;
 INSERT INTO auth.users (id, email) VALUES ('ee320000-0000-0000-0000-0000000000f1', NULL);
+RESET ROLE;
 INSERT INTO app.partner_member (user_id, org_id, role) VALUES ('ee320000-0000-0000-0000-0000000000f1', '10000000-0000-0000-0000-000000000001', 'staff');
 SELECT pg_temp.bind(:'th_mx');
 SELECT is(pg_temp.call_a2('mx', format($q$SELECT o_status FROM private.partner_member_recover_for_partner('ee320000-0000-0000-0000-0000000000f1', %L)$q$, pg_temp.hh('rec16'))), 'no_email', 'a person with no auth email cannot be sent a recovery token: a status, nothing written');
@@ -993,6 +1010,18 @@ SELECT pg_temp.bind(:'th_sx');
 SELECT throws_ok($t$SELECT pg_temp.call_a2('sx', $q$SELECT o_status FROM private.partner_pin_reset_for_partner('00000000-0000-0000-0000-1000000000a1')$q$)$t$, '42501', 'partner_authorize: no scope', 'staff cannot reset a PIN, not even their own (the unlock is a manager action)');
 ROLLBACK TO SAVEPOINT pinreset_staff;
 
+-- the people the enrolment and branch-E flows need (confirmed mailboxes; made here because the harness cannot confirm an existing auth.users row): a recoverable staff member with two credentials,
+-- a signed-in member with two credentials and two sessions (branch E), and one whose mailbox is NOT confirmed
+SELECT pg_temp.mk_cred('rc1', 'ee320000-0000-0000-0000-000000000008');
+SELECT pg_temp.mk_cred('rc2', 'ee320000-0000-0000-0000-000000000008');
+SELECT pg_temp.mk_cred('em1', 'ee320000-0000-0000-0000-000000000009') AS c_em \gset
+SELECT pg_temp.mk_cred('em2', 'ee320000-0000-0000-0000-000000000009');
+SELECT pg_temp.mk_cred('eu1', 'ee320000-0000-0000-0000-00000000000a') AS c_eu \gset
+SELECT pg_temp.mk_session('em', 'ee320000-0000-0000-0000-000000000009', :'c_em') AS s_em \gset
+SELECT pg_temp.mk_session('emb', 'ee320000-0000-0000-0000-000000000009', :'c_em') AS s_emb \gset
+SELECT pg_temp.mk_session('eu', 'ee320000-0000-0000-0000-00000000000a', :'c_eu') AS s_eu \gset
+SELECT pg_temp.th('em') AS th_em, pg_temp.th('eu') AS th_eu \gset
+
 -- ----------------------------------------------------------------------------
 -- 8. ENROLMENT TOKENS (6.1, 6.4, 6.5): recover and admin tokens, accepted in the same order; first credential for a PERSON (ref kind 2)
 -- ----------------------------------------------------------------------------
@@ -1000,16 +1029,16 @@ CREATE FUNCTION pg_temp.mk_tok(p_label text, p_uid uuid, p_purpose text, p_by uu
   INSERT INTO app.partner_enrolment_token (user_id, purpose, issued_by, token_hash, created_at, expires_at)
   VALUES (p_uid, p_purpose, p_by, encode(sha256(convert_to('h32:' || p_label, 'UTF8')), 'hex'), now(), now() + interval '24 hours') RETURNING id
 $f$;
-SELECT pg_temp.mk_tok('tk1', '00000000-0000-0000-0000-1000000000a1', 'recover') AS tok_rec \gset
+SELECT pg_temp.mk_tok('tk1', 'ee320000-0000-0000-0000-000000000008', 'recover') AS tok_rec \gset
 SELECT pg_temp.mk_tok('tk2', 'ee320000-0000-0000-0000-000000000004', 'admin', NULL) AS tok_adm \gset
 SELECT pg_temp.mk_tok('tk3', 'ee320000-0000-0000-0000-000000000011', 'admin', '00000000-0000-0000-0000-4000000000d0') AS tok_badadm \gset
 SELECT pg_temp.mk_tok('tk4', 'ee320000-0000-0000-0000-000000000005', 'recover') AS tok_nomem \gset
 SELECT pg_temp.mk_tok('tk5', 'ee320000-0000-0000-0000-000000000013', 'recover') AS tok_unc \gset
-SELECT pg_temp.mk_tok('tk6', '00000000-0000-0000-0000-1000000000a1', 'recover') AS tok_exp \gset
-SELECT pg_temp.mk_tok('tk7', '00000000-0000-0000-0000-1000000000a1', 'recover') AS tok_rev \gset
+SELECT pg_temp.mk_tok('tk6', 'ee320000-0000-0000-0000-000000000008', 'recover') AS tok_exp \gset
+SELECT pg_temp.mk_tok('tk7', 'ee320000-0000-0000-0000-000000000008', 'recover') AS tok_rev \gset
 SELECT pg_temp.fix(format($$UPDATE app.partner_enrolment_token SET created_at = now() - interval '2 days', expires_at = now() - interval '1 day' WHERE id = %L$$, :'tok_exp'));
 UPDATE app.partner_enrolment_token SET revoked_at = now() WHERE id = :'tok_rev';
-SELECT is(pg_temp.email_for('token', 'tk1'), '1:staff-x@example.test', 'email_for_token returns the PERSON''S OWN auth email for a live token');
+SELECT is(pg_temp.email_for('token', 'tk1'), '1:rc@example.test', 'email_for_token returns the PERSON''S OWN auth email for a live token');
 SELECT is(pg_temp.email_for('token', 'tk6') || '|' || pg_temp.email_for('token', 'tk7') || '|' || pg_temp.email_for('token', 'zz-unknown'), '0:|0:|0:', 'an expired, a revoked and an unknown token are one answer: no row');
 SELECT throws_ok($$SET LOCAL ROLE edge_partner_minter; SELECT * FROM private.partner_enrolment_token_email_for_token('x')$$, '22023', 'partner_enrolment_token_email_for_token: a 64-hex token hash is required', 'a malformed hash is 22023');
 RESET ROLE;
@@ -1018,39 +1047,39 @@ SELECT throws_ok(format($$SELECT pg_temp.bind(%L); SET LOCAL ROLE edge_partner_m
 RESET ROLE;
 
 SAVEPOINT tok_statuses;
-SELECT pg_temp.gotrue('00000000-0000-0000-0000-1000000000a1') AS g_sx \gset
+SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000008') AS g_rc \gset
 SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000011') AS g_nb1 \gset
 SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000013') AS g_nbu \gset
 SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000005') AS g_nm \gset
-SELECT pg_temp.gotrue('00000000-0000-0000-0000-1000000000a1', interval '5 minutes') AS g_sx_old \gset
-SELECT is(pg_temp.accept_t('tk6', 'sx', :'g_sx') || '|' || pg_temp.accept_t('tk7', 'sx', :'g_sx') || '|' || pg_temp.accept_t('zz-unknown', 'sx', :'g_sx'), 'not_found|not_found|not_found', 'PA-14: expired, revoked and unknown tokens are one not_found');
+SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000008', interval '5 minutes') AS g_rc_old \gset
+SELECT is(pg_temp.accept_t('tk6', 'rc', :'g_rc') || '|' || pg_temp.accept_t('tk7', 'rc', :'g_rc') || '|' || pg_temp.accept_t('zz-unknown', 'rc', :'g_rc'), 'not_found|not_found|not_found', 'PA-14: expired, revoked and unknown tokens are one not_found');
 SELECT is(pg_temp.accept_t('tk1', 'nb1', :'g_nb1'), 'email_mismatch', 'a verified uid that is NOT the token''s person is a status (email_mismatch), never a RAISE');
 SELECT is((SELECT attempts::text FROM app.partner_enrolment_token WHERE id = :'tok_rec'), '1', '... and the attempt count is written (it commits)');
 SELECT is(pg_temp.accept_t('tk5', 'nbu', :'g_nbu'), 'email_unconfirmed', 'an unconfirmed mailbox is refused');
-SELECT is(pg_temp.accept_t('tk1', 'sx', :'g_sx_old'), 'session_stale', 'a stale GoTrue session is refused');
-SELECT is(pg_temp.accept_t('tk1', 'sx', :'g_sx'), 'existing_member_sign_in', 'PA-16: email OTP alone does NOT add a credential to a person with an ACTIVE one (staff_x has two)');
+SELECT is(pg_temp.accept_t('tk1', 'rc', :'g_rc_old'), 'session_stale', 'a stale GoTrue session is refused');
+SELECT is(pg_temp.accept_t('tk1', 'rc', :'g_rc'), 'existing_member_sign_in', 'PA-16: email OTP alone does NOT add a credential to a person with an ACTIVE one (the person has two)');
 SELECT is((SELECT consumed_at IS NULL FROM app.partner_enrolment_token WHERE id = :'tok_rec'), true, 'PA-16: ... and the token is not consumed');
 SELECT is(pg_temp.accept_t('tk3', 'nb1', :'g_nb1'), 'refused', 'an ADMIN token for a person who is not in admin_user is refused');
 SELECT is(pg_temp.accept_t('tk4', 'nm', :'g_nm'), 'refused', 'a RECOVER token for a person with no active membership who is not an admin is refused');
 SELECT count(*) FROM generate_series(1, 1) \gset
 SELECT sum((pg_temp.accept_t('tk1', 'nb1', :'g_nb1') = 'email_mismatch')::int) AS n9 FROM generate_series(1, 9) i \gset
-SELECT is(pg_temp.accept_t('tk1', 'sx', :'g_sx'), 'locked', 'PA-14: after ten attempts the token is locked, whoever presents it');
+SELECT is(pg_temp.accept_t('tk1', 'rc', :'g_rc'), 'locked', 'PA-14: after ten attempts the token is locked, whoever presents it');
 ROLLBACK TO SAVEPOINT tok_statuses;
 
 SAVEPOINT tok_recover_ok;
-UPDATE app.partner_credential SET revoked_at = now() WHERE user_id = '00000000-0000-0000-0000-1000000000a1';
-SELECT pg_temp.gotrue('00000000-0000-0000-0000-1000000000a1') AS g_sx \gset
-SELECT is(pg_temp.accept_t('tk1', 'sx', :'g_sx'), 'ok', 'PA-25: after recovery (no active credential) the person accepts the recover token');
+UPDATE app.partner_credential SET revoked_at = now() WHERE user_id = 'ee320000-0000-0000-0000-000000000008';
+SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000008') AS g_rc \gset
+SELECT is(pg_temp.accept_t('tk1', 'rc', :'g_rc'), 'ok', 'PA-25: after recovery (no active credential) the person accepts the recover token');
 SELECT is((SELECT (kind, status, role, octet_length(nonce))::text FROM acc), '(2,ok,recover,32)', '... the register challenge comes back with ref kind 2 and the purpose');
-SELECT is((SELECT mac FROM acc), pg_temp.mac_of(2, (SELECT exp FROM acc), (SELECT nonce FROM acc), '00000000-0000-0000-0000-1000000000a1', 2, :'tok_rec'::uuid,
+SELECT is((SELECT mac FROM acc), pg_temp.mac_of(2, (SELECT exp FROM acc), (SELECT nonce FROM acc), 'ee320000-0000-0000-0000-000000000008', 2, :'tok_rec'::uuid,
   pg_temp.us_of((SELECT consumed_at FROM app.partner_enrolment_token WHERE id = :'tok_rec'))), 'PA-7b: its MAC equals the independent oracle over (uid, token id, consumed_at), ref kind 2');
 SELECT is((SELECT (consumed_at IS NOT NULL, attempts)::text FROM app.partner_enrolment_token WHERE id = :'tok_rec'), '(t,1)', 'the token is consumed (single use) with one attempt');
 SELECT is(pg_temp.reg_std('t1'), 'ok', 'PA-25: the person registers their new credential against the TOKEN (no org rule applies: they keep their membership)');
-SELECT is((SELECT (c.user_id::text, c.revoked_at IS NULL)::text FROM app.partner_credential c WHERE c.id = (SELECT cred FROM reg_out)), '(00000000-0000-0000-0000-1000000000a1,t)', '... a new ACTIVE credential of that person');
+SELECT is((SELECT (c.user_id::text, c.revoked_at IS NULL)::text FROM app.partner_credential c WHERE c.id = (SELECT cred FROM reg_out)), '(ee320000-0000-0000-0000-000000000008,t)', '... a new ACTIVE credential of that person');
 SELECT is((SELECT registered_credential_id = (SELECT cred FROM reg_out) FROM app.partner_enrolment_token WHERE id = :'tok_rec'), true, '... recorded on the token');
 SELECT is((SELECT s.mint_kind || ':' || (s.mint_signature IS NULL)::text FROM app.partner_session s WHERE s.id = (SELECT sid FROM reg_out)), 'register:true', '... and the first session minted in the same transaction (no signature)');
 SELECT is(pg_temp.reg_std('t2'), 'already_registered', 'one registration per acceptance holds for tokens too');
-SELECT is(pg_temp.accept_t('tk1', 'sx', :'g_sx'), 'not_found', 'PA-14: ... and cannot be accepted again');
+SELECT is(pg_temp.accept_t('tk1', 'rc', :'g_rc'), 'not_found', 'PA-14: ... and cannot be accepted again');
 ROLLBACK TO SAVEPOINT tok_recover_ok;
 
 SAVEPOINT tok_admin_ok;
@@ -1060,23 +1089,45 @@ SELECT is((SELECT role FROM acc), 'admin', '... with purpose admin');
 SELECT is(pg_temp.reg_std('t3'), 'ok', '6.4: ... and the admin registers their first credential');
 ROLLBACK TO SAVEPOINT tok_admin_ok;
 
+CREATE FUNCTION pg_temp.bootstrap(p_uid uuid, p_hash text) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE r text;
+BEGIN
+  EXECUTE 'SET LOCAL ROLE private_definer';
+  SELECT private.partner_admin_bootstrap_token(p_uid, p_hash)::text INTO r;
+  EXECUTE 'RESET ROLE';
+  RETURN r;
+END
+$f$;
+SAVEPOINT tok_bootstrap;
+SELECT pg_temp.bootstrap('ee320000-0000-0000-0000-000000000004', pg_temp.hh('bt1')) AS tok_bt \gset
+SELECT is((SELECT (purpose, issued_by IS NULL, consumed_at IS NULL, expires_at <= created_at + interval '24 hours', expires_at > created_at + interval '23 hours')::text FROM app.partner_enrolment_token WHERE id = :'tok_bt'::uuid),
+  '(admin,t,t,t,t)', '6.4 (M4): the ops bootstrap writes an admin token (issued_by NULL, 24 h): 0053''s function could never insert (an RLS violation on RETURNING, then the 24 h CHECK); 0054 replaces it');
+SELECT throws_ok($$SELECT pg_temp.bootstrap('ee320000-0000-0000-0000-000000000005', repeat('f', 64))$$, '42501', 'partner_admin_bootstrap_token: the user must already be in app.admin_user', 'the bootstrap refuses a user who is not in admin_user');
+SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000004') AS g_sa \gset
+SELECT is(pg_temp.accept_t('bt1', 'sa', :'g_sa'), 'ok', '6.4: the bootstrapped admin token is accepted by the admin it names');
+ROLLBACK TO SAVEPOINT tok_bootstrap;
+SAVEPOINT tok_admin_issue;
+SELECT pg_temp.bind(:'th_ad');
+SELECT is(pg_temp.call_a2('ad', format($q$SELECT o_status FROM private.partner_admin_enrolment_issue_for_partner('ee320000-0000-0000-0000-000000000004', %L)$q$, pg_temp.hh('bt2'))), 'ok', '6.4: an admin issues an admin enrolment token for a different admin (A3)');
+SELECT is((SELECT (purpose, issued_by::text, expires_at <= created_at + interval '24 hours')::text FROM app.partner_enrolment_token WHERE token_hash = pg_temp.hh('bt2')), '(admin,00000000-0000-0000-0000-4000000000d0,t)', '... recorded with its issuer, within the 24 h CHECK');
+ROLLBACK TO SAVEPOINT tok_admin_issue;
+
 SAVEPOINT tok_race;
-UPDATE app.partner_credential SET revoked_at = now() WHERE user_id = '00000000-0000-0000-0000-1000000000a1';
-SELECT pg_temp.gotrue('00000000-0000-0000-0000-1000000000a1') AS g_sx \gset
-SELECT is(pg_temp.accept_t('tk1', 'sx', :'g_sx'), 'ok', 'setup');
-SELECT pg_temp.mk_cred('sxrace', '00000000-0000-0000-0000-1000000000a1');
+UPDATE app.partner_credential SET revoked_at = now() WHERE user_id = 'ee320000-0000-0000-0000-000000000008';
+SELECT pg_temp.gotrue('ee320000-0000-0000-0000-000000000008') AS g_rc \gset
+SELECT is(pg_temp.accept_t('tk1', 'rc', :'g_rc'), 'ok', 'setup');
+SELECT pg_temp.mk_cred('rcrace', 'ee320000-0000-0000-0000-000000000008');
 SELECT is(pg_temp.reg_std('t4'), 'credential_exists', 'PA-16: register_first refuses when an active credential appeared in the gap (token-bound too)');
 ROLLBACK TO SAVEPOINT tok_race;
 
 -- ----------------------------------------------------------------------------
 -- 9. BRANCH E (6.1, PA-23, PA-14): a member with an active credential joins another org; the session user's confirmed email must equal the invite's
 -- ----------------------------------------------------------------------------
-SELECT pg_temp.mk_inv('e1', '10000000-0000-0000-0000-000000000002', 'staff', 'staff-x@example.test', 'ee320000-0000-0000-0000-000000000001') AS inv_e1 \gset
+SELECT pg_temp.mk_inv('e1', '10000000-0000-0000-0000-000000000002', 'staff', 'em@example.test', 'ee320000-0000-0000-0000-000000000001') AS inv_e1 \gset
 SELECT pg_temp.mk_inv('e2', '10000000-0000-0000-0000-000000000002', 'staff', 'forwardee-target@example.test', 'ee320000-0000-0000-0000-000000000001') AS inv_e2 \gset
-SELECT pg_temp.mk_inv('e3', '10000000-0000-0000-0000-000000000001', 'staff', 'staff-x@example.test') AS inv_e3 \gset
-SELECT pg_temp.mk_inv('e4', '10000000-0000-0000-0000-000000000002', 'manager', 'staff-x@example.test', 'ee320000-0000-0000-0000-000000000001') AS inv_e4 \gset
-SELECT pg_temp.mk_session('sxb', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS s_sxb \gset
-CREATE FUNCTION pg_temp.accept_e(p_label text, p_sess text DEFAULT 'sx') RETURNS text LANGUAGE plpgsql AS $f$
+SELECT pg_temp.mk_inv('e3', '10000000-0000-0000-0000-000000000001', 'staff', 'em@example.test') AS inv_e3 \gset
+SELECT pg_temp.mk_inv('e4', '10000000-0000-0000-0000-000000000002', 'manager', 'em@example.test', 'ee320000-0000-0000-0000-000000000001') AS inv_e4 \gset
+CREATE FUNCTION pg_temp.accept_e(p_label text, p_sess text DEFAULT 'em') RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE r text; h text := pg_temp.hh(p_label);
 BEGIN
   PERFORM pg_temp.a2(p_sess);
@@ -1087,51 +1138,51 @@ BEGIN
 END
 $f$;
 SAVEPOINT e_ok;
-SELECT pg_temp.bind(:'th_sx');
+SELECT pg_temp.bind(:'th_em');
 SELECT is(pg_temp.accept_e('e1'), 'ok:10000000-0000-0000-0000-000000000002:staff', 'PA-23: branch E: the session user''s confirmed email equals the invite''s: the membership at Y is activated');
-SELECT is((SELECT (role::text, revoked_at IS NULL, invited_by::text)::text FROM app.partner_member WHERE user_id = '00000000-0000-0000-0000-1000000000a1' AND org_id = '10000000-0000-0000-0000-000000000002'), '(staff,t,ee320000-0000-0000-0000-000000000001)', 'branch E: the membership is written with the invite''s role and inviter');
-SELECT is((SELECT (accepted_by::text, attempts)::text FROM app.partner_invite WHERE id = :'inv_e1'), '(00000000-0000-0000-0000-1000000000a1,1)', 'branch E: the invite is consumed by the session user');
-SELECT is((SELECT count(*)::int FROM app.partner_credential WHERE user_id = '00000000-0000-0000-0000-1000000000a1' AND created_at >= now() - interval '1 minute' AND label <> ''), 2, 'branch E: NO credential was created (the two staff_x credentials are the ones that existed)');
-SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'s_sx'), true, '6.1: the ACCEPTING session is exempt from the authority trigger and stays live');
-SELECT is((SELECT (revoke_reason, revoked_at IS NOT NULL)::text FROM app.partner_session WHERE id = :'s_sxb'), '(authority_changed,t)', '6.5: ... while the person''s OTHER sessions are revoked by the membership INSERT');
+SELECT is((SELECT (role::text, revoked_at IS NULL, invited_by::text)::text FROM app.partner_member WHERE user_id = 'ee320000-0000-0000-0000-000000000009' AND org_id = '10000000-0000-0000-0000-000000000002'), '(staff,t,ee320000-0000-0000-0000-000000000001)', 'branch E: the membership is written with the invite''s role and inviter');
+SELECT is((SELECT (accepted_by::text, attempts)::text FROM app.partner_invite WHERE id = :'inv_e1'), '(ee320000-0000-0000-0000-000000000009,1)', 'branch E: the invite is consumed by the session user');
+SELECT is((SELECT count(*)::int FROM app.partner_credential WHERE user_id = 'ee320000-0000-0000-0000-000000000009' AND created_at >= now() - interval '1 minute' AND label <> ''), 2, 'branch E: NO credential was created (the two credentials of the member are the ones that existed)');
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'s_em'), true, '6.1: the ACCEPTING session is exempt from the authority trigger and stays live');
+SELECT is((SELECT (revoke_reason, revoked_at IS NOT NULL)::text FROM app.partner_session WHERE id = :'s_emb'), '(authority_changed,t)', '6.5: ... while the person''s OTHER sessions are revoked by the membership INSERT');
 SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.invite.accept' AND subject_id = :'inv_e1' AND detail ->> 'branch' = 'member'), 1, 'an audit_log row records the branch-E accept');
 SELECT is(pg_temp.accept_e('e1'), 'not_found::', 'the token is single use: a second accept is not_found');
 ROLLBACK TO SAVEPOINT e_ok;
 SAVEPOINT e_forwarded;
-SELECT pg_temp.bind(:'th_sx');
+SELECT pg_temp.bind(:'th_em');
 SELECT is(pg_temp.accept_e('e2'), 'email_mismatch::', 'PA-14: a FORWARDED link: the session user''s email is not the invite''s: a status (403 at the handler), never a RAISE');
 SELECT is((SELECT (attempts, accepted_at IS NULL)::text FROM app.partner_invite WHERE id = :'inv_e2'), '(1,t)', 'PA-14: the mismatch attempt count is written, the invite is not consumed');
-SELECT is((SELECT count(*)::int FROM app.partner_member WHERE user_id = '00000000-0000-0000-0000-1000000000a1' AND org_id = '10000000-0000-0000-0000-000000000002'), 0, 'PA-14: ... and no membership was written');
+SELECT is((SELECT count(*)::int FROM app.partner_member WHERE user_id = 'ee320000-0000-0000-0000-000000000009' AND org_id = '10000000-0000-0000-0000-000000000002'), 0, 'PA-14: ... and no membership was written');
 ROLLBACK TO SAVEPOINT e_forwarded;
 SAVEPOINT e_member;
-SELECT pg_temp.bind(:'th_sx');
+SELECT pg_temp.bind(:'th_em');
 SELECT is(pg_temp.accept_e('e3'), 'already_member::', 'an invite to an org the person is already ACTIVE in is a status (already_member)');
 ROLLBACK TO SAVEPOINT e_member;
 SAVEPOINT e_unconfirmed;
-UPDATE auth.users SET email_confirmed_at = NULL WHERE id = '00000000-0000-0000-0000-1000000000a1';
-SELECT pg_temp.bind(:'th_sx');
-SELECT is(pg_temp.accept_e('e1'), 'email_unconfirmed::', 'the session user''s mailbox must be CONFIRMED');
+SELECT pg_temp.mk_inv('e5', '10000000-0000-0000-0000-000000000002', 'staff', 'eu@example.test', 'ee320000-0000-0000-0000-000000000001') AS inv_e5 \gset
+SELECT pg_temp.bind(:'th_eu');
+SELECT is(pg_temp.accept_e('e5', 'eu'), 'email_unconfirmed::', 'the session user''s mailbox must be CONFIRMED');
 ROLLBACK TO SAVEPOINT e_unconfirmed;
 SAVEPOINT e_react;
-INSERT INTO app.partner_member (user_id, org_id, role, revoked_at) VALUES ('00000000-0000-0000-0000-1000000000a1', '10000000-0000-0000-0000-000000000002', 'staff', now());
-UPDATE app.partner_pin SET locked_at = now(), failed_count = 5, failed_today = 5, next_attempt_at = now() + interval '5 minutes' WHERE user_id = '00000000-0000-0000-0000-1000000000a1';
-SELECT pg_temp.mk_session('sxe', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS s_sxe \gset
-SELECT pg_temp.bind(pg_temp.th('sxe'));
-SELECT is(pg_temp.accept_e('e4', 'sxe'), 'ok:10000000-0000-0000-0000-000000000002:manager', '6.1: a REVOKED membership is reactivated with the invite''s role');
-SELECT is((SELECT (must_change, locked_at IS NULL, failed_count)::text FROM app.partner_pin WHERE user_id = '00000000-0000-0000-0000-1000000000a1'), '(t,t,0)', '6.1: ... and the PIN is reset (must_change) on a reactivation');
+INSERT INTO app.partner_member (user_id, org_id, role, revoked_at) VALUES ('ee320000-0000-0000-0000-000000000009', '10000000-0000-0000-0000-000000000002', 'staff', now());
+SELECT pg_temp.mk_pin('ee320000-0000-0000-0000-000000000009', true);
+SELECT pg_temp.mk_session('eme', 'ee320000-0000-0000-0000-000000000009', :'c_em') AS s_eme \gset
+SELECT pg_temp.bind(pg_temp.th('eme'));
+SELECT is(pg_temp.accept_e('e4', 'eme'), 'ok:10000000-0000-0000-0000-000000000002:manager', '6.1: a REVOKED membership is reactivated with the invite''s role');
+SELECT is((SELECT (must_change, locked_at IS NULL, failed_count)::text FROM app.partner_pin WHERE user_id = 'ee320000-0000-0000-0000-000000000009'), '(t,t,0)', '6.1: ... and the PIN is reset (must_change) on a reactivation');
 ROLLBACK TO SAVEPOINT e_react;
 SAVEPOINT e_lock;
-SELECT pg_temp.bind(:'th_sx');
+SELECT pg_temp.bind(:'th_em');
 SELECT sum((pg_temp.accept_e('e2') = 'email_mismatch::')::int) AS n10 FROM generate_series(1, 10) i \gset
 SELECT is(pg_temp.accept_e('e2'), 'locked::', 'PA-14: branch E locks after ten attempts too');
 ROLLBACK TO SAVEPOINT e_lock;
 SAVEPOINT e_a2;
-SELECT pg_temp.bind(:'th_sx');
+SELECT pg_temp.bind(:'th_em');
 SELECT throws_ok(format($t$SELECT pg_temp.call($q$SELECT o_status FROM private.partner_invite_accept_for_partner(%L)$q$)$t$, repeat('c', 64)), '42501', 'partner_authorize: a passkey assertion in the last 5 minutes is required', 'PA-23: branch E is class A2: without a PIN grant and a fresh passkey assertion it is refused');
 ROLLBACK TO SAVEPOINT e_a2;
 SAVEPOINT e_malformed;
-SELECT pg_temp.bind(:'th_sx');
-SELECT throws_ok($t$SELECT pg_temp.call_a2('sx', $q$SELECT o_status FROM private.partner_invite_accept_for_partner('not-a-hash')$q$)$t$, '22023', 'partner_invite_accept_for_partner: a 64-hex token hash is required', 'a malformed token hash is 22023');
+SELECT pg_temp.bind(:'th_em');
+SELECT throws_ok($t$SELECT pg_temp.call_a2('em', $q$SELECT o_status FROM private.partner_invite_accept_for_partner('not-a-hash')$q$)$t$, '22023', 'partner_invite_accept_for_partner: a 64-hex token hash is required', 'a malformed token hash is 22023');
 ROLLBACK TO SAVEPOINT e_malformed;
 
 -- ----------------------------------------------------------------------------
@@ -1275,8 +1326,8 @@ SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.org.r
 ROLLBACK TO SAVEPOINT revall_mx;
 SAVEPOINT revall_t;
 SELECT pg_temp.bind(:'th_mx');
-SELECT is(pg_temp.call_a2('mx', $q$SELECT o_status || ':' || o_credentials FROM private.partner_org_sessions_revoke_for_partner('10000000-0000-0000-0000-000000000001', now() - interval '1 minute')$q$), 'ok:2',
-  '6.5: "every credential created after T": the two credentials of staff_x are revoked');
+SELECT is(pg_temp.call_a2('mx', $q$SELECT o_status || ':' || o_credentials FROM private.partner_org_sessions_revoke_for_partner('10000000-0000-0000-0000-000000000001', now() - interval '1 minute')$q$), 'ok:7',
+  '6.5: "every credential created after T": the seven credentials of the staff at X the manager covers are revoked');
 SELECT is((SELECT count(*)::int FROM app.partner_credential WHERE user_id = 'ee320000-0000-0000-0000-000000000003' AND revoked_at IS NOT NULL), 0, '6.5: ... but not the credential of a person who ALSO works at Y (the reach rule does not cover them)');
 SELECT is((SELECT count(*)::int FROM app.partner_credential WHERE user_id = '00000000-0000-0000-0000-2000000000b1' AND revoked_at IS NOT NULL), 0, '... nor the revoker''s own credential');
 ROLLBACK TO SAVEPOINT revall_t;
@@ -1498,7 +1549,7 @@ SAVEPOINT guc_unbound;
 SELECT is(pg_temp.rows_reached('private_definer', $$SELECT 1 FROM app.partner_invite$$, false), 0, 'M1 holds: with NO binding, private_definer sees no invite (the accept definers are the issuer''s, not its)');
 SELECT is(pg_temp.rows_reached('private_definer', $$DELETE FROM app.partner_session WHERE expires_at <= now() - interval '31 days'$$, false), 1, 'control: with NO binding the session purge floor admits the lapsed session (so the closed cell above is not vacuous)');
 SELECT is(pg_temp.rows_reached('private_definer', $$SELECT 1 FROM app.partner_credential WHERE user_id = '00000000-0000-0000-0000-1000000000a3'$$, false), 0, 'with no binding and no window private_definer reads no credential either');
-SELECT is(pg_temp.rows_reached('private_definer', $$SELECT 1 FROM app.partner_enrolment_token$$, false), 0, '... nor an enrolment token');
+SELECT is(pg_temp.rows_reached('private_definer', $$SELECT 1 FROM app.partner_enrolment_token WHERE purpose = 'recover'$$, false), 0, '... nor a recover token (the hash-free admin tokens 0053 inserts are visible by design: the INSERT ... RETURNING policy)');
 ROLLBACK TO SAVEPOINT guc_unbound;
 
 -- ----------------------------------------------------------------------------
@@ -1557,7 +1608,7 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid IN ('app.p
                'pd_setnull_partner_invite_accepted_by', 'pd_setnull_partner_invite_accepted_by_r', 'pd_setnull_partner_invite_revoked_by', 'pd_setnull_partner_invite_revoked_by_r', 'pd_delete_partner_enrolment_token_user_id',
                'pd_delete_partner_enrolment_token_user_id_r', 'pd_setnull_partner_enrolment_token_issued_by', 'pd_setnull_partner_enrolment_token_issued_by_r', 'pd_delete_partner_credential_user_id', 'pd_delete_partner_credential_user_id_r',
                'pd_setnull_partner_credential_revoked_by', 'pd_setnull_partner_credential_revoked_by_r', 'pd_delete_partner_pin_user_id', 'pd_delete_partner_pin_user_id_r')), 0,
-  'PA-4c (iii): the ONLY policies on those five tables that read a setting are the delete_my_data window pairs that already existed; none of the 35 added by 0054 does');
+  'PA-4c (iii): the ONLY policies on those five tables that read a setting are the delete_my_data window pairs that already existed; none of the 36 added by 0054 does');
 
 SELECT * FROM finish();
 ROLLBACK;

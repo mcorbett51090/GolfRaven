@@ -289,6 +289,12 @@ CREATE POLICY pd_insert_partner_enrolment_token_recover ON app.partner_enrolment
 CREATE POLICY pd_read_partner_enrolment_token_recover ON app.partner_enrolment_token FOR SELECT TO private_definer
   USING (purpose = 'recover' AND (SELECT private.partner_binding_kind()) = 'partner'
          AND private.partner_reach_covers((SELECT private.partner_binding_user()), user_id));
+-- the admin tokens 0053 inserts (bootstrap: issued_by NULL outside a partner binding; the A3 issue: issued_by = the bound user) return their id: INSERT ... RETURNING needs the new row to be visible, and
+-- 0053 admitted no SELECT for it, so both always failed with an RLS violation. The same predicate as pd_insert_partner_enrolment_token_admin, for SELECT.
+CREATE POLICY pd_read_partner_enrolment_token_admin_issue ON app.partner_enrolment_token FOR SELECT TO private_definer
+  USING (purpose = 'admin' AND consumed_at IS NULL AND revoked_at IS NULL
+         AND ((issued_by IS NULL AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner')
+              OR (issued_by IS NOT NULL AND issued_by = (SELECT private.partner_binding_user()))));
 CREATE POLICY pd_revoke_partner_enrolment_token_recover ON app.partner_enrolment_token FOR UPDATE TO private_definer
   USING (purpose = 'recover' AND consumed_at IS NULL AND revoked_at IS NULL AND (SELECT private.partner_binding_kind()) = 'partner'
          AND private.partner_reach_covers((SELECT private.partner_binding_user()), user_id))
@@ -1629,6 +1635,68 @@ BEGIN
 END
 $$;
 
+-- 7m2. The two 0053 admin-token writers, REPLACED (same signatures, owner and grants): created_at is set explicitly and expires_at is created_at + 24 h, because the table CHECK
+-- (expires_at <= created_at + 24 h) refused clock_timestamp() + 24 h against the transaction-start default of created_at, so neither could ever insert (found by matrix 32).
+CREATE OR REPLACE FUNCTION private.partner_admin_bootstrap_token(p_user_id uuid, p_token_hash text)
+RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_id uuid;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+BEGIN
+  IF p_user_id IS NULL OR p_token_hash IS NULL
+     OR pg_catalog.char_length(p_token_hash) <> 64
+     OR p_token_hash !~ '^[0-9a-f]{64}' THEN
+    RAISE EXCEPTION 'partner_admin_bootstrap_token: a user id and a 64-hex token hash are required' USING ERRCODE = '22023';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM auth.users u WHERE u.id = p_user_id) THEN
+    RAISE EXCEPTION 'partner_admin_bootstrap_token: the user does not exist' USING ERRCODE = '22023';
+  END IF;
+  IF NOT private.is_admin(p_user_id) THEN
+    RAISE EXCEPTION 'partner_admin_bootstrap_token: the user must already be in app.admin_user' USING ERRCODE = '42501';
+  END IF;
+  INSERT INTO app.partner_enrolment_token (user_id, purpose, issued_by, token_hash, created_at, expires_at)
+  VALUES (p_user_id, 'admin', NULL, p_token_hash, v_now, v_now + interval '24 hours')
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION private.partner_admin_enrolment_issue_for_partner(p_user_id uuid, p_token_hash text)
+RETURNS TABLE (o_status text, o_token_id uuid, o_expires_at timestamptz)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_uid uuid;
+  v_id uuid;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_exp timestamptz;
+BEGIN
+  v_uid := private.partner_authorize(NULL, NULL, ARRAY['operator']::app.partner_role[], 'A3');
+  IF NOT private.is_admin(v_uid) THEN
+    RAISE EXCEPTION 'partner_admin_enrolment_issue_for_partner: only an admin may issue an admin enrolment token' USING ERRCODE = '42501';
+  END IF;
+  IF p_user_id IS NULL OR p_user_id = v_uid OR p_token_hash IS NULL
+     OR pg_catalog.char_length(p_token_hash) <> 64
+     OR p_token_hash !~ '^[0-9a-f]{64}' THEN
+    RAISE EXCEPTION 'partner_admin_enrolment_issue_for_partner: a different target user and a 64-hex token hash are required' USING ERRCODE = '22023';
+  END IF;
+  IF NOT private.is_admin(p_user_id) THEN
+    RAISE EXCEPTION 'partner_admin_enrolment_issue_for_partner: the target must be in app.admin_user' USING ERRCODE = '42501';
+  END IF;
+  v_exp := v_now + interval '24 hours';
+  INSERT INTO app.partner_enrolment_token (user_id, purpose, issued_by, token_hash, created_at, expires_at)
+  VALUES (p_user_id, 'admin', v_uid, p_token_hash, v_now, v_exp)
+  RETURNING id INTO v_id;
+  PERFORM private.partner_audit_write('partner.admin.enrolment_issue', 'app.partner_enrolment_token', v_id::text,
+    pg_catalog.jsonb_build_object('target', p_user_id));
+  RETURN QUERY SELECT 'ok'::text, v_id, v_exp;
+END
+$$;
+
 -- 7n. THE LAST-MEMBERSHIP TRIGGER (5.2, PA-29): after a membership is revoked or deleted, a person with NO active membership left loses their partner_pin and, unless they are in
 -- app.admin_user (an admin holds no membership and needs the TOTP regardless), their partner_totp. The rule is also in the delete policies (pd_lastmember_*), so the function is not trusted alone.
 CREATE FUNCTION private.partner_member_last_membership()
@@ -1909,6 +1977,7 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'partner_enrolment_token', 'pd_insert_partner_enrolment_token_recover', 'INSERT', true, 'S1.5: recover token issue; purpose=recover only, issued_by = the bound user, for a person the reach rule covers (partner_reach_covers)', 'private_definer'),
   ('app', 'partner_enrolment_token', 'pd_purge_partner_enrolment_token', 'DELETE', true, 'S1.5 purge: enrolment tokens 90 days past consumed / revoked / expired; closed under a partner binding', 'private_definer'),
   ('app', 'partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'SELECT', true, 'row-visibility companion to pd_purge_partner_enrolment_token', 'private_definer'),
+  ('app', 'partner_enrolment_token', 'pd_read_partner_enrolment_token_admin_issue', 'SELECT', true, 'S1.5: row visibility of the admin tokens 0053 inserts (INSERT ... RETURNING id needs it): issued_by NULL outside a partner binding (ops bootstrap) or issued_by = the bound user (the A3 issue)', 'private_definer'),
   ('app', 'partner_enrolment_token', 'pd_read_partner_enrolment_token_recover', 'SELECT', true, 'S1.5: row visibility of recover tokens for a person the bound actor''s reach covers (INSERT RETURNING and the revoke of earlier tokens)', 'private_definer'),
   ('app', 'partner_enrolment_token', 'pd_revoke_partner_enrolment_token_recover', 'UPDATE', true, 'S1.5: retire an earlier unconsumed recover token of a person the bound actor''s reach covers', 'private_definer'),
   ('app', 'partner_enrolment_token', 'psi_read_partner_enrolment_token', 'SELECT', true, 'S1.5: the enrolment-token accept / register definers read a token by hash; USING(true), the column grant is the scope', 'partner_session_issuer'),
@@ -1943,12 +2012,12 @@ FROM pg_policy pol
 JOIN pg_class cl ON cl.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = cl.relnamespace
 WHERE n.nspname = al.schema_name AND cl.relname = al.table_name AND pol.polname = al.policy_name
-  AND pol.polname IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r');
+  AND pol.polname IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_admin_issue', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r');
 DO $assert_0054_allowlist$
 BEGIN
   IF (SELECT count(*) FROM private.definer_policy_allowlist
-      WHERE policy_name IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r')
-        AND (using_expr IS NOT NULL OR with_check_expr IS NOT NULL)) <> 35 THEN
+      WHERE policy_name IN ('pd_purge_partner_auth_challenge', 'pd_purge_partner_auth_challenge_r', 'pd_purge_partner_credential', 'pd_purge_partner_credential_r', 'pd_read_partner_credential_bound', 'pd_insert_partner_enrolment_token_recover', 'pd_purge_partner_enrolment_token', 'pd_purge_partner_enrolment_token_r', 'pd_read_partner_enrolment_token_admin_issue', 'pd_read_partner_enrolment_token_recover', 'pd_revoke_partner_enrolment_token_recover', 'psi_read_partner_enrolment_token', 'psi_update_partner_enrolment_token_accept', 'psi_update_partner_enrolment_token_register', 'pd_insert_partner_invite', 'pd_purge_partner_invite', 'pd_purge_partner_invite_r', 'pd_read_partner_invite_scope', 'pd_revoke_partner_invite', 'psi_read_partner_invite', 'psi_update_partner_invite_accept', 'psi_update_partner_invite_register', 'psi_insert_partner_member', 'psi_read_partner_member', 'psi_update_partner_member', 'pst_revoke_partner_member', 'pd_lastmember_delete_partner_pin', 'pd_lastmember_delete_partner_pin_r', 'ppv_read_partner_pin_reach', 'ppv_update_partner_pin_reach', 'pd_purge_partner_session', 'pd_purge_partner_session_r', 'pd_purge_partner_sign_in_failure', 'pd_purge_partner_sign_in_failure_r', 'pd_lastmember_delete_partner_totp', 'pd_lastmember_delete_partner_totp_r')
+        AND (using_expr IS NOT NULL OR with_check_expr IS NOT NULL)) <> 36 THEN
     RAISE EXCEPTION '0054: an allowlist row names no live policy (its expressions were not derived)';
   END IF;
 END
