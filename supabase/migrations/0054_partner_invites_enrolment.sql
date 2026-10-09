@@ -3,7 +3,7 @@
 -- P5.1a, slice S1.5: INVITES, ENROLMENT AND MEMBERS (database half). docs/security/partner-auth-design.md (revision 5) is the specification: sections 5.1 (the register HMAC), 5.2 (last-membership
 -- PIN / TOTP), 5.3 (the function list), 6.1 (invite, accept, enrol: branches N and E), 6.5 (the reach rule; recovery; revoke-all), 9 (retention), 12 (S1.5), 12.1 (PA-14, PA-15, PA-16, PA-22,
 -- PA-23, PA-25, PA-29) and 21.4 (the seams S1.4 left: full reach for the TOTP reset, the last-membership delete). Migrations 0001-0053 are untouched; everything below is CREATE, GRANT, or
--- CREATE OR REPLACE of partner_totp_reset_for_partner (the S1.4 admin-lite reset, now under the full reach rule).
+-- CREATE OR REPLACE of partner_totp_reset_for_partner (the S1.4 admin-lite reset, now under the full reach rule) and of the two S1.4 admin-token writers (item 9).
 --
 -- WHAT THIS ADDS
 --   1. THE REGISTER CHALLENGE (5.1). partner_challenge_core / partner_challenge_verify get an OVERLOAD that appends ref_kind (1 byte: 1 invite, 2 enrolment token) || ref_id (16 bytes) ||
@@ -23,9 +23,13 @@
 --   7. Policies, grants and registries: every new policy is keyed on the transaction's binding (or on an accepted invite row), never on a settable GUC, and has a definer_policy_allowlist row
 --      and a line in supabase/tests/fixtures/definer_policy_exprs.txt; every privilege an owner role gains is in private.partner_owner_privilege and its fixture; every function is in
 --      private.function_inventory.
+--   8. IMMUTABILITY GUARDS (the OR rule of 5.4 item 2): permissive policies are OR-ed, so BEFORE UPDATE triggers on partner_invite and partner_enrolment_token state what never changes for
+--      any writer (an acceptance and a consumption are final, the token and expiry never move, attempts never fall, one registration per acceptance).
+--   9. Two S1.4 DEFECTS, found by matrix 32 and replaced here (same signatures, owners and grants): partner_admin_bootstrap_token and partner_admin_enrolment_issue_for_partner could never
+--      insert (an RLS violation on INSERT ... RETURNING, then the 24 h CHECK against clock_timestamp()).
 --
 -- WHAT THIS DOES NOT BUILD (seams stay intact): the Edge handlers (partner-invites, partner-members, enrolments/*, credentials) and their ports; the PWA screens; the out-of-band notice of a
--- credential add (open item U1: an audit_log row stands in); eviction of the oldest session on a SIGN-IN mint (0048 seam: register_first evicts, the sign-in mint is untouched); pepper / key
+-- credential add (open item U1: an audit_log row stands in) and the operator alert on a TOTP reset (an audit_log row stands in); eviction of the oldest session on a SIGN-IN mint (0048 seam: register_first evicts, the sign-in mint is untouched); pepper / key
 -- rotation. The Edge builds the WebAuthn create options (it needs partner_rp_config_read and the exclude list from partner_credential_options_for_partner).
 
 -- ============================================================================
