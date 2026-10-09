@@ -256,6 +256,19 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       state.reauthHits += 1;
       return state.reauthHits > state.reauthLimit ? { ok: false, retryAfterSeconds: 1800 } : { ok: true, retryAfterSeconds: 0 };
     },
+    // S1.5 invite/member surface: fail closed. The S7 invite and member screens will implement these in this fake.
+    withInviteMint() {
+      return Promise.reject(new Error("fake partner server: invite mint is not implemented (S7)"));
+    },
+    withInvites() {
+      return Promise.reject(new Error("fake partner server: invites are not implemented (S7)"));
+    },
+    withMembers() {
+      return Promise.reject(new Error("fake partner server: members are not implemented (S7)"));
+    },
+    async hitSystemRateLimit() {
+      return { ok: true, retryAfterSeconds: 0 };
+    },
   };
 
   const innerHandler = (req: Request) =>

@@ -90,8 +90,12 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
       m.committed += 1;
       return r;
     },
+    withInviteMint: () => Promise.reject(new Error("not used")),
     withSession: () => Promise.reject(new Error("not used")),
+    withInvites: () => Promise.reject(new Error("not used")),
+    withMembers: () => Promise.reject(new Error("not used")),
     hitRateLimit: () => Promise.reject(new Error("not used")),
+    hitSystemRateLimit: () => Promise.reject(new Error("not used")),
   };
   m.deps = { db, allowedOrigin: RP.origin, webauthn: assertionVerifier, otp: NO_OTP, nowMs: () => NOW, newSessionToken: newPartnerSessionToken };
   return m;
