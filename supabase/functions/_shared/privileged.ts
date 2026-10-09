@@ -100,10 +100,21 @@ import {
   type HandoverMintResult,
   type HandoverMintStatus,
   type HeldQueueRow,
+  type FacilityProgrammeRow,
+  type FacilityProgrammeUpsertStatus,
+  type OfferAdminRow,
+  type OfferApproveStatus,
+  type OfferEndStatus,
+  type OfferUpsertResult,
+  type OfferUpsertStatus,
+  type OperatorRollupRow,
   type PartnerAttestTx,
   type PartnerDb,
   type PartnerEntitlementsTx,
+  type PartnerOffersAdminTx,
+  type PartnerProgrammeTx,
   type PartnerReviewTx,
+  type PartnerSponsorshipsTx,
   type PartnerStockTx,
   type RedeemMethod,
   type RedeemResult,
@@ -112,11 +123,18 @@ import {
   type ResolveHeldStatus,
   type ReviewSlaSummary,
   type ShiftLogRow,
+  type SponsorRollupRow,
+  type SponsorshipApproveStatus,
+  type SponsorshipRow,
+  type SponsorshipUpsertResult,
+  type SponsorshipUpsertStatus,
   type StaffActivityRow,
   type StockMoveKind,
   type StockMoveResult,
   type StockMoveStatus,
   type StockRow,
+  type TrailProgrammeRow,
+  type TrailProgrammeUpsertStatus,
   type VoucherResult,
   type VoucherStatus,
   type PartnerInviteMintTx,
@@ -4206,6 +4224,279 @@ function buildPartnerStockTx(trx: TxSql): PartnerStockTx {
   };
 }
 
+/** The programme / offers / sponsorships definers of 0059 (S6). Every status is a returned row, so a refusal COMMITS. */
+const TRAIL_PROGRAMME_UPSERT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found"]);
+const FACILITY_PROGRAMME_UPSERT_STATUSES: ReadonlySet<string> = new Set(["ok", "no_trail"]);
+const OFFER_UPSERT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_draft", "bad_funder"]);
+const OFFER_APPROVE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_draft"]);
+const OFFER_END_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_live"]);
+const SPONSORSHIP_UPSERT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_draft", "bad_sponsor"]);
+const SPONSORSHIP_APPROVE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_draft", "stock_short"]);
+
+const dateOnlyOrNull = (v: unknown): string | null => {
+  if (v === null || v === undefined) return null;
+  return v instanceof Date ? v.toISOString().slice(0, 10) : String(v).slice(0, 10);
+};
+const numOrNull = (v: unknown): number | null => {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const boolOrNull = (v: unknown): boolean | null => (typeof v === "boolean" ? v : null);
+
+function buildPartnerProgrammeTx(trx: TxSql): PartnerProgrammeTx {
+  return {
+    async trailRead(trailId: string): Promise<TrailProgrammeRow> {
+      const rows = await trx`
+        select o_status, o_trail_id, o_programme_status, o_marker_source, o_marker_requires_completion,
+               o_special_marker_funded_by, o_special_marker_low_threshold::int as o_special_marker_low_threshold,
+               o_web_player_flow, o_special_marker_sku, o_special_marker_sponsorship_id::text as o_special_marker_sponsorship_id,
+               o_fee_model, o_fee_amount, o_starts_on, o_ends_on
+        from private.partner_trail_programme_read_for_partner(${trailId}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || (r.o_status !== "ok" && r.o_status !== "not_found")) {
+        throw new Error("partner_trail_programme_read_for_partner returned no usable status");
+      }
+      return {
+        status: r.o_status as "ok" | "not_found",
+        trailId: textOrNull(r.o_trail_id),
+        programmeStatus: textOrNull(r.o_programme_status),
+        markerSource: textOrNull(r.o_marker_source),
+        markerRequiresCompletion: boolOrNull(r.o_marker_requires_completion),
+        specialMarkerFundedBy: textOrNull(r.o_special_marker_funded_by),
+        specialMarkerLowThreshold: r.o_special_marker_low_threshold === null || r.o_special_marker_low_threshold === undefined
+          ? null
+          : Number(r.o_special_marker_low_threshold),
+        webPlayerFlow: boolOrNull(r.o_web_player_flow),
+        specialMarkerSku: textOrNull(r.o_special_marker_sku),
+        specialMarkerSponsorshipId: textOrNull(r.o_special_marker_sponsorship_id),
+        feeModel: textOrNull(r.o_fee_model),
+        feeAmount: numOrNull(r.o_fee_amount),
+        startsOn: dateOnlyOrNull(r.o_starts_on),
+        endsOn: dateOnlyOrNull(r.o_ends_on),
+      };
+    },
+    async facilityList(trailId: string): Promise<FacilityProgrammeRow[]> {
+      const rows = await trx`
+        select o_facility_id, o_participation, o_stocks_markers, o_holds_special_marker, o_connectivity,
+               o_staff_network, o_wifi_note, o_qr_mode, o_pin_epoch::int as o_pin_epoch
+        from private.partner_facility_programme_list_for_partner(${trailId}::text)`;
+      return rows.map((r) => ({
+        facilityId: String(r.o_facility_id),
+        participation: String(r.o_participation),
+        stocksMarkers: Boolean(r.o_stocks_markers),
+        holdsSpecialMarker: Boolean(r.o_holds_special_marker),
+        connectivity: textOrNull(r.o_connectivity),
+        staffNetwork: boolOrNull(r.o_staff_network),
+        wifiNote: textOrNull(r.o_wifi_note),
+        qrMode: String(r.o_qr_mode),
+        pinEpoch: Number(r.o_pin_epoch),
+      }));
+    },
+    async trailUpsert(
+      trailId: string,
+      status: string,
+      markerSource: string,
+      markerRequiresCompletion: boolean,
+      specialMarkerFundedBy: string | null,
+      specialMarkerLowThreshold: number,
+      webPlayerFlow: boolean,
+      specialMarkerSku: string | null,
+      specialMarkerSponsorshipId: string | null,
+      feeModel: string | null,
+      feeAmount: number | null,
+      startsOn: string | null,
+      endsOn: string | null,
+    ): Promise<TrailProgrammeUpsertStatus> {
+      const rows = await trx`
+        select o_status
+        from private.partner_trail_programme_upsert_for_partner(
+          ${trailId}::text, ${status}::text, ${markerSource}::text, ${markerRequiresCompletion}::boolean,
+          ${specialMarkerFundedBy}::text, ${specialMarkerLowThreshold}::int, ${webPlayerFlow}::boolean,
+          ${specialMarkerSku}::text, ${specialMarkerSponsorshipId}::uuid, ${feeModel}::text, ${feeAmount}::numeric,
+          ${startsOn}::date, ${endsOn}::date)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !TRAIL_PROGRAMME_UPSERT_STATUSES.has(r.o_status)) {
+        throw new Error("partner_trail_programme_upsert_for_partner returned no usable status");
+      }
+      return r.o_status as TrailProgrammeUpsertStatus;
+    },
+    async facilityUpsert(
+      trailId: string,
+      facilityId: string,
+      participation: string,
+      stocksMarkers: boolean | null,
+      holdsSpecialMarker: boolean | null,
+      connectivity: string | null,
+      staffNetwork: boolean | null,
+      wifiNote: string | null,
+      qrMode: string,
+    ): Promise<FacilityProgrammeUpsertStatus> {
+      const rows = await trx`
+        select o_status
+        from private.partner_facility_programme_upsert_for_partner(
+          ${trailId}::text, ${facilityId}::text, ${participation}::text, ${stocksMarkers}::boolean,
+          ${holdsSpecialMarker}::boolean, ${connectivity}::text, ${staffNetwork}::boolean, ${wifiNote}::text, ${qrMode}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !FACILITY_PROGRAMME_UPSERT_STATUSES.has(r.o_status)) {
+        throw new Error("partner_facility_programme_upsert_for_partner returned no usable status");
+      }
+      return r.o_status as FacilityProgrammeUpsertStatus;
+    },
+    async operatorRollup(trailId: string): Promise<OperatorRollupRow[]> {
+      const rows = await trx`
+        select o_trail_id, o_month, o_metric, o_value, o_cohort_n::int as o_cohort_n
+        from private.partner_operator_rollup_for_partner(${trailId}::text)`;
+      return rows.map((r) => ({
+        trailId: String(r.o_trail_id),
+        month: dateOnlyOrNull(r.o_month) ?? String(r.o_month),
+        metric: String(r.o_metric),
+        value: Number(r.o_value),
+        cohortN: Number(r.o_cohort_n),
+      }));
+    },
+    async sponsorRollup(sponsorshipId: string): Promise<SponsorRollupRow[]> {
+      const rows = await trx`
+        select o_sponsorship_id::text as o_sponsorship_id, o_month, o_metric, o_value, o_cohort_n::int as o_cohort_n
+        from private.partner_sponsor_rollup_for_partner(${sponsorshipId}::uuid)`;
+      return rows.map((r) => ({
+        sponsorshipId: String(r.o_sponsorship_id),
+        month: dateOnlyOrNull(r.o_month) ?? String(r.o_month),
+        metric: String(r.o_metric),
+        value: Number(r.o_value),
+        cohortN: Number(r.o_cohort_n),
+      }));
+    },
+  };
+}
+
+function buildPartnerOffersAdminTx(trx: TxSql): PartnerOffersAdminTx {
+  return {
+    async listOffers(trailId: string): Promise<OfferAdminRow[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_terms_id, o_trail_id, o_facility_id, o_eligibility, o_funder,
+               o_sponsorship_id::text as o_sponsorship_id, o_budget_cap, o_budget_used, o_budget_reserved,
+               o_max_redemptions::int as o_max_redemptions, o_face_value, o_valid_from, o_valid_to, o_status
+        from private.partner_offers_list_for_partner(${trailId}::text)`;
+      return rows.map((r) => ({
+        id: String(r.o_id),
+        termsId: textOrNull(r.o_terms_id),
+        trailId: String(r.o_trail_id),
+        facilityId: String(r.o_facility_id),
+        eligibility: r.o_eligibility,
+        funder: String(r.o_funder),
+        sponsorshipId: textOrNull(r.o_sponsorship_id),
+        budgetCap: Number(r.o_budget_cap),
+        budgetUsed: Number(r.o_budget_used),
+        budgetReserved: Number(r.o_budget_reserved),
+        maxRedemptions: r.o_max_redemptions === null || r.o_max_redemptions === undefined ? null : Number(r.o_max_redemptions),
+        faceValue: Number(r.o_face_value),
+        validFrom: dateOnlyOrNull(r.o_valid_from) ?? String(r.o_valid_from),
+        validTo: dateOnlyOrNull(r.o_valid_to) ?? String(r.o_valid_to),
+        status: String(r.o_status),
+      }));
+    },
+    async upsertOffer(
+      id: string | null,
+      trailId: string,
+      facilityId: string,
+      eligibility: unknown,
+      funder: string,
+      sponsorshipId: string | null,
+      budgetCap: number,
+      maxRedemptions: number | null,
+      faceValue: number,
+      validFrom: string,
+      validTo: string,
+    ): Promise<OfferUpsertResult> {
+      const rows = await trx`
+        select o_status, o_id::text as o_id
+        from private.partner_offer_upsert_for_partner(
+          ${id}::uuid, ${trailId}::text, ${facilityId}::text, ${trx.json(eligibility as never)}::jsonb, ${funder}::text,
+          ${sponsorshipId}::uuid, ${budgetCap}::numeric, ${maxRedemptions}::int, ${faceValue}::numeric,
+          ${validFrom}::date, ${validTo}::date)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !OFFER_UPSERT_STATUSES.has(r.o_status)) {
+        throw new Error("partner_offer_upsert_for_partner returned no usable status");
+      }
+      return { status: r.o_status as OfferUpsertStatus, id: textOrNull(r.o_id) };
+    },
+    async approveOffer(id: string): Promise<OfferApproveStatus> {
+      const rows = await trx`select o_status from private.partner_offer_approve_for_partner(${id}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !OFFER_APPROVE_STATUSES.has(r.o_status)) {
+        throw new Error("partner_offer_approve_for_partner returned no usable status");
+      }
+      return r.o_status as OfferApproveStatus;
+    },
+    async endOffer(id: string): Promise<OfferEndStatus> {
+      const rows = await trx`select o_status from private.partner_offer_end_for_partner(${id}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !OFFER_END_STATUSES.has(r.o_status)) {
+        throw new Error("partner_offer_end_for_partner returned no usable status");
+      }
+      return r.o_status as OfferEndStatus;
+    },
+  };
+}
+
+function buildPartnerSponsorshipsTx(trx: TxSql): PartnerSponsorshipsTx {
+  return {
+    async listSponsorships(trailId: string): Promise<SponsorshipRow[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_sponsor_org_id::text as o_sponsor_org_id, o_trail_id, o_category, o_scope,
+               o_attribution_name, o_attribution_asset, o_placement_fee, o_starts_on, o_ends_on,
+               o_operator_approved_at, o_status
+        from private.partner_sponsorships_list_for_partner(${trailId}::text)`;
+      return rows.map((r) => ({
+        id: String(r.o_id),
+        sponsorOrgId: String(r.o_sponsor_org_id),
+        trailId: String(r.o_trail_id),
+        category: String(r.o_category),
+        scope: String(r.o_scope),
+        attributionName: String(r.o_attribution_name),
+        attributionAsset: textOrNull(r.o_attribution_asset),
+        placementFee: numOrNull(r.o_placement_fee),
+        startsOn: dateOnlyOrNull(r.o_starts_on),
+        endsOn: dateOnlyOrNull(r.o_ends_on),
+        operatorApprovedAt: isoOrNull(r.o_operator_approved_at),
+        status: String(r.o_status),
+      }));
+    },
+    async upsertSponsorship(
+      id: string | null,
+      sponsorOrgId: string,
+      trailId: string,
+      category: string,
+      scope: string,
+      attributionName: string,
+      attributionAsset: string | null,
+      placementFee: number | null,
+      startsOn: string | null,
+      endsOn: string | null,
+    ): Promise<SponsorshipUpsertResult> {
+      const rows = await trx`
+        select o_status, o_id::text as o_id
+        from private.partner_sponsorship_upsert_for_partner(
+          ${id}::uuid, ${sponsorOrgId}::uuid, ${trailId}::text, ${category}::text, ${scope}::text,
+          ${attributionName}::text, ${attributionAsset}::text, ${placementFee}::numeric, ${startsOn}::date, ${endsOn}::date)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !SPONSORSHIP_UPSERT_STATUSES.has(r.o_status)) {
+        throw new Error("partner_sponsorship_upsert_for_partner returned no usable status");
+      }
+      return { status: r.o_status as SponsorshipUpsertStatus, id: textOrNull(r.o_id) };
+    },
+    async approveSponsorship(id: string): Promise<SponsorshipApproveStatus> {
+      const rows = await trx`select o_status from private.partner_sponsorship_approve_for_partner(${id}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !SPONSORSHIP_APPROVE_STATUSES.has(r.o_status)) {
+        throw new Error("partner_sponsorship_approve_for_partner returned no usable status");
+      }
+      return r.o_status as SponsorshipApproveStatus;
+    },
+  };
+}
+
 /** The hand-over definers of 0058 (S5). Every status is a returned row, so a refusal COMMITS; the token hash is the only form of a hand-over token that reaches the database. */
 const HANDOVER_MINT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_redeemable", "wrong_facility", "no_stock_row", "token_exists"]);
 const REDEEM_STATUSES: ReadonlySet<string> = new Set([
@@ -4277,11 +4568,27 @@ export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMi
 const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 
 /** A transaction as `edge_partner`, bound to the session whose token hash this is. A malformed hash is refused without a database round trip, with the same error as an unknown one. */
-export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx) => Promise<T>): Promise<T> {
+export async function withPartnerSession<T>(
+  tokenHash: string,
+  op: (
+    s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx & PartnerProgrammeTx & PartnerOffersAdminTx & PartnerSponsorshipsTx,
+  ) => Promise<T>,
+): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
   try {
     return await openScopedTx("partner", partnerBind(tokenHash), (trx) =>
-      op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx), ...buildPartnerAttestTx(trx), ...buildPartnerReviewTx(trx), ...buildPartnerStockTx(trx), ...buildPartnerEntitlementsTx(trx) }),
+      op({
+        ...buildPartnerSessionTx(trx),
+        ...buildPartnerInvitesTx(trx),
+        ...buildPartnerMembersTx(trx),
+        ...buildPartnerAttestTx(trx),
+        ...buildPartnerReviewTx(trx),
+        ...buildPartnerStockTx(trx),
+        ...buildPartnerEntitlementsTx(trx),
+        ...buildPartnerProgrammeTx(trx),
+        ...buildPartnerOffersAdminTx(trx),
+        ...buildPartnerSponsorshipsTx(trx),
+      }),
     );
   } catch (err) {
     return mapPartnerDbError(err);
@@ -4320,6 +4627,9 @@ export const partnerDb: PartnerDb = {
   withReview: withPartnerSession,
   withStock: withPartnerSession,
   withEntitlements: withPartnerSession,
+  withProgramme: withPartnerSession,
+  withOffersAdmin: withPartnerSession,
+  withSponsorships: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
   hitSystemRateLimit: hitSystemRateLimitForPartner,
 };

@@ -465,6 +465,196 @@ export interface PartnerStockTx {
   stockMove(facilityId: string, trailId: string, kind: StockMoveKind, qty: number, note: string | null): Promise<StockMoveResult>;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// S6 (migration 0059): programme, offers-admin and sponsorships. Statuses are the SQL's own, one for one; every one of them is a RETURNED row (PA-14), so the transaction that returned it COMMITS.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/** What `partner_trail_programme_read_for_partner` answers (0059). */
+export type TrailProgrammeReadStatus = "ok" | "not_found";
+export interface TrailProgrammeRow {
+  readonly status: TrailProgrammeReadStatus;
+  readonly trailId: string | null;
+  readonly programmeStatus: string | null;
+  readonly markerSource: string | null;
+  readonly markerRequiresCompletion: boolean | null;
+  readonly specialMarkerFundedBy: string | null;
+  readonly specialMarkerLowThreshold: number | null;
+  readonly webPlayerFlow: boolean | null;
+  readonly specialMarkerSku: string | null;
+  readonly specialMarkerSponsorshipId: string | null;
+  readonly feeModel: string | null;
+  readonly feeAmount: number | null;
+  readonly startsOn: string | null;
+  readonly endsOn: string | null;
+}
+/** One facility_programme row (0059). */
+export interface FacilityProgrammeRow {
+  readonly facilityId: string;
+  readonly participation: string;
+  readonly stocksMarkers: boolean;
+  readonly holdsSpecialMarker: boolean;
+  readonly connectivity: string | null;
+  readonly staffNetwork: boolean | null;
+  readonly wifiNote: string | null;
+  readonly qrMode: string;
+  readonly pinEpoch: number;
+}
+export type TrailProgrammeUpsertStatus = "ok" | "not_found";
+export type FacilityProgrammeUpsertStatus = "ok" | "no_trail";
+/** One operator_rollup row (0059). */
+export interface OperatorRollupRow {
+  readonly trailId: string;
+  readonly month: string;
+  readonly metric: string;
+  readonly value: number;
+  readonly cohortN: number;
+}
+/** One sponsor_rollup row (0059). */
+export interface SponsorRollupRow {
+  readonly sponsorshipId: string;
+  readonly month: string;
+  readonly metric: string;
+  readonly value: number;
+  readonly cohortN: number;
+}
+
+/** One transaction as `edge_partner` for the `programme-config` routes (0059). Class A0 for reads, A3 for upserts; operator of the trail. */
+export interface PartnerProgrammeTx {
+  /** GET programme (class A0): the trail_programme row. */
+  trailRead(trailId: string): Promise<TrailProgrammeRow>;
+  /** GET programme (class A0): facility_programme rows for the trail. */
+  facilityList(trailId: string): Promise<FacilityProgrammeRow[]>;
+  /** POST programme/trail (class A3). */
+  trailUpsert(
+    trailId: string,
+    status: string,
+    markerSource: string,
+    markerRequiresCompletion: boolean,
+    specialMarkerFundedBy: string | null,
+    specialMarkerLowThreshold: number,
+    webPlayerFlow: boolean,
+    specialMarkerSku: string | null,
+    specialMarkerSponsorshipId: string | null,
+    feeModel: string | null,
+    feeAmount: number | null,
+    startsOn: string | null,
+    endsOn: string | null,
+  ): Promise<TrailProgrammeUpsertStatus>;
+  /** POST programme/facility (class A3). */
+  facilityUpsert(
+    trailId: string,
+    facilityId: string,
+    participation: string,
+    stocksMarkers: boolean | null,
+    holdsSpecialMarker: boolean | null,
+    connectivity: string | null,
+    staffNetwork: boolean | null,
+    wifiNote: string | null,
+    qrMode: string,
+  ): Promise<FacilityProgrammeUpsertStatus>;
+  /** GET rollups/operator (class A0). */
+  operatorRollup(trailId: string): Promise<OperatorRollupRow[]>;
+  /** GET rollups/sponsor (class A0). */
+  sponsorRollup(sponsorshipId: string): Promise<SponsorRollupRow[]>;
+}
+
+/** One offer row from `partner_offers_list_for_partner` (0059): full budget columns, every status. */
+export interface OfferAdminRow {
+  readonly id: string;
+  readonly termsId: string | null;
+  readonly trailId: string;
+  readonly facilityId: string;
+  readonly eligibility: unknown;
+  readonly funder: string;
+  readonly sponsorshipId: string | null;
+  readonly budgetCap: number;
+  readonly budgetUsed: number;
+  readonly budgetReserved: number;
+  readonly maxRedemptions: number | null;
+  readonly faceValue: number;
+  readonly validFrom: string;
+  readonly validTo: string;
+  readonly status: string;
+}
+/** What `partner_offer_upsert_for_partner` answers (0059). */
+export type OfferUpsertStatus = "ok" | "not_found" | "not_draft" | "bad_funder";
+export interface OfferUpsertResult {
+  readonly status: OfferUpsertStatus;
+  readonly id: string | null;
+}
+/** What `partner_offer_approve_for_partner` / `partner_offer_end_for_partner` answer (0059). */
+export type OfferApproveStatus = "ok" | "not_found" | "not_draft";
+export type OfferEndStatus = "ok" | "not_found" | "not_live";
+
+/** One transaction as `edge_partner` for the `offers-admin` routes (0059). Class A0 for the list, A3 for writes; operator of the trail (approve is admin-only in the database). */
+export interface PartnerOffersAdminTx {
+  /** GET offers (class A0). */
+  listOffers(trailId: string): Promise<OfferAdminRow[]>;
+  /** POST offers (class A3): create or edit a draft. */
+  upsertOffer(
+    id: string | null,
+    trailId: string,
+    facilityId: string,
+    eligibility: unknown,
+    funder: string,
+    sponsorshipId: string | null,
+    budgetCap: number,
+    maxRedemptions: number | null,
+    faceValue: number,
+    validFrom: string,
+    validTo: string,
+  ): Promise<OfferUpsertResult>;
+  /** POST offers/approve (class A3, admin): draft to live. */
+  approveOffer(id: string): Promise<OfferApproveStatus>;
+  /** POST offers/end (class A3): live to ended. */
+  endOffer(id: string): Promise<OfferEndStatus>;
+}
+
+/** One sponsorship row (0059). */
+export interface SponsorshipRow {
+  readonly id: string;
+  readonly sponsorOrgId: string;
+  readonly trailId: string;
+  readonly category: string;
+  readonly scope: string;
+  readonly attributionName: string;
+  readonly attributionAsset: string | null;
+  readonly placementFee: number | null;
+  readonly startsOn: string | null;
+  readonly endsOn: string | null;
+  readonly operatorApprovedAt: string | null;
+  readonly status: string;
+}
+/** What `partner_sponsorship_upsert_for_partner` answers (0059). */
+export type SponsorshipUpsertStatus = "ok" | "not_found" | "not_draft" | "bad_sponsor";
+export interface SponsorshipUpsertResult {
+  readonly status: SponsorshipUpsertStatus;
+  readonly id: string | null;
+}
+/** What `partner_sponsorship_approve_for_partner` answers (0059, AT(20)). */
+export type SponsorshipApproveStatus = "ok" | "not_found" | "not_draft" | "stock_short";
+
+/** One transaction as `edge_partner` for the `sponsorships-admin` routes (0059). Class A0 for the list, A3 for writes; operator of the trail. */
+export interface PartnerSponsorshipsTx {
+  /** GET sponsorships (class A0). */
+  listSponsorships(trailId: string): Promise<SponsorshipRow[]>;
+  /** POST sponsorships (class A3): create or edit a draft. */
+  upsertSponsorship(
+    id: string | null,
+    sponsorOrgId: string,
+    trailId: string,
+    category: string,
+    scope: string,
+    attributionName: string,
+    attributionAsset: string | null,
+    placementFee: number | null,
+    startsOn: string | null,
+    endsOn: string | null,
+  ): Promise<SponsorshipUpsertResult>;
+  /** POST sponsorships/approve (class A3): draft to live; `stock_short` when AT(20) fails. */
+  approveSponsorship(id: string): Promise<SponsorshipApproveStatus>;
+}
+
 /** What `partner_handover_mint_for_partner` answers (0058). */
 export type HandoverMintStatus = "ok" | "not_found" | "not_redeemable" | "wrong_facility" | "no_stock_row" | "token_exists";
 export interface HandoverMintResult {
@@ -558,6 +748,12 @@ export interface PartnerDb {
   withStock<T>(tokenHash: string, op: (s: PartnerStockTx) => Promise<T>): Promise<T>;
   /** `withSession` for the `partner-entitlements` routes (collect, hand-over mint, redeem, voucher): the same bound transaction, the hand-over definers of 0058 (S5). */
   withEntitlements<T>(tokenHash: string, op: (s: PartnerEntitlementsTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `programme-config` routes (programme read/upsert, rollups): the same bound transaction, the programme definers of 0059 (S6). */
+  withProgramme<T>(tokenHash: string, op: (s: PartnerProgrammeTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `offers-admin` routes (list, upsert, approve, end): the same bound transaction, the offer definers of 0059 (S6). */
+  withOffersAdmin<T>(tokenHash: string, op: (s: PartnerOffersAdminTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `sponsorships-admin` routes (list, upsert, approve): the same bound transaction, the sponsorship definers of 0059 (S6). */
+  withSponsorships<T>(tokenHash: string, op: (s: PartnerSponsorshipsTx) => Promise<T>): Promise<T>;
   /** One hit of a per-member bucket, in its OWN short transaction, committed before any request transaction opens (the pool-deadlock rule of `hitRateLimitForActor`). */
   hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
   /** One hit of a SYSTEM bucket (design 8: nothing is bound before authentication, so the buckets keyed on an object the caller cannot choose, the invite token and the target mailbox, are `edge_system` buckets), in its own short transaction. */

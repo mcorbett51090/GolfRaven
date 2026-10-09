@@ -15,9 +15,20 @@ import { challengeToken, credentialJson, NOW_MS } from "./partner-fakes.ts";
 
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
 /** The partner lane's Edge Functions (design 4.5): each is a directory with an `index.ts`, `verify_jwt = false`, and no use of the player identity. */
-/** `stock-admin` is named for its resource (the design names it so), not with the `partner-` prefix; it is still a partner-lane function. */
-const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin"];
-const PARTNER_FUNCTIONS = ["partner-session", "partner-invites", "partner-members", "partner-attest", "partner-review", "stock-admin", "partner-entitlements"];
+/** Named for their resource (the design names them so), not with the `partner-` prefix; still partner-lane functions. */
+const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin", "programme-config", "offers-admin", "sponsorships-admin"];
+const PARTNER_FUNCTIONS = [
+  "partner-session",
+  "partner-invites",
+  "partner-members",
+  "partner-attest",
+  "partner-review",
+  "stock-admin",
+  "partner-entitlements",
+  "programme-config",
+  "offers-admin",
+  "sponsorships-admin",
+];
 const REPO = join(import.meta.dirname, "..", "..", "..");
 
 describe("cors.ts", () => {
@@ -218,7 +229,17 @@ function partnerFiles(): string[] {
 describe("PA-11: the partner modules never log", () => {
   it("finds the modules it is meant to scan", () => {
     const names = partnerFiles().map((p) => p.split("/").slice(-2).join("/"));
-    for (const n of ["partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts", "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts", "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts", "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts", "partner-attest/index.ts", "partner/attest-handler.ts", "partner/attest-shape.ts", "partner-review/index.ts", "partner/review-handler.ts", "partner/review-shape.ts", "stock-admin/index.ts", "partner/stock-handler.ts", "partner/stock-shape.ts", "partner-entitlements/index.ts", "partner/entitlements-handler.ts", "partner/entitlements-shape.ts"]) expect(names).toContain(n);
+    for (const n of [
+      "partner/cors.ts", "partner/http.ts", "partner/session-handler.ts", "partner/session-shape.ts", "partner/token.ts", "partner/ports.ts",
+      "partner/webauthn.ts", "partner/webauthn-port.ts", "partner-session/index.ts", "partner/pin-contract.ts", "partner/pin-deny-list.ts",
+      "partner/pin-vectors.ts", "partner/totp-contract.ts", "partner-invites/index.ts", "partner-members/index.ts", "partner/invites-handler.ts",
+      "partner/members-handler.ts", "partner/handler-kit.ts", "partner/invites-shape.ts", "partner/members-shape.ts", "partner/registration-shape.ts",
+      "partner-attest/index.ts", "partner/attest-handler.ts", "partner/attest-shape.ts", "partner-review/index.ts", "partner/review-handler.ts",
+      "partner/review-shape.ts", "stock-admin/index.ts", "partner/stock-handler.ts", "partner/stock-shape.ts", "partner-entitlements/index.ts",
+      "partner/entitlements-handler.ts", "partner/entitlements-shape.ts", "programme-config/index.ts", "partner/programme-handler.ts",
+      "partner/programme-shape.ts", "offers-admin/index.ts", "partner/offers-handler.ts", "partner/offers-shape.ts", "partner/offer-eligibility.ts",
+      "sponsorships-admin/index.ts", "partner/sponsorships-handler.ts", "partner/sponsorships-shape.ts",
+    ]) expect(names).toContain(n);
   });
 
   it("no `console` identifier appears anywhere in code (comments and strings aside) in the partner modules, the function entrypoint or the partner lane section of privileged.ts", () => {
@@ -273,9 +294,12 @@ describe("the entrypoints and the configuration", () => {
     "partner-review": "handlePartnerReviewRequest",
     "stock-admin": "handlePartnerStockRequest",
     "partner-entitlements": "handlePartnerEntitlementsRequest",
+    "programme-config": "handlePartnerProgrammeRequest",
+    "offers-admin": "handlePartnerOffersAdminRequest",
+    "sponsorships-admin": "handlePartnerSponsorshipsRequest",
   };
 
-  it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* (or stock-admin) entrypoint is named here", () => {
+  it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* (or unprefixed partner) entrypoint is named here", () => {
     const onDisk = readdirSync(FUNCTIONS, { withFileTypes: true }).filter((d) => d.isDirectory() && (d.name.startsWith("partner-") || UNPREFIXED_PARTNER_FUNCTIONS.includes(d.name))).map((d) => d.name).sort();
     expect(onDisk).toEqual([...PARTNER_FUNCTIONS].sort());
     expect(Object.keys(HANDLERS).sort()).toEqual([...PARTNER_FUNCTIONS].sort());

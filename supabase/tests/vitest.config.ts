@@ -41,6 +41,10 @@ export default {
       "@noble/hashes/utils.js": resolveFrom(RULES_PKG, "@noble/hashes/utils.js"),
       "@noble/hashes/sha2.js": resolveFrom(RULES_PKG, "@noble/hashes/sha2.js"),
       "tz-lookup": resolveFrom(CATALOG_PKG, "tz-lookup"),
+      // S6 offers-admin pulls packages/rules/src/offer-eligibility.ts (AT(14)); point the bare workspace
+      // specifiers at source so vitest does not need a prior `pnpm -r build` of catalog/rules dist.
+      "@golfraven/catalog": new URL("../../packages/catalog/src/index.ts", import.meta.url).pathname,
+      "@golfraven/rules": new URL("../../packages/rules/src/index.ts", import.meta.url).pathname,
     },
   },
   server: {

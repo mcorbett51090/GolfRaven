@@ -278,6 +278,15 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     withEntitlements() {
       return Promise.reject(new Error("fake partner server: entitlements are not implemented (S7c)"));
     },
+    withProgramme() {
+      return Promise.reject(new Error("fake partner server: programme is not implemented (S7d)"));
+    },
+    withOffersAdmin() {
+      return Promise.reject(new Error("fake partner server: offers-admin is not implemented (S7d)"));
+    },
+    withSponsorships() {
+      return Promise.reject(new Error("fake partner server: sponsorships are not implemented (S7d)"));
+    },
     async hitSystemRateLimit() {
       return { ok: true, retryAfterSeconds: 0 };
     },

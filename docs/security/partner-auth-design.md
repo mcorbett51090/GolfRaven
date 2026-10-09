@@ -2096,7 +2096,7 @@ Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055`
 
 ### 30.1 What was built
 
-**Migration `0059_partner_programme_sponsors.sql`** (database half) and **matrix `37_partner_programme_sponsors.sql`** (58 cells; both harness modes when green). Edge half is not in this commit.
+**Migration `0059_partner_programme_sponsors.sql`** (database half) and **matrix `37_partner_programme_sponsors.sql`** (58 cells; both harness modes when green), then Edge functions **`programme-config`**, **`offers-admin`**, and **`sponsorships-admin`**.
 
 - **`private.partner_bound_operator_at_trail(trail)`** — policy predicate (EXECUTE for nobody but the owner; in the 14(c) reader list). True when this transaction carries a partner binding whose member is an operator of the trail (or admin via `has_trail_scope`).
 - **Programme (A0/A3, operator of the trail):** `partner_trail_programme_read_for_partner`, `partner_facility_programme_list_for_partner`, `partner_trail_programme_upsert_for_partner` (`web_player_flow` true → `22023`; statuses `ok | not_found`), `partner_facility_programme_upsert_for_partner` (statuses `ok | no_trail`; never writes `pin_epoch`).
@@ -2105,19 +2105,27 @@ Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055`
 - **Rollups (A0):** `partner_operator_rollup_for_partner`, `partner_sponsor_rollup_for_partner` (scope via the sponsorship's trail).
 - **Binding-keyed policies:** 14 `private_definer` policies (`pd_partner_programme_*`) on `trail_programme`, `facility_programme`, `offer`, `sponsorship`, `operator_rollup`, `sponsor_rollup`, and `special_marker_stock`. **None reads a GUC.** Existing `pd_marker_scan_*`, `pd_partner_attest_*`, `pd_partner_review_*`, and `pd_read_sponsorship` stay.
 
+| Function | Routes |
+|---|---|
+| `programme-config` | `GET programme`, `POST programme/trail`, `POST programme/facility`, `GET rollups/operator`, `GET rollups/sponsor` |
+| `offers-admin` | `GET offers`, `POST offers`, `POST offers/approve`, `POST offers/end` |
+| `sponsorships-admin` | `GET sponsorships`, `POST sponsorships`, `POST sponsorships/approve` |
+
+Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOffersAdmin`, `PartnerSponsorshipsTx` / `withSponsorships` (merged into `withPartnerSession` like `withStock`). Upsert eligibility is checked with `validateOfferEligibility` from `packages/rules` **before** the database (AT(14)). Status map: `ok` → 200; `not_found` / `no_trail` / `not_draft` / `not_live` / `bad_funder` / `bad_sponsor` / `stock_short` / `invalid_eligibility` → 422; `42501` → 403; `22023` → 422. Per-member buckets (`programme-config:member`, `offers-admin:member`, `sponsorships-admin:member`, 240 an hour each).
+
 ### 30.2 Decisions and departures, and why
 
 - **Offer approve means draft → live in one step** (no separate `approved` stop). Keeps the portal machine simple; `approved` remains a legal enum value for other writers.
 - **Admin-only offer approve** mirrors S4's held-review resolve (`partner_authorize` with an operator role array, then `is_admin` or `42501`).
 - **AT(20) is a status, not a raise** — `stock_short` commits so the Edge can map it to 422 without rolling back an unrelated write in the same request transaction.
 - **Column grants exclude `pin_epoch`** on facility_programme programme writers; the 0046 epoch rotation path stays the only partner write of that column.
+- **Edge half built** — three functions, `verify_jwt = false`, handlers pure (PA-11). Settlement remains P5.1b.
 
 ### 30.3 Not built, honestly
 
-- **Settlement-export AT(17)** and any P5.1b settlement writer.
+- **Settlement-export AT(17)** and any P5.1b settlement writer (Edge half of programme/offers/sponsorships is built; settlement is not).
 - **Rollups-refresh writer** (rows are read-only here; ops/catalog still seed them).
 - **offers-redeem** and the issuance staff gate **AT(10)**.
-- **Edge half** (`programme-config`, `offers-admin`, `sponsorships-admin`) — database only in this commit.
 - **S7d / S7c UI** (portal screens; §29 reserved for S7c).
 - **No mutation pass** was run for this slice.
 

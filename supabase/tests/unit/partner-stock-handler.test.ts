@@ -78,6 +78,9 @@ function world(): { w: World; deps: PartnerStockDeps } {
       }
     },
     withEntitlements: reject,
+    withProgramme: reject,
+    withOffersAdmin: reject,
+    withSponsorships: reject,
     async hitRateLimit(hash, bucket, windowSeconds, max) {
       w.calls.push("db.hitRateLimit");
       w.rate.push({ hash, bucket, windowSeconds, max });

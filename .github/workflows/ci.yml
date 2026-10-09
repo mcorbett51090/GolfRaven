@@ -410,6 +410,9 @@ jobs:
             supabase/functions/partner-review/index.ts \
             supabase/functions/stock-admin/index.ts \
             supabase/functions/partner-entitlements/index.ts \
+            supabase/functions/programme-config/index.ts \
+            supabase/functions/offers-admin/index.ts \
+            supabase/functions/sponsorships-admin/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -475,6 +478,9 @@ jobs:
             supabase/functions/partner-review/index.ts \
             supabase/functions/stock-admin/index.ts \
             supabase/functions/partner-entitlements/index.ts \
+            supabase/functions/programme-config/index.ts \
+            supabase/functions/offers-admin/index.ts \
+            supabase/functions/sponsorships-admin/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -560,6 +566,9 @@ jobs:
             supabase/functions/partner-review/index.ts \
             supabase/functions/stock-admin/index.ts \
             supabase/functions/partner-entitlements/index.ts \
+            supabase/functions/programme-config/index.ts \
+            supabase/functions/offers-admin/index.ts \
+            supabase/functions/sponsorships-admin/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts 2>&1)
           TAMPER_EXIT=$?

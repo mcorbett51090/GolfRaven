@@ -4,9 +4,11 @@
     "@noble/hashes/utils.js": "npm:@noble/hashes@2.4.0/utils.js",
     "@noble/hashes/sha2.js": "npm:@noble/hashes@2.4.0/sha2.js",
     "tz-lookup": "npm:tz-lookup@6.1.25",
+    "@golfraven/catalog": "../../packages/catalog/src/index.ts",
     "@simplewebauthn/server": "npm:@simplewebauthn/server@14.0.3",
     "@simplewebauthn/server/helpers": "npm:@simplewebauthn/server@14.0.3/helpers",
     "std/http/server": "https://deno.land/std@0.224.0/http/server.ts",
     "postgres": "https://deno.land/x/postgresjs@v3.4.5/mod.js"
-  }
+  },
+  "unstable": ["sloppy-imports"]
 }
