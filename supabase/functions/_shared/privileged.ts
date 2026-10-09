@@ -69,16 +69,39 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { Errors, HttpError } from "./http.ts";
 import { makeSelfCheckGate, type SelfCheckGate } from "./edge-selfcheck-gate.ts";
 import {
+  type AdminEnrolmentResult,
   type ChallengeIssue,
   type CredentialLookup,
+  type CredentialOptionsResult,
+  type CredentialRegisterInput,
+  type CredentialRevokeStatus,
+  type CredentialSubject,
+  type CredentialView,
   type EmailOtpPort,
+  type EnrolmentAcceptResult,
+  type EnrolmentAcceptStatus,
+  type InviteAcceptResult,
+  type InviteAcceptStatus,
+  type InviteCreateResult,
+  type InviteMemberAcceptResult,
+  type InviteMemberAcceptStatus,
+  type InviteRevokeStatus,
+  type InviteRole,
+  type InviteView,
+  type MemberRecoverResult,
+  type MemberRevokeStatus,
   type MintInput,
   type MintResult,
+  type OrgRevokeAllResult,
   type PartnerDb,
+  type PartnerInviteMintTx,
+  type PartnerInvitesTx,
+  type PartnerMembersTx,
   type PartnerMintTx,
   type PartnerSessionTx,
   PartnerAuthorityRefused,
   PartnerConflict,
+  PartnerInvalidArgument,
   PartnerNotConfigured,
   PartnerSessionRefused,
   type PinChangeInput,
@@ -87,9 +110,12 @@ import {
   type PinSetInput,
   type PinVerifyResult,
   type PinWriteResult,
+  type PinResetStatus,
   type PinWriteStatus,
   type ReauthCredential,
   type ReauthInput,
+  type RegisterFirstInput,
+  type RegisterFirstResult,
   type RpConfig,
   type TotpConfirmResult,
   type TotpConfirmStatus,
@@ -2536,6 +2562,13 @@ export async function hitSystemRateLimit(bucketKey: string, windowSeconds: numbe
  *   signin_revocation_queue  `private.purge_signin_revocation_queue(30 d)`  finished (revoked / expired) rows older than 30 days, 5000 per call; never a pending one
  *   consumed_nonce           `private.purge_consumed_nonce()`               nonce tombstones 7 days past their source expiry, 5000 per call (the policy repeats the floor)
  *   rate_limit_buckets       `private.purge_rate_limit_buckets()`           windows older than 2 days (the kept `<uid>:me-delete:user` bucket included), 5000 per call
+ * and, since 0054 (partner design 9, S1.5), the six partner classes, each the same shape (a constant LIMIT 5000 inside the definer, the floor repeated in its policy, EXECUTE for edge_system):
+ *   partner_challenges       `private.purge_partner_challenges()`           used sign-in / reauth nonces an hour past use
+ *   partner_sessions         `private.purge_partner_sessions()`             sessions 30 days past their expiry or revocation
+ *   partner_credentials      `private.purge_partner_credentials()`          credentials revoked more than 180 days ago
+ *   partner_invites          `private.purge_partner_invites()`              invites 90 days past their acceptance, revocation or expiry
+ *   partner_enrolment_tokens `private.purge_partner_enrolment_tokens()`     enrolment tokens 90 days past their consumption, revocation or expiry
+ *   partner_sign_in_failures `private.purge_partner_sign_in_failures()`     failure counters a day idle
  * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
  * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
  *
@@ -2587,6 +2620,13 @@ export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): R
     // 0040 (owner decision 2026-10-02): the two TTL hygiene purges. service_role-only until then; edge_system holds EXECUTE on exactly these two.
     step("consumed_nonce", fixed, async (trx) => n(await trx`select private.purge_consumed_nonce() as n`)),
     step("rate_limit_buckets", fixed, async (trx) => n(await trx`select private.purge_rate_limit_buckets() as n`)),
+    // 0054 (partner design 9): the six partner purges, each bounded inside its definer
+    step("partner_challenges", fixed, async (trx) => n(await trx`select private.purge_partner_challenges() as n`)),
+    step("partner_sessions", fixed, async (trx) => n(await trx`select private.purge_partner_sessions() as n`)),
+    step("partner_credentials", fixed, async (trx) => n(await trx`select private.purge_partner_credentials() as n`)),
+    step("partner_invites", fixed, async (trx) => n(await trx`select private.purge_partner_invites() as n`)),
+    step("partner_enrolment_tokens", fixed, async (trx) => n(await trx`select private.purge_partner_enrolment_tokens() as n`)),
+    step("partner_sign_in_failures", fixed, async (trx) => n(await trx`select private.purge_partner_sign_in_failures() as n`)),
   ];
 }
 
@@ -3573,8 +3613,12 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
 //   withPartnerSession(h, op)  ONE transaction as `edge_partner` (kind "partner"): `bind_partner_session(h)`, the post-bind assertion, then `_for_partner` definers only.
 //   hitRateLimitForPartner     one hit of a per-member bucket, in its OWN short transaction (committed before any request transaction opens: the rule of `hitRateLimitForActor`).
 // Errors are mapped here and nowhere else: 28000 from the binder is `PartnerSessionRefused` (the ONE 401), 42501 from a definer is `PartnerAuthorityRefused` (403), 55000 (no relying-party row, no Vault
-// key: the challenge key or the PIN pepper) is `PartnerNotConfigured` (a bare 503), 23505 (a unique index: a GoTrue session that already proved another proof) is `PartnerConflict`. Anything else propagates and
-// rolls back.
+// key: the challenge key or the PIN pepper) is `PartnerNotConfigured` (a bare 503), 23505 (a unique index: a GoTrue session that already proved another proof) is `PartnerConflict`, 22023 (a malformed argument,
+// e.g. acting on oneself) is `PartnerInvalidArgument` (S1.5). Anything else propagates and rolls back.
+//
+// S1.5 (0054, partner-invites and partner-members): the minter transaction and the bound transaction each carry MORE methods (`PartnerInviteMintTx`, `PartnerInvitesTx` / `PartnerMembersTx`), not more kinds: `withPartnerMint`
+// and `withPartnerSession` stay the ONE caller of their kinds (the lint's `privileged-mint-scope` allow-list), and `partnerDb.withInviteMint` / `withInvites` / `withMembers` are those same functions typed for the
+// narrower port a handler is given.
 
 /** The SQLSTATE of a postgres.js error, or "". */
 function partnerPgCode(err: unknown): string {
@@ -3588,19 +3632,89 @@ function mapPartnerDbError(err: unknown): never {
   if (code === "42501") throw new PartnerAuthorityRefused();
   if (code === "55000") throw new PartnerNotConfigured();
   if (code === "23505") throw new PartnerConflict();
+  if (code === "22023") throw new PartnerInvalidArgument();
   throw err;
 }
 
 const bytesOf = (v: unknown): Uint8Array => new Uint8Array(v as ArrayLike<number>);
+const isoOrNull = (v: unknown): string | null => (v instanceof Date ? v.toISOString() : null);
+const textOrNull = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
-function buildPartnerMintTx(trx: TxSql): PartnerMintTx {
+async function readPartnerRpConfig(trx: TxSql): Promise<RpConfig> {
+  const rows = await trx`select o_rp_id, o_origin from private.partner_rp_config_read()`;
+  const r = rows[0];
+  if (typeof r?.o_rp_id !== "string" || typeof r?.o_origin !== "string") throw new PartnerNotConfigured();
+  return { rpId: r.o_rp_id, origin: r.o_origin };
+}
+
+const INVITE_ACCEPT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "locked", "email_mismatch", "email_unconfirmed", "session_stale", "existing_member_sign_in", "recover_required"]);
+const ENROLMENT_ACCEPT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "locked", "email_mismatch", "email_unconfirmed", "session_stale", "existing_member_sign_in", "refused"]);
+
+/** The register challenge an accept definer issued (only on `ok`). */
+function registerChallengeOf(r: Record<string, unknown>, fn: string): ChallengeIssue {
+  if (r.o_nonce === null || r.o_nonce === undefined || r.o_exp === null || r.o_exp === undefined || r.o_mac === null || r.o_mac === undefined) throw new Error(`${fn} returned ok without a challenge`);
+  return { nonce: bytesOf(r.o_nonce), exp: Number(r.o_exp), mac: bytesOf(r.o_mac) };
+}
+
+/** The invite and enrolment definers of 0054 (the minter lane, unbound). Every one is a `select private.*(...)` matching the migration's argument order. */
+function buildPartnerInviteMintTx(trx: TxSql): PartnerInviteMintTx {
   return {
-    async rpConfig(): Promise<RpConfig> {
-      const rows = await trx`select o_rp_id, o_origin from private.partner_rp_config_read()`;
-      const r = rows[0];
-      if (typeof r?.o_rp_id !== "string" || typeof r?.o_origin !== "string") throw new PartnerNotConfigured();
-      return { rpId: r.o_rp_id, origin: r.o_origin };
+    rpConfig: () => readPartnerRpConfig(trx),
+    async inviteEmailForToken(tokenHash: string): Promise<string | null> {
+      const rows = await trx`select o_email from private.partner_invite_email_for_token(${tokenHash}::text)`;
+      return textOrNull(rows[0]?.o_email);
     },
+    async inviteAccept(tokenHash: string, verifiedUserId: string, gotrueSessionId: string): Promise<InviteAcceptResult> {
+      const rows = await trx`
+        select o_status, o_user_id::text as o_user_id, o_invite_id::text as o_invite_id, o_org_id::text as o_org_id, o_role::text as o_role, o_nonce, o_exp::text as o_exp, o_mac
+        from private.partner_invite_accept(${tokenHash}::text, ${verifiedUserId}::uuid, ${gotrueSessionId}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !INVITE_ACCEPT_STATUSES.has(r.o_status)) throw new Error("partner_invite_accept returned no usable status");
+      if (r.o_status !== "ok") return { status: r.o_status as InviteAcceptStatus, accepted: null };
+      return {
+        status: "ok",
+        accepted: { userId: String(r.o_user_id), inviteId: String(r.o_invite_id), orgId: String(r.o_org_id), role: String(r.o_role), challenge: registerChallengeOf(r, "partner_invite_accept") },
+      };
+    },
+    async enrolmentEmailForToken(tokenHash: string): Promise<string | null> {
+      const rows = await trx`select o_email from private.partner_enrolment_token_email_for_token(${tokenHash}::text)`;
+      return textOrNull(rows[0]?.o_email);
+    },
+    async enrolmentAccept(tokenHash: string, verifiedUserId: string, gotrueSessionId: string): Promise<EnrolmentAcceptResult> {
+      const rows = await trx`
+        select o_status, o_user_id::text as o_user_id, o_token_id::text as o_token_id, o_purpose, o_nonce, o_exp::text as o_exp, o_mac
+        from private.partner_enrolment_token_accept(${tokenHash}::text, ${verifiedUserId}::uuid, ${gotrueSessionId}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !ENROLMENT_ACCEPT_STATUSES.has(r.o_status)) throw new Error("partner_enrolment_token_accept returned no usable status");
+      if (r.o_status !== "ok") return { status: r.o_status as EnrolmentAcceptStatus, accepted: null };
+      return {
+        status: "ok",
+        accepted: { userId: String(r.o_user_id), tokenId: String(r.o_token_id), purpose: String(r.o_purpose), challenge: registerChallengeOf(r, "partner_enrolment_token_accept") },
+      };
+    },
+    async registerFirst(input: RegisterFirstInput): Promise<RegisterFirstResult> {
+      const rows = await trx`
+        select o_status, o_credential_id::text as o_credential_id, o_aal::int as o_aal, o_expires_at, o_enrolment_until
+        from private.partner_credential_register_first(
+          ${input.sessionTokenHash}::text, ${input.userId}::uuid, ${input.refKind}::smallint, ${input.refId}::uuid,
+          ${input.nonce}::bytea, ${String(input.exp)}::bigint, ${input.mac}::bytea,
+          ${input.attestationObject}::bytea, ${input.clientDataJson}::bytea, ${input.credentialId}::bytea, ${input.publicKey}::bytea, ${[...input.transports] as never}::text[])`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string") throw new Error("partner_credential_register_first returned no status");
+      return {
+        status: r.o_status,
+        credentialId: textOrNull(r.o_credential_id),
+        aal: r.o_aal === null || r.o_aal === undefined ? null : Number(r.o_aal),
+        expiresAt: isoOrNull(r.o_expires_at),
+        enrolmentUntil: isoOrNull(r.o_enrolment_until),
+      };
+    },
+  };
+}
+
+function buildPartnerMintTx(trx: TxSql): PartnerMintTx & PartnerInviteMintTx {
+  return {
+    ...buildPartnerInviteMintTx(trx),
     async issueChallenge(): Promise<ChallengeIssue> {
       const rows = await trx`select o_nonce, o_exp::text as o_exp, o_mac from private.partner_challenge_issue_sign_in()`;
       const r = rows[0];
@@ -3780,8 +3894,160 @@ function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
   };
 }
 
+const INVITE_REVOKE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "already_accepted", "already_revoked"]);
+const INVITE_MEMBER_ACCEPT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "locked", "email_mismatch", "email_unconfirmed", "already_member"]);
+const CREDENTIAL_REVOKE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "already_revoked"]);
+
+/** The invite definers of the bound lane (0054 7a to 7d). */
+function buildPartnerInvitesTx(trx: TxSql): PartnerInvitesTx {
+  return {
+    async inviteCreate(orgId: string, role: InviteRole, inviteeEmail: string, tokenHash: string): Promise<InviteCreateResult> {
+      const rows = await trx`
+        select o_status, o_invite_id::text as o_invite_id, o_expires_at
+        from private.partner_invite_create_for_partner(${orgId}::uuid, ${role}::app.partner_role, ${inviteeEmail}::text, ${tokenHash}::text)`;
+      const r = rows[0];
+      if (r?.o_status === "ok") {
+        const expiresAt = isoOrNull(r.o_expires_at);
+        if (typeof r.o_invite_id !== "string" || expiresAt === null) throw new Error("partner_invite_create_for_partner returned ok without an invite");
+        return { status: "ok", inviteId: r.o_invite_id, expiresAt };
+      }
+      if (r?.o_status === "already_member") return { status: "already_member", inviteId: null, expiresAt: null };
+      throw new Error("partner_invite_create_for_partner returned no usable status");
+    },
+    async inviteList(orgId: string | null): Promise<InviteView[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_org_id::text as o_org_id, o_role::text as o_role, o_facility_id, o_invitee_email, o_invited_by::text as o_invited_by,
+               o_created_at, o_expires_at, o_accepted_at, o_revoked_at, o_attempts::int as o_attempts
+        from private.partner_invite_list_for_partner(${orgId}::uuid)`;
+      return rows.map((r) => ({
+        id: String(r.o_id),
+        orgId: String(r.o_org_id),
+        role: String(r.o_role),
+        facilityId: textOrNull(r.o_facility_id),
+        inviteeEmail: String(r.o_invitee_email),
+        invitedBy: String(r.o_invited_by),
+        createdAt: String(isoOrNull(r.o_created_at)),
+        expiresAt: String(isoOrNull(r.o_expires_at)),
+        acceptedAt: isoOrNull(r.o_accepted_at),
+        revokedAt: isoOrNull(r.o_revoked_at),
+        attempts: Number(r.o_attempts),
+      }));
+    },
+    async inviteRevoke(inviteId: string): Promise<InviteRevokeStatus> {
+      const rows = await trx`select o_status from private.partner_invite_revoke_for_partner(${inviteId}::uuid)`;
+      const status = rows[0]?.o_status;
+      if (typeof status !== "string" || !INVITE_REVOKE_STATUSES.has(status)) throw new Error("partner_invite_revoke_for_partner returned no usable status");
+      return status as InviteRevokeStatus;
+    },
+    async inviteAcceptMember(tokenHash: string): Promise<InviteMemberAcceptResult> {
+      const rows = await trx`select o_status, o_org_id::text as o_org_id, o_role::text as o_role from private.partner_invite_accept_for_partner(${tokenHash}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !INVITE_MEMBER_ACCEPT_STATUSES.has(r.o_status)) throw new Error("partner_invite_accept_for_partner returned no usable status");
+      return { status: r.o_status as InviteMemberAcceptStatus, orgId: textOrNull(r.o_org_id), role: textOrNull(r.o_role) };
+    },
+  };
+}
+
+/** The member and credential definers of the bound lane (0054 7e to 7l); `totpReset` is the session builder's (7m replaced its body, not its signature). */
+function buildPartnerMembersTx(trx: TxSql): Omit<PartnerMembersTx, "totpReset"> {
+  return {
+    async memberRevoke(targetUserId: string, orgId: string): Promise<MemberRevokeStatus> {
+      const rows = await trx`select o_status from private.partner_member_revoke_for_partner(${targetUserId}::uuid, ${orgId}::uuid)`;
+      const status = rows[0]?.o_status;
+      if (status !== "ok" && status !== "not_found") throw new Error("partner_member_revoke_for_partner returned no usable status");
+      return status;
+    },
+    async memberRecover(targetUserId: string, tokenHash: string): Promise<MemberRecoverResult> {
+      const rows = await trx`select o_status, o_token_id::text as o_token_id, o_expires_at from private.partner_member_recover_for_partner(${targetUserId}::uuid, ${tokenHash}::text)`;
+      const r = rows[0];
+      if (r?.o_status === "ok") {
+        const expiresAt = isoOrNull(r.o_expires_at);
+        if (typeof r.o_token_id !== "string" || expiresAt === null) throw new Error("partner_member_recover_for_partner returned ok without a token");
+        return { status: "ok", tokenId: r.o_token_id, expiresAt };
+      }
+      if (r?.o_status === "no_email") return { status: "no_email", tokenId: null, expiresAt: null };
+      throw new Error("partner_member_recover_for_partner returned no usable status");
+    },
+    async pinReset(targetUserId: string): Promise<PinResetStatus> {
+      const rows = await trx`select o_status from private.partner_pin_reset_for_partner(${targetUserId}::uuid)`;
+      const status = rows[0]?.o_status;
+      if (status !== "ok" && status !== "unset") throw new Error("partner_pin_reset_for_partner returned no usable status");
+      return status;
+    },
+    async orgSessionsRevokeAll(orgId: string, createdAfter: string | null): Promise<OrgRevokeAllResult> {
+      const rows = await trx`
+        select o_status, o_sessions::int as o_sessions, o_credentials::int as o_credentials
+        from private.partner_org_sessions_revoke_for_partner(${orgId}::uuid, ${createdAfter}::timestamptz)`;
+      const r = rows[0];
+      const status = r?.o_status;
+      if (status !== "ok" && status !== "not_found") throw new Error("partner_org_sessions_revoke_for_partner returned no usable status");
+      return { status, sessions: Number(r?.o_sessions ?? 0), credentials: Number(r?.o_credentials ?? 0) };
+    },
+    async adminEnrolmentIssue(targetUserId: string, tokenHash: string): Promise<AdminEnrolmentResult> {
+      const rows = await trx`select o_status, o_token_id::text as o_token_id, o_expires_at from private.partner_admin_enrolment_issue_for_partner(${targetUserId}::uuid, ${tokenHash}::text)`;
+      const r = rows[0];
+      const expiresAt = isoOrNull(r?.o_expires_at);
+      if (r?.o_status !== "ok" || typeof r.o_token_id !== "string" || expiresAt === null) throw new Error("partner_admin_enrolment_issue_for_partner returned no usable row");
+      return { tokenId: r.o_token_id, expiresAt };
+    },
+    async credentialOptions(): Promise<CredentialOptionsResult> {
+      const rows = await trx`
+        select o_status, o_nonce, o_exp::text as o_exp, o_mac, o_rp_id, o_origin, o_exclude
+        from private.partner_credential_options_for_partner()`;
+      const r = rows[0];
+      if (r?.o_status === "too_many") return { status: "too_many" };
+      if (r?.o_status !== "ok" || typeof r.o_rp_id !== "string" || typeof r.o_origin !== "string") throw new Error("partner_credential_options_for_partner returned no usable row");
+      const exclude = Array.isArray(r.o_exclude) ? (r.o_exclude as unknown[]).map(bytesOf) : [];
+      return {
+        status: "ok",
+        challenge: { nonce: bytesOf(r.o_nonce), exp: Number(r.o_exp), mac: bytesOf(r.o_mac) },
+        rp: { rpId: r.o_rp_id, origin: r.o_origin },
+        excludeCredentialIds: exclude,
+      };
+    },
+    async credentialSubject(): Promise<CredentialSubject> {
+      const who = await trx`select private.partner_whoami_for_partner() as info`;
+      const userId = (who[0]?.info as { userId?: unknown } | null | undefined)?.userId;
+      if (typeof userId !== "string") throw new Error("partner_whoami_for_partner returned no user");
+      const mail = await trx`select o_email from private.partner_session_otp_target_for_partner()`;
+      return { userId, email: textOrNull(mail[0]?.o_email) };
+    },
+    async credentialRegister(input: CredentialRegisterInput): Promise<{ status: string; credentialId: string | null }> {
+      const rows = await trx`
+        select o_status, o_credential_id::text as o_credential_id
+        from private.partner_credential_register_for_partner(
+          ${input.nonce}::bytea, ${String(input.exp)}::bigint, ${input.mac}::bytea,
+          ${input.attestationObject}::bytea, ${input.clientDataJson}::bytea, ${input.credentialId}::bytea, ${input.publicKey}::bytea, ${[...input.transports] as never}::text[])`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string") throw new Error("partner_credential_register_for_partner returned no status");
+      return { status: r.o_status, credentialId: textOrNull(r.o_credential_id) };
+    },
+    async credentialList(): Promise<CredentialView[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_label, o_note, o_created_at, o_last_used_at, o_revoked_at, o_backup_eligible, o_backup_state
+        from private.partner_credential_list_for_partner()`;
+      return rows.map((r) => ({
+        id: String(r.o_id),
+        label: String(r.o_label),
+        note: textOrNull(r.o_note),
+        createdAt: String(isoOrNull(r.o_created_at)),
+        lastUsedAt: isoOrNull(r.o_last_used_at),
+        revokedAt: isoOrNull(r.o_revoked_at),
+        backupEligible: r.o_backup_eligible === true,
+        backupState: r.o_backup_state === true,
+      }));
+    },
+    async credentialRevoke(credentialId: string): Promise<CredentialRevokeStatus> {
+      const rows = await trx`select o_status from private.partner_credential_revoke_for_partner(${credentialId}::uuid)`;
+      const status = rows[0]?.o_status;
+      if (typeof status !== "string" || !CREDENTIAL_REVOKE_STATUSES.has(status)) throw new Error("partner_credential_revoke_for_partner returned no usable status");
+      return status as CredentialRevokeStatus;
+    },
+  };
+}
+
 /** The partner sign-in minter's transaction (kind "partner_mint": the ONE caller of that kind, the lint's `privileged-mint-scope` rule keeps it so). */
-export async function withPartnerMint<T>(op: (m: PartnerMintTx) => Promise<T>): Promise<T> {
+export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMintTx) => Promise<T>): Promise<T> {
   try {
     return await openScopedTx("partner_mint", { expectedUid: null }, (trx) => op(buildPartnerMintTx(trx)));
   } catch (err) {
@@ -3792,10 +4058,10 @@ export async function withPartnerMint<T>(op: (m: PartnerMintTx) => Promise<T>): 
 const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 
 /** A transaction as `edge_partner`, bound to the session whose token hash this is. A malformed hash is refused without a database round trip, with the same error as an unknown one. */
-export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx) => Promise<T>): Promise<T> {
+export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx) => Promise<T>): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
   try {
-    return await openScopedTx("partner", partnerBind(tokenHash), (trx) => op(buildPartnerSessionTx(trx)));
+    return await openScopedTx("partner", partnerBind(tokenHash), (trx) => op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx) }));
   } catch (err) {
     return mapPartnerDbError(err);
   }
@@ -3816,32 +4082,45 @@ export async function hitRateLimitForPartner(tokenHash: string, bucketKey: strin
   return count > max ? { ok: false, retryAfterSeconds: windowSeconds } : { ok: true, retryAfterSeconds: 0 };
 }
 
-/** The partner database port the `partner-session` entrypoint hands the pure handler. */
+/** One hit of a SYSTEM bucket (partner design 8: before authentication nothing is bound, so the buckets keyed on the invite token and the target mailbox are `edge_system` buckets), in its OWN short transaction. */
+async function hitSystemRateLimitForPartner(bucketKey: string, windowSeconds: number, max: number): Promise<{ ok: boolean; retryAfterSeconds: number }> {
+  const r = await hitSystemRateLimit(bucketKey, windowSeconds, max);
+  return r.ok ? { ok: true, retryAfterSeconds: 0 } : { ok: false, retryAfterSeconds: r.retryAfterSeconds ?? windowSeconds };
+}
+
+/** The partner database port the `partner-session`, `partner-invites` and `partner-members` entrypoints hand the pure handlers. */
 export const partnerDb: PartnerDb = {
   withMint: withPartnerMint,
+  withInviteMint: withPartnerMint,
   withSession: withPartnerSession,
+  withInvites: withPartnerSession,
+  withMembers: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
+  hitSystemRateLimit: hitSystemRateLimitForPartner,
 };
 
-/** The anon-key Auth client's one call the partner proof needs to SEND a one-time code: the email OTP, to an account that already exists (a proof never creates one). */
+/** The anon-key Auth client's one call the partner lane needs to SEND a one-time code: the email OTP. A proof and an enrolment token go to an account that already exists (`shouldCreateUser` false); only an INVITE may create the account of the address it names. */
 export interface OtpSendClient {
   auth: { signInWithOtp(args: { email: string; options: { shouldCreateUser: boolean } }): Promise<{ error: { status?: number } | null }> };
 }
 
-/** Builds the sender over a client factory (the real one below; a recording fake in the integration suite). A failure THROWS (the handler answers a constant 500: nothing about the account or the mailer is shown). */
-export function makePartnerEmailOtpSender(newClient: () => OtpSendClient): (email: string) => Promise<void> {
+/** Builds the sender over a client factory (the real one below; a recording fake in the integration suite). A failure THROWS (the handler decides what to say: nothing about the account or the mailer is ever shown). */
+export function makePartnerEmailOtpSender(newClient: () => OtpSendClient, shouldCreateUser: boolean = false): (email: string) => Promise<void> {
   return async (email: string): Promise<void> => {
-    const { error } = await newClient().auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+    const { error } = await newClient().auth.signInWithOtp({ email, options: { shouldCreateUser } });
     if (error) throw new Error("supabase auth signInWithOtp failed");
   };
 }
 
-const sendPartnerEmailOtp = makePartnerEmailOtpSender(() => {
+function newPartnerOtpSendClient(): OtpSendClient {
   const url = Deno.env.get("SUPABASE_URL");
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
   if (!url || !anonKey) throw new Error("privileged.ts: SUPABASE_URL/SUPABASE_ANON_KEY are not set in this environment");
   return createClient(url, anonKey, { auth: { autoRefreshToken: false, persistSession: false } }) as unknown as OtpSendClient;
-});
+}
+
+const sendPartnerEmailOtp = makePartnerEmailOtpSender(newPartnerOtpSendClient);
+const sendPartnerInviteEmailOtp = makePartnerEmailOtpSender(newPartnerOtpSendClient, true);
 
 /** Builds the proof's email-OTP port over a sender and a verifier (the real ones below; recording fakes in the integration suite). */
 export function makePartnerEmailOtp(send: (email: string) => Promise<void>, verifier: { verify(email: string, code: string): ReturnType<EmailOtpPort["verify"]> }): EmailOtpPort {
@@ -3850,6 +4129,12 @@ export function makePartnerEmailOtp(send: (email: string) => Promise<void>, veri
 
 /** The partner proof's email OTP: GoTrue with the ANON key, as the player flow does it (E19). The code is mailed to the member's OWN address only (the handler takes it from the database, never from the client). */
 export const partnerEmailOtp: EmailOtpPort = makePartnerEmailOtp(sendPartnerEmailOtp, supabaseEmailOtpVerifier);
+
+/**
+ * The email OTP of an INVITE (6.1 branch N): the same GoTrue call, but the invitee has no account yet, so the account of the address the invite names is created by the send. The address is the invite row's (the handler
+ * takes it from the database, never from the client), so a token holder cannot cause an account to be created for an address of their choosing. The enrolment-token OTP is `partnerEmailOtp`: that person exists.
+ */
+export const partnerInviteEmailOtp: EmailOtpPort = makePartnerEmailOtp(sendPartnerInviteEmailOtp, supabaseEmailOtpVerifier);
 
 /**
  * The ONE origin the partner lane allows (partner design 4.6): `GR_PARTNER_ORIGIN`, an exact https origin. It lives in the environment, not in `app.partner_rp_config`, because `OPTIONS` must answer

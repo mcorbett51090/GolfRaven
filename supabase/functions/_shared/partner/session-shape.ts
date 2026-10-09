@@ -62,11 +62,11 @@ const MIN_CREDENTIAL_ID = 16;
 const MAX_USER_HANDLE = 64;
 const MAX_POP_JKT = 64;
 
-function plain(v: unknown): v is Record<string, unknown> {
+export function plain(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function unknownKeys(obj: Record<string, unknown>, known: ReadonlySet<string>, prefix: string, issues: ParseIssue[]): void {
+export function unknownKeys(obj: Record<string, unknown>, known: ReadonlySet<string>, prefix: string, issues: ParseIssue[]): void {
   for (const k of Object.keys(obj)) if (!known.has(k)) issues.push({ path: prefix + k, message: "unknown field" });
 }
 

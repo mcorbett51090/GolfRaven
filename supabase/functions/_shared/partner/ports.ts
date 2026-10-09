@@ -1,8 +1,8 @@
 // supabase/functions/_shared/partner/ports.ts
 //
-// The seams of the partner sign-in handler (docs/security/partner-auth-design.md 4.2 / 4.4 / 4.5, slice S1.2): what the pure handler asks of the database (`PartnerDb`, implemented in
-// `privileged.ts`, the sole database site) and of the WebAuthn wrapper (`AssertionVerifier`, implemented in `webauthn-port.ts`). Types and three error classes only: no behaviour, no imports,
-// so the handler and its unit tests (vitest, no Deno) see the contract without pulling in a driver or a library.
+// The seams of the partner handlers (docs/security/partner-auth-design.md 4.2 / 4.4 / 4.5, slices S1.2 and S1.5): what the pure handlers ask of the database (`PartnerDb`, implemented in
+// `privileged.ts`, the sole database site) and of the WebAuthn wrapper (`AssertionVerifier` and `RegistrationVerifier`, implemented in `webauthn-port.ts`). Types and the error classes only: no behaviour,
+// no imports, so the handlers and their unit tests (vitest, no Deno) see the contract without pulling in a driver or a library.
 
 /** The relying party, from `app.partner_rp_config` (the exact origin and the RP ID). */
 export interface RpConfig {
@@ -135,7 +135,7 @@ export interface TotpVerifyResult {
   readonly mfaUntil: string | null;
 }
 
-/** POST members/{id}/totp-reset (partner_totp_reset_for_partner): admin only; no public route on partner-session yet (S1.4 lite). */
+/** POST members/{id}/totp-reset (partner_totp_reset_for_partner, under the full reach rule since 0054): served by `partner-members`. */
 export type TotpResetStatus = "ok" | "unset";
 export interface TotpResetResult {
   readonly status: TotpResetStatus;
@@ -168,8 +168,175 @@ export interface PartnerSessionTx {
   totpConfirm(code: string): Promise<TotpConfirmResult>;
   /** POST step-up/totp: evaluates a 6-digit code; on `ok` sets aal 2 and mfa_until. A returned status for every refusal: the transaction COMMITS. */
   totpVerify(code: string): Promise<TotpVerifyResult>;
-  /** Admin reset of another person's TOTP (port only until members/{id}/totp-reset is wired). */
+  /** Reset of another person's TOTP (class A3, the reach rule): used by `partner-members` through `PartnerMembersTx`. */
   totpReset(targetUid: string): Promise<TotpResetResult>;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// S1.5 (migration 0054): invites, enrolment and members. Statuses are the SQL's own, one for one; every one of them is a RETURNED row (PA-14), so the transaction that returned it COMMITS.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/** The roles an invite may name (`sponsor` invites are disabled until P6: the database refuses them with 22023). */
+export type InviteRole = "staff" | "manager" | "operator";
+
+/** `partner_invite_accept` (branch N). `existing_member_sign_in` and `recover_required` are reached only by the owner of the invited mailbox (the OTP was just proved). */
+export type InviteAcceptStatus = "ok" | "not_found" | "locked" | "email_mismatch" | "email_unconfirmed" | "session_stale" | "existing_member_sign_in" | "recover_required";
+export interface InviteAcceptResult {
+  readonly status: InviteAcceptStatus;
+  /** Present on `ok` only. */
+  readonly accepted: { readonly userId: string; readonly inviteId: string; readonly orgId: string; readonly role: string; readonly challenge: ChallengeIssue } | null;
+}
+
+/** `partner_enrolment_token_accept` (recovery and admin enrolment tokens: a person, no org). */
+export type EnrolmentAcceptStatus = "ok" | "not_found" | "locked" | "email_mismatch" | "email_unconfirmed" | "session_stale" | "existing_member_sign_in" | "refused";
+export interface EnrolmentAcceptResult {
+  readonly status: EnrolmentAcceptStatus;
+  /** Present on `ok` only. */
+  readonly accepted: { readonly userId: string; readonly tokenId: string; readonly purpose: string; readonly challenge: ChallengeIssue } | null;
+}
+
+/** Which acceptance a registration follows: the `ref_kind` of the register challenge (1 an invite, 2 an enrolment token). */
+export type RegisterRefKind = 1 | 2;
+
+export interface RegisterFirstInput {
+  /** sha256 hex of the opaque session token the first session is minted with: the raw token never reaches the database. */
+  readonly sessionTokenHash: string;
+  readonly userId: string;
+  readonly refKind: RegisterRefKind;
+  readonly refId: string;
+  readonly nonce: Uint8Array;
+  readonly exp: number;
+  readonly mac: Uint8Array;
+  /** The create ceremony's raw bytes: the database parses and re-checks all of it (R4-L2). */
+  readonly attestationObject: Uint8Array;
+  readonly clientDataJson: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly publicKey: Uint8Array;
+  readonly transports: readonly string[];
+}
+/** `partner_credential_register_first`: `ok`, one of its own refusals (`not_accepted`, `accept_expired`, `bad_challenge`, `expired`, `credential_exists`, `other_membership`, `already_registered`) or one of the create core's. */
+export interface RegisterFirstResult {
+  readonly status: string;
+  readonly credentialId: string | null;
+  readonly aal: number | null;
+  readonly expiresAt: string | null;
+  readonly enrolmentUntil: string | null;
+}
+
+/** One transaction as `edge_partner_minter` for the enrolment routes: unbound, COMMITS when the callback returns (the attempt counters of the accept definers are written by their refusals). */
+export interface PartnerInviteMintTx {
+  rpConfig(): Promise<RpConfig>;
+  /** The normalised address of a LIVE invite (unaccepted, unrevoked, unexpired, under 10 attempts), or null: unknown, expired, revoked, accepted and locked are one answer. */
+  inviteEmailForToken(tokenHash: string): Promise<string | null>;
+  inviteAccept(tokenHash: string, verifiedUserId: string, gotrueSessionId: string): Promise<InviteAcceptResult>;
+  enrolmentEmailForToken(tokenHash: string): Promise<string | null>;
+  enrolmentAccept(tokenHash: string, verifiedUserId: string, gotrueSessionId: string): Promise<EnrolmentAcceptResult>;
+  registerFirst(input: RegisterFirstInput): Promise<RegisterFirstResult>;
+}
+
+export interface InviteView {
+  readonly id: string;
+  readonly orgId: string;
+  readonly role: string;
+  readonly facilityId: string | null;
+  readonly inviteeEmail: string;
+  readonly invitedBy: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+  readonly acceptedAt: string | null;
+  readonly revokedAt: string | null;
+  readonly attempts: number;
+}
+export type InviteCreateResult =
+  | { readonly status: "ok"; readonly inviteId: string; readonly expiresAt: string }
+  | { readonly status: "already_member"; readonly inviteId: null; readonly expiresAt: null };
+export type InviteRevokeStatus = "ok" | "not_found" | "already_accepted" | "already_revoked";
+/** Branch E (`partner_invite_accept_for_partner`): the core's statuses that a signed-in member can reach. */
+export type InviteMemberAcceptStatus = "ok" | "not_found" | "locked" | "email_mismatch" | "email_unconfirmed" | "already_member";
+export interface InviteMemberAcceptResult {
+  readonly status: InviteMemberAcceptStatus;
+  readonly orgId: string | null;
+  readonly role: string | null;
+}
+
+/** One transaction as `edge_partner` for the `partner-invites` routes. Every method is a `_for_partner` definer that begins with `partner_authorize`. */
+export interface PartnerInvitesTx {
+  /** POST invites (class A2): only the SHA-256 of the token arrives; 42501 outside the inviter's reach, 22023 for a malformed argument. */
+  inviteCreate(orgId: string, role: InviteRole, inviteeEmail: string, tokenHash: string): Promise<InviteCreateResult>;
+  /** GET invites (class A0), newest first, never the token hash. */
+  inviteList(orgId: string | null): Promise<InviteView[]>;
+  /** DELETE invites/{id} (class A2). */
+  inviteRevoke(inviteId: string): Promise<InviteRevokeStatus>;
+  /** POST invites/accept, branch E (class A2): the SESSION user's confirmed email must equal the invite's. */
+  inviteAcceptMember(tokenHash: string): Promise<InviteMemberAcceptResult>;
+}
+
+export type MemberRevokeStatus = "ok" | "not_found";
+export type MemberRecoverResult =
+  | { readonly status: "ok"; readonly tokenId: string; readonly expiresAt: string }
+  | { readonly status: "no_email"; readonly tokenId: null; readonly expiresAt: null };
+export type PinResetStatus = "ok" | "unset";
+export interface OrgRevokeAllResult {
+  readonly status: "ok" | "not_found";
+  readonly sessions: number;
+  readonly credentials: number;
+}
+export interface AdminEnrolmentResult {
+  readonly tokenId: string;
+  readonly expiresAt: string;
+}
+
+export type CredentialOptionsResult =
+  | { readonly status: "ok"; readonly challenge: ChallengeIssue; readonly rp: RpConfig; readonly excludeCredentialIds: readonly Uint8Array[] }
+  | { readonly status: "too_many" };
+/** The signed-in person a second credential is created for: the WebAuthn user handle is their id (a sign-in assertion must return it), the name is only what an authenticator shows. */
+export interface CredentialSubject {
+  readonly userId: string;
+  readonly email: string | null;
+}
+export interface CredentialRegisterInput {
+  readonly nonce: Uint8Array;
+  readonly exp: number;
+  readonly mac: Uint8Array;
+  readonly attestationObject: Uint8Array;
+  readonly clientDataJson: Uint8Array;
+  readonly credentialId: Uint8Array;
+  readonly publicKey: Uint8Array;
+  readonly transports: readonly string[];
+}
+export interface CredentialView {
+  readonly id: string;
+  readonly label: string;
+  readonly note: string | null;
+  readonly createdAt: string;
+  readonly lastUsedAt: string | null;
+  readonly revokedAt: string | null;
+  readonly backupEligible: boolean;
+  readonly backupState: boolean;
+}
+export type CredentialRevokeStatus = "ok" | "not_found" | "already_revoked";
+
+/** One transaction as `edge_partner` for the `partner-members` routes. Every method is a `_for_partner` definer that begins with `partner_authorize`; the reach rule (6.5) is the database's: a target outside it is a 42501. */
+export interface PartnerMembersTx extends Pick<PartnerSessionTx, "totpReset"> {
+  /** POST members/{id}/revoke (class A2): ONE membership. */
+  memberRevoke(targetUserId: string, orgId: string): Promise<MemberRevokeStatus>;
+  /** POST members/{id}/recover (class A2): only the SHA-256 of the new enrolment token arrives. */
+  memberRecover(targetUserId: string, tokenHash: string): Promise<MemberRecoverResult>;
+  /** POST members/{id}/pin-reset (class A2). */
+  pinReset(targetUserId: string): Promise<PinResetStatus>;
+  /** POST orgs/{id}/sessions/revoke-all (class A2); `createdAfter` is an ISO time or null. */
+  orgSessionsRevokeAll(orgId: string, createdAfter: string | null): Promise<OrgRevokeAllResult>;
+  /** POST admin/enrolments (class A3): an admin issues an enrolment token for ANOTHER admin. */
+  adminEnrolmentIssue(targetUserId: string, tokenHash: string): Promise<AdminEnrolmentResult>;
+  /** POST credentials/options (class A2 + reauth). */
+  credentialOptions(): Promise<CredentialOptionsResult>;
+  credentialSubject(): Promise<CredentialSubject>;
+  /** POST credentials (class A2 + reauth): a second credential. */
+  credentialRegister(input: CredentialRegisterInput): Promise<{ readonly status: string; readonly credentialId: string | null }>;
+  /** GET credentials (class A0): the person's own. */
+  credentialList(): Promise<CredentialView[]>;
+  /** DELETE credentials/{id} (class A2, one's own included): own, or one the reach rule covers; its sessions die with it. */
+  credentialRevoke(credentialId: string): Promise<CredentialRevokeStatus>;
 }
 
 /**
@@ -185,10 +352,18 @@ export interface EmailOtpPort {
 export interface PartnerDb {
   /** Runs `op` in one transaction as `edge_partner_minter`; COMMITS whenever `op` returns (a refusal is a returned value, never a throw). A throw rolls back. */
   withMint<T>(op: (m: PartnerMintTx) => Promise<T>): Promise<T>;
+  /** The same transaction (kind `partner_mint`, no binding) with the invite and enrolment definers of 0054 (S1.5). COMMITS whenever `op` returns: the attempt counts are written by refusals (PA-14). */
+  withInviteMint<T>(op: (m: PartnerInviteMintTx) => Promise<T>): Promise<T>;
   /** Runs `op` in one transaction as `edge_partner` bound to the session whose token hash this is. Throws `PartnerSessionRefused` when the binder refuses, `PartnerAuthorityRefused` on a 42501 refusal. */
   withSession<T>(tokenHash: string, op: (s: PartnerSessionTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `partner-invites` routes (invite create / list / revoke, branch-E accept): the same bound transaction, the invite definers. */
+  withInvites<T>(tokenHash: string, op: (s: PartnerInvitesTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `partner-members` routes (member revoke / recover, PIN and TOTP reset, org revoke-all, credentials): the same bound transaction, the member definers. */
+  withMembers<T>(tokenHash: string, op: (s: PartnerMembersTx) => Promise<T>): Promise<T>;
   /** One hit of a per-member bucket, in its OWN short transaction, committed before any request transaction opens (the pool-deadlock rule of `hitRateLimitForActor`). */
   hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
+  /** One hit of a SYSTEM bucket (design 8: nothing is bound before authentication, so the buckets keyed on an object the caller cannot choose, the invite token and the target mailbox, are `edge_system` buckets), in its own short transaction. */
+  hitSystemRateLimit(bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
 }
 
 /** The assertion as the browser's `PublicKeyCredential.toJSON()` hands it over (the shape `@simplewebauthn/server` takes). */
@@ -220,6 +395,41 @@ export interface AssertionVerifier {
   verify(input: VerifyAssertionRequest): Promise<VerifyOutcome>;
 }
 
+/** The create ceremony as the browser's `PublicKeyCredential.toJSON()` hands it over (the shape `@simplewebauthn/server` takes), with the fields the lane never reads dropped. */
+export interface RegistrationJson {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  response: { clientDataJSON: string; attestationObject: string; transports?: string[] };
+  clientExtensionResults: Record<string, never>;
+}
+
+export interface CreationOptionsRequest {
+  readonly rp: RpConfig;
+  /** The person's id (16 bytes): the WebAuthn user handle. */
+  readonly userHandle: Uint8Array;
+  readonly userName: string;
+  /** The 32 bytes the database issued (a `register` challenge, or the session-bound one of `credentials/options`). */
+  readonly challenge: Uint8Array;
+  /** Credential ids the person already holds (so the authenticator does not register a second one on the same device). */
+  readonly excludeCredentialIds: readonly Uint8Array[];
+}
+
+export interface VerifyRegistrationRequest {
+  readonly rp: RpConfig;
+  readonly response: RegistrationJson;
+  readonly expectedChallenge: Uint8Array;
+}
+
+/** `ok: true` carries what the database stores (the id and key as the library parsed them, the transports reduced to the WebAuthn enum). Any refusal is `{ ok: false }`: the reason stays in the wrapper. */
+export type RegistrationOutcome = { readonly ok: true; readonly credentialId: Uint8Array; readonly publicKey: Uint8Array; readonly transports: readonly string[] } | { readonly ok: false };
+
+export interface RegistrationVerifier {
+  /** Create options: attestation `none`, discoverable credential and user verification required, ES256 and RS256 only (6.1 step 4). */
+  options(req: CreationOptionsRequest): Promise<unknown>;
+  verify(req: VerifyRegistrationRequest): Promise<RegistrationOutcome>;
+}
+
 /** The binder refused the presented token (28000, one message for unknown, idle, expired, revoked ...): the handler answers the ONE 401. */
 export class PartnerSessionRefused extends Error {
   constructor() {
@@ -249,5 +459,13 @@ export class PartnerConflict extends Error {
   constructor() {
     super("partner_conflict");
     this.name = "PartnerConflict";
+  }
+}
+
+/** A definer refused a malformed argument (22023), most often an action on oneself where the rule is "a different target person": the handler answers 422. */
+export class PartnerInvalidArgument extends Error {
+  constructor() {
+    super("partner_invalid_argument");
+    this.name = "PartnerInvalidArgument";
   }
 }
