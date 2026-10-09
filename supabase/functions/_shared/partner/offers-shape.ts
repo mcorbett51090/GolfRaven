@@ -8,7 +8,7 @@
 //   POST offers/approve   { id }
 //   POST offers/end       { id }
 //
-// Eligibility is checked for SHAPE only here (a JSON value). `validateOfferEligibility` from `@golfraven/rules` runs in the handler before the database is opened (AT(14)).
+// Eligibility is checked for SHAPE only here (a JSON value). The Edge-local `validateOfferEligibility` (AT(14) schema gate) runs in the handler before the database is opened.
 
 import { parseFacilityId, parseReadQuery } from "./attest-shape.ts";
 import { parseUuid } from "./invites-shape.ts";
