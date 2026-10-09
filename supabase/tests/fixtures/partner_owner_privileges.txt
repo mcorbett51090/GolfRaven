@@ -98,11 +98,22 @@
 {"privilege": "EXECUTE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
 {"privilege": "USAGE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "schema", "object_name": "app"}
 {"privilege": "USAGE", "role_name": "partner_session_toucher", "column_name": null, "object_kind": "schema", "object_name": "private"}
+# 0053 (S1.4): partner_totp_verifier gains the TOTP table (SELECT/INSERT/UPDATE), SELECT of enrolment_until / otp_proof_until / user_id on partner_session, and EXECUTE of partner_binding_user, hotp, partner_totp_seed_derive, is_admin. Appended/re-ordered by (role_name, object_kind, object_name, privilege, column_name) to match the regenerate query.
 {"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "aal", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "enrolment_until", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "id", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "mfa_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "otp_proof_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": "user_id", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "UPDATE", "role_name": "partner_totp_verifier", "column_name": "aal", "object_kind": "column", "object_name": "app.partner_session"}
 {"privilege": "UPDATE", "role_name": "partner_totp_verifier", "column_name": "mfa_until", "object_kind": "column", "object_name": "app.partner_session"}
+{"privilege": "EXECUTE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "function", "object_name": "private.hotp(bytea,bigint,integer,text)"}
+{"privilege": "EXECUTE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "function", "object_name": "private.is_admin(uuid)"}
 {"privilege": "EXECUTE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_session()"}
+{"privilege": "EXECUTE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_binding_user()"}
+{"privilege": "EXECUTE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "function", "object_name": "private.partner_totp_seed_derive(uuid,integer)"}
+{"privilege": "INSERT", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "relation", "object_name": "app.partner_totp"}
+{"privilege": "SELECT", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "relation", "object_name": "app.partner_totp"}
+{"privilege": "UPDATE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "relation", "object_name": "app.partner_totp"}
 {"privilege": "USAGE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "schema", "object_name": "app"}
 {"privilege": "USAGE", "role_name": "partner_totp_verifier", "column_name": null, "object_kind": "schema", "object_name": "private"}

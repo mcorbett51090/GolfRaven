@@ -572,13 +572,13 @@ SELECT is(private.zz24_authz_for_partner(NULL, NULL, NULL, 'SESSION'), '00000000
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az1;
 
--- PA-4b: A3 FAILS CLOSED, for every actor, admin included, until S1.4 (no interim relaxation). A2 was enabled by S1.3 (0052): without its prerequisites (a passkey assertion at most 5 minutes old and a PIN grant at most 30 s
--- old; the enabled-class cells are in 28_partner_pin_step_up.sql) it still refuses every actor, so the A2 cells below keep their 42501 and now name the prerequisite.
+-- PA-4b: A2 and A3 are ENABLED (S1.3 / S1.4). Without their prerequisites they still refuse every actor: A2 needs reauth + PIN (or PIN-less A3); A3 needs aal 2 and a fresh mfa_until. The enabled-class happy paths are in
+-- 28_partner_pin_step_up.sql (A2) and 31_partner_totp_aal2.sql (A3).
 SAVEPOINT az4b;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A2')$$, '42501', 'partner_authorize: a passkey assertion in the last 5 minutes is required', 'PA-4b (S1.3: A2 is ENABLED): the ADMIN (aal 2) with no reauth and no PIN grant is refused class A2');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3')$$, '42501', 'partner_authorize: class A3 is not enabled (fails closed until its prerequisite exists)', 'PA-4b: ... and class A3');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-4b (S1.4: A3 is ENABLED): ... and class A3 without mfa_until');
 SELECT is(private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A0'), '00000000-0000-0000-0000-4000000000d0'::uuid, 'PA-4b control: the same admin session passes class A0 (so the A2 / A3 refusals are the class prerequisite, not the session)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b;
@@ -586,14 +586,14 @@ SAVEPOINT az4b2;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_mx');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A2')$$, '42501', NULL, 'PA-4b: the MANAGER at the facility, with no reauth and no PIN grant, is refused class A2 as well');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', NULL, 'PA-4b: ... and A3');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-4b: ... and A3 (aal1 manager lacks aal2 + mfa)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b2;
 SAVEPOINT az4b3;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A2')$$, '42501', NULL, 'PA-4b: staff with no reauth and no PIN grant is refused A2');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_y', NULL, ARRAY['staff'], 'A3')$$, '42501', NULL, 'PA-4b: ... and A3 (the refusal comes BEFORE the scope check: the same answer in or out of scope)');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-4b: ... and A3 in scope without aal2 + mfa_until');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b3;
 

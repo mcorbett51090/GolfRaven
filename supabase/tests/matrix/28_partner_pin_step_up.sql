@@ -1,7 +1,7 @@
 -- 28_partner_pin_step_up.sql
 -- P5.1a S1.3 (0052): THE PARTNER STEP-UP PIN, from docs/security/partner-auth-design.md section 12.1 "S1.3": PA-18 (the verifier is not a function of the PIN alone; five failures lock and the sixth CORRECT attempt is still
--- refused; the lock survives a new session; the counters are a returned STATUS), PA-19 (a PIN grant is single-use and session-bound; A1, A2 and A3 refuse outside their prerequisites; the A3-for-a-PIN-less-member
--- substitution is S1.4's and stays fail-closed) and PA-21 (a PIN is set or changed only inside an enrolment window or after an email proof: a passkey assertion alone is refused), plus the OTP-proof definers, the
+-- refused; the lock survives a new session; the counters are a returned STATUS), PA-19 (a PIN grant is single-use and session-bound; A1 and A2 refuse outside their prerequisites; A3 and the PIN-less substitution
+-- are covered in 31_partner_totp_aal2.sql after S1.4) and PA-21 (a PIN is set or changed only inside an enrolment window or after an email proof: a passkey assertion alone is refused), plus the OTP-proof definers, the
 -- check-14 (a) behavioural cells of the six new `_for_partner` definers, the OR rule on partner_pin (a planted GUC opens nothing under a partner binding) and account deletion.
 --
 -- WHAT A pgTAP FILE CANNOT SHOW, AND WHERE IT IS SHOWN: that a refusal's TRANSACTION COMMITS (the counters after a REAL commit), and that 20 CONCURRENT wrong attempts evaluate at most 5 (a row lock needs two connections):
@@ -231,8 +231,9 @@ ROLLBACK TO SAVEPOINT user_bound2;
 SAVEPOINT op_aal1;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op1');
-SELECT throws_ok($$SELECT * FROM private.partner_pin_verify_for_partner('\x1111111111111111111111111111111111111111111111111111111111111111'::bytea)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', 'PA-20 shape: partner_pin_verify_for_partner is class A0: an aal 1 OPERATOR session is refused');
-SELECT throws_ok($$SELECT * FROM private.partner_session_otp_proof_for_partner('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', 'the OTP proof is class A0: an aal 1 operator is refused (S1.4 seam: the TOTP-less exception of 4.1)');
+SELECT throws_ok($$SELECT * FROM private.partner_pin_verify_for_partner('\x1111111111111111111111111111111111111111111111111111111111111111'::bytea)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', 'PA-20 shape: partner_pin_verify_for_partner is class A0_WRITE: an aal 1 OPERATOR session is refused');
+-- S1.4 reclassed otp-proof to A0_ENROL: an aal 1 operator with no confirmed TOTP may reach it (PA-28); a bad GoTrue session id is a STATUS, not an aal refusal. Full PA-28 cells are in 31_partner_totp_aal2.sql.
+SELECT is((SELECT o_status FROM private.partner_session_otp_proof_for_partner('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)), 'refused', 'PA-28 shape (S1.4): otp-proof is A0_ENROL — aal1 operator without confirmed TOTP reaches it; bad GoTrue id → refused');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT op_aal1;
 
@@ -506,12 +507,12 @@ SELECT private.bind_partner_session(:'th_mx');
 SELECT throws_ok($$SELECT private.zz28_authz_for_partner('fac_y', NULL, ARRAY['manager'], 'A2')$$, '42501', 'partner_authorize: no scope', 'PA-19: A2 with every prerequisite but NO scope at the facility is refused for the scope');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a2_scope;
--- A3 still fails closed for EVERY actor, whatever else the session holds
+-- A3 is ENABLED by S1.4 (0053): admin aal2 + fresh mfa_until passes; manager at aal1 still refuses (needs aal2)
 SAVEPOINT a3_closed;
 SELECT pg_temp.seed_step('ad', '{"pin_grant_s": 50, "reauth_s": 240, "mfa_s": 240}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
-SELECT throws_ok($$SELECT private.zz28_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3')$$, '42501', 'partner_authorize: class A3 is not enabled (fails closed until its prerequisite exists)', 'PA-19 / PA-4b: A3 STILL fails closed for an ADMIN at aal 2 holding a PIN grant, a reauth window and an mfa window (S1.4 builds it)');
+SELECT is(private.zz28_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3'), '00000000-0000-0000-0000-4000000000d0'::uuid, 'PA-19 / PA-4b (S1.4): A3 ENABLED — ADMIN at aal 2 with fresh mfa_until passes');
 SELECT is(private.zz28_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A0'), '00000000-0000-0000-0000-4000000000d0'::uuid, 'control: the same admin passes A0');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a3_closed;
@@ -519,16 +520,16 @@ SAVEPOINT a3_closed2;
 SELECT pg_temp.seed_step('mx', '{"pin_grant_s": 50, "reauth_s": 240, "mfa_s": 240}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_mx');
-SELECT throws_ok($$SELECT private.zz28_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', 'partner_authorize: class A3 is not enabled (fails closed until its prerequisite exists)', 'PA-19: ... and for a MANAGER (the A3 refusal comes before the scope check and before any grant is read)');
+SELECT throws_ok($$SELECT private.zz28_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-19: MANAGER at aal1 is refused A3 (needs aal2 + mfa; full A3 cells in 31)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a3_closed2;
--- the A3-for-a-PIN-less-member substitution is S1.4's: an OPERATOR (no staff or manager role, so no PIN) is refused A1 and A2, and cannot set a PIN
+-- the A3-for-a-PIN-less-member substitution (S1.4): an OPERATOR with fresh mfa_until (and reauth for A2) passes A1/A2 without a PIN grant
 SAVEPOINT pinless;
 SELECT pg_temp.seed_step('op', '{"reauth_s": 240, "mfa_s": 240}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
-SELECT throws_ok($$SELECT private.zz28_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A1')$$, '42501', 'partner_authorize: a PIN verified in the last minute and not yet used is required', 'PA-19: a PIN-less OPERATOR is refused A1 (the A3 substitution is S1.4: fail-closed, no interim relaxation)');
-SELECT throws_ok($$SELECT private.zz28_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A2')$$, '42501', 'partner_authorize: a PIN verified in the last 30 seconds and not yet used is required', 'PA-19: ... and A2');
+SELECT is(private.zz28_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A1'), '00000000-0000-0000-0000-3000000000c1'::uuid, 'PA-19 (S1.4): PIN-less OPERATOR with fresh mfa_until passes A1 (A3 substitution)');
+SELECT is(private.zz28_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A2'), '00000000-0000-0000-0000-3000000000c1'::uuid, 'PA-19 (S1.4): ... and A2 with reauth + mfa');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT pinless;
 SAVEPOINT pinless2;
