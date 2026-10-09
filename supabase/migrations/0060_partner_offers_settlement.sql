@@ -30,9 +30,15 @@
 -- ============================================================================
 GRANT EXECUTE ON FUNCTION app.consume_offer_budget(uuid, numeric) TO private_definer;
 GRANT UPDATE (budget_used) ON app.offer TO private_definer;
+-- function_inventory is FORCE RLS; UPDATE needs the 0041 / 0057 pattern (INSERT still uses the 0017 owner policy).
+GRANT UPDATE ON private.function_inventory TO CURRENT_USER;
+CREATE POLICY current_user_edit_function_inventory_0060 ON private.function_inventory
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 UPDATE private.function_inventory
 SET note = 'locks + moves a reservation into budget_used; service_role and private_definer (0060 partner offers-redeem)'
 WHERE schema_name = 'app' AND function_name = 'consume_offer_budget' AND identity_args = 'p_offer_id uuid, p_amount numeric';
+DROP POLICY current_user_edit_function_inventory_0060 ON private.function_inventory;
+REVOKE UPDATE ON private.function_inventory FROM CURRENT_USER;
 
 -- ============================================================================
 -- 2. Binding-keyed policies (private_definer). Never a GUC.
