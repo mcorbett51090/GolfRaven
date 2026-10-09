@@ -357,13 +357,14 @@ ROLLBACK TO SAVEPOINT pinless;
 -- ----------------------------------------------------------------------------
 -- 4. PA-24 enrol / confirm / reset
 -- ----------------------------------------------------------------------------
+-- After confirm, A0_ENROL needs aal 2 (PA-28). Seed aal 2 so authorize reaches enrol_apply's already_confirmed status.
 SAVEPOINT already;
 SELECT pg_temp.seed_totp('00000000-0000-0000-0000-3000000000c1', 1, true, NULL);
-SELECT pg_temp.seed_step('op1', '{"otp_s": 500}'::jsonb);
+SELECT pg_temp.seed_step('op1', '{"otp_s": 500, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op1');
 RESET ROLE;
-SELECT is(split_part(pg_temp.enrol(), '|', 1), 'already_confirmed', 'PA-24: enrol after confirmed → already_confirmed');
+SELECT is(split_part(pg_temp.enrol(), '|', 1), 'already_confirmed', 'PA-24: enrol after confirmed (aal 2 session) → already_confirmed');
 ROLLBACK TO SAVEPOINT already;
 
 SAVEPOINT no_proof;

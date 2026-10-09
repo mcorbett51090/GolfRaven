@@ -162,9 +162,9 @@ SELECT is((SELECT array_agg(f.sig ORDER BY f.sig) FROM (VALUES ('private.partner
 SELECT is((SELECT array_agg(f.sig || ' -> ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END || ':' || a.privilege_type || ':' || a.grantor::regrole::text ORDER BY f.sig, CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE a.grantee::regrole::text END)
            FROM (VALUES ('private.partner_pin_core(uuid, bytea, bytea)'), ('private.partner_binding_user()')) f(sig)
            CROSS JOIN LATERAL aclexplode((SELECT p.proacl FROM pg_proc p WHERE p.oid = f.sig::regprocedure)) a),
-  ARRAY['private.partner_binding_user() -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> private_definer:EXECUTE:private_definer',
+  ARRAY['private.partner_binding_user() -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> partner_totp_verifier:EXECUTE:private_definer', 'private.partner_binding_user() -> private_definer:EXECUTE:private_definer',
         'private.partner_pin_core(uuid, bytea, bytea) -> partner_pin_verifier:EXECUTE:private_definer', 'private.partner_pin_core(uuid, bytea, bytea) -> private_definer:EXECUTE:private_definer'],
-  'N1: partner_pin_core and partner_binding_user carry EXACTLY two ACL entries each: partner_pin_verifier and the owner private_definer (no PUBLIC, no edge role, no other grantee)');
+  'N1: partner_pin_core has exactly two ACL entries (pin verifier + owner); partner_binding_user has three (pin verifier, totp verifier from 0053, owner); no PUBLIC, no edge role');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_reauth_verifier'), ('partner_session_issuer'), ('partner_session_toucher')) r(n)
            WHERE has_any_column_privilege(r.n, 'app.partner_pin', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, 'app.partner_pin', 'DELETE,TRUNCATE,TRIGGER')), 0,
   'PA-1: no client role, no edge role, no service_role and no other owner role holds ANY privilege on app.partner_pin');
@@ -484,15 +484,15 @@ SELECT private.bind_partner_session(:'th_op1');
 SELECT throws_ok($$SELECT private.zz28_authz_for_partner(NULL, 'trl_t', ARRAY['operator'], 'A0_WRITE')$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', 'LOW-1: A0_WRITE still refuses an aal 1 session of an operator (M2)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT a0w_aal;
--- the wrappers that WRITE the session row say so (a revert to A0 reopens the same-session deadlock); the read-only ones stay A0
+-- the wrappers that WRITE the session row under A0_WRITE (PIN only after 0053): otp-proof / reauth moved to A0_ENROL (PA-28); GET pin stays A0
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE '%\_for\_partner'
            AND regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ 'partner_authorize\([^;]*''A0_WRITE''\)'),
-  ARRAY['partner_pin_change_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner', 'partner_session_otp_proof_for_partner', 'partner_session_reauth_for_partner'],
-  'LOW-1: exactly the five wrappers that write the session row use class A0_WRITE: the PIN verify, set and change, the email proof and the S1.2 reauth (redefined in 0052)');
+  ARRAY['partner_pin_change_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner'],
+  'LOW-1: exactly the three PIN wrappers that write the session row use class A0_WRITE (otp-proof and reauth moved to A0_ENROL in 0053)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE '%\_for\_partner'
            AND regexp_replace(p.prosrc, '--[^\n]*', '', 'g') ~ 'partner_authorize\([^;]*''A0''\)'),
-  ARRAY['partner_pin_params_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_options_for_partner'],
-  'LOW-1: the read-only A0 wrappers stay A0 (GET pin, the OTP target, the reauth options and credential): no needless serialisation of reads');
+  ARRAY['partner_pin_params_for_partner'],
+  'LOW-1: GET pin stays A0 (read-only); otp-target / reauth options / credential moved to A0_ENROL in 0053');
 SAVEPOINT a2_reauthexp;
 SELECT pg_temp.seed_step('mx', '{"pin_grant_s": 50, "reauth_s": -1}'::jsonb);
 SET LOCAL ROLE edge_partner;

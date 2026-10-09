@@ -56,3 +56,10 @@ private.partner_pin_verify_apply(p_derived bytea)
 private.partner_pin_set_apply(p_mode text, p_derived bytea, p_salt bytea, p_iterations integer, p_current bytea)
 private.partner_pin_params_read()
 private.partner_pin_grant_consume_fresh(p_max_age_seconds integer)
+# 0053 (partner TOTP / aal 2, S1.4): outside the *_for_partner family, four functions owned by partner_totp_verifier (R5-L1) read the binding. enrol_apply / confirm_apply / verify_apply /
+# mfa_clear take the person and the session from the binding and are reachable only from the A0_ENROL / A0_MFA / SESSION wrappers that begin with private.partner_authorize; the role can write
+# nothing but aal / mfa_until of its own bound session and the partner_totp row of its own bound person (or, for admin reset, another admin/operator via reset_apply, which does not read the binding).
+private.partner_totp_enrol_apply()
+private.partner_totp_confirm_apply(p_code text)
+private.partner_totp_verify_apply(p_code text)
+private.partner_totp_mfa_clear()

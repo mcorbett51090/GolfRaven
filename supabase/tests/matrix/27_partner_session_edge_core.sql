@@ -220,9 +220,12 @@ ROLLBACK TO SAVEPOINT user_bound;
 SAVEPOINT op_aal1;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
-SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_options_for_partner()$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', '14 (a) / PA-20: the reauth issuer is class A0: an aal 1 OPERATOR session is refused');
-SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_credential_for_partner('\x00112233445566778899aabbccddeeff'::bytea)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', '14 (a): the reauth credential read is class A0: an aal 1 OPERATOR session is refused');
-SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_for_partner('\x00112233445566778899aabbccddeeff'::bytea, '\x00'::bytea, 1, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', '14 (a): the reauth verification is class A0: an aal 1 OPERATOR session is refused');
+-- S1.4 (0053): reauth is A0_ENROL. An aal 1 operator with NO confirmed TOTP may call it (PA-28); matrix 31 proves the post-confirm refusal.
+SELECT lives_ok($$SELECT * FROM private.partner_session_reauth_options_for_partner()$$, '14 (a) / PA-28: the reauth issuer is A0_ENROL: an aal 1 OPERATOR with no confirmed TOTP may call it');
+SELECT lives_ok($$SELECT * FROM private.partner_session_reauth_credential_for_partner('\x00112233445566778899aabbccddeeff'::bytea)$$, '14 (a) / PA-28: the reauth credential read is A0_ENROL: an aal 1 OPERATOR with no confirmed TOTP may call it');
+SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_for_partner('\x00112233445566778899aabbccddeeff'::bytea, '\x00'::bytea, 1, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea)$$, '22023',
+  'partner_reauth_check: a session, a credential id, a 32-byte nonce, an expiry, a MAC, the authenticator data, the client data and a signature are required',
+  '14 (a) / PA-28: the reauth verification is A0_ENROL: authorize passes; malformed args raise 22023 (not the aal gate)');
 SELECT is((SELECT private.partner_whoami_for_partner() ->> 'requiredAal'), '2', '4.1: ... while GET session (PEEK) still answers an aal 1 operator, and reports the assurance it needs');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, '4.1: ... and lock (SESSION) still works at aal 1');
 SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, '4.1: ... and sign-out (SESSION) still works at aal 1');
@@ -303,7 +306,7 @@ SELECT is((SELECT (private.partner_whoami_for_partner() -> 'stepUp' ->> 'reauthU
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'lock: runs');
 RESET ROLE;
 SELECT is((SELECT (pin_grant_until IS NULL AND reauth_until IS NULL AND otp_proof_until IS NULL) FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'lock: the PIN grant, the reauth window and the OTP proof are cleared');
-SELECT ok((SELECT mfa_until IS NOT NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock: mfa_until is NOT cleared here (S1.4 owns that column and adds its clearer: nothing sets it before S1.4); the seam is stated in 0049');
+SELECT ok((SELECT mfa_until IS NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock: mfa_until IS cleared (S1.4 partner_totp_mfa_clear via the totp-verifier-owned clearer)');
 SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'lock: the session stays LIVE');
 ROLLBACK TO SAVEPOINT lock1;
 SAVEPOINT lock2;
