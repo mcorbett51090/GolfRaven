@@ -61,6 +61,11 @@ describe("the policy", () => {
     for (const src of d.get("connect-src")!) expect(src).toMatch(/\/functions\/v1\/[a-z][a-z0-9-]*\/$/);
   });
 
+  it("connect-src names exactly partner-session, partner-invites (invite and enrolment acceptance, the first credential) and partner-members, each path-scoped", () => {
+    expect(d.get("connect-src")).toEqual([`${API}/partner-session/`, `${API}/partner-invites/`, `${API}/partner-members/`]);
+    expect(d.get("connect-src")!.join(" ")).not.toMatch(/partner-attest|rest\/v1|auth\/v1/);
+  });
+
   it("the CSP list and the client's bearer allow-list are the SAME list (partner-functions.json)", () => {
     expect([...CLIENT_FUNCTIONS]).toEqual([...PARTNER_FUNCTIONS]);
     expect(connectSources(API, ["a-fn", "b-fn"])).toEqual([`${API}/a-fn/`, `${API}/b-fn/`]);
@@ -170,7 +175,7 @@ describe("the _headers file", () => {
   });
 
   it("gives no request two values for one header name (Cloudflare Pages joins repeated names across the matching blocks with a comma instead of replacing)", () => {
-    for (const path of ["/", "/index.html", "/assets/app-X.js", "/assets/styles-X.css", "/favicon.svg", "/manifest.webmanifest"]) {
+    for (const path of ["/", "/index.html", "/invite", "/assets/app-X.js", "/assets/styles-X.css", "/favicon.svg", "/manifest.webmanifest"]) {
       const names = matching(text, path).flatMap((b) => b.names);
       expect(names.filter((n, i) => names.indexOf(n) !== i), path).toEqual([]);
     }
@@ -179,6 +184,8 @@ describe("the _headers file", () => {
   it("the page itself (/ and /index.html) is no-store, so Back never serves the signed-in page from a cache or the bfcache; the assets are not", () => {
     expect(headersFor(text, "/")["cache-control"]).toBe("no-store");
     expect(headersFor(text, "/index.html")["cache-control"]).toBe("no-store");
+    // an invite link (/invite#<token>) is served the same page by the host's single-page fallback, and is just as uncacheable
+    expect(headersFor(text, "/invite")["cache-control"]).toBe("no-store");
     for (const asset of ["/assets/app-X.js", "/assets/styles-X.css"]) expect(headersFor(text, asset)["cache-control"], asset).toBe("public, max-age=31536000, immutable");
     for (const other of ["/favicon.svg", "/manifest.webmanifest"]) expect(headersFor(text, other)["cache-control"], other).toBeUndefined();
   });

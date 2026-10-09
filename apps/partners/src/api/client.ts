@@ -17,6 +17,10 @@
  * ERRORS are `PartnerApiError` values with a closed `kind` (see errors.ts). A 401 on an authenticated call means the
  * session is dead: the token is wiped here, before the caller sees the error, and listeners are told.
  *
+ * PRE-SESSION ROUTES (S1.5): `acceptStart` / `acceptVerify` (invite or enrolment token, no bearer) and `registerFirst` (the first credential, which OPENS the
+ * first session: its token is adopted exactly as `verify`'s is, by `adoptSession`, including the cancel handling) are beside `signInOptions`. The step-up routes
+ * (`pin`, `step-up/pin`, `pin/set`, ...) are session routes and go through `call()`; their typed wrappers are `session-routes.ts`.
+ *
  * ENDING A SESSION IS IMMEDIATE (threat model: a shared shop iPad). `signOut()` and `lock()` copy the token into a local, wipe
  * it and tell the listeners (the screen goes to sign-in) BEFORE a byte is sent, then send with the copy and drop the copy as
  * soon as `fetch` has been called, so a request that never answers neither keeps the screen up nor keeps the token in memory.

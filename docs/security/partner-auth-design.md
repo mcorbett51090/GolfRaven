@@ -1944,3 +1944,36 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 - Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
 - The PWA screens and `apps/partners` client; the out-of-band notice of a credential add (U1) is still an `audit_log` row.
 - `gr_enr_` is not on `getActorFromRequest`'s refusal list (it is never a bearer); add it if a bearer use ever appears.
+
+## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
+
+Closes the seams 20.5 left for S1.3, S1.4 and S1.5, now that their Edge routes exist. **No server, database or migration change**: the page is the only thing that moved.
+
+### 24.1 What was built
+
+- **PIN step-up** (`src/auth/pin.ts`, `step-up.ts`, `pin-setup.ts`). The browser derives with the shared contract (19.4): `pin-contract.ts`, `pin-deny-list.ts` and, for the base64url helpers it imports, `token.ts` are imported **by relative path** (not copied), so the browser cannot drift from what the Edge and the database tests run. `scripts/lib/inputs.mjs` allows exactly those three files outside `src/` (an exact-path list; a fourth fails the build; `node_modules` is still refused) and `tsconfig.json` gains `allowImportingTsExtensions` for their `./token.ts` import. `createStepUp` is the real `StepUp`: `GET pin` (a locked, unset or must-change PIN ends the call before any prompt), the prompt, the rule and deny-list check **before** any derivation, PBKDF2 with the stored salt and iteration count, `POST step-up/pin { derived }`. The controller exposes it as `requirePin(actionClass)`; `unavailableStepUp` stays exported.
+- **Set, change and the email proof**: `pin/set`, `pin/change`, `otp-proof/start`, `otp-proof/verify` (6.3), with a fresh CSPRNG salt and the contract's default 600,000 iterations. The first PIN after an enrolment is forced (6.1 step 5).
+- **Invite and enrolment acceptance** (6.1 branch N): client methods `acceptStart`, `acceptVerify`, `registerFirst` beside `signInOptions`; `src/webauthn/registration.ts` (`navigator.credentials.create` for the server's options, refused if they weaken the ceremony; serialised into exactly the strict shape `registration-shape.ts` accepts); the enrolment flow (token, emailed code, passkey, first session, forced PIN); the invite link (`/invite#<token>`, the fragment removed from the address bar on load).
+- **TOTP** (6.4), the nice-to-have: enter a code (`step-up/totp`) or add an authenticator (`totp/enrol`, `totp/confirm`) when `aal < requiredAal`. The seed is shown once as text (and the `otpauth://` link); there is no QR renderer, because no dependency may be added.
+- **CSP and client allow-list**: `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, so `connect-src` carries three path-scoped sources (the same list is the bearer allow-list of `call()`); `_headers` marks `/invite` no-store. Error kinds `conflict` (409), `gone` (410) and `unprocessable` (422) join the client's closed set (the new routes answer them).
+
+### 24.2 Decisions and departures
+
+- **A PIN the rules refuse is refused at a verify too**, not only at a set. The server cannot tell a denied PIN from another (it sees derived bytes), and 19.4 puts the rules where the PIN is typed. A refused PIN at a verify cannot be a PIN this page ever set; refusing it sends nothing and costs the member no failure against the lockout of 5. The cost: a PIN set by a custom client to a denied value cannot be used through this page until a manager resets it.
+- **A hostile or broken server cannot choose the work factor.** `GET pin` iterations outside `[210000, 1000000]`, or a salt that is not 16 canonical bytes, end the call with `bad_params` before anything is derived (a floor below the contract weakens the member's verifier; a ceiling above it is a denial of service on the page).
+- **`GET pin` is read before the prompt**, on every loop, so a locked PIN is never asked for and the prompt can show the server's back-off; the deny-list runs before the derivation and the POST.
+- **No "check my PIN" button.** A grant that nothing consumes would leave a 60-second window in which whoever holds the iPad could run an A1 action without a PIN. The prompt is reachable only from `requirePin`, i.e. from a screen that makes the action call straight after.
+- **`registerFirst` holds the first session's token exactly as `verify` does** (one closure variable, never returned, revoked with a copy if the flow was cancelled while the request was on the wire); the invite token and the emailed code are in the flow's closure only, never in the state, never drawn.
+- **The create ceremony starts from a button**, not automatically after the code, so Safari's user-activation rule holds and the options (good for a few minutes) are used on the person's tap.
+
+### 24.3 Not built, honestly
+
+- No screen consumes a PIN grant yet (S7b onward); `requirePin("A2")` does not also run the passkey reauth (`reauthWithPasskey` exists; the A2 screens compose the two).
+- Invite create / list / revoke, branch E (`invites/accept` for an existing member), `members/*` and the credential screens are not built; their CSP origins and the `call()` allow-list are in place.
+- No QR for the TOTP seed (text only).
+- A JavaScript string cannot be wiped: the four digits stay in the page's heap until collected (measured: a V8 heap snapshot after a set still finds them; the invite token and the session token are gone once their flow ends). The guarantee is the one the design needs: the digits are in no request, URL, header, storage, console or controller state.
+- `[unverified]`: PBKDF2 at 600,000 iterations on a low-end iPad (S0 owns the measurement), and the French strings (not reviewed by a native fr-CA speaker).
+
+### 24.4 Tests
+
+`pin.test.ts` (the four shared vectors, node's PBKDF2 as an independent oracle, every deny-list entry refused with no key derived, the work-factor and salt bounds), `step-up.test.ts` and `pin-setup.test.ts` (the real `partner-session` handler over the fake: the request body is exactly `{ derived }`, the PIN's digits in no request, wrong, back-off, lock, unset, must-change, hostile parameters), `registration.test.ts` (options strength; the serialised ceremony accepted by the server's own `parseEnrolCredentialBody`), `client-enrol.test.ts`, `enrol.test.ts` (token, code, passkey, first session, forced PIN, and the credential the page created **signs in afterwards**), `panels.test.ts` (prompt, set / change, proof, TOTP), plus source-scan, CSP, build-output and bundle-input cells. The Playwright suite adds six cells in real Chromium under the real CSP (invite link to first PIN, the PIN prompt, zero violations, nothing in storage, no PIN digits on the wire). `fake-partner-server.ts` now runs the real `partner-invites` handler with working in-memory PIN, email proof, TOTP, enrolment and a registration verifier that parses the attestation object.

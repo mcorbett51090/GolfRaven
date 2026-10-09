@@ -90,7 +90,7 @@ export interface FakeServer {
     /** answer every `options` call with 503 */
     unavailable: boolean;
     reauthUntil: string | null;
-    /** routes (the part after `/partner-session/`, e.g. "sign-out", "session") whose non-preflight requests are received, logged and then NEVER ANSWERED until reset() */
+    /** routes (the part after `/partner-session/` or `/partner-invites/`, e.g. "sign-out", "session", "credentials") whose non-preflight requests are received, logged and then NEVER ANSWERED until reset() */
     hang: Set<string>;
     /** route -> ms: the handler runs (the server's state changes) and the RESPONSE is held back this long */
     delayAfter: Record<string, number>;
@@ -106,7 +106,7 @@ export interface FakeServer {
     pinGrantsIssued: number;
   };
   /** Gives a user a PIN, derived here exactly as the browser derives it (pin-contract.ts). Default user: the signed-in one. */
-  seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean }): Promise<void>;
+  seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean; failures?: number }): Promise<void>;
   /** What the server stores of a user's PIN (never the digits), or null. */
   pinRecord(userId?: string): { derived: string; salt: string; iterations: number; failures: number; locked: boolean; mustChange: boolean } | null;
   /** A new invite (branch N) for an address: the token the invite link would carry. */
@@ -623,7 +623,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       referer: req.headers.get("referer"),
       body,
     });
-    const route = new URL(req.url).pathname.split("/partner-session/")[1] ?? "";
+    const route = new URL(req.url).pathname.split(/\/partner-(?:session|invites)\//)[1] ?? "";
     if (req.method !== "OPTIONS" && state.hang.has(route)) {
       return await new Promise<Response>((resolve) => {
         held.push(() => resolve(new Response(null, { status: 503 })));
@@ -670,7 +670,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       if (user === undefined) throw new Error("fake partner server: no such user");
       const salt = newPinSalt();
       const iterations = o.iterations ?? 210_000;
-      user.pin = { salt, iterations, derived: await derivePinKey(pin, salt, iterations), failures: 0, locked: o.locked === true, mustChange: o.mustChange === true, backoffUntil: 0 };
+      user.pin = { salt, iterations, derived: await derivePinKey(pin, salt, iterations), failures: o.failures ?? 0, locked: o.locked === true, mustChange: o.mustChange === true, backoffUntil: 0 };
     },
     pinRecord(userId = USER_ID) {
       const pin = users.get(userId)?.pin ?? null;
