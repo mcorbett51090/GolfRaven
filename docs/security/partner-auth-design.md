@@ -2131,4 +2131,4 @@ Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOff
 
 ### 30.4 Verification
 
-Focused restricted-style apply of migrations 0001–0059 + helpers + matrix 37 on this tip: **58/58** cells PASS. `definer_policy_exprs.txt` regenerated for the fourteen `pd_partner_programme_*` policies. Full `HARNESS_MODE=restricted tools/db/test.sh` (all matrices + Deno) still pending on CI / a complete local harness run.
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on tip `5782bd8`: matrix 37's **58/58** cells; all other pgTAP matrices (**5344** tests PASS across 57 files, including updated 10 / 24 / 25 / 28 inventory and grant cells); Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest programme / offers / sponsorships handler suites plus related PartnerDb fakes (**96** focused cells; broader partner handler run **268**). `definer_policy_exprs.txt` holds the fourteen `pd_partner_programme_*` policies. CI on PR #71 pending.
