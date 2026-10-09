@@ -12,7 +12,7 @@ SELECT plan(44);
 -- ----------------------------------------------------------------------------
 -- 0. Setup
 -- ----------------------------------------------------------------------------
-GRANT edge_partner, edge_actor, private_definer, service_role TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, edge_actor, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
 GRANT SELECT ON app.offer_code, app.entitlement, app.review_item, app.audit_log, app.device_reward_ledger, app.offer TO CURRENT_USER;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
