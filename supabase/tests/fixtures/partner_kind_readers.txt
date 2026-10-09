@@ -72,3 +72,8 @@ private.partner_invite_accept(p_token_hash text, p_verified_uid uuid, p_gotrue_s
 private.partner_enrolment_token_email_for_token(p_token_hash text)
 private.partner_enrolment_token_accept(p_token_hash text, p_verified_uid uuid, p_gotrue_session_id uuid)
 private.partner_credential_register_first(p_token_hash text, p_user_id uuid, p_ref_kind smallint, p_ref_id uuid, p_nonce bytea, p_exp bigint, p_mac bytea, p_attestation_object bytea, p_client_data_json bytea, p_credential_id bytea, p_public_key bytea, p_transports text[])
+# 0056 (S3 attest and redeem): three policy predicates outside the *_for_partner family read the partner binding (they are keyed on it: the partner twins of 0045's offline_code_bound_staff). Each only answers a boolean to
+# a private_definer policy; none writes the binding, none reads a kind as authority beyond 'this transaction is a partner binding of a staff / manager member'. EXECUTE for nobody but the owner.
+private.partner_bound_staff_at(p_facility_id text)
+private.partner_bound_manager_at(p_facility_id text)
+private.partner_bound_staff_any()
