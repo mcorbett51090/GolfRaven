@@ -2376,4 +2376,4 @@ Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (progr
 ### 31.4 Verification run for this slice
 
 - `pnpm --filter @golfraven/partners typecheck`: clean.
-- `pnpm --filter @golfraven/partners test:unit`: recorded in the commit that lands this section (adds `admin.test.ts`: open screen, A0 load, A3 gate, approve/resolve flows).
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 877 tests, all pass** (adds `admin.test.ts`: open programme/offers/review/rollups, A0 load, A3 aal gate, offer approve and review resolve; request bodies contain no tokens beyond closed ids).
