@@ -5,6 +5,16 @@
  * challenge: those are held by a flow only for the length of one call, and what is drawn is only "which step, busy or not, which notice".
  */
 
+import type {
+  FacilityProgramme,
+  OfferAdmin,
+  OperatorRollup,
+  ReviewQueueItem,
+  ReviewSla,
+  SponsorRollup,
+  Sponsorship,
+  TrailProgramme,
+} from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
 import type {
   AttestKind,
@@ -43,7 +53,14 @@ export type Notice =
         | "stock-moved"
         | "handover-minted"
         | "redeem-ok"
-        | "voucher-ok";
+        | "voucher-ok"
+        | "programme-saved"
+        | "offer-saved"
+        | "offer-approved"
+        | "offer-ended"
+        | "sponsorship-saved"
+        | "sponsorship-approved"
+        | "review-resolved";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -100,7 +117,7 @@ export interface TotpPanel {
 
 export type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
 
-/** The S7b/S7c work screens drawn in place of the signed-in home (design 24.3 → S7b/S7c). `null` means home. */
+/** The S7b–S7d work screens drawn in place of the signed-in home (design 24.3 → S7b/S7c/S7d). `null` means home. */
 export type WorkView =
   | {
       readonly kind: "attest";
@@ -137,6 +154,42 @@ export type WorkView =
       readonly minted: HandoverMinted | null;
       readonly redeemMethod: RedeemMethod;
       readonly lastRedeem: RedeemResult | null;
+    }
+  | {
+      readonly kind: "programme";
+      readonly trailId: string;
+      readonly busy: boolean;
+      readonly trail: TrailProgramme | null;
+      readonly facilities: readonly FacilityProgramme[] | null;
+    }
+  | {
+      readonly kind: "offers";
+      readonly trailId: string;
+      readonly busy: boolean;
+      readonly offers: readonly OfferAdmin[] | null;
+      readonly lastId: string | null;
+    }
+  | {
+      readonly kind: "sponsorships";
+      readonly trailId: string;
+      readonly busy: boolean;
+      readonly sponsorships: readonly Sponsorship[] | null;
+      readonly lastId: string | null;
+    }
+  | {
+      readonly kind: "review";
+      readonly busy: boolean;
+      readonly items: readonly ReviewQueueItem[] | null;
+      readonly sla: ReviewSla | null;
+      readonly lastState: string | null;
+    }
+  | {
+      readonly kind: "rollups";
+      readonly trailId: string;
+      readonly sponsorshipId: string;
+      readonly busy: boolean;
+      readonly operator: readonly OperatorRollup[] | null;
+      readonly sponsor: readonly SponsorRollup[] | null;
     };
 
 export type AppState =
@@ -153,7 +206,7 @@ export type AppState =
       readonly notice: Notice | null;
       /** What is drawn instead of the home / work screen, or null. */
       readonly panel: Panel | null;
-      /** Attest, course-QR, stock or hand-over work; null draws the home screen. */
+      /** Shop-floor or manager/operator/admin work; null draws the home screen. */
       readonly work: WorkView | null;
     };
 

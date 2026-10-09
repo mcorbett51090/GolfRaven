@@ -61,7 +61,7 @@ describe("the policy", () => {
     for (const src of d.get("connect-src")!) expect(src).toMatch(/\/functions\/v1\/[a-z][a-z0-9-]*\/$/);
   });
 
-  it("connect-src names the partner functions of partner-functions.json (session, invites, members, attest, course-qr, qr-print, stock-admin, partner-entitlements), each path-scoped", () => {
+  it("connect-src names the partner functions of partner-functions.json (session, invites, members, attest, course-qr, qr-print, stock-admin, partner-entitlements, programme-config, offers-admin, sponsorships-admin, partner-review), each path-scoped", () => {
     expect(d.get("connect-src")).toEqual([
       `${API}/partner-session/`,
       `${API}/partner-invites/`,
@@ -71,6 +71,10 @@ describe("the policy", () => {
       `${API}/qr-print/`,
       `${API}/stock-admin/`,
       `${API}/partner-entitlements/`,
+      `${API}/programme-config/`,
+      `${API}/offers-admin/`,
+      `${API}/sponsorships-admin/`,
+      `${API}/partner-review/`,
     ]);
     expect(d.get("connect-src")!.join(" ")).not.toMatch(/rest\/v1|auth\/v1|partner-offers/);
   });

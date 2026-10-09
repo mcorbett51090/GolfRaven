@@ -206,7 +206,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       if (s.work.kind === "attest") withWork(s, { ...s.work, facilityId, lastResult: null, shiftLog: null, staffActivity: null });
       else if (s.work.kind === "course-qr") withWork(s, { ...s.work, facilityId, pin: null, sale: null, refreshLeft: null, printed: null });
       else if (s.work.kind === "stock") withWork(s, { ...s.work, facilityId, rows: null, lastOnHand: null });
-      else withWork(s, { ...s.work, facilityId, queue: null, minted: null, lastRedeem: null });
+      else if (s.work.kind === "handover") withWork(s, { ...s.work, facilityId, queue: null, minted: null, lastRedeem: null });
     },
 
     setAttestMode(mode) {

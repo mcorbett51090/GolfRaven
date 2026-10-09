@@ -319,7 +319,16 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           if (c === undefined) return { status: "unknown_credential", aal: null, expiresAt: null };
           signCount = Buffer.from(input.authenticatorData).readUInt32BE(33);
           const aal = opts.whoami?.aal ?? 1;
-          sessions.set(input.tokenHash, { userId: c.userId, createdAt: new Date(), aal, enrolmentUntil: null, otpProofUntil: null, pinGrantUntil: null, mfaUntil: null });
+          // Sessions that already start at aal 2 (operator/admin fixtures) carry a fresh MFA window so A3 routes can be exercised without a TOTP round-trip.
+          sessions.set(input.tokenHash, {
+            userId: c.userId,
+            createdAt: new Date(),
+            aal,
+            enrolmentUntil: null,
+            otpProofUntil: null,
+            pinGrantUntil: null,
+            mfaUntil: aal >= 2 ? Date.now() + 3_600_000 : null,
+          });
           return { status: "ok", aal, expiresAt: new Date(Date.now() + 8 * 3_600_000).toISOString() };
         },
       };
@@ -666,6 +675,51 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     stock: new Map<string, number>(),
   };
 
+  type FakeOffer = {
+    id: string;
+    termsId: string;
+    trailId: string;
+    facilityId: string;
+    eligibility: unknown;
+    funder: string;
+    sponsorshipId: string | null;
+    budgetCap: number;
+    budgetUsed: number;
+    budgetReserved: number;
+    maxRedemptions: number | null;
+    faceValue: number;
+    validFrom: string;
+    validTo: string;
+    status: string;
+  };
+  type FakeSponsorship = {
+    id: string;
+    sponsorOrgId: string;
+    trailId: string;
+    category: string;
+    scope: string;
+    attributionName: string;
+    attributionAsset: string | null;
+    placementFee: number | null;
+    startsOn: string | null;
+    endsOn: string | null;
+    operatorApprovedAt: string | null;
+    status: string;
+  };
+
+  const adminState = {
+    trails: new Map<string, Record<string, unknown>>(),
+    facilities: new Map<string, Record<string, unknown>[]>(),
+    offers: new Map<string, FakeOffer>(),
+    sponsorships: new Map<string, FakeSponsorship>(),
+    reviewOpen: true,
+  };
+
+  function needA3(session: FakeSession): Response | null {
+    if (session.aal < 2 || session.mfaUntil === null || session.mfaUntil <= Date.now()) return err(403, "aal_required");
+    return null;
+  }
+
   async function workHandler(req: Request): Promise<Response> {
     if (req.method === "OPTIONS") {
       return new Response(null, {
@@ -682,7 +736,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     const url = new URL(req.url);
     const parts = url.pathname.split("/").filter((p) => p.length > 0);
     const fnIdx = parts.findIndex((p) =>
-      p === "partner-attest" || p === "course-qr" || p === "qr-print" || p === "stock-admin" || p === "partner-entitlements"
+      p === "partner-attest" || p === "course-qr" || p === "qr-print" || p === "stock-admin" || p === "partner-entitlements" ||
+      p === "programme-config" || p === "offers-admin" || p === "sponsorships-admin" || p === "partner-review"
     );
     if (fnIdx < 0) return err(404, "not_found");
     const fn = parts[fnIdx]!;
@@ -833,6 +888,308 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       return err(404, "not_found");
     }
 
+    if (fn === "programme-config") {
+      if (route === "programme" && req.method === "GET") {
+        const trailId = url.searchParams.get("trailId") ?? "";
+        const trail = adminState.trails.get(trailId) ?? {
+          trailId,
+          status: "pilot",
+          markerSource: "any_purchase",
+          markerRequiresCompletion: false,
+          specialMarkerFundedBy: null,
+          specialMarkerLowThreshold: 3,
+          webPlayerFlow: true,
+          specialMarkerSku: null,
+          specialMarkerSponsorshipId: null,
+          feeModel: null,
+          feeAmount: null,
+          startsOn: null,
+          endsOn: null,
+        };
+        const facilities = adminState.facilities.get(trailId) ?? [{
+          facilityId: "44444444-4444-4444-8444-444444444444",
+          participation: "accepted",
+          stocksMarkers: true,
+          holdsSpecialMarker: false,
+          connectivity: "ok",
+          staffNetwork: true,
+          wifiNote: null,
+          qrMode: "rotating",
+          pinEpoch: 1,
+        }];
+        return ok(200, { trail, facilities });
+      }
+      if (route === "programme/trail" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { trailId?: string };
+        const trailId = body.trailId ?? "";
+        adminState.trails.set(trailId, { ...body, trailId });
+        return ok(200, { ok: true });
+      }
+      if (route === "programme/facility" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { trailId?: string; facilityId?: string };
+        const trailId = body.trailId ?? "";
+        if (!adminState.trails.has(trailId) && trailId !== "trl_demo") return err(422, "no_trail");
+        const list = adminState.facilities.get(trailId) ?? [];
+        const row = {
+          facilityId: body.facilityId ?? "",
+          participation: (body as { participation?: string }).participation ?? "invited",
+          stocksMarkers: (body as { stocksMarkers?: boolean | null }).stocksMarkers ?? null,
+          holdsSpecialMarker: (body as { holdsSpecialMarker?: boolean | null }).holdsSpecialMarker ?? null,
+          connectivity: (body as { connectivity?: string | null }).connectivity ?? null,
+          staffNetwork: (body as { staffNetwork?: boolean | null }).staffNetwork ?? null,
+          wifiNote: (body as { wifiNote?: string | null }).wifiNote ?? null,
+          qrMode: (body as { qrMode?: string }).qrMode ?? "rotating",
+          pinEpoch: 1,
+        };
+        adminState.facilities.set(trailId, [...list.filter((f) => f["facilityId"] !== row.facilityId), row]);
+        return ok(200, { ok: true });
+      }
+      if (route === "rollups/operator" && req.method === "GET") {
+        const trailId = url.searchParams.get("trailId") ?? "";
+        return ok(200, { rollups: [{ trailId, month: "2026-10", metric: "redemptions", value: 12, cohortN: 40 }] });
+      }
+      if (route === "rollups/sponsor" && req.method === "GET") {
+        const sponsorshipId = url.searchParams.get("sponsorshipId") ?? "";
+        return ok(200, { rollups: [{ sponsorshipId, month: "2026-10", metric: "impressions", value: 90, cohortN: 40 }] });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "offers-admin") {
+      if (route === "offers" && req.method === "GET") {
+        const trailId = url.searchParams.get("trailId") ?? "";
+        const offers = [...adminState.offers.values()].filter((o) => o.trailId === trailId);
+        if (offers.length === 0) {
+          return ok(200, {
+            offers: [{
+              id: "61000000-0000-0000-0000-000000006101",
+              termsId: "61000000-0000-0000-0000-000000006102",
+              trailId,
+              facilityId: "44444444-4444-4444-8444-444444444444",
+              eligibility: { all: true },
+              funder: "course",
+              sponsorshipId: null,
+              budgetCap: 100,
+              budgetUsed: 0,
+              budgetReserved: 0,
+              maxRedemptions: null,
+              faceValue: 10,
+              validFrom: "2026-01-01",
+              validTo: "2026-12-31",
+              status: "draft",
+            }],
+          });
+        }
+        return ok(200, { offers });
+      }
+      if (route === "offers" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as Partial<FakeOffer> & { id?: string | null };
+        const id = typeof body.id === "string" && body.id.length > 0 ? body.id : randomUUID();
+        const existing = adminState.offers.get(id);
+        if (existing !== undefined && existing.status !== "draft") return err(422, "not_draft");
+        if (body.funder === "sponsor" && (body.sponsorshipId === null || body.sponsorshipId === undefined)) return err(422, "bad_funder");
+        const row: FakeOffer = {
+          id,
+          termsId: existing?.termsId ?? randomUUID(),
+          trailId: body.trailId ?? "",
+          facilityId: body.facilityId ?? "",
+          eligibility: body.eligibility ?? {},
+          funder: body.funder ?? "course",
+          sponsorshipId: body.sponsorshipId ?? null,
+          budgetCap: body.budgetCap ?? 0,
+          budgetUsed: existing?.budgetUsed ?? 0,
+          budgetReserved: existing?.budgetReserved ?? 0,
+          maxRedemptions: body.maxRedemptions ?? null,
+          faceValue: body.faceValue ?? 0,
+          validFrom: body.validFrom ?? "2026-01-01",
+          validTo: body.validTo ?? "2026-12-31",
+          status: "draft",
+        };
+        adminState.offers.set(id, row);
+        return ok(200, { id });
+      }
+      if (route === "offers/approve" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { id?: string };
+        const row = adminState.offers.get(body.id ?? "");
+        if (row === undefined) {
+          // seed default draft if approving the canned id
+          if (body.id === "61000000-0000-0000-0000-000000006101") {
+            adminState.offers.set(body.id, {
+              id: body.id,
+              termsId: "61000000-0000-0000-0000-000000006102",
+              trailId: "trl_demo",
+              facilityId: "44444444-4444-4444-8444-444444444444",
+              eligibility: { all: true },
+              funder: "course",
+              sponsorshipId: null,
+              budgetCap: 100,
+              budgetUsed: 0,
+              budgetReserved: 0,
+              maxRedemptions: null,
+              faceValue: 10,
+              validFrom: "2026-01-01",
+              validTo: "2026-12-31",
+              status: "live",
+            });
+            return ok(200, { ok: true });
+          }
+          return err(422, "not_found");
+        }
+        if (row.status !== "draft") return err(422, "not_draft");
+        row.status = "live";
+        return ok(200, { ok: true });
+      }
+      if (route === "offers/end" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { id?: string };
+        const row = adminState.offers.get(body.id ?? "");
+        if (row === undefined) return err(422, "not_found");
+        if (row.status !== "live") return err(422, "not_live");
+        row.status = "ended";
+        return ok(200, { ok: true });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "sponsorships-admin") {
+      if (route === "sponsorships" && req.method === "GET") {
+        const trailId = url.searchParams.get("trailId") ?? "";
+        const sponsorships = [...adminState.sponsorships.values()].filter((s) => s.trailId === trailId);
+        if (sponsorships.length === 0) {
+          return ok(200, {
+            sponsorships: [{
+              id: "71000000-0000-0000-0000-000000007101",
+              sponsorOrgId: "71000000-0000-0000-0000-000000007199",
+              trailId,
+              category: "equipment",
+              scope: "offers",
+              attributionName: "Demo Sponsor",
+              attributionAsset: null,
+              placementFee: null,
+              startsOn: null,
+              endsOn: null,
+              operatorApprovedAt: null,
+              status: "draft",
+            }],
+          });
+        }
+        return ok(200, { sponsorships });
+      }
+      if (route === "sponsorships" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as Partial<FakeSponsorship> & { id?: string | null };
+        const id = typeof body.id === "string" && body.id.length > 0 ? body.id : randomUUID();
+        const existing = adminState.sponsorships.get(id);
+        if (existing !== undefined && existing.status !== "draft") return err(422, "not_draft");
+        const row: FakeSponsorship = {
+          id,
+          sponsorOrgId: body.sponsorOrgId ?? "",
+          trailId: body.trailId ?? "",
+          category: body.category ?? "equipment",
+          scope: body.scope ?? "offers",
+          attributionName: body.attributionName ?? "Sponsor",
+          attributionAsset: body.attributionAsset ?? null,
+          placementFee: body.placementFee ?? null,
+          startsOn: body.startsOn ?? null,
+          endsOn: body.endsOn ?? null,
+          operatorApprovedAt: null,
+          status: "draft",
+        };
+        adminState.sponsorships.set(id, row);
+        return ok(200, { id });
+      }
+      if (route === "sponsorships/approve" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { id?: string };
+        const id = body.id ?? "";
+        let row = adminState.sponsorships.get(id);
+        if (row === undefined && id === "71000000-0000-0000-0000-000000007101") {
+          row = {
+            id,
+            sponsorOrgId: "71000000-0000-0000-0000-000000007199",
+            trailId: "trl_demo",
+            category: "equipment",
+            scope: "offers",
+            attributionName: "Demo Sponsor",
+            attributionAsset: null,
+            placementFee: null,
+            startsOn: null,
+            endsOn: null,
+            operatorApprovedAt: null,
+            status: "draft",
+          };
+          adminState.sponsorships.set(id, row);
+        }
+        if (row === undefined) return err(422, "not_found");
+        if (row.status !== "draft") return err(422, "not_draft");
+        if (row.scope === "special_marker" || row.scope === "both") {
+          // AT(20) stub: stock_short when scope needs markers and on_hand is zero
+          const onHand = [...workState.stock.values()][0];
+          if (onHand === 0) return err(422, "stock_short");
+        }
+        row.status = "live";
+        row.operatorApprovedAt = new Date().toISOString();
+        return ok(200, { ok: true });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "partner-review") {
+      if (route === "queue" && req.method === "GET") {
+        return ok(200, {
+          items: adminState.reviewOpen
+            ? [{
+                kind: "offer_code",
+                id: "81000000-0000-0000-0000-000000008101",
+                subjectTable: "offer_codes",
+                subjectId: "81000000-0000-0000-0000-000000008102",
+                userId: USER_ID,
+                handle: "player_one",
+                facilityId: "44444444-4444-4444-8444-444444444444",
+                trailId: "trl_demo",
+                holdDetail: "held_review",
+                reservedAmount: 10,
+                heldAt: new Date().toISOString(),
+                slaBreached: false,
+                reviewKind: "offer_code",
+              }]
+            : [],
+        });
+      }
+      if (route === "sla" && req.method === "GET") {
+        return ok(200, {
+          heldOfferCodes: adminState.reviewOpen ? 1 : 0,
+          heldEntitlements: 0,
+          openReviewItems: adminState.reviewOpen ? 1 : 0,
+          slaBreachedRewards: 0,
+          slaBreachedReviewItems: 0,
+          slaHours: 48,
+        });
+      }
+      if ((route === "resolve/offer-code" || route === "resolve/entitlement") && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { id?: string; approve?: boolean };
+        if (typeof body.id !== "string" || typeof body.approve !== "boolean") return err(400, "bad_request");
+        if (body.id === "budget-short") return err(422, "budget_short");
+        if (!adminState.reviewOpen && body.id !== "81000000-0000-0000-0000-000000008101") return err(409, "not_held");
+        adminState.reviewOpen = false;
+        return ok(200, { state: body.approve ? "approved" : "rejected" });
+      }
+      return err(404, "not_found");
+    }
+
     return err(404, "not_found");
   }
 
@@ -841,7 +1198,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     if (path.includes("/partner-invites/")) return invitesHandler(req);
     if (
       path.includes("/partner-attest/") || path.includes("/course-qr/") || path.includes("/qr-print") ||
-      path.includes("/stock-admin/") || path.includes("/partner-entitlements/")
+      path.includes("/stock-admin/") || path.includes("/partner-entitlements/") ||
+      path.includes("/programme-config/") || path.includes("/offers-admin/") || path.includes("/sponsorships-admin/") ||
+      path.includes("/partner-review/")
     ) return workHandler(req);
     return sessionHandler(req);
   };
@@ -905,6 +1264,11 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       workState.usedTokens.clear();
       workState.usedCodes.clear();
       workState.stock.clear();
+      adminState.trails.clear();
+      adminState.facilities.clear();
+      adminState.offers.clear();
+      adminState.sponsorships.clear();
+      adminState.reviewOpen = true;
     },
     async seedPin(pin, o = {}) {
       const user = users.get(o.userId ?? USER_ID);

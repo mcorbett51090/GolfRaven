@@ -10,7 +10,22 @@ export interface UiMessage {
   readonly params?: Params;
 }
 
-export type ErrorContext = "sign-in" | "session" | "enrol" | "pin" | "proof" | "totp" | "attest" | "course-qr" | "stock" | "handover";
+export type ErrorContext =
+  | "sign-in"
+  | "session"
+  | "enrol"
+  | "pin"
+  | "proof"
+  | "totp"
+  | "attest"
+  | "course-qr"
+  | "stock"
+  | "handover"
+  | "programme"
+  | "offers"
+  | "sponsorships"
+  | "review"
+  | "rollups";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
@@ -73,6 +88,19 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "cold_start_cap") return { key: "handover.coldStart" };
     if (kind === "conflict") return { key: "handover.outOfStock" };
     if (kind === "unprocessable") return { key: "handover.failed" };
+  }
+  if (context === "programme" || context === "offers" || context === "sponsorships" || context === "review" || context === "rollups") {
+    if (code === "not_draft") return { key: "admin.notDraft" };
+    if (code === "not_live") return { key: "admin.notLive" };
+    if (code === "bad_funder") return { key: "admin.badFunder" };
+    if (code === "bad_sponsor") return { key: "admin.badSponsor" };
+    if (code === "stock_short") return { key: "admin.stockShort" };
+    if (code === "budget_short") return { key: "admin.budgetShort" };
+    if (code === "no_trail") return { key: "admin.noTrailRow" };
+    if (code === "invalid_eligibility") return { key: "admin.invalidEligibility" };
+    if (code === "not_held") return { key: "admin.notHeld" };
+    if (code === "not_found") return { key: "admin.notFound" };
+    if (kind === "unprocessable") return { key: "admin.failed" };
   }
   return null;
 }

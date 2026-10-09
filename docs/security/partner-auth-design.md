@@ -2311,7 +2311,7 @@ Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4
 ### 34.3 Not built, honestly
 
 - Camera scan of a player QR into the token field.
-- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29).
+- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29); programme/offers/sponsorships/review/rollups are section 31.
 - Offers-redeem (S3 seam / P5.1b).
 - Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
 
@@ -2340,7 +2340,7 @@ Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parall
 ### 29.3 Not built, honestly
 
 - Camera scan into redeem credential fields.
-- S7d manager/operator/admin screens.
+- S7d manager/operator/admin screens (section 31).
 - Offline-code redeem (P5.1b).
 - Merging with S5 will conflict textually in enumeration files the way S7b notes for S2b/S3.
 
@@ -2348,3 +2348,32 @@ Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parall
 
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **20 files, 761 tests, all pass** (extends `work.test.ts`: stock load + A1 move; hand-over mint + staff_scan redeem after PIN; request bodies contain no PIN digits).
+
+## 31. As built: S7d (manager / operator / admin screens; `apps/partners`)
+
+Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (programme/sponsors Edge half, parallel branch) claims section 30; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls S6/S4 Edge paths by name (`programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`); the fake partner server stubs them so unit cells run without merging those trees.
+
+### 31.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`; `connect-src` gains four path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`).
+- **Typed admin routes** (`src/api/admin-routes.ts`): programme read + trail/facility upsert; offers list/upsert/approve/end; sponsorships list/upsert/approve; review queue + SLA + resolve offer-code/entitlement; operator and sponsor rollups. Response bodies checked field-by-field (camelCase wire shapes match the S6 handlers).
+- **Admin screens** (`src/app/admin.ts`, extended `WorkView` kinds, `ui/views-admin.ts`). Signed-in home gains a **Programme and ops** section: programme / offers / sponsorships / rollups for `isAdmin` or any `operator` membership; **Review queue** for `isAdmin` only. Staff keep shop-floor only. A0 reads call directly; A3 writes refuse on the client unless `aal` 2 (same gate as printed-QR write).
+- **Errors and i18n.** `ErrorContext` gains programme/offers/sponsorships/review/rollups; closed codes `not_draft`, `not_live`, `bad_funder`, `bad_sponsor`, `stock_short`, `budget_short`, `no_trail`, `invalid_eligibility`, `not_held` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers the four new functions in-memory (A3 checks aal + fresh `mfaUntil`; sessions minted at aal ≥ 2 get a fresh MFA window for fixtures).
+
+### 31.2 Decisions and departures
+
+- **WorkView extended** with `programme | offers | sponsorships | review | rollups` rather than a parallel `AdminView` field, so one `work` slot still replaces home.
+- **Invite/member admin tools** stay on the existing PIN/TOTP/enrol panels; this slice does not add invite-issue UI.
+- **Eligibility** is sent as JSON from a text field; schema validation remains the Edge's AT(14) gate.
+
+### 31.3 Not built, honestly
+
+- Settlement UI (billing / fee settlement surfaces).
+- Camera or richer editors for eligibility rules.
+- Merging with S6 will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 31.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: recorded in the commit that lands this section (adds `admin.test.ts`: open screen, A0 load, A3 gate, approve/resolve flows).

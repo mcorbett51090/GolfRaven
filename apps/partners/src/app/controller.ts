@@ -15,6 +15,12 @@
  * it is inside the API client's closure, and this module never receives it.
  */
 
+import type {
+  FacilityProgrammeUpsert,
+  OfferUpsert,
+  SponsorshipUpsert,
+  TrailProgrammeUpsert,
+} from "../api/admin-routes";
 import type { PartnerApi, SessionEndReason } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
 import type { AttestKind, RedeemMethod, StockMoveKind } from "../api/work-routes";
@@ -24,6 +30,7 @@ import { signInWithPasskey } from "../auth/sign-in";
 import type { StepUp } from "../auth/step-up";
 import type { GetAssertionDeps } from "../webauthn/assertion";
 import type { CreateCredentialDeps } from "../webauthn/registration";
+import { createAdminScreens } from "./admin";
 import { createEnrolFlow } from "./enrol-flow";
 import { messageForError } from "./messages";
 import { createPanels, type PinSetupInput } from "./panels";
@@ -89,6 +96,30 @@ export interface AppController extends StepUp {
   dismissHandoverMint(): void;
   submitRedeem(entitlementId: string, credential: string): Promise<void>;
   submitVoucher(entitlementId: string): Promise<void>;
+
+  /** S7d manager/operator/admin screens (see admin.ts). */
+  openProgramme(trailId: string): void;
+  openOffers(trailId: string): void;
+  openSponsorships(trailId: string): void;
+  openReview(): void;
+  openRollups(trailId: string): void;
+  setAdminTrail(trailId: string): void;
+  setAdminSponsorshipId(sponsorshipId: string): void;
+  loadProgramme(): Promise<void>;
+  saveTrailProgramme(body: TrailProgrammeUpsert): Promise<void>;
+  saveFacilityProgramme(body: FacilityProgrammeUpsert): Promise<void>;
+  loadOffers(): Promise<void>;
+  saveOffer(body: OfferUpsert): Promise<void>;
+  approveOffer(id: string): Promise<void>;
+  endOffer(id: string): Promise<void>;
+  loadSponsorships(): Promise<void>;
+  saveSponsorship(body: SponsorshipUpsert): Promise<void>;
+  approveSponsorship(id: string): Promise<void>;
+  loadReview(): Promise<void>;
+  resolveOfferCode(id: string, approve: boolean): Promise<void>;
+  resolveEntitlement(id: string, approve: boolean): Promise<void>;
+  loadOperatorRollups(): Promise<void>;
+  loadSponsorRollups(): Promise<void>;
 }
 
 export interface ControllerWebAuthn {
@@ -135,6 +166,7 @@ export function createController(deps: ControllerDeps): AppController {
   };
   const panels = createPanels({ api, host, nowMs });
   const work = createWorkScreens({ api, host, stepUp: panels, webauthn: assertionDeps(deps.webauthn) });
+  const admin = createAdminScreens({ api, host });
   const enrol = createEnrolFlow({
     api,
     webauthn: creationDeps(deps.webauthn),
@@ -323,6 +355,29 @@ export function createController(deps: ControllerDeps): AppController {
     dismissHandoverMint: () => work.dismissHandoverMint(),
     submitRedeem: (entitlementId, credential) => work.submitRedeem(entitlementId, credential),
     submitVoucher: (entitlementId) => work.submitVoucher(entitlementId),
+
+    openProgramme: (trailId) => admin.openProgramme(trailId),
+    openOffers: (trailId) => admin.openOffers(trailId),
+    openSponsorships: (trailId) => admin.openSponsorships(trailId),
+    openReview: () => admin.openReview(),
+    openRollups: (trailId) => admin.openRollups(trailId),
+    setAdminTrail: (trailId) => admin.setTrail(trailId),
+    setAdminSponsorshipId: (sponsorshipId) => admin.setSponsorshipId(sponsorshipId),
+    loadProgramme: () => admin.loadProgramme(),
+    saveTrailProgramme: (body) => admin.saveTrail(body),
+    saveFacilityProgramme: (body) => admin.saveFacility(body),
+    loadOffers: () => admin.loadOffers(),
+    saveOffer: (body) => admin.saveOffer(body),
+    approveOffer: (id) => admin.approveOffer(id),
+    endOffer: (id) => admin.endOffer(id),
+    loadSponsorships: () => admin.loadSponsorships(),
+    saveSponsorship: (body) => admin.saveSponsorship(body),
+    approveSponsorship: (id) => admin.approveSponsorship(id),
+    loadReview: () => admin.loadReview(),
+    resolveOfferCode: (id, approve) => admin.resolveOfferCode(id, approve),
+    resolveEntitlement: (id, approve) => admin.resolveEntitlement(id, approve),
+    loadOperatorRollups: () => admin.loadOperatorRollups(),
+    loadSponsorRollups: () => admin.loadSponsorRollups(),
 
     signOut: () => end(() => api.signOut(), "sign-out-offline", "signed-out"),
 

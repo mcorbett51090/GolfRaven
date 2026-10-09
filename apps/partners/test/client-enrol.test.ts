@@ -66,6 +66,10 @@ describe("the partner function list (the CSP's connect-src and the bearer allow-
       "qr-print",
       "stock-admin",
       "partner-entitlements",
+      "programme-config",
+      "offers-admin",
+      "sponsorships-admin",
+      "partner-review",
     ]);
     expect(INVITES_FUNCTION).toBe("partner-invites");
   });
