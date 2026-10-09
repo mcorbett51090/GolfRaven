@@ -218,6 +218,11 @@ DECLARE
   v_now timestamptz := pg_catalog.clock_timestamp();
   v_cosignal jsonb;
 BEGIN
+  -- the App Store review account is never a player an attestation, a purchase or a credit is written for (0051: the minters of money-path rows refuse it in the database)
+  IF private.is_demo_account(p_player) THEN
+    RETURN QUERY SELECT 'token_invalid'::text, NULL::uuid;
+    RETURN;
+  END IF;
   SELECT f.tz INTO v_tz FROM app.catalog_facility f WHERE f.id = p_facility_id;
   IF v_tz IS NULL THEN
     RETURN QUERY SELECT 'no_facility'::text, NULL::uuid;
@@ -397,6 +402,9 @@ BEGIN
   -- resolve the handle (no handle oracle: an unknown one is a counted failure like a wrong code)
   IF pg_catalog.char_length(p_handle) BETWEEN 3 AND 20 AND p_handle !~ '[^a-z0-9_]' THEN
     SELECT p.user_id INTO v_player FROM app.profile p WHERE p.handle = p_handle;
+  END IF;
+  IF v_player IS NOT NULL AND private.is_demo_account(v_player) THEN
+    v_player := NULL;
   END IF;
   IF v_player IS NOT NULL AND v_player = v_uid THEN
     RAISE EXCEPTION 'self_attestation_refused: a staff member cannot attest their own account' USING ERRCODE = '22023';

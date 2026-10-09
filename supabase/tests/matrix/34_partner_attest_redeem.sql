@@ -17,7 +17,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(109);
+SELECT plan(112);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -128,7 +128,8 @@ SET LOCAL ROLE service_role;
 INSERT INTO app.device (id, user_id, platform, devicecheck_token_hash) VALUES
   ('34000000-0000-0000-0000-00000000d0b1', '00000000-0000-0000-0000-00000000000b', 'ios', 'dc-player-b'),
   ('34000000-0000-0000-0000-00000000d0b2', '00000000-0000-0000-0000-00000000000b', 'ios', 'dc-shared'),
-  ('34000000-0000-0000-0000-00000000d0a1', '00000000-0000-0000-0000-1000000000a1', 'ios', 'dc-shared');
+  ('34000000-0000-0000-0000-00000000d0a1', '00000000-0000-0000-0000-1000000000a1', 'ios', 'dc-shared'),
+  ('34000000-0000-0000-0000-00000000d0e1', '00000000-0000-0000-0000-5000000000e0', 'ios', 'dc-demo');
 INSERT INTO app.checkin_challenge (id, user_id, device_id, facility_id, nonce_hash, expires_at, kind) VALUES
   ('34100000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_x', 'n34-1', now() + interval '10 minutes', 'live'),
   ('34100000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', NULL, 'n34-2', now() + interval '10 minutes', 'live'),
@@ -136,7 +137,8 @@ INSERT INTO app.checkin_challenge (id, user_id, device_id, facility_id, nonce_ha
   ('34100000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_y', 'n34-4', now() + interval '10 minutes', 'live'),
   ('34100000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b2', 'fac_x', 'n34-5', now() + interval '10 minutes', 'live'),
   ('34100000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'fac_x', 'n34-6', now() + interval '10 minutes', 'live'),
-  ('34100000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_x', 'n34-7', now() + interval '10 minutes', 'live');
+  ('34100000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_x', 'n34-7', now() + interval '10 minutes', 'live'),
+  ('34100000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-5000000000e0', '34000000-0000-0000-0000-00000000d0e1', 'fac_x', 'n34-8', now() + interval '10 minutes', 'live');
 INSERT INTO app.checkin_token (jti, challenge_id, user_id, device_id, facility_id, attestation_grade, challenge_kind, issued_at, expires_at) VALUES
   ('34200000-0000-0000-0000-000000000001', '34100000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_x', 'attested', 'live', now(), now() + interval '10 minutes'),
   ('34200000-0000-0000-0000-000000000002', '34100000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', NULL, 'attested', 'live', now(), now() + interval '10 minutes'),
@@ -144,7 +146,8 @@ INSERT INTO app.checkin_token (jti, challenge_id, user_id, device_id, facility_i
   ('34200000-0000-0000-0000-000000000004', '34100000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_y', 'attested', 'live', now(), now() + interval '10 minutes'),
   ('34200000-0000-0000-0000-000000000005', '34100000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b2', 'fac_x', 'attested', 'live', now(), now() + interval '10 minutes'),
   ('34200000-0000-0000-0000-000000000006', '34100000-0000-0000-0000-000000000006', '00000000-0000-0000-0000-00000000000a', '20000000-0000-0000-0000-000000000001', 'fac_x', 'attested', 'live', now(), now() + interval '10 minutes'),
-  ('34200000-0000-0000-0000-000000000007', '34100000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_x', 'attested', 'live', now(), now() + interval '10 minutes');
+  ('34200000-0000-0000-0000-000000000007', '34100000-0000-0000-0000-000000000007', '00000000-0000-0000-0000-00000000000b', '34000000-0000-0000-0000-00000000d0b1', 'fac_x', 'attested', 'live', now(), now() + interval '10 minutes'),
+  ('34200000-0000-0000-0000-000000000008', '34100000-0000-0000-0000-000000000008', '00000000-0000-0000-0000-5000000000e0', '34000000-0000-0000-0000-00000000d0e1', 'fac_x', 'attested', 'live', now(), now() + interval '10 minutes');
 RESET ROLE;
 
 -- ----------------------------------------------------------------------------
@@ -253,6 +256,9 @@ SELECT is(pg_temp.onl('sx', 'fac_x', 'presence', '34200000-0000-0000-0000-000000
 SELECT is(pg_temp.onl('sx', 'fac_x', 'presence', '34200000-0000-0000-0000-000000000003'), 'token_invalid|false', 'an EXPIRED token');
 SELECT is(pg_temp.onl('sx', 'fac_x', 'presence', '34200000-0000-0000-0000-000000000004'), 'token_invalid|false', 'a token issued for ANOTHER facility');
 SELECT is(pg_temp.onl('sx', 'fac_x', 'presence', '34200000-0000-0000-0000-0000000000ff'), 'token_invalid|false', 'an unknown token: the same one answer (no oracle on which of the three it was)');
+SELECT is(pg_temp.onl('sx', 'fac_x', 'marker_purchase', '34200000-0000-0000-0000-000000000008'), 'token_invalid|false', 'the App Store review (demo) account is never attested: the same one answer');
+SELECT is((SELECT count(*)::int FROM app.attestation WHERE player_user_id = '00000000-0000-0000-0000-5000000000e0') + (SELECT count(*)::int FROM app.purchase_evidence WHERE user_id = '00000000-0000-0000-0000-5000000000e0'), 0, '... and nothing was written for it');
+SELECT is(pg_temp.off('sx', 'fac_x', 'presence', 'demo_player', '123456'), 'verification_failed|false', 'the review account''s handle on the offline path: the same one answer as an unknown handle');
 ROLLBACK TO SAVEPOINT on1;
 -- malformed arguments
 SAVEPOINT on2;

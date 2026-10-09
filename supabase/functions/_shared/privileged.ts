@@ -93,7 +93,13 @@ import {
   type MintInput,
   type MintResult,
   type OrgRevokeAllResult,
+  type AttestKind,
+  type AttestResult,
+  type AttestStatus,
+  type PartnerAttestTx,
   type PartnerDb,
+  type ShiftLogRow,
+  type StaffActivityRow,
   type PartnerInviteMintTx,
   type PartnerInvitesTx,
   type PartnerMembersTx,
@@ -4046,6 +4052,53 @@ function buildPartnerMembersTx(trx: TxSql): Omit<PartnerMembersTx, "totpReset"> 
   };
 }
 
+/** The attest and read definers of 0056 (S3). `select private.*(...)` in the migration's argument order; every status is a returned row, so a refusal COMMITS (the failure counters live in it). */
+const ATTEST_STATUSES: ReadonlySet<string> = new Set(["ok", "token_invalid", "replayed", "verification_failed", "rate_limited", "no_facility", "no_programme", "cold_start_cap"]);
+function attestResultOf(r: Record<string, unknown> | undefined, fn: string): AttestResult {
+  if (typeof r?.o_status !== "string" || !ATTEST_STATUSES.has(r.o_status)) throw new Error(`${fn} returned no usable status`);
+  return { status: r.o_status as AttestStatus, attestationId: textOrNull(r.o_attestation_id), held: r.o_held === true };
+}
+function buildPartnerAttestTx(trx: TxSql): PartnerAttestTx {
+  return {
+    async attest(facilityId: string, kind: AttestKind, token: string): Promise<AttestResult> {
+      const rows = await trx`select o_status, o_attestation_id::text as o_attestation_id, o_held from private.partner_attest_for_partner(${facilityId}::text, ${kind}::text, ${token}::uuid)`;
+      return attestResultOf(rows[0], "partner_attest_for_partner");
+    },
+    async offlineAttest(facilityId: string, kind: AttestKind, handle: string, code: string): Promise<AttestResult> {
+      const rows = await trx`
+        select o_status, o_attestation_id::text as o_attestation_id, o_held
+        from private.partner_offline_attest_for_partner(${facilityId}::text, ${kind}::text, ${handle}::text, ${code}::text)`;
+      return attestResultOf(rows[0], "partner_offline_attest_for_partner");
+    },
+    async shiftLog(facilityId: string): Promise<ShiftLogRow[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_facility_id, o_created_at, o_kind::text as o_kind, o_player_handle, o_staff_handle
+        from private.partner_shift_log_for_partner(${facilityId}::text)`;
+      return rows.map((r) => ({
+        id: String(r.o_id),
+        facilityId: String(r.o_facility_id),
+        createdAt: String(isoOrNull(r.o_created_at)),
+        kind: String(r.o_kind),
+        playerHandle: String(r.o_player_handle),
+        staffHandle: String(r.o_staff_handle),
+      }));
+    },
+    async staffActivity(facilityId: string, days: number): Promise<StaffActivityRow[]> {
+      const rows = await trx`
+        select o_staff_user_id::text as o_staff_user_id, o_facility_id, o_day::text as o_day, o_attests::int as o_attests, o_activations::int as o_activations, o_anomalies
+        from private.partner_staff_activity_for_partner(${facilityId}::text, ${days}::int)`;
+      return rows.map((r) => ({
+        staffUserId: String(r.o_staff_user_id),
+        facilityId: String(r.o_facility_id),
+        day: String(r.o_day),
+        attests: Number(r.o_attests),
+        activations: Number(r.o_activations),
+        anomalies: r.o_anomalies,
+      }));
+    },
+  };
+}
+
 /** The partner sign-in minter's transaction (kind "partner_mint": the ONE caller of that kind, the lint's `privileged-mint-scope` rule keeps it so). */
 export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMintTx) => Promise<T>): Promise<T> {
   try {
@@ -4058,10 +4111,10 @@ export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMi
 const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 
 /** A transaction as `edge_partner`, bound to the session whose token hash this is. A malformed hash is refused without a database round trip, with the same error as an unknown one. */
-export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx) => Promise<T>): Promise<T> {
+export async function withPartnerSession<T>(tokenHash: string, op: (s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx) => Promise<T>): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
   try {
-    return await openScopedTx("partner", partnerBind(tokenHash), (trx) => op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx) }));
+    return await openScopedTx("partner", partnerBind(tokenHash), (trx) => op({ ...buildPartnerSessionTx(trx), ...buildPartnerInvitesTx(trx), ...buildPartnerMembersTx(trx), ...buildPartnerAttestTx(trx) }));
   } catch (err) {
     return mapPartnerDbError(err);
   }
@@ -4095,6 +4148,7 @@ export const partnerDb: PartnerDb = {
   withSession: withPartnerSession,
   withInvites: withPartnerSession,
   withMembers: withPartnerSession,
+  withAttest: withPartnerSession,
   hitRateLimit: hitRateLimitForPartner,
   hitSystemRateLimit: hitSystemRateLimitForPartner,
 };

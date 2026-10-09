@@ -339,6 +339,58 @@ export interface PartnerMembersTx extends Pick<PartnerSessionTx, "totpReset"> {
   credentialRevoke(credentialId: string): Promise<CredentialRevokeStatus>;
 }
 
+/** The kinds an attestation of this slice can have (0056). `offer_redemption` and `special_marker_handover` are other slices'. */
+export type AttestKind = "presence" | "marker_purchase";
+export const ATTEST_KINDS: readonly AttestKind[] = ["presence", "marker_purchase"];
+
+/** What `partner_attest_for_partner` / `partner_offline_attest_for_partner` answer (0056). Every status except a raise is a returned value, so the failure counters commit. */
+export type AttestStatus =
+  | "ok"
+  | "token_invalid"
+  | "replayed"
+  | "verification_failed"
+  | "rate_limited"
+  | "no_facility"
+  | "no_programme"
+  | "cold_start_cap";
+export interface AttestResult {
+  readonly status: AttestStatus;
+  /** Present only on `ok`. */
+  readonly attestationId: string | null;
+  /** True when the same-device rule held the purchase (an `ok` attest that went to held_review). */
+  readonly held: boolean;
+}
+/** One row of the shift log (the old `api.staff_shift_log`, a subset of its columns). */
+export interface ShiftLogRow {
+  readonly id: string;
+  readonly facilityId: string;
+  readonly createdAt: string;
+  readonly kind: string;
+  readonly playerHandle: string;
+  readonly staffHandle: string;
+}
+/** One row of `staff_activity`: counts and anomaly markers, never a player id or handle. */
+export interface StaffActivityRow {
+  readonly staffUserId: string;
+  readonly facilityId: string;
+  readonly day: string;
+  readonly attests: number;
+  readonly activations: number;
+  readonly anomalies: unknown;
+}
+
+/** One transaction as `edge_partner` for the `partner-attest` routes. Every method is a `_for_partner` definer that begins with `partner_authorize` (class A1 for the two attests, A0 for the reads). */
+export interface PartnerAttestTx {
+  /** POST attest (class A1): the ONLINE path; the player is the owner of the check-in token, never named by the caller. */
+  attest(facilityId: string, kind: AttestKind, token: string): Promise<AttestResult>;
+  /** POST attest/offline (class A1): the offline code, verified and recorded IN THE DATABASE. The handle and the six digits go in; a status comes out. */
+  offlineAttest(facilityId: string, kind: AttestKind, handle: string, code: string): Promise<AttestResult>;
+  /** GET shift-log (class A0, staff or manager of the facility). */
+  shiftLog(facilityId: string): Promise<ShiftLogRow[]>;
+  /** GET staff-activity (class A0, manager or operator of the facility). */
+  staffActivity(facilityId: string, days: number): Promise<StaffActivityRow[]>;
+}
+
 /**
  * The email OTP of the proof (6.1, 6.3), through GoTrue with the ANON key, as the player flow already does (E19): `send` mails a one-time code to the member's own address; `verify` proves the mailbox and returns the
  * GoTrue session the verification created, which the database then checks (it must exist, for THIS person, fresh) and which the caller closes AFTER the proof is recorded, on every path. A wrong or expired code is
@@ -360,6 +412,8 @@ export interface PartnerDb {
   withInvites<T>(tokenHash: string, op: (s: PartnerInvitesTx) => Promise<T>): Promise<T>;
   /** `withSession` for the `partner-members` routes (member revoke / recover, PIN and TOTP reset, org revoke-all, credentials): the same bound transaction, the member definers. */
   withMembers<T>(tokenHash: string, op: (s: PartnerMembersTx) => Promise<T>): Promise<T>;
+  /** `withSession` for the `partner-attest` routes (attest, offline attest, shift-log, staff-activity): the same bound transaction, the attest definers of 0056 (S3). */
+  withAttest<T>(tokenHash: string, op: (s: PartnerAttestTx) => Promise<T>): Promise<T>;
   /** One hit of a per-member bucket, in its OWN short transaction, committed before any request transaction opens (the pool-deadlock rule of `hitRateLimitForActor`). */
   hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
   /** One hit of a SYSTEM bucket (design 8: nothing is bound before authentication, so the buckets keyed on an object the caller cannot choose, the invite token and the target mailbox, are `edge_system` buckets), in its own short transaction. */

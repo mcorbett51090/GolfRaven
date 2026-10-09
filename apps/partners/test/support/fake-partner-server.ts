@@ -266,6 +266,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     withMembers() {
       return Promise.reject(new Error("fake partner server: members are not implemented (S7)"));
     },
+    withAttest() {
+      return Promise.reject(new Error("fake partner server: attest is not implemented (S7b)"));
+    },
     async hitSystemRateLimit() {
       return { ok: true, retryAfterSeconds: 0 };
     },

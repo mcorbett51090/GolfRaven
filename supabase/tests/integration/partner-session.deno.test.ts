@@ -158,6 +158,7 @@ Deno.test("PA-10: OPTIONS never opens a database connection (a counting database
     withSession: (h, op) => (calls++, partnerDb.withSession(h, op)),
     withInvites: (h, op) => (calls++, partnerDb.withInvites(h, op)),
     withMembers: (h, op) => (calls++, partnerDb.withMembers(h, op)),
+    withAttest: (h, op) => (calls++, partnerDb.withAttest(h, op)),
     hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
     hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
   };
@@ -219,6 +220,7 @@ Deno.test("PA-11: a Supabase JWT sent to the partner function is 401 on every se
     withSession: (h, op) => (calls++, partnerDb.withSession(h, op)),
     withInvites: (h, op) => (calls++, partnerDb.withInvites(h, op)),
     withMembers: (h, op) => (calls++, partnerDb.withMembers(h, op)),
+    withAttest: (h, op) => (calls++, partnerDb.withAttest(h, op)),
     hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
     hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
   };
