@@ -412,14 +412,15 @@ Deno.test("section 8: an assertion under a credential id nobody holds is the uni
 // 4.1: an aal 1 operator session; reauth (PA-27); the member rate limit
 // =============================================================================================================================================================
 
-Deno.test("4.1: an aal 1 OPERATOR session can GET session (reporting the aal it needs), lock and sign out; reauth is refused (class A0 needs the required aal)", DT, async () => {
+Deno.test("4.1 / PA-28: an aal 1 OPERATOR with no confirmed TOTP can GET session, lock, sign out, and reauth/options (A0_ENROL); normal A0 stays refused", DT, async () => {
   const auth = await enrol(OPERATOR);
   const token = await signIn(auth);
   const who = await call("GET", "session", { headers: bearer(token) });
   assertEquals(who.status, 200);
   const info = (await who.json()).data as { requiredAal: number; aal: number };
   assertEquals([info.aal, info.requiredAal], [1, 2]);
-  assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 403);
+  // S1.4: reauth is A0_ENROL — reachable at aal 1 only while TOTP is unconfirmed (matrix 31 proves the post-confirm refusal).
+  assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 200);
   assertEquals((await call("POST", "lock", { headers: bearer(token), body: {} })).status, 200);
   assertEquals((await call("POST", "sign-out", { headers: bearer(token), body: {} })).status, 200);
 });
@@ -544,7 +545,7 @@ Deno.test("PA-13b: inside a real partner transaction the role is edge_partner an
   );
   assertEquals(
     names[0]!.n,
-    "bind_partner_session,hit_partner_rate_limit,partner_binding,partner_binding_kind,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_whoami_for_partner",
+    "bind_partner_session,hit_partner_rate_limit,partner_admin_enrolment_issue_for_partner,partner_binding,partner_binding_kind,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_totp_confirm_for_partner,partner_totp_enrol_for_partner,partner_totp_reset_for_partner,partner_totp_verify_for_partner,partner_whoami_for_partner",
   );
 });
 
