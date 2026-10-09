@@ -57,7 +57,16 @@ afterEach(() => spies.restore());
 
 describe("the partner function list (the CSP's connect-src and the bearer allow-list are one list)", () => {
   it("names the partner functions, so invites, members, attest, course-qr and qr-print are path-scoped in connect-src", () => {
-    expect([...PARTNER_FUNCTIONS]).toEqual(["partner-session", "partner-invites", "partner-members", "partner-attest", "course-qr", "qr-print"]);
+    expect([...PARTNER_FUNCTIONS]).toEqual([
+      "partner-session",
+      "partner-invites",
+      "partner-members",
+      "partner-attest",
+      "course-qr",
+      "qr-print",
+      "stock-admin",
+      "partner-entitlements",
+    ]);
     expect(INVITES_FUNCTION).toBe("partner-invites");
   });
 });

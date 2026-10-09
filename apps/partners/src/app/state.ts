@@ -6,7 +6,20 @@
  */
 
 import type { EnrolmentKind } from "../api/client";
-import type { AttestKind, AttestResult, CoursePin, MintedToken, PrintedQr, ShiftLogEntry, StaffActivityRow } from "../api/work-routes";
+import type {
+  AttestKind,
+  AttestResult,
+  CoursePin,
+  EntitlementQueueRow,
+  HandoverMinted,
+  MintedToken,
+  PrintedQr,
+  RedeemMethod,
+  RedeemResult,
+  ShiftLogEntry,
+  StaffActivityRow,
+  StockRow,
+} from "../api/work-routes";
 import type { SessionGrant, TotpEnrolment, WhoAmI } from "../api/types";
 import type { ActionClass, PinProblem } from "../auth/step-up";
 import type { PinSetupMode } from "../auth/pin-setup";
@@ -17,7 +30,21 @@ export type Notice =
   /** Outcomes of accepting an invite or enrolment: already a member with a passkey, needs a manager's recovery, passkey saved but the first session could not be shown, or a code was sent. */
   | { readonly kind: "enrol-existing-member" | "enrol-recover-required" | "enrol-saved" | "enrol-code-sent" }
   /** Success notices of the signed-in screens. */
-  | { readonly kind: "pin-set" | "pin-changed" | "totp-confirmed" | "totp-verified" | "attest-ok" | "pin-rotated" | "token-minted" | "printed-ok" }
+  | {
+      readonly kind:
+        | "pin-set"
+        | "pin-changed"
+        | "totp-confirmed"
+        | "totp-verified"
+        | "attest-ok"
+        | "pin-rotated"
+        | "token-minted"
+        | "printed-ok"
+        | "stock-moved"
+        | "handover-minted"
+        | "redeem-ok"
+        | "voucher-ok";
+    }
   | { readonly kind: "error"; readonly message: UiMessage };
 
 /** Which step of accepting an invite or an enrolment token the person is on. `token`: asks for the token (or, when it came in a link, for a press of "email me a code"). */
@@ -73,7 +100,7 @@ export interface TotpPanel {
 
 export type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
 
-/** The S7b work screens drawn in place of the signed-in home (design 24.3 → S7b). `null` means home. */
+/** The S7b/S7c work screens drawn in place of the signed-in home (design 24.3 → S7b/S7c). `null` means home. */
 export type WorkView =
   | {
       readonly kind: "attest";
@@ -93,6 +120,23 @@ export type WorkView =
       readonly sale: MintedToken | null;
       readonly refreshLeft: number | null;
       readonly printed: PrintedQr | null;
+    }
+  | {
+      readonly kind: "stock";
+      readonly facilityId: string;
+      readonly busy: boolean;
+      readonly rows: readonly StockRow[] | null;
+      readonly lastOnHand: number | null;
+    }
+  | {
+      readonly kind: "handover";
+      readonly facilityId: string;
+      readonly busy: boolean;
+      readonly queue: readonly EntitlementQueueRow[] | null;
+      /** Plaintext `gr_ho_…` shown once after mint; cleared when the person leaves or dismisses. Never logged. */
+      readonly minted: HandoverMinted | null;
+      readonly redeemMethod: RedeemMethod;
+      readonly lastRedeem: RedeemResult | null;
     };
 
 export type AppState =
@@ -109,7 +153,7 @@ export type AppState =
       readonly notice: Notice | null;
       /** What is drawn instead of the home / work screen, or null. */
       readonly panel: Panel | null;
-      /** Attest or course-QR work; null draws the home screen. */
+      /** Attest, course-QR, stock or hand-over work; null draws the home screen. */
       readonly work: WorkView | null;
     };
 

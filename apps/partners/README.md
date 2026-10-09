@@ -52,7 +52,7 @@ GOLFRAVEN_PARTNERS_API_BASE=https://<project>.supabase.co/functions/v1 pnpm --fi
 ```
 
 `GOLFRAVEN_PARTNERS_API_BASE` is the **functions root** of the partners API: the client calls `<base>/partner-session/<route>`,
-`<base>/partner-invites/<route>`, `<base>/partner-attest/<route>`, `<base>/course-qr/<route>` and `<base>/qr-print`. It is baked into the bundle, and the CSP `connect-src` is built from it: one **path-scoped** source per partner
+`<base>/partner-invites/<route>`, `<base>/partner-attest/<route>`, `<base>/course-qr/<route>`, `<base>/qr-print`, `<base>/stock-admin/<route>` and `<base>/partner-entitlements/<route>`. It is baked into the bundle, and the CSP `connect-src` is built from it: one **path-scoped** source per partner
 function (`<base>/partner-session/`; the list is `src/api/partner-functions.json`, the same one the client's `call()` allow-list uses), never the
 whole API origin (the same host serves `/rest/v1` and every other edge function). The default is a placeholder on the
 reserved `.example` TLD (`https://partners-api.golfraven.example/functions/v1`) because the real host is owner question Q1;
@@ -78,7 +78,7 @@ on any bundle input that is not under `src/` or that comes from `node_modules`.
 ## The CSP
 
 `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src` one path-scoped source per entry of `partner-functions.json`
-(`partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`); `manifest-src 'self'; worker-src 'none';
+(`partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`, `stock-admin`, `partner-entitlements`); `manifest-src 'self'; worker-src 'none';
 object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`.
 Emitted by `scripts/lib/csp.mjs`, once as the response header and once as the `<meta>`. Stricter than design 4.6 in three places (no `'self'` in
 `connect-src`, no `data:` images, `worker-src 'none'`); see the design doc's "As built: S7a". Trusted Types is enforced by Chromium; Safari

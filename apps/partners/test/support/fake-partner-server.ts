@@ -662,6 +662,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     printed: new Map<string, { qrKid: string; sig: string; printedAt: string }>(),
     usedTokens: new Set<string>(),
     usedCodes: new Set<string>(),
+    /** on_hand by facilityId for stock-admin / redeem (S7c). */
+    stock: new Map<string, number>(),
   };
 
   async function workHandler(req: Request): Promise<Response> {
@@ -679,7 +681,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     }
     const url = new URL(req.url);
     const parts = url.pathname.split("/").filter((p) => p.length > 0);
-    const fnIdx = parts.findIndex((p) => p === "partner-attest" || p === "course-qr" || p === "qr-print");
+    const fnIdx = parts.findIndex((p) =>
+      p === "partner-attest" || p === "course-qr" || p === "qr-print" || p === "stock-admin" || p === "partner-entitlements"
+    );
     if (fnIdx < 0) return err(404, "not_found");
     const fn = parts[fnIdx]!;
     const route = parts.slice(fnIdx + 1).join("/");
@@ -767,13 +771,78 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         return ok(201, { facilityId, qrKid: row.qrKid, sig: row.sig, printedAt, revoked: false, revokedAt: null, link: null, changed: true });
       }
     }
+
+    if (fn === "stock-admin") {
+      if (route === "stock" && req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        const onHand = workState.stock.get(facilityId) ?? 5;
+        return ok(200, {
+          stock: [{ trailId: "trl_demo", onHand, lowThreshold: 3, status: onHand <= 0 ? "out" : onHand <= 3 ? "low" : "in_stock", lastCountedAt: null }],
+        });
+      }
+      if (route === "stock/move" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { facilityId?: string; trailId?: string; kind?: string; qty?: number };
+        const facilityId = body.facilityId ?? "";
+        const qty = typeof body.qty === "number" ? body.qty : 0;
+        const prev = workState.stock.get(facilityId) ?? 5;
+        const next = body.kind === "count_adjustment" ? prev + qty : body.kind === "transfer_out" || body.kind === "damaged" ? prev - Math.abs(qty) : prev + Math.abs(qty);
+        if (next < 0) return err(422, "short");
+        workState.stock.set(facilityId, next);
+        return ok(200, { onHand: next, availability: next <= 0 ? "out" : next <= 3 ? "low" : "in_stock" });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "partner-entitlements") {
+      if (route === "collect" && req.method === "GET") {
+        return ok(200, {
+          entitlements: [{
+            entitlementId: "51000000-0000-0000-0000-000000003601",
+            trailId: "trl_demo",
+            state: "redeemable",
+            playerHandle: "player_one",
+            activatedAt: new Date().toISOString(),
+            voucherIssuedAt: null,
+          }],
+        });
+      }
+      if (route === "handover/mint" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const token = "gr_ho_" + "c".repeat(43);
+        return ok(201, { token, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() });
+      }
+      if (route === "redeem" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { facilityId?: string; method?: string; credential?: string };
+        if (body.credential === "replayed") return err(409, "replayed");
+        if (workState.stock.get(body.facilityId ?? "") === 0) return err(409, "out_of_stock");
+        const facilityId = body.facilityId ?? "";
+        const prev = workState.stock.get(facilityId) ?? 5;
+        workState.stock.set(facilityId, Math.max(0, prev - 1));
+        return ok(201, { attestationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", movement: "redeemed", availability: "low" });
+      }
+      if (route === "voucher" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        return ok(200, { voucherIssuedAt: new Date().toISOString() });
+      }
+      return err(404, "not_found");
+    }
+
     return err(404, "not_found");
   }
 
   const innerHandler = (req: Request) => {
     const path = new URL(req.url).pathname;
     if (path.includes("/partner-invites/")) return invitesHandler(req);
-    if (path.includes("/partner-attest/") || path.includes("/course-qr/") || path.includes("/qr-print")) return workHandler(req);
+    if (
+      path.includes("/partner-attest/") || path.includes("/course-qr/") || path.includes("/qr-print") ||
+      path.includes("/stock-admin/") || path.includes("/partner-entitlements/")
+    ) return workHandler(req);
     return sessionHandler(req);
   };
 
@@ -835,6 +904,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       workState.printed.clear();
       workState.usedTokens.clear();
       workState.usedCodes.clear();
+      workState.stock.clear();
     },
     async seedPin(pin, o = {}) {
       const user = users.get(o.userId ?? USER_ID);
