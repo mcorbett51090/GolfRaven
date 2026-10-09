@@ -3,8 +3,9 @@
 -- the held-review queue and SLA summary reads (class A0, admin only); staff / manager / operator cannot resolve or read the queue; a missing A3 (no fresh TOTP window) is refused; not_found / not_held / budget_short
 -- are returned statuses; edge_partner has no EXECUTE on app.resolve_held_*; the binding-keyed policies are closed without a partner binding and not opened by a planted GUC.
 --
--- HOW THIS FILE RUNS. One transaction, rolled back at the end (the 34 pattern). Token hashes are precomputed with \gset so they can be passed under SET LOCAL ROLE edge_partner
--- (edge_partner cannot EXECUTE pg_temp helpers). Inventory / allow-list reads run as service_role (FORCE RLS; SELECT is granted to service_role only).
+-- HOW THIS FILE RUNS. One transaction, rolled back at the end (the 34 pattern). Authority refusals each sit in a SAVEPOINT that is rolled back (a second bind in one transaction is itself
+-- refused). The happy-path admin resolves bind once, then the helpers only SET ROLE and call (no re-bind). Token hashes are precomputed with \gset so they can be passed under
+-- SET LOCAL ROLE edge_partner (edge_partner cannot EXECUTE pg_temp helpers). Inventory / allow-list reads run as service_role (FORCE RLS; SELECT is granted to service_role only).
 --
 -- Principals are helpers.sql's: staff_x (a1), manager_x (b1), operator_t (c1), admin (d0), player_a / player_b.
 
@@ -53,26 +54,22 @@ BEGIN
 END
 $f$;
 
--- call a resolve as edge_partner under a binding; returns status|state. Hash captured BEFORE SET ROLE (edge_partner cannot EXECUTE pg_temp.th).
+-- call a resolve as edge_partner under a binding the caller already made, with a fresh A3 window each time; 'status|state' (the 34 onl/off pattern: helpers do not re-bind)
 CREATE FUNCTION pg_temp.res_oc(p_label text, p_id uuid, p_approve boolean) RETURNS text LANGUAGE plpgsql AS $f$
-DECLARE r record; v_th text;
+DECLARE r record;
 BEGIN
-  v_th := pg_temp.th(p_label);
   PERFORM pg_temp.seed_step(p_label, '{"mfa_s": 240, "aal": 2}'::jsonb);
   EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(v_th);
   SELECT * INTO r FROM private.partner_resolve_held_offer_code_for_partner(p_id, p_approve);
   EXECUTE 'RESET ROLE';
   RETURN r.o_status || '|' || coalesce(r.o_state, '');
 END
 $f$;
 CREATE FUNCTION pg_temp.res_ent(p_label text, p_id uuid, p_approve boolean) RETURNS text LANGUAGE plpgsql AS $f$
-DECLARE r record; v_th text;
+DECLARE r record;
 BEGIN
-  v_th := pg_temp.th(p_label);
   PERFORM pg_temp.seed_step(p_label, '{"mfa_s": 240, "aal": 2}'::jsonb);
   EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(v_th);
   SELECT * INTO r FROM private.partner_resolve_held_entitlement_for_partner(p_id, p_approve);
   EXECUTE 'RESET ROLE';
   RETURN r.o_status || '|' || coalesce(r.o_state, '');
@@ -168,6 +165,12 @@ ROLLBACK TO SAVEPOINT a3_missing;
 -- ----------------------------------------------------------------------------
 -- 3. Happy path: admin approves a held code and a held entitlement; rejects the budget-short path
 -- ----------------------------------------------------------------------------
+-- one bind for the rest of the file (helpers and the queue read reuse it; they do not re-bind)
+SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_ad');
+RESET ROLE;
+
 SELECT is(pg_temp.res_oc('ad', '70000000-0000-0000-0000-000000003501', true), 'ok|issued', 'admin approves a reserved held offer_code -> issued');
 SELECT is((SELECT state::text FROM app.offer_code WHERE id = '70000000-0000-0000-0000-000000003501'), 'issued', 'the code is issued');
 SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'held_reward_approved' AND subject_id = '70000000-0000-0000-0000-000000003501'), 1, 'an audit row records the approval');
@@ -188,7 +191,6 @@ SELECT is(pg_temp.res_ent('ad', '51000000-0000-0000-0000-000000003599', false), 
 SAVEPOINT bad_args;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_ad');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner(NULL, true)$$, '22023', NULL, 'a NULL code id is 22023');
 SELECT throws_ok($$SELECT * FROM private.partner_resolve_held_offer_code_for_partner('70000000-0000-0000-0000-000000003501', NULL)$$, '22023', NULL, 'a NULL approve flag is 22023');
 RESET ROLE;
@@ -209,10 +211,8 @@ WHERE id = '51000000-0000-0000-0000-000000003501';
 
 SELECT count(*)::int AS held_oc_n FROM app.offer_code WHERE state = 'held_review' \gset
 
-SAVEPOINT queue_read;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_ad');
 SELECT ok((SELECT count(*)::int FROM private.partner_held_queue_for_partner() WHERE o_kind = 'offer_code') >= 1, 'the queue lists held offer_codes');
 SELECT ok((SELECT count(*)::int FROM private.partner_held_queue_for_partner() WHERE o_kind = 'entitlement') >= 1, 'the queue lists held entitlements');
 SELECT ok((SELECT count(*)::int FROM private.partner_held_queue_for_partner() WHERE o_kind = 'review_item') >= 1, 'the queue lists open review_items');
@@ -222,7 +222,6 @@ SELECT is((SELECT o_held_offer_codes::int FROM private.partner_review_sla_for_pa
 SELECT is((SELECT o_sla_hours FROM private.partner_review_sla_for_partner()), 48, 'SLA hours is 48 ([inference])');
 SELECT ok((SELECT o_sla_breached_rewards FROM private.partner_review_sla_for_partner()) >= 1, 'SLA summary counts breached rewards');
 RESET ROLE;
-ROLLBACK TO SAVEPOINT queue_read;
 
 -- ----------------------------------------------------------------------------
 -- 5. Policies: registered, no GUC, partner_bound_admin not opened by a planted GUC
