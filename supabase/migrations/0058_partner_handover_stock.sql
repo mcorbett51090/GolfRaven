@@ -354,7 +354,9 @@ BEGIN
     RAISE EXCEPTION 'partner_entitlement_redeem_for_partner: a facility, an entitlement, a method (staff_scan or hand_over_token) and a credential of that method are required' USING ERRCODE = '22023';
   END IF;
 
-  SELECT e.user_id, e.trail_id, e.state, e.voucher_facility_id INTO v_ent FROM app.entitlement e WHERE e.id = p_entitlement_id FOR UPDATE;
+  -- Read without FOR UPDATE first: SELECT FOR UPDATE also applies UPDATE RLS, and the UPDATE
+  -- policy only opens redeemable/vouchered rows, so a redeemed row would look like not_found.
+  SELECT e.user_id, e.trail_id, e.state, e.voucher_facility_id INTO v_ent FROM app.entitlement e WHERE e.id = p_entitlement_id;
   IF NOT FOUND THEN
     RETURN QUERY SELECT 'not_found'::text, NULL::uuid, NULL::text, NULL::text;
     RETURN;
@@ -402,6 +404,13 @@ BEGIN
     v_ref := 'handover:' || v_cred;
   END IF;
 
+  -- Lock the entitlement (UPDATE RLS allows redeemable/vouchered) and re-check state after the credential work
+  SELECT e.user_id, e.trail_id, e.state, e.voucher_facility_id INTO v_ent FROM app.entitlement e WHERE e.id = p_entitlement_id FOR UPDATE;
+  IF NOT FOUND OR v_ent.state NOT IN ('redeemable', 'vouchered') THEN
+    RETURN QUERY SELECT 'not_redeemable'::text, NULL::uuid, NULL::text, NULL::text;
+    RETURN;
+  END IF;
+
   SELECT s.on_hand INTO v_stock FROM app.special_marker_stock s WHERE s.trail_id = v_ent.trail_id AND s.facility_id = p_facility_id FOR UPDATE;
   IF NOT FOUND THEN
     RETURN QUERY SELECT 'no_stock_row'::text, NULL::uuid, NULL::text, NULL::text;
@@ -412,8 +421,9 @@ BEGIN
     RETURN;
   END IF;
 
+  -- attestation.token_jti is UNIQUE and tombstoned (0017): use the credential ref (check-in jti or handover:hash), never the entitlement id alone, so a later redeem of a reset row (or a second unit) cannot collide
   SELECT w.o_status, w.o_attestation_id INTO v_w
-  FROM private.partner_attest_write(v_uid, p_facility_id, v_ent.user_id, 'special_marker_handover', 'handover:' || p_entitlement_id::text, v_ref, false, false, v_now, v_now) w;
+  FROM private.partner_attest_write(v_uid, p_facility_id, v_ent.user_id, 'special_marker_handover', v_ref, v_ref, false, false, v_now, v_now) w;
   IF v_w.o_status <> 'ok' THEN
     RETURN QUERY SELECT v_w.o_status, NULL::uuid, NULL::text, NULL::text;
     RETURN;
@@ -456,7 +466,7 @@ BEGIN
   IF p_facility_id IS NULL OR pg_catalog.btrim(p_facility_id) = '' OR p_entitlement_id IS NULL THEN
     RAISE EXCEPTION 'partner_entitlement_voucher_for_partner: a facility and an entitlement are required' USING ERRCODE = '22023';
   END IF;
-  SELECT e.user_id, e.trail_id, e.state INTO v_ent FROM app.entitlement e WHERE e.id = p_entitlement_id FOR UPDATE;
+  SELECT e.user_id, e.trail_id, e.state INTO v_ent FROM app.entitlement e WHERE e.id = p_entitlement_id;
   IF NOT FOUND THEN
     RETURN QUERY SELECT 'not_found'::text, NULL::timestamptz;
     RETURN;
@@ -470,6 +480,11 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM app.special_marker_stock s WHERE s.trail_id = v_ent.trail_id AND s.facility_id = p_facility_id) THEN
     RETURN QUERY SELECT 'no_stock_row'::text, NULL::timestamptz;
+    RETURN;
+  END IF;
+  SELECT e.user_id, e.trail_id, e.state INTO v_ent FROM app.entitlement e WHERE e.id = p_entitlement_id FOR UPDATE;
+  IF NOT FOUND OR v_ent.state <> 'redeemable' THEN
+    RETURN QUERY SELECT 'not_redeemable'::text, NULL::timestamptz;
     RETURN;
   END IF;
   UPDATE app.entitlement SET state = 'vouchered', voucher_facility_id = p_facility_id, voucher_issued_at = v_now WHERE id = p_entitlement_id;
