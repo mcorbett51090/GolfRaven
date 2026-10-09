@@ -9,11 +9,13 @@ import { STOCK_MOVE_KINDS, type StockMoveKind } from "../api/work-routes";
 import { translate, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
 import { noticeElement } from "./notice";
+import { adminView } from "./views-admin";
 
 function facilitySelect(state: SignedInState, controller: AppController, locale: Locale): HTMLElement {
   const t = (k: MessageKey) => translate(locale, k);
   const choices = facilityChoices(state.session);
-  const current = state.work?.facilityId ?? choices[0] ?? "";
+  const work = state.work;
+  const current = work !== null && "facilityId" in work ? work.facilityId : choices[0] ?? "";
   const select = h(
     "select",
     {
@@ -28,8 +30,15 @@ function facilitySelect(state: SignedInState, controller: AppController, locale:
 }
 
 export function workView(state: SignedInState, controller: AppController, locale: Locale): HTMLElement {
-  const t = (k: MessageKey, p?: Record<string, string | number>) => translate(locale, k, p);
   const work = state.work!;
+  if (
+    work.kind === "programme" || work.kind === "offers" || work.kind === "sponsorships" ||
+    work.kind === "review" || work.kind === "rollups"
+  ) {
+    return adminView(state, controller, locale);
+  }
+
+  const t = (k: MessageKey, p?: Record<string, string | number>) => translate(locale, k, p);
   const busy = state.busy !== null || work.busy;
   const back = h("button", { type: "button", disabled: busy, "data-testid": "work-back", onclick: () => controller.closeWork() }, t("work.back"));
 

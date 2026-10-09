@@ -5,6 +5,7 @@
  */
 
 import type { WhoAmI } from "../api/types";
+import { canOpenAdminOps, canOpenReview, trailChoices } from "../app/admin";
 import type { AppState, AppController } from "../app/controller";
 import { translate, plural, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
@@ -92,6 +93,9 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
     const busy = state.busy !== null;
     const needsSecondFactor = state.session.aal < state.session.requiredAal;
     const firstFacility = state.session.memberships.flatMap((m) => m.facilityIds)[0] ?? "";
+    const firstTrail = trailChoices(state.session)[0] ?? "";
+    const showAdminOps = canOpenAdminOps(state.session);
+    const showReview = canOpenReview(state.session);
     main = h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "signed-in" },
@@ -114,6 +118,33 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
           h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-stock", onclick: () => controller.openStock(firstFacility) }, t("home.work.stock")),
         ),
       ),
+      showAdminOps || showReview
+        ? h(
+            "section",
+            { "data-testid": "home-admin" },
+            h("h2", {}, t("home.admin.title")),
+            h("p", { class: "muted" }, t("home.admin.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-programme", onclick: () => controller.openProgramme(firstTrail) }, t("home.admin.programme"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-offers", onclick: () => controller.openOffers(firstTrail) }, t("home.admin.offers"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-sponsorships", onclick: () => controller.openSponsorships(firstTrail) }, t("home.admin.sponsorships"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-rollups", onclick: () => controller.openRollups(firstTrail) }, t("home.admin.rollups"))
+                : null,
+              showReview
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-review", onclick: () => controller.openReview() }, t("home.admin.review"))
+                : null,
+            ),
+          )
+        : null,
       h(
         "section",
         {},

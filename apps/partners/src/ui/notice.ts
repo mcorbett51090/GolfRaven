@@ -26,6 +26,13 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "handover-minted": "notice.handoverMinted",
   "redeem-ok": "notice.redeemOk",
   "voucher-ok": "notice.voucherOk",
+  "programme-saved": "notice.programmeSaved",
+  "offer-saved": "notice.offerSaved",
+  "offer-approved": "notice.offerApproved",
+  "offer-ended": "notice.offerEnded",
+  "sponsorship-saved": "notice.sponsorshipSaved",
+  "sponsorship-approved": "notice.sponsorshipApproved",
+  "review-resolved": "notice.reviewResolved",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {
