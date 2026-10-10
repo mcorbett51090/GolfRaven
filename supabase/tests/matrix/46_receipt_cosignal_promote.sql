@@ -16,6 +16,7 @@ CREATE FUNCTION pg_temp.qfix(p_fix text, p_fac text, p_grade text, p_at timestam
     'accuracyMeters', 10, 'capturedAt', (extract(epoch FROM p_at) * 1000)::bigint, 'localDate', p_ld::text
   )
 $f$;
+GRANT EXECUTE ON FUNCTION pg_temp.qfix(text, text, text, timestamptz, date) TO PUBLIC;
 
 CREATE FUNCTION pg_temp.seed_fix(p_fix text, p_u uuid, p_fac text, p_grade text, p_at timestamptz)
 RETURNS uuid LANGUAGE plpgsql AS $f$
@@ -32,6 +33,7 @@ BEGIN
   RETURN v_id;
 END
 $f$;
+GRANT EXECUTE ON FUNCTION pg_temp.seed_fix(text, uuid, text, text, timestamptz) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
 -- 1. Policy shape
