@@ -21,11 +21,13 @@ export type ErrorContext =
   | "course-qr"
   | "stock"
   | "handover"
+  | "offer-redeem"
   | "programme"
   | "offers"
   | "sponsorships"
   | "review"
-  | "rollups";
+  | "rollups"
+  | "settlement";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
@@ -89,6 +91,18 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (kind === "conflict") return { key: "handover.outOfStock" };
     if (kind === "unprocessable") return { key: "handover.failed" };
   }
+  if (context === "offer-redeem") {
+    if (code === "not_issued") return { key: "offerRedeem.notIssued" };
+    if (code === "expired") return { key: "offerRedeem.expired" };
+    if (code === "wrong_facility") return { key: "offerRedeem.wrongFacility" };
+    if (code === "token_invalid") return { key: "offerRedeem.tokenInvalid" };
+    if (code === "replayed") return { key: "offerRedeem.replayed" };
+    if (code === "budget_short") return { key: "offerRedeem.budgetShort" };
+    if (code === "cold_start_cap") return { key: "offerRedeem.coldStart" };
+    if (code === "not_found") return { key: "offerRedeem.notFound" };
+    if (kind === "conflict") return { key: "offerRedeem.replayed" };
+    if (kind === "unprocessable") return { key: "offerRedeem.failed" };
+  }
   if (context === "programme" || context === "offers" || context === "sponsorships" || context === "review" || context === "rollups") {
     if (code === "not_draft") return { key: "admin.notDraft" };
     if (code === "not_live") return { key: "admin.notLive" };
@@ -101,6 +115,11 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "not_held") return { key: "admin.notHeld" };
     if (code === "not_found") return { key: "admin.notFound" };
     if (kind === "unprocessable") return { key: "admin.failed" };
+  }
+  if (context === "settlement") {
+    if (code === "empty") return { key: "settlement.empty" };
+    if (code === "not_found") return { key: "settlement.empty" };
+    if (kind === "unprocessable") return { key: "settlement.failed" };
   }
   return null;
 }

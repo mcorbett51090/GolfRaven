@@ -69,11 +69,12 @@ export interface AppController extends StepUp {
   submitTotp(code: string): Promise<void>;
   closePanel(): void;
 
-  /** S7b/S7c work screens (attest, course-QR, stock, hand-over; see work.ts). */
+  /** S7b/S7c/S7 work screens (attest, course-QR, stock, hand-over, offer redeem; see work.ts). */
   openAttest(facilityId: string): void;
   openCourseQr(facilityId: string): void;
   openStock(facilityId: string): void;
   openHandover(facilityId: string): void;
+  openOfferRedeem(facilityId: string): void;
   closeWork(): void;
   setWorkFacility(facilityId: string): void;
   setAttestMode(mode: "online" | "offline"): void;
@@ -96,15 +97,20 @@ export interface AppController extends StepUp {
   dismissHandoverMint(): void;
   submitRedeem(entitlementId: string, credential: string): Promise<void>;
   submitVoucher(entitlementId: string): Promise<void>;
+  loadOffersQueue(): Promise<void>;
+  selectOfferCode(offerCodeId: string): void;
+  submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
 
-  /** S7d manager/operator/admin screens (see admin.ts). */
+  /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
   openOffers(trailId: string): void;
   openSponsorships(trailId: string): void;
   openReview(): void;
   openRollups(trailId: string): void;
+  openSettlement(trailId: string): void;
   setAdminTrail(trailId: string): void;
   setAdminSponsorshipId(sponsorshipId: string): void;
+  setSettlementMonth(month: string): void;
   loadProgramme(): Promise<void>;
   saveTrailProgramme(body: TrailProgrammeUpsert): Promise<void>;
   saveFacilityProgramme(body: FacilityProgrammeUpsert): Promise<void>;
@@ -120,6 +126,8 @@ export interface AppController extends StepUp {
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
   loadOperatorRollups(): Promise<void>;
   loadSponsorRollups(): Promise<void>;
+  exportSettlement(month?: string): Promise<void>;
+  dismissSettlementExport(): void;
 }
 
 export interface ControllerWebAuthn {
@@ -333,6 +341,7 @@ export function createController(deps: ControllerDeps): AppController {
     openCourseQr: (facilityId) => work.openCourseQr(facilityId),
     openStock: (facilityId) => work.openStock(facilityId),
     openHandover: (facilityId) => work.openHandover(facilityId),
+    openOfferRedeem: (facilityId) => work.openOfferRedeem(facilityId),
     closeWork: () => work.closeWork(),
     setWorkFacility: (facilityId) => work.setFacility(facilityId),
     setAttestMode: (mode) => work.setAttestMode(mode),
@@ -355,14 +364,19 @@ export function createController(deps: ControllerDeps): AppController {
     dismissHandoverMint: () => work.dismissHandoverMint(),
     submitRedeem: (entitlementId, credential) => work.submitRedeem(entitlementId, credential),
     submitVoucher: (entitlementId) => work.submitVoucher(entitlementId),
+    loadOffersQueue: () => work.loadOffersQueue(),
+    selectOfferCode: (offerCodeId) => work.selectOfferCode(offerCodeId),
+    submitOfferRedeem: (offerCodeId, credential) => work.submitOfferRedeem(offerCodeId, credential),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),
     openSponsorships: (trailId) => admin.openSponsorships(trailId),
     openReview: () => admin.openReview(),
     openRollups: (trailId) => admin.openRollups(trailId),
+    openSettlement: (trailId) => admin.openSettlement(trailId),
     setAdminTrail: (trailId) => admin.setTrail(trailId),
     setAdminSponsorshipId: (sponsorshipId) => admin.setSponsorshipId(sponsorshipId),
+    setSettlementMonth: (month) => admin.setSettlementMonth(month),
     loadProgramme: () => admin.loadProgramme(),
     saveTrailProgramme: (body) => admin.saveTrail(body),
     saveFacilityProgramme: (body) => admin.saveFacility(body),
@@ -378,6 +392,8 @@ export function createController(deps: ControllerDeps): AppController {
     resolveEntitlement: (id, approve) => admin.resolveEntitlement(id, approve),
     loadOperatorRollups: () => admin.loadOperatorRollups(),
     loadSponsorRollups: () => admin.loadSponsorRollups(),
+    exportSettlement: (month) => admin.exportSettlement(month),
+    dismissSettlementExport: () => admin.dismissSettlementExport(),
 
     signOut: () => end(() => api.signOut(), "sign-out-offline", "signed-out"),
 

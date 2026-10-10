@@ -1,5 +1,5 @@
 /**
- * The S7b/S7c work screens: attest, course-QR, stock and special-marker hand-over.
+ * The S7b/S7c/S7 work screens: attest, course-QR, stock, special-marker hand-over and offer redeem.
  *
  * DOM-free. Every A1 action calls `requirePin("A1")` then the action in the same turn (design 6.3 / 24.3: the grant is single-use; nothing may sit between
  * the grant and the call). Rotate PIN is A2: passkey reauth then `requirePin("A2")` then the rotate. Printed-QR write is A3: the person must already hold
@@ -11,15 +11,18 @@
 
 import type { PartnerApi } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
+import type { WhoAmI } from "../api/types";
 import {
   getCollectQueue,
   getCoursePin,
+  getOffersQueue,
   getPrintedQr,
   getShiftLog,
   getStaffActivity,
   getStock,
   postHandoverMint,
   postMintToken,
+  postOfferRedeem,
   postOfflineAttest,
   postOnlineAttest,
   postPrintedQr,
@@ -45,6 +48,7 @@ export interface WorkScreens {
   openCourseQr(facilityId: string): void;
   openStock(facilityId: string): void;
   openHandover(facilityId: string): void;
+  openOfferRedeem(facilityId: string): void;
   closeWork(): void;
   setFacility(facilityId: string): void;
   setAttestMode(mode: "online" | "offline"): void;
@@ -67,6 +71,15 @@ export interface WorkScreens {
   dismissHandoverMint(): void;
   submitRedeem(entitlementId: string, credential: string): Promise<void>;
   submitVoucher(entitlementId: string): Promise<void>;
+  loadOffersQueue(): Promise<void>;
+  selectOfferCode(offerCodeId: string): void;
+  submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
+}
+
+/** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
+export function canOpenOfferRedeem(session: WhoAmI): boolean {
+  if (session.isAdmin) return true;
+  return session.memberships.some((m) => m.role === "staff" || m.role === "manager");
 }
 
 export interface WorkDeps {
@@ -194,6 +207,17 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       withWork(s, { kind: "handover", facilityId: id, busy: false, queue: null, minted: null, redeemMethod: "staff_scan", lastRedeem: null }, null);
     },
 
+    openOfferRedeem(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenOfferRedeem(s.session)) return;
+      const id = pickFacility(s, facilityId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
+        return;
+      }
+      withWork(s, { kind: "offer-redeem", facilityId: id, busy: false, queue: null, selectedOfferCodeId: "", lastRedeem: null }, null);
+    },
+
     closeWork() {
       const s = signedIn(host);
       if (s === null || s.busy !== null || s.panel !== null) return;
@@ -207,6 +231,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       else if (s.work.kind === "course-qr") withWork(s, { ...s.work, facilityId, pin: null, sale: null, refreshLeft: null, printed: null });
       else if (s.work.kind === "stock") withWork(s, { ...s.work, facilityId, rows: null, lastOnHand: null });
       else if (s.work.kind === "handover") withWork(s, { ...s.work, facilityId, queue: null, minted: null, lastRedeem: null });
+      else if (s.work.kind === "offer-redeem") withWork(s, { ...s.work, facilityId, queue: null, selectedOfferCodeId: "", lastRedeem: null });
     },
 
     setAttestMode(mode) {
@@ -523,6 +548,58 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         const work = cur.work?.kind === "handover" ? { ...cur.work, busy: false, queue: null } : cur.work;
         return { ...cur, busy: null, work, notice: { kind: "voucher-ok" } };
       });
+    },
+
+    async loadOffersQueue() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const queue = await getOffersQueue(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "offer-redeem") host.set({ ...cur, busy: null, work: { ...cur.work, queue } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "offer-redeem") });
+      }
+    },
+
+    selectOfferCode(offerCodeId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.busy !== null || s.panel !== null) return;
+      if (!UUID_RE.test(offerCodeId)) return;
+      withWork(s, { ...s.work, selectedOfferCodeId: offerCodeId.toLowerCase() });
+    },
+
+    async submitOfferRedeem(offerCodeId, credential) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem") return;
+      if (!UUID_RE.test(offerCodeId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.codeInvalid" } } });
+        return;
+      }
+      const cred = credential.trim();
+      if (!UUID_RE.test(cred)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.credentialInvalid" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = offerCodeId.toLowerCase();
+      const wireCred = cred.toLowerCase();
+      await runA1(
+        grant,
+        "offer-redeem",
+        () => postOfferRedeem(api, { facilityId, offerCodeId: id, method: "staff_scan", credential: wireCred }),
+        (cur, lastRedeem) => {
+          const work = cur.work?.kind === "offer-redeem"
+            ? { ...cur.work, busy: false, lastRedeem, queue: null, selectedOfferCodeId: "" }
+            : cur.work;
+          return { ...cur, busy: null, work, notice: { kind: "offer-redeem-ok" } };
+        },
+      );
     },
   };
 }

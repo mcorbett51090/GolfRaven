@@ -70,6 +70,8 @@ describe("the partner function list (the CSP's connect-src and the bearer allow-
       "offers-admin",
       "sponsorships-admin",
       "partner-review",
+      "partner-offers-redeem",
+      "settlement-export",
     ]);
     expect(INVITES_FUNCTION).toBe("partner-invites");
   });
@@ -201,11 +203,11 @@ describe("the bearer never goes to a pre-session route, and call() still guards 
     expect(calls[0]!.headers["authorization"]).toBeUndefined();
   });
 
-  it("partner-invites and partner-attest are on the allow-list; a not-yet-built partner function is not", async () => {
+  it("partner-invites and partner-attest are on the allow-list; a system-lane function is not", async () => {
     const { api } = make((c) => (c.url.endsWith("/partner-invites/invites") || c.url.includes("/partner-attest/") ? jsonResponse(200, { data: { invites: [] } }) : happy(c)));
     await api.registerFirst({ challenge: CHALLENGE_OBJ, credential: CREDENTIAL });
     await expect(api.call("GET", "partner-invites", "invites")).resolves.toEqual({ invites: [] });
     await expect(api.call("GET", "partner-attest", "shift-log", undefined, { facilityId: "fac_a" })).resolves.toEqual({ invites: [] });
-    expect((await err((api as PartnerApi).call("GET", "partner-offers-redeem", "x"))).kind).toBe("bad_request");
+    expect((await err((api as PartnerApi).call("GET", "exports-purge", "x"))).kind).toBe("bad_request");
   });
 });

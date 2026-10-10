@@ -180,3 +180,41 @@ describe("S7c hand-over screen", () => {
     expect(redeemPosts[0]!.body).not.toMatch(/7391|derived|pin/i);
   });
 });
+
+describe("S7 offer-redeem screen", () => {
+  const OFFER_CODE = "71000000-0000-0000-0000-000000007101";
+
+  it("loads the issued-code queue and redeems via staff_scan after PIN", async () => {
+    const s = await setup();
+    s.controller.openOfferRedeem(FACILITY);
+    expect(home(s.controller).work?.kind).toBe("offer-redeem");
+
+    await s.controller.loadOffersQueue();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("offer-redeem");
+      if (w?.kind === "offer-redeem") expect(w.queue?.[0]?.playerHandle).toBe("player_one");
+    }
+
+    s.controller.selectOfferCode(OFFER_CODE);
+    {
+      const w = home(s.controller).work;
+      if (w?.kind === "offer-redeem") expect(w.selectedOfferCodeId).toBe(OFFER_CODE);
+    }
+
+    const redeemPending = s.controller.submitOfferRedeem(OFFER_CODE, TOKEN);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for offer redeem");
+    s.controller.submitPin(PIN);
+    await redeemPending;
+    expect(home(s.controller).notice).toEqual({ kind: "offer-redeem-ok" });
+    const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-offers-redeem/redeem"));
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]!.body)).toEqual({
+      facilityId: FACILITY,
+      offerCodeId: OFFER_CODE,
+      method: "staff_scan",
+      credential: TOKEN,
+    });
+    expect(posts[0]!.body).not.toMatch(/7391|derived|pin/i);
+  });
+});

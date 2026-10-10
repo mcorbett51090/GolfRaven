@@ -6,6 +6,7 @@
 
 import type { WhoAmI } from "../api/types";
 import { canOpenAdminOps, canOpenReview, trailChoices } from "../app/admin";
+import { canOpenOfferRedeem } from "../app/work";
 import type { AppState, AppController } from "../app/controller";
 import { translate, plural, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
@@ -96,6 +97,7 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
     const firstTrail = trailChoices(state.session)[0] ?? "";
     const showAdminOps = canOpenAdminOps(state.session);
     const showReview = canOpenReview(state.session);
+    const showOfferRedeem = canOpenOfferRedeem(state.session);
     main = h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "signed-in" },
@@ -116,6 +118,9 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
           h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-course-qr", onclick: () => controller.openCourseQr(firstFacility) }, t("home.work.courseQr")),
           h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-handover", onclick: () => controller.openHandover(firstFacility) }, t("home.work.handover")),
           h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-stock", onclick: () => controller.openStock(firstFacility) }, t("home.work.stock")),
+          showOfferRedeem
+            ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-offer-redeem", onclick: () => controller.openOfferRedeem(firstFacility) }, t("home.work.offerRedeem"))
+            : null,
         ),
       ),
       showAdminOps || showReview
@@ -138,6 +143,9 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
                 : null,
               showAdminOps
                 ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-rollups", onclick: () => controller.openRollups(firstTrail) }, t("home.admin.rollups"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-settlement", onclick: () => controller.openSettlement(firstTrail) }, t("home.admin.settlement"))
                 : null,
               showReview
                 ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-review", onclick: () => controller.openReview() }, t("home.admin.review"))

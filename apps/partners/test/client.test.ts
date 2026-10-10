@@ -468,7 +468,7 @@ describe("call(): the bearer goes only to the partner-function allow-list (LOW-3
     const m = strict();
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     m.calls.length = 0;
-    for (const fn of ["partner-offers-redeem", "other-fn", "rest", "auth", "me-export", "partner-session2", "partner"]) {
+    for (const fn of ["exports-purge", "other-fn", "rest", "auth", "me-export", "partner-session2", "partner"]) {
       expect(((await kindOf(m.api.call("POST", fn, "x", {}))) as PartnerApiError).kind, fn).toBe("bad_request");
     }
     expect(m.calls).toEqual([]);

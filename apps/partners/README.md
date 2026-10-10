@@ -8,7 +8,7 @@ sections 4.5 and 4.6; what S7a built and why: its "As built: S7a" section.
 helper for later screens, EN and FR-CA strings, the CSP, and the tests that pin all of it. **S7a's second half (this README's "PIN step-up" and
 "Invites and enrolment" sections) closes the seams S1.3 to S1.5 left**: the browser-derived PIN, invite and enrolment acceptance with the first
 passkey and the forced first PIN, and the operator / admin second factor. **S7b adds the attest and course-QR shop-floor screens** (PIN before every A1
-action). Hand-over, stock, manager, operator and admin screens are S7c to S7d.
+action). Hand-over, stock, manager, operator and admin screens are S7c to S7d; offer redeem and settlement export follow on this slice.
 
 ## The one rule that shapes everything
 
@@ -172,7 +172,7 @@ renderer in the page (no dependency may be added), so the person types the key i
 | Not built | Seam |
 |---|---|
 | Camera scan of a player check-in QR into the attest token field | `camera=(self)` is open; the field is paste-only today |
-| Hand-over, stock, manager / operator / admin screens (S7c–S7d) | `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
+| Hand-over, stock, offer redeem, manager / operator / admin / settlement (S7c–S7) | `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
 | Invite create / list / revoke, branch E (an existing member joins another org), member recovery, credential list | `partner-invites` and `partner-members` are in the CSP and the `call()` allow-list; the pre-session half is built, the session half is not |
 | A QR for the TOTP seed | none: the seed and the `otpauth://` link are shown as text |
 | Offline behaviour | none |

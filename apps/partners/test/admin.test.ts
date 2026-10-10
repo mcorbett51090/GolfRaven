@@ -230,3 +230,46 @@ describe("S7d rollups screen", () => {
     if (w?.kind === "rollups") expect(w.operator?.[0]?.metric).toBe("redemptions");
   });
 });
+
+describe("S7 settlement export screen", () => {
+  it("refuses export when aal is below 2 (A3 client gate)", async () => {
+    const s = await setup(staffLowAal);
+    s.controller.openSettlement(TRAIL);
+    expect(home(s.controller).work?.kind).toBe("settlement");
+    await s.controller.exportSettlement();
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "admin.needTotp" } });
+    const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/settlement-export/export"));
+    expect(posts).toHaveLength(0);
+  });
+
+  it("exports for aal 2 and surfaces path/expiry without logging the signed URL token", async () => {
+    const s = await setup(operatorWhoami);
+    s.controller.openSettlement(TRAIL);
+    s.controller.setSettlementMonth("2026-09");
+    await s.controller.exportSettlement();
+    await until(() => home(s.controller).notice?.kind === "settlement-exported", "settlement export never completed");
+    expect(home(s.controller).notice).toEqual({ kind: "settlement-exported" });
+    const w = home(s.controller).work;
+    expect(w?.kind).toBe("settlement");
+    if (w?.kind === "settlement") {
+      expect(w.export?.path).toContain("settlement/trl_demo/");
+      expect(w.export?.expiresAt.length).toBeGreaterThan(10);
+      expect(w.export?.signedUrl).toContain("token=");
+      expect(w.export?.lines[0]?.redemptions).toBe(3);
+    }
+    const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/settlement-export/export"));
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]!.body)).toEqual({ trailId: TRAIL, month: "2026-09-01" });
+    // Request log must not contain the signed URL token (response body is not re-logged by the client).
+    expect(posts[0]!.body).not.toMatch(/fake-signed-token|signedUrl/i);
+  });
+
+  it("maps empty month to the empty catalogue key", async () => {
+    const s = await setup(operatorWhoami);
+    s.controller.openSettlement(TRAIL);
+    s.controller.setSettlementMonth("1999-01-01");
+    await s.controller.exportSettlement();
+    await until(() => home(s.controller).notice?.kind === "error", "empty settlement never surfaced");
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "settlement.empty" } });
+  });
+});

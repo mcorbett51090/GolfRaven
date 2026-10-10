@@ -737,7 +737,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     const parts = url.pathname.split("/").filter((p) => p.length > 0);
     const fnIdx = parts.findIndex((p) =>
       p === "partner-attest" || p === "course-qr" || p === "qr-print" || p === "stock-admin" || p === "partner-entitlements" ||
-      p === "programme-config" || p === "offers-admin" || p === "sponsorships-admin" || p === "partner-review"
+      p === "programme-config" || p === "offers-admin" || p === "sponsorships-admin" || p === "partner-review" ||
+      p === "partner-offers-redeem" || p === "settlement-export"
     );
     if (fnIdx < 0) return err(404, "not_found");
     const fn = parts[fnIdx]!;
@@ -884,6 +885,61 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         const refused = takePinGrant(session);
         if (refused !== null) return refused;
         return ok(200, { voucherIssuedAt: new Date().toISOString() });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "partner-offers-redeem") {
+      if (route === "queue" && req.method === "GET") {
+        return ok(200, {
+          offerCodes: [{
+            offerCodeId: "71000000-0000-0000-0000-000000007101",
+            offerId: "61000000-0000-0000-0000-000000006101",
+            playerHandle: "player_one",
+            expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+            faceValue: 10,
+          }],
+        });
+      }
+      if (route === "redeem" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { facilityId?: string; offerCodeId?: string; method?: string; credential?: string };
+        if (body.method !== "staff_scan") return err(422, "invalid_request");
+        if (body.credential === "replayed") return err(409, "replayed");
+        if (body.offerCodeId === "expired") return err(422, "expired");
+        if (body.offerCodeId === "budget-short") return err(422, "budget_short");
+        return ok(201, { attestationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" });
+      }
+      return err(404, "not_found");
+    }
+
+    if (fn === "settlement-export") {
+      if (route === "export" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { trailId?: string; month?: string };
+        if (typeof body.trailId !== "string" || typeof body.month !== "string") return err(400, "bad_request");
+        if (body.month.startsWith("1999")) return err(404, "empty");
+        const expiresAt = new Date(Date.now() + 7 * 86_400_000).toISOString();
+        const path = `settlement/${body.trailId}/${body.month}/fake-export.csv`;
+        // Signed URL token is for the response body only; never echoed into logs by this stub.
+        const signedUrl = `https://exports.example.test/signed/${path}?token=fake-signed-token-not-for-logs`;
+        return ok(200, {
+          path,
+          signedUrl,
+          expiresAt,
+          lines: [{
+            facilityId: "44444444-4444-4444-8444-444444444444",
+            month: body.month.slice(0, 7) + "-01",
+            funder: "course",
+            sponsorshipId: null,
+            redemptions: 3,
+            offlineCount: 0,
+            unconfirmedCount: 0,
+            faceValueTotal: 30,
+          }],
+        });
       }
       return err(404, "not_found");
     }
@@ -1200,7 +1256,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       path.includes("/partner-attest/") || path.includes("/course-qr/") || path.includes("/qr-print") ||
       path.includes("/stock-admin/") || path.includes("/partner-entitlements/") ||
       path.includes("/programme-config/") || path.includes("/offers-admin/") || path.includes("/sponsorships-admin/") ||
-      path.includes("/partner-review/")
+      path.includes("/partner-review/") || path.includes("/partner-offers-redeem/") || path.includes("/settlement-export/")
     ) return workHandler(req);
     return sessionHandler(req);
   };

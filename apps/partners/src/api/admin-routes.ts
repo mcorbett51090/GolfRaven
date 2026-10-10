@@ -1,10 +1,11 @@
 /**
- * Typed wrappers for the S7d manager/operator/admin screens: `programme-config`, `offers-admin`,
- * `sponsorships-admin` and `partner-review` (docs/security/partner-auth-design.md 30, 31).
+ * Typed wrappers for the S7d/S7 manager/operator/admin screens: `programme-config`, `offers-admin`,
+ * `sponsorships-admin`, `partner-review` and `settlement-export` (docs/security/partner-auth-design.md 30, 31, 32, 33).
  *
  * Every call goes through `PartnerApi.call`, so the bearer, the function allow-list and the closed
  * route/query shapes apply. Response bodies are checked field-by-field: a malformed answer is
- * `malformed_response`, never trusted into the UI.
+ * `malformed_response`, never trusted into the UI. Settlement signed URLs are returned to the UI only;
+ * callers must never log the token.
  */
 
 import type { PartnerApi } from "./client";
@@ -409,4 +410,55 @@ export async function postResolveEntitlement(api: PartnerApi, id: string, approv
   const data = await api.call("POST", "partner-review", "resolve/entitlement", { id, approve });
   if (!isObject(data) || !isString(data["state"])) malformed();
   return { state: data["state"] };
+}
+
+export interface SettlementLine {
+  readonly facilityId: string;
+  readonly month: string;
+  readonly funder: string;
+  readonly sponsorshipId: string | null;
+  readonly redemptions: number;
+  readonly offlineCount: number;
+  readonly unconfirmedCount: number;
+  readonly faceValueTotal: number;
+}
+
+/** AT(17): time-limited signed URL for the CSV. Never log `signedUrl`. */
+export interface SettlementExport {
+  readonly path: string;
+  readonly signedUrl: string;
+  readonly expiresAt: string;
+  readonly lines: readonly SettlementLine[];
+}
+
+function parseSettlementLine(data: unknown): SettlementLine {
+  if (
+    !isObject(data) || !isString(data["facilityId"]) || !isString(data["month"]) || !isString(data["funder"]) ||
+    !isStringOrNull(data["sponsorshipId"] ?? null) || !isNum(data["redemptions"]) || !isNum(data["offlineCount"]) ||
+    !isNum(data["unconfirmedCount"]) || !isNum(data["faceValueTotal"])
+  ) malformed();
+  return {
+    facilityId: data["facilityId"],
+    month: data["month"],
+    funder: data["funder"],
+    sponsorshipId: (data["sponsorshipId"] as string | null) ?? null,
+    redemptions: data["redemptions"],
+    offlineCount: data["offlineCount"],
+    unconfirmedCount: data["unconfirmedCount"],
+    faceValueTotal: data["faceValueTotal"],
+  };
+}
+
+export async function postSettlementExport(api: PartnerApi, trailId: string, month: string): Promise<SettlementExport> {
+  const data = await api.call("POST", "settlement-export", "export", { trailId, month });
+  if (
+    !isObject(data) || !isString(data["path"]) || !isString(data["signedUrl"]) || !isString(data["expiresAt"]) ||
+    !Array.isArray(data["lines"])
+  ) malformed();
+  return {
+    path: data["path"],
+    signedUrl: data["signedUrl"],
+    expiresAt: data["expiresAt"],
+    lines: data["lines"].map(parseSettlementLine),
+  };
 }

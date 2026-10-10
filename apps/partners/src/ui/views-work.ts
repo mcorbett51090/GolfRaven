@@ -1,5 +1,5 @@
 /**
- * Draws the S7b/S7c work screens (attest, course-QR, stock, hand-over). Plain DOM, `textContent` only. Forms collect values on submit and hand them to the controller; nothing secret is kept in the tree.
+ * Draws the S7b/S7c/S7 work screens (attest, course-QR, stock, hand-over, offer redeem). Plain DOM, `textContent` only. Forms collect values on submit and hand them to the controller; nothing secret is kept in the tree.
  */
 
 import type { AppController } from "../app/controller";
@@ -33,7 +33,7 @@ export function workView(state: SignedInState, controller: AppController, locale
   const work = state.work!;
   if (
     work.kind === "programme" || work.kind === "offers" || work.kind === "sponsorships" ||
-    work.kind === "review" || work.kind === "rollups"
+    work.kind === "review" || work.kind === "rollups" || work.kind === "settlement"
   ) {
     return adminView(state, controller, locale);
   }
@@ -226,6 +226,86 @@ export function workView(state: SignedInState, controller: AppController, locale
         "div",
         { class: "actions" },
         h("button", { type: "button", disabled: busy, "data-testid": "stock-load", onclick: () => void controller.loadStock() }, t("stock.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "offer-redeem") {
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "offer-redeem" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("offerRedeem.title")),
+      noticeElement(state.notice, locale),
+      facilitySelect(state, controller, locale),
+      h("p", { class: "muted" }, t("offerRedeem.hint")),
+      work.queue !== null
+        ? h(
+            "ul",
+            { "data-testid": "offer-redeem-queue" },
+            ...work.queue.map((r) =>
+              h(
+                "li",
+                {},
+                h(
+                  "span",
+                  {},
+                  t("offerRedeem.queue.row", {
+                    handle: r.playerHandle ?? "—",
+                    face: r.faceValue ?? "—",
+                    expires: r.expiresAt ?? "—",
+                  }),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    disabled: busy,
+                    "data-testid": `offer-redeem-pick-${r.offerCodeId}`,
+                    onclick: () => controller.selectOfferCode(r.offerCodeId),
+                  },
+                  t("offerRedeem.pick"),
+                ),
+              ),
+            ),
+          )
+        : null,
+      h(
+        "form",
+        {
+          "data-testid": "offer-redeem-form",
+          onsubmit: (e: SubmitEvent) => {
+            e.preventDefault();
+            const fd = new FormData(e.target as HTMLFormElement);
+            void controller.submitOfferRedeem(String(fd.get("offerCodeId") ?? ""), String(fd.get("credential") ?? ""));
+          },
+        },
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("offerRedeem.code")),
+          h("input", {
+            name: "offerCodeId",
+            type: "text",
+            value: work.selectedOfferCodeId,
+            autocomplete: "off",
+            spellcheck: "false",
+            required: true,
+            "data-testid": "offer-redeem-code",
+            disabled: busy,
+          }),
+        ),
+        h("label", { class: "field" }, h("span", {}, t("offerRedeem.credential")), h("input", { name: "credential", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "offer-redeem-credential", disabled: busy })),
+        h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-submit" }, t("offerRedeem.submit"))),
+      ),
+      work.lastRedeem !== null
+        ? h("p", { role: "status", "data-testid": "offer-redeem-result" }, t("offerRedeem.result", { id: work.lastRedeem.attestationId }))
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "offer-redeem-load", onclick: () => void controller.loadOffersQueue() }, t("offerRedeem.load")),
         back,
       ),
       busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,

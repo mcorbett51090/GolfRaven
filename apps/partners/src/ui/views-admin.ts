@@ -382,6 +382,70 @@ export function adminView(state: SignedInState, controller: AppController, local
     );
   }
 
+  if (work.kind === "settlement") {
+    const monthValue = work.month.length >= 7 ? work.month.slice(0, 7) : work.month;
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "settlement" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("settlement.title")),
+      noticeElement(state.notice, locale),
+      trailField(state, controller, locale),
+      h("p", { class: "muted" }, t("settlement.hint")),
+      h(
+        "form",
+        {
+          "data-testid": "settlement-form",
+          onsubmit: (e: SubmitEvent) => {
+            e.preventDefault();
+            const fd = new FormData(e.target as HTMLFormElement);
+            void controller.exportSettlement(String(fd.get("month") ?? ""));
+          },
+        },
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("settlement.month")),
+          h("input", {
+            name: "month",
+            type: "month",
+            value: monthValue,
+            required: true,
+            "data-testid": "settlement-month",
+            disabled: busy,
+            onchange: (e: Event) => controller.setSettlementMonth((e.target as HTMLInputElement).value),
+          }),
+        ),
+        h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "settlement-export" }, t("settlement.export"))),
+      ),
+      work.export !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "settlement-result" },
+            h("p", {}, t("settlement.path", { path: work.export.path })),
+            h("p", { class: "muted" }, t("settlement.expires", { until: work.export.expiresAt })),
+            h("p", {}, t("settlement.lines", { count: work.export.lines.length })),
+            h(
+              "p",
+              {},
+              h(
+                "a",
+                {
+                  href: work.export.signedUrl,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  "data-testid": "settlement-download",
+                },
+                t("settlement.download"),
+              ),
+            ),
+            h("button", { type: "button", disabled: busy, "data-testid": "settlement-dismiss", onclick: () => controller.dismissSettlementExport() }, t("settlement.dismiss")),
+          )
+        : null,
+      h("div", { class: "actions" }, back(controller, locale, busy)),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
   if (work.kind !== "rollups") {
     return h("main", { "data-screen": "admin" }, h("h1", { tabindex: "-1", "data-testid": "heading" }, t("home.admin.title")), back(controller, locale, busy));
   }

@@ -2378,3 +2378,34 @@ Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (progr
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **21 files, 877 tests, all pass** (adds `admin.test.ts`: open programme/offers/review/rollups, A0 load, A3 aal gate, offer approve and review resolve; request bodies contain no tokens beyond closed ids).
 - CI on PR #72 tip `ec7a5cc`: all three checks green.
+
+## 33. As built: S7 offer redeem + settlement export screens (`apps/partners`)
+
+Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (programme/sponsors Edge) claims section 30; P5.1b (offers-redeem / settlement Edge half, parallel branch) claims section 32; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls P5.1b Edge paths by name (`partner-offers-redeem`, `settlement-export`); the fake partner server stubs them so unit cells run without merging that tree. `exports-purge` stays on the system lane and is **not** allow-listed.
+
+### 33.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `partner-offers-redeem` and `settlement-export`; `connect-src` gains two path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`). `exports-purge` is explicitly refused by the bearer allow-list cells.
+- **Typed routes.** `work-routes.ts`: `GET partner-offers-redeem/queue`, `POST …/redeem` (staff_scan only; camelCase wire matches P5.1b). `admin-routes.ts`: `POST settlement-export/export` → `{ path, signedUrl, expiresAt, lines }` (signed URL never logged).
+- **Offer redeem screen** (`work.ts` / `views-work.ts`, WorkView kind `offer-redeem`). Facility-scoped like stock/handover. Home button for staff/manager (or admin). A0 queue load; A1 redeem via `requirePin("A1")` then redeem in the same turn.
+- **Settlement export screen** (`admin.ts` / `views-admin.ts`, WorkView kind `settlement`). Home button with Programme and ops (operator/admin). Trail + month form; A3 aal gate (same as printed-QR / S7d writes); shows path, expiry, line count and a download link; dismiss clears the signed URL from state.
+- **Errors and i18n.** `ErrorContext` gains `offer-redeem` and `settlement`; closed codes `not_issued`, `expired`, `wrong_facility`, `token_invalid`, `replayed`, `budget_short`, `cold_start_cap`, `empty` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers both functions in-memory (PIN grant for redeem; aal + fresh `mfaUntil` for export).
+
+### 33.2 Decisions and departures
+
+- Offer redeem stays on the shop-floor `work` slot (facility picker); settlement stays with admin ops (trail picker) — one `work` field still replaces home.
+- Settlement signed URL is held only in `work.export` for display (like a hand-over token); request logs and notices never include it.
+- Month inputs accept `YYYY-MM` (HTML `type=month`) or `YYYY-MM-DD` and normalize to `YYYY-MM-01` for the Edge body.
+
+### 33.3 Not built, honestly
+
+- Camera scan for check-in tokens.
+- Offline offer redeem (`offline_code` remains refused by Edge and UI).
+- `exports-purge` UI (system lane).
+- Merging with P5.1b will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 33.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: recorded after the run on this branch tip.

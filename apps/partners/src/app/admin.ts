@@ -1,9 +1,11 @@
 /**
- * The S7d manager/operator/admin screens: programme, offers, sponsorships, review queue and rollups.
+ * The S7d/S7 manager/operator/admin screens: programme, offers, sponsorships, review queue, rollups
+ * and settlement export.
  *
- * DOM-free. A0 reads call the Edge routes directly. A3 writes (upsert, approve, end, resolve) refuse on
- * the client unless the person already holds `aal` 2 with a fresh TOTP window — the same gate as printed-QR
- * write in work.ts (design 6.3 / 31). No PIN grant is used for A3.
+ * DOM-free. A0 reads call the Edge routes directly. A3 writes (upsert, approve, end, resolve, settlement
+ * export) refuse on the client unless the person already holds `aal` 2 with a fresh TOTP window — the
+ * same gate as printed-QR write in work.ts (design 6.3 / 31 / 33). No PIN grant is used for A3.
+ * Settlement signed URLs are held only in `work.export` for display; never logged.
  */
 
 import type {
@@ -26,6 +28,7 @@ import {
   postOfferEnd,
   postResolveEntitlement,
   postResolveOfferCode,
+  postSettlementExport,
   postSponsorship,
   postSponsorshipApprove,
   postTrailProgramme,
@@ -41,8 +44,10 @@ export interface AdminScreens {
   openSponsorships(trailId: string): void;
   openReview(): void;
   openRollups(trailId: string): void;
+  openSettlement(trailId: string): void;
   setTrail(trailId: string): void;
   setSponsorshipId(sponsorshipId: string): void;
+  setSettlementMonth(month: string): void;
   loadProgramme(): Promise<void>;
   saveTrail(body: TrailProgrammeUpsert): Promise<void>;
   saveFacility(body: FacilityProgrammeUpsert): Promise<void>;
@@ -58,6 +63,8 @@ export interface AdminScreens {
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
   loadOperatorRollups(): Promise<void>;
   loadSponsorRollups(): Promise<void>;
+  exportSettlement(month?: string): Promise<void>;
+  dismissSettlementExport(): void;
 }
 
 export interface AdminDeps {
@@ -67,6 +74,15 @@ export interface AdminDeps {
 
 const TRAIL_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MONTH_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Normalize a month field to YYYY-MM-01 (type=month yields YYYY-MM; Edge accepts any day in the month). */
+export function normalizeSettlementMonth(raw: string): string | null {
+  const v = raw.trim();
+  if (/^\d{4}-\d{2}$/.test(v)) return `${v}-01`;
+  if (MONTH_RE.test(v)) return `${v.slice(0, 7)}-01`;
+  return null;
+}
 
 function signedIn(host: Host): SignedInState | null {
   const s = host.getState();
@@ -208,6 +224,19 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
       withWork(host, s, { kind: "rollups", trailId: id, sponsorshipId: "", busy: false, operator: null, sponsor: null }, null);
     },
 
+    openSettlement(trailId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenAdminOps(s.session)) return;
+      const id = pickTrail(s, trailId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "admin.noTrail" } } });
+        return;
+      }
+      const now = new Date();
+      const month = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
+      withWork(host, s, { kind: "settlement", trailId: id, month, busy: false, export: null }, null);
+    },
+
     setTrail(trailId) {
       const s = signedIn(host);
       if (s === null || s.work === null || s.busy !== null || s.panel !== null || !TRAIL_RE.test(trailId)) return;
@@ -215,12 +244,24 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
       else if (s.work.kind === "offers") withWork(host, s, { ...s.work, trailId, offers: null, lastId: null });
       else if (s.work.kind === "sponsorships") withWork(host, s, { ...s.work, trailId, sponsorships: null, lastId: null });
       else if (s.work.kind === "rollups") withWork(host, s, { ...s.work, trailId, operator: null });
+      else if (s.work.kind === "settlement") withWork(host, s, { ...s.work, trailId, export: null });
     },
 
     setSponsorshipId(sponsorshipId) {
       const s = signedIn(host);
       if (s === null || s.work?.kind !== "rollups" || s.busy !== null || s.panel !== null) return;
       withWork(host, s, { ...s.work, sponsorshipId: sponsorshipId.trim(), sponsor: null });
+    },
+
+    setSettlementMonth(month) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "settlement" || s.busy !== null || s.panel !== null) return;
+      const normalized = normalizeSettlementMonth(month);
+      if (normalized === null) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "settlement.monthInvalid" } } });
+        return;
+      }
+      withWork(host, s, { ...s.work, month: normalized, export: null }, s.notice?.kind === "error" ? null : s.notice);
     },
 
     async loadProgramme() {
@@ -416,6 +457,36 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "rollups") host.set({ ...cur, busy: null, work: { ...cur.work, sponsor } });
       });
+    },
+
+    async exportSettlement(monthInput) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "settlement") return;
+      const month = normalizeSettlementMonth(monthInput ?? s.work.month);
+      if (month === null) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "settlement.monthInvalid" } } });
+        return;
+      }
+      const grant = s.grant;
+      const trailId = s.work.trailId;
+      await runA3(grant, "settlement", async () => {
+        const exported = await postSettlementExport(api, trailId, month);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "settlement") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, month, export: exported },
+            notice: { kind: "settlement-exported" },
+          });
+        }
+      });
+    },
+
+    dismissSettlementExport() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "settlement" || s.busy !== null || s.panel !== null) return;
+      withWork(host, s, { ...s.work, export: null }, s.notice?.kind === "settlement-exported" ? null : s.notice);
     },
   };
 }

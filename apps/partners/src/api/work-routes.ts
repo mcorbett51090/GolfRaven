@@ -1,6 +1,6 @@
 /**
- * Typed wrappers for the S7b/S7c work screens: `partner-attest`, `course-qr`, `qr-print`, `stock-admin` and `partner-entitlements`
- * (docs/security/partner-auth-design.md 26, 25, 28, S7b/S7c).
+ * Typed wrappers for the S7b/S7c/S7 work screens: `partner-attest`, `course-qr`, `qr-print`, `stock-admin`,
+ * `partner-entitlements` and `partner-offers-redeem` (docs/security/partner-auth-design.md 26, 25, 28, 32, 33).
  *
  * Every call goes through `PartnerApi.call`, so the bearer, the function allow-list and the closed route/query shapes apply. Response bodies are checked
  * field-by-field: a malformed answer is `malformed_response`, never trusted into the UI.
@@ -298,4 +298,47 @@ export async function postVoucher(api: PartnerApi, facilityId: string, entitleme
   const data = await api.call("POST", "partner-entitlements", "voucher", { facilityId, entitlementId });
   if (!isObject(data) || !isString(data["voucherIssuedAt"])) malformed();
   return { voucherIssuedAt: data["voucherIssuedAt"] };
+}
+
+/** Offer redeem is staff_scan only on this slice (P5.1b / design 32); offline_code is refused by Edge. */
+export type OfferRedeemMethod = "staff_scan";
+
+export interface OfferQueueRow {
+  readonly offerCodeId: string;
+  readonly offerId: string;
+  readonly playerHandle: string | null;
+  readonly expiresAt: string | null;
+  readonly faceValue: number | null;
+}
+
+export interface OfferRedeemResult {
+  readonly attestationId: string;
+}
+
+export async function getOffersQueue(api: PartnerApi, facilityId: string): Promise<readonly OfferQueueRow[]> {
+  const data = await api.call("GET", "partner-offers-redeem", "queue", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["offerCodes"])) malformed();
+  return data["offerCodes"].map((r) => {
+    if (
+      !isObject(r) || !isString(r["offerCodeId"]) || !isString(r["offerId"]) ||
+      !isStringOrNull(r["playerHandle"] ?? null) || !isStringOrNull(r["expiresAt"] ?? null) ||
+      !(r["faceValue"] === null || isNum(r["faceValue"]))
+    ) malformed();
+    return {
+      offerCodeId: r["offerCodeId"],
+      offerId: r["offerId"],
+      playerHandle: (r["playerHandle"] as string | null) ?? null,
+      expiresAt: (r["expiresAt"] as string | null) ?? null,
+      faceValue: (r["faceValue"] as number | null) ?? null,
+    };
+  });
+}
+
+export async function postOfferRedeem(
+  api: PartnerApi,
+  input: { facilityId: string; offerCodeId: string; method: OfferRedeemMethod; credential: string },
+): Promise<OfferRedeemResult> {
+  const data = await api.call("POST", "partner-offers-redeem", "redeem", input);
+  if (!isObject(data) || !isString(data["attestationId"])) malformed();
+  return { attestationId: data["attestationId"] };
 }

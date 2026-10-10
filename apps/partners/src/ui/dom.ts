@@ -37,6 +37,10 @@ export interface Props {
   readonly "aria-describedby"?: string;
   readonly value?: string;
   readonly selected?: boolean;
+  /** Anchor target (settlement signed URL download). Never log the href value. */
+  readonly href?: string;
+  readonly target?: string;
+  readonly rel?: string;
   readonly onclick?: (ev: MouseEvent) => void;
   readonly onsubmit?: (ev: SubmitEvent) => void;
   readonly onchange?: (ev: Event) => void;

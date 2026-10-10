@@ -11,6 +11,7 @@ import type {
   OperatorRollup,
   ReviewQueueItem,
   ReviewSla,
+  SettlementExport,
   SponsorRollup,
   Sponsorship,
   TrailProgramme,
@@ -23,6 +24,8 @@ import type {
   EntitlementQueueRow,
   HandoverMinted,
   MintedToken,
+  OfferQueueRow,
+  OfferRedeemResult,
   PrintedQr,
   RedeemMethod,
   RedeemResult,
@@ -60,7 +63,9 @@ export type Notice =
         | "offer-ended"
         | "sponsorship-saved"
         | "sponsorship-approved"
-        | "review-resolved";
+        | "review-resolved"
+        | "offer-redeem-ok"
+        | "settlement-exported";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -117,7 +122,7 @@ export interface TotpPanel {
 
 export type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
 
-/** The S7b–S7d work screens drawn in place of the signed-in home (design 24.3 → S7b/S7c/S7d). `null` means home. */
+/** The S7b–S7 work screens drawn in place of the signed-in home (design 24.3 → S7b/S7c/S7d/S7). `null` means home. */
 export type WorkView =
   | {
       readonly kind: "attest";
@@ -156,6 +161,15 @@ export type WorkView =
       readonly lastRedeem: RedeemResult | null;
     }
   | {
+      readonly kind: "offer-redeem";
+      readonly facilityId: string;
+      readonly busy: boolean;
+      readonly queue: readonly OfferQueueRow[] | null;
+      /** Offer code id chosen from the queue (or typed); cleared after a successful redeem. */
+      readonly selectedOfferCodeId: string;
+      readonly lastRedeem: OfferRedeemResult | null;
+    }
+  | {
       readonly kind: "programme";
       readonly trailId: string;
       readonly busy: boolean;
@@ -190,6 +204,14 @@ export type WorkView =
       readonly busy: boolean;
       readonly operator: readonly OperatorRollup[] | null;
       readonly sponsor: readonly SponsorRollup[] | null;
+    }
+  | {
+      readonly kind: "settlement";
+      readonly trailId: string;
+      readonly month: string;
+      readonly busy: boolean;
+      /** Signed URL held only for display; never logged (AT(17)). */
+      readonly export: SettlementExport | null;
     };
 
 export type AppState =
