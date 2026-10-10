@@ -15,7 +15,8 @@
 --      writes offer_redemption attestation, sets offline_confirm_by. Statuses commit; 22023 / 42501 raise.
 --   3. CREATE OR REPLACE private.partner_settlement_export_for_partner: unconfirmed_count uses the new column;
 --      inserts fraud_signal kind=offer_offline_unconfirmed for newly overdue offline redemptions (once).
---   4. Binding-keyed policy widen: fraud_signal INSERT allows offer_offline_unconfirmed.
+--   4. Binding-keyed policy widen: fraud_signal INSERT allows offer_offline_unconfirmed; a companion SELECT
+--      policy lets settlement's NOT EXISTS see prior offer_offline_unconfirmed rows under FORCE RLS.
 --   5. UPDATE grant on offer_code.offline_confirm_by (covered by existing column-less UPDATE grant).
 --
 -- DELIBERATELY NOT HERE: player-lane cosignal attach that CLEARS offline_confirm_by (a confirmed fix against
@@ -35,6 +36,12 @@ DROP POLICY IF EXISTS pd_partner_attest_fraud_insert ON app.fraud_signal;
 CREATE POLICY pd_partner_attest_fraud_insert ON app.fraud_signal FOR INSERT TO private_definer
   WITH CHECK ((SELECT private.partner_binding_kind()) = 'partner'
               AND kind = ANY (ARRAY['same_device_attest'::text, 'offer_offline_unconfirmed'::text]));
+
+-- Settlement's once-check (NOT EXISTS) must see prior offer_offline_unconfirmed rows under FORCE RLS.
+DROP POLICY IF EXISTS pd_partner_offer_offline_fraud_select ON app.fraud_signal;
+CREATE POLICY pd_partner_offer_offline_fraud_select ON app.fraud_signal FOR SELECT TO private_definer
+  USING ((SELECT private.partner_binding_kind()) = 'partner'
+         AND kind = 'offer_offline_unconfirmed');
 
 -- ============================================================================
 -- 2. Offline redeem definer + settlement replace
@@ -365,21 +372,31 @@ WHERE schema_name = 'private' AND function_name = 'partner_settlement_export_for
 DROP POLICY current_user_edit_function_inventory_0062 ON private.function_inventory;
 REVOKE UPDATE ON private.function_inventory FROM CURRENT_USER;
 
-GRANT UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_edit_definer_policy_allowlist_0062 ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note, role_name) VALUES
+  ('app', 'fraud_signal', 'pd_partner_offer_offline_fraud_select', 'SELECT', true,
+   '0062: settlement once-check reads prior offer_offline_unconfirmed fraud_signal rows under a partner binding', 'private_definer')
+ON CONFLICT (schema_name, table_name, policy_name) DO UPDATE
+SET note = EXCLUDED.note, command = EXCLUDED.command, scoped = EXCLUDED.scoped, role_name = EXCLUDED.role_name;
 
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid),
-    note = 'S3/0062: same_device_attest and offer_offline_unconfirmed fraud_signal inserts under a partner binding'
+    note = CASE
+      WHEN al.policy_name = 'pd_partner_attest_fraud_insert'
+        THEN 'S3/0062: same_device_attest and offer_offline_unconfirmed fraud_signal inserts under a partner binding'
+      WHEN al.policy_name = 'pd_partner_offer_offline_fraud_select'
+        THEN '0062: settlement once-check reads prior offer_offline_unconfirmed fraud_signal rows under a partner binding'
+      ELSE al.note
+    END
 FROM pg_policy pol
 JOIN pg_class c ON c.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'app' AND c.relname = 'fraud_signal' AND pol.polname = 'pd_partner_attest_fraud_insert'
-  AND al.schema_name = 'app'
-  AND al.table_name = 'fraud_signal'
-  AND al.policy_name = 'pd_partner_attest_fraud_insert';
+WHERE n.nspname = al.schema_name AND c.relname = al.table_name AND pol.polname = al.policy_name
+  AND al.policy_name IN ('pd_partner_attest_fraud_insert', 'pd_partner_offer_offline_fraud_select');
 
 DO $assert_0062_allowlist$
 BEGIN
@@ -389,8 +406,14 @@ BEGIN
         AND with_check_expr LIKE '%offer_offline_unconfirmed%') <> 1 THEN
     RAISE EXCEPTION '0062: pd_partner_attest_fraud_insert allowlist row was not refreshed for offer_offline_unconfirmed';
   END IF;
+  IF (SELECT count(*) FROM private.definer_policy_allowlist
+      WHERE policy_name = 'pd_partner_offer_offline_fraud_select'
+        AND using_expr IS NOT NULL
+        AND using_expr LIKE '%offer_offline_unconfirmed%') <> 1 THEN
+    RAISE EXCEPTION '0062: pd_partner_offer_offline_fraud_select allowlist row was not derived';
+  END IF;
 END
 $assert_0062_allowlist$;
 
 DROP POLICY current_user_edit_definer_policy_allowlist_0062 ON private.definer_policy_allowlist;
-REVOKE UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
