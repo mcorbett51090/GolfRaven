@@ -100,11 +100,11 @@ BEGIN
   RETURN v_id;
 END
 $f$;
-CREATE FUNCTION pg_temp.confirm(p_uid uuid, p_fac text, p_at timestamptz, p_grade text, p_fix text, p_ev uuid) RETURNS text LANGUAGE plpgsql AS $f$
+-- Caller must already be bound as the player (actor_binding is one per transaction; re-bind raises).
+CREATE FUNCTION pg_temp.confirm(p_fac text, p_at timestamptz, p_grade text, p_fix text, p_ev uuid) RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE r record;
 BEGIN
   EXECUTE 'SET LOCAL ROLE edge_actor';
-  PERFORM private.bind_actor(p_uid);
   SELECT * INTO r FROM private.offer_offline_confirm_for_actor(p_fac, p_at, p_grade, p_fix, p_ev);
   EXECUTE 'RESET ROLE';
   RETURN r.o_result || '|' || r.o_cleared::text;
@@ -199,9 +199,13 @@ SELECT ok((SELECT offline_confirm_by IS NOT NULL AND offline_confirm_by > now() 
   'offline redeem still sets offline_confirm_by ~24 h ahead');
 
 -- ----------------------------------------------------------------------------
--- 3. Happy confirm + refusals
+-- 3. Happy confirm + refusals (one bind for the transaction)
 -- ----------------------------------------------------------------------------
-SELECT is(pg_temp.confirm('00000000-0000-0000-0000-00000000000b', 'fac_x', :'t0'::timestamptz, 'attested', 'fix41ok', :'ev_ok'::uuid),
+SET LOCAL ROLE edge_actor;
+SELECT private.bind_actor('00000000-0000-0000-0000-00000000000b');
+RESET ROLE;
+
+SELECT is(pg_temp.confirm('fac_x', :'t0'::timestamptz, 'attested', 'fix41ok', :'ev_ok'::uuid),
   'confirmed|2', 'qualifying fix clears both same-window awaiting offline offers for the bound player');
 SELECT ok((SELECT offline_confirm_by IS NULL FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000051'),
   'planted code offline_confirm_by is cleared');
@@ -210,11 +214,11 @@ SELECT ok((SELECT offline_confirm_by IS NOT NULL FROM app.offer_code WHERE id = 
 SELECT ok((SELECT offline_confirm_by IS NULL FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000050'),
   'same-window offline redeem from section 2 is also cleared by the same fix');
 
-SELECT is(pg_temp.confirm('00000000-0000-0000-0000-00000000000b', 'fac_x', :'t0'::timestamptz, 'attested', 'fix41ok', :'ev_ok'::uuid),
+SELECT is(pg_temp.confirm('fac_x', :'t0'::timestamptz, 'attested', 'fix41ok', :'ev_ok'::uuid),
   'none_awaiting|0', 'second confirm with nothing left awaiting is none_awaiting');
-SELECT is(pg_temp.confirm('00000000-0000-0000-0000-00000000000b', 'fac_x', :'t0'::timestamptz, 'attested', 'fix41bad', :'ev_bad'::uuid),
+SELECT is(pg_temp.confirm('fac_x', :'t0'::timestamptz, 'attested', 'fix41bad', :'ev_bad'::uuid),
   'cosignal_invalid|0', 'non-qualifying evidence is cosignal_invalid');
-SELECT is(pg_temp.confirm('00000000-0000-0000-0000-00000000000b', 'fac_x', :'t0'::timestamptz, 'attested', 'fix41used', :'ev_used'::uuid),
+SELECT is(pg_temp.confirm('fac_x', :'t0'::timestamptz, 'attested', 'fix41used', :'ev_used'::uuid),
   'cosignal_used|0', 'evidence already used by a purchase is cosignal_used');
 
 SELECT * FROM finish();
