@@ -38,8 +38,8 @@ export const WALLET_ACTIVATION_UI_ENABLED = false;
 export const MARKER_COSIGNAL_UI_ENABLED = false;
 
 /**
- * `RECEIPTS_UPLOAD_UI_ENABLED` (P5 §43): whether any screen can pick/capture a receipt image and POST it to the receipts Edge function.
- * It is `false`: the Edge + DB half is built (§40) and the HTTP client is wired, but no picker/camera UI ships yet (store privacy declarations for
- * CAMERA / READ_EXTERNAL_STORAGE / photo library, and product copy, are still open). Flip it in the change that adds the screen.
+ * `RECEIPTS_UPLOAD_UI_ENABLED` (P5 §43 / §50): whether the facility page shows the receipt-upload card and the service may open the photo library.
+ * It is `false`: the screen, picker port and upload service are built (library-only; CAMERA stays blocked), but store privacy declarations for
+ * photo library (and product copy review) are still open. Flip it when those items in the README are done.
  */
 export const RECEIPTS_UPLOAD_UI_ENABLED = false;

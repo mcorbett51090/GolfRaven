@@ -50,6 +50,9 @@ export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set([
   // `NSLocationAlways*` usage strings and `NSMotionUsageDescription` into Info.plist, so it is allowed ONLY with every prop in `EXPO_LOCATION_REQUIRED_FALSE` set to `false` (the
   // `plugin-prop-missing` rule below) and a non-empty `locationWhenInUsePermission`; what it generated is checked in the Info.plist and manifest (`scanLocationDeclarations`), not taken on trust.
   "expo-location",
+  // P5 §50: photo-library receipt upload. Allowed ONLY with `cameraPermission: false` and `microphonePermission: false` (so CAMERA / RECORD_AUDIO stay blocked)
+  // and a non-empty `photosPermission` usage string. CAMERA remains in app.json `blockedPermissions`.
+  "expo-image-picker",
   // P4.2b-2: the local attestation module's config plugin. It sets the App Attest entitlement (development | production, from the build-time GOLFRAVEN_APP_ATTEST_ENV) and
   // nothing else: no Android permission, no Info.plist key. Its source is `modules/golfraven-attest/app.plugin.js`; what it writes is checked in the generated
   // entitlements file (`scanEntitlements`) and the generated manifest (`scanAndroidGrantedPermissions`), not taken on trust.
@@ -160,6 +163,19 @@ export function scanAppConfig(config: ExpoConfig): Violation[] {
       }
       const when = p["locationWhenInUsePermission"];
       if (typeof when !== "string" || when.trim().length < 20) out.push({ rule: "plugin-prop-missing", detail: "plugin expo-location must set an honest locationWhenInUsePermission usage string" });
+    }
+    if (name === "expo-image-picker") {
+      const p = props && typeof props === "object" ? (props as Record<string, unknown>) : {};
+      if (p["cameraPermission"] !== false) {
+        out.push({ rule: "plugin-prop-missing", detail: "plugin expo-image-picker must set cameraPermission: false (receipt upload is library-only; CAMERA stays blocked)" });
+      }
+      if (p["microphonePermission"] !== false) {
+        out.push({ rule: "plugin-prop-missing", detail: "plugin expo-image-picker must set microphonePermission: false" });
+      }
+      const photos = p["photosPermission"];
+      if (typeof photos !== "string" || photos.trim().length < 20) {
+        out.push({ rule: "plugin-prop-missing", detail: "plugin expo-image-picker must set an honest photosPermission usage string" });
+      }
     }
   }
   return out;

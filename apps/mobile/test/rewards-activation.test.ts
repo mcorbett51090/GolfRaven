@@ -303,8 +303,8 @@ describe("FLAGS OFF: nothing of the offline code or the Wallet activation is rea
     // P4.2c: the check-in screen reads the switch through `checkinUiAvailable()` (`src/checkin/gate.ts`), the one place besides the prefetch gate; `test/checkin-flag.test.ts` pins the rest.
     expect(users(/\bCHECKIN_UI_ENABLED\b/)).toEqual(["src/challenges/prefetch-gate.ts", "src/checkin/gate.ts", "src/features.ts"]);
     expect(users(/\bMARKER_COSIGNAL_UI_ENABLED\b/)).toEqual(["src/checkin/gate.ts", "src/features.ts"]);
-    // P5 §43: flag only until a picker/camera screen lands; wire test pins no callers outside api/.
-    expect(users(/\bRECEIPTS_UPLOAD_UI_ENABLED\b/)).toEqual(["src/features.ts"]);
+    // P5 §50: the facility receipt card reads the switch through `receiptsUploadUiAvailable()` (`src/receipts/gate.ts`).
+    expect(users(/\bRECEIPTS_UPLOAD_UI_ENABLED\b/)).toEqual(["src/features.ts", "src/receipts/gate.ts"]);
   });
 
   it("the cards are rendered only behind their switch, and imported by no one else", () => {
