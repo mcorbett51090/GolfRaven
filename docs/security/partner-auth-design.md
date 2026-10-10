@@ -2191,6 +2191,35 @@ Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055`
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 36's **65/65** cells; all other pgTAP matrices (**5286** tests PASS); partner serialisation; **partner stock concurrency** (`test-partner-stock-concurrency.sh`: six last-unit rounds, same-entitlement race, play guard at a real commit); review-account tool checks; Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest stock + entitlements handler suites (status map, hash-only hand-over token, strict shapes, bucket order). CI on PR #69 tip `b433f81`: all three checks green.
 
+## 29. As built: S7c (hand-over and stock screens; `apps/partners`)
+
+Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parallel Edge/DB half) claims section 28; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page talks to the Edge routes S5 ships (`stock-admin`, `partner-entitlements`).
+
+### 29.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `stock-admin` and `partner-entitlements`; `connect-src` gains two path-scoped sources.
+- **Typed work routes** (`src/api/work-routes.ts`): stock read/move; collect queue; hand-over mint (plaintext once); redeem (`staff_scan` / `hand_over_token`); voucher. Response bodies checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Hand over a marker** and **Stock** beside attest and course-QR. Every A1 action calls `requirePin("A1")` then the action in the same turn. Hand-over token plaintext lives only in `work.minted` until dismissed.
+- **Fake partner server** answers the two new functions in-memory (PIN-grant consume on A1) so the page's unit cells run without the S5 Edge tree on this branch.
+
+### 29.2 Decisions and departures
+
+- **Hand-over token shape is checked without a regexp** (same V8 last-match reason as the session token).
+- **Queue mint/voucher buttons** sit on each collect row; redeem uses a shared form (entitlement id + credential) so a pasted id still works when the queue is empty.
+- **Stock move kinds** match the Edge allow-list (never `redeemed` / `voucher_redeemed`).
+
+### 29.3 Not built, honestly
+
+- Camera scan into redeem credential fields.
+- S7d manager/operator/admin screens (section 31).
+- Offline-code redeem (P5.1b).
+- Merging with S5 will conflict textually in enumeration files the way S7b notes for S2b/S3.
+
+### 29.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 761 tests, all pass** (extends `work.test.ts`: stock load + A1 move; hand-over mint + staff_scan redeem after PIN; request bodies contain no PIN digits).
+
 ## 30. As built: S6 (programme and sponsors)
 
 Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055` / matrix `33` / section 25; S3–S5 claim 0056–0058 / 34–36 / 26–28; **§29 is reserved for S7c UI.** Nothing from 0001–0058 is edited.
@@ -2233,6 +2262,36 @@ Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOff
 ### 30.4 Verification
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on tip `5782bd8`: matrix 37's **58/58** cells; all other pgTAP matrices (**5344** tests PASS across 57 files, including updated 10 / 24 / 25 / 28 inventory and grant cells); Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest programme / offers / sponsorships handler suites plus related PartnerDb fakes (**96** focused cells; broader partner handler run **268**). `definer_policy_exprs.txt` holds the fourteen `pd_partner_programme_*` policies. CI on PR #71 tip `e2b11ac`: all three checks green.
+
+## 31. As built: S7d (manager / operator / admin screens; `apps/partners`)
+
+Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (programme/sponsors Edge half, parallel branch) claims section 30; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls S6/S4 Edge paths by name (`programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`); the fake partner server stubs them so unit cells run without merging those trees.
+
+### 31.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`; `connect-src` gains four path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`).
+- **Typed admin routes** (`src/api/admin-routes.ts`): programme read + trail/facility upsert; offers list/upsert/approve/end; sponsorships list/upsert/approve; review queue + SLA + resolve offer-code/entitlement; operator and sponsor rollups. Response bodies checked field-by-field (camelCase wire shapes match the S6 handlers).
+- **Admin screens** (`src/app/admin.ts`, extended `WorkView` kinds, `ui/views-admin.ts`). Signed-in home gains a **Programme and ops** section: programme / offers / sponsorships / rollups for `isAdmin` or any `operator` membership; **Review queue** for `isAdmin` only. Staff keep shop-floor only. A0 reads call directly; A3 writes refuse on the client unless `aal` 2 (same gate as printed-QR write).
+- **Errors and i18n.** `ErrorContext` gains programme/offers/sponsorships/review/rollups; closed codes `not_draft`, `not_live`, `bad_funder`, `bad_sponsor`, `stock_short`, `budget_short`, `no_trail`, `invalid_eligibility`, `not_held` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers the four new functions in-memory (A3 checks aal + fresh `mfaUntil`; sessions minted at aal ≥ 2 get a fresh MFA window for fixtures).
+
+### 31.2 Decisions and departures
+
+- **WorkView extended** with `programme | offers | sponsorships | review | rollups` rather than a parallel `AdminView` field, so one `work` slot still replaces home.
+- **Invite/member admin tools** stay on the existing PIN/TOTP/enrol panels; this slice does not add invite-issue UI.
+- **Eligibility** is sent as JSON from a text field; schema validation remains the Edge's AT(14) gate.
+
+### 31.3 Not built, honestly
+
+- Settlement UI (billing / fee settlement surfaces).
+- Camera or richer editors for eligibility rules.
+- Merging with S6 will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 31.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 877 tests, all pass** (adds `admin.test.ts`: open programme/offers/review/rollups, A0 load, A3 aal gate, offer approve and review resolve; request bodies contain no tokens beyond closed ids).
+- CI on PR #72 tip `ec7a5cc`: all three checks green.
 
 ## 32. As built: P5.1b (offers-redeem + settlement-export + exports-purge)
 
@@ -2290,95 +2349,6 @@ Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited
 
 **Verification:** on this branch, `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38. CI green with §32.4 tip.
 
-## 34. As built: S7b (attest and course-QR screens; `apps/partners`)
-
-Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4; S4 landed on main first via #73, so this UI as-built takes the next free section.) S2b (parallel) claims section 25 and S3 claims section 26; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page is the only thing that moved. It talks to the Edge routes S2b and S3 ship (`partner-attest`, `course-qr`, `qr-print`).
-
-### 34.1 What was built
-
-- **Allow-list and CSP.** `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`. `connect-src` gains three path-scoped sources; `Permissions-Policy` is `camera=(self)` (paste-only attest today; a later scan into the token field needs no header change).
-- **`call()` query object.** GET routes that need `?facilityId=` take a closed `{ key: value }` map (facility-id charset), appended after the path is validated so a route string still cannot carry `?` or `#`.
-- **Typed work routes** (`src/api/work-routes.ts`): online/offline attest, shift-log, staff-activity, course PIN, rotate, mint, refresh, printed QR read/write. Response bodies are checked field-by-field.
-- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Attest a player** and **Course QR**. Every A1 action calls `requirePin("A1")` then the action in the same turn (24.3). Rotate PIN is A2: `reauthWithPasskey` then `requirePin("A2")` then rotate. Printed-QR write is A3: refused in the UI when `aal < 2`.
-- **Fake partner server** answers the three new functions in-memory (PIN-grant consume on A1, reauth window on A2, aal/mfa on A3) so the page's unit cells run without the S2b/S3 Edge trees on this branch.
-
-### 34.2 Decisions and departures
-
-- **`state.work` on signed-in**, not a new top-level `AppState` screen. The PIN prompt is `state.panel`; keeping work under signed-in means `requirePin` needs no second host. Design 20.5's "new AppState branch" is met as a new view branch of signed-in.
-- **Online attest token is pasted** (the check-in jti). Camera policy is open; a BarcodeDetector scan is not built.
-- **Staff-activity and shift-log** are A0 reads on the attest screen (no PIN). Staff who are not managers will get 403 from the server for staff-activity; the page does not hide the button by role (the session's role list has no per-facility rank beyond membership).
-
-### 34.3 Not built, honestly
-
-- Camera scan of a player QR into the token field.
-- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29); programme/offers/sponsorships/review/rollups are section 31.
-- Offers-redeem (S3 seam / P5.1b).
-- Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
-
-### 34.4 Verification run for this slice
-
-- `pnpm --filter @golfraven/partners typecheck`: clean.
-- `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).
-
-## 29. As built: S7c (hand-over and stock screens; `apps/partners`)
-
-Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parallel Edge/DB half) claims section 28; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page talks to the Edge routes S5 ships (`stock-admin`, `partner-entitlements`).
-
-### 29.1 What was built
-
-- **Allow-list and CSP.** `partner-functions.json` gains `stock-admin` and `partner-entitlements`; `connect-src` gains two path-scoped sources.
-- **Typed work routes** (`src/api/work-routes.ts`): stock read/move; collect queue; hand-over mint (plaintext once); redeem (`staff_scan` / `hand_over_token`); voucher. Response bodies checked field-by-field.
-- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Hand over a marker** and **Stock** beside attest and course-QR. Every A1 action calls `requirePin("A1")` then the action in the same turn. Hand-over token plaintext lives only in `work.minted` until dismissed.
-- **Fake partner server** answers the two new functions in-memory (PIN-grant consume on A1) so the page's unit cells run without the S5 Edge tree on this branch.
-
-### 29.2 Decisions and departures
-
-- **Hand-over token shape is checked without a regexp** (same V8 last-match reason as the session token).
-- **Queue mint/voucher buttons** sit on each collect row; redeem uses a shared form (entitlement id + credential) so a pasted id still works when the queue is empty.
-- **Stock move kinds** match the Edge allow-list (never `redeemed` / `voucher_redeemed`).
-
-### 29.3 Not built, honestly
-
-- Camera scan into redeem credential fields.
-- S7d manager/operator/admin screens (section 31).
-- Offline-code redeem (P5.1b).
-- Merging with S5 will conflict textually in enumeration files the way S7b notes for S2b/S3.
-
-### 29.4 Verification run for this slice
-
-- `pnpm --filter @golfraven/partners typecheck`: clean.
-- `pnpm --filter @golfraven/partners test:unit`: **20 files, 761 tests, all pass** (extends `work.test.ts`: stock load + A1 move; hand-over mint + staff_scan redeem after PIN; request bodies contain no PIN digits).
-
-## 31. As built: S7d (manager / operator / admin screens; `apps/partners`)
-
-Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (programme/sponsors Edge half, parallel branch) claims section 30; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls S6/S4 Edge paths by name (`programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`); the fake partner server stubs them so unit cells run without merging those trees.
-
-### 31.1 What was built
-
-- **Allow-list and CSP.** `partner-functions.json` gains `programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`; `connect-src` gains four path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`).
-- **Typed admin routes** (`src/api/admin-routes.ts`): programme read + trail/facility upsert; offers list/upsert/approve/end; sponsorships list/upsert/approve; review queue + SLA + resolve offer-code/entitlement; operator and sponsor rollups. Response bodies checked field-by-field (camelCase wire shapes match the S6 handlers).
-- **Admin screens** (`src/app/admin.ts`, extended `WorkView` kinds, `ui/views-admin.ts`). Signed-in home gains a **Programme and ops** section: programme / offers / sponsorships / rollups for `isAdmin` or any `operator` membership; **Review queue** for `isAdmin` only. Staff keep shop-floor only. A0 reads call directly; A3 writes refuse on the client unless `aal` 2 (same gate as printed-QR write).
-- **Errors and i18n.** `ErrorContext` gains programme/offers/sponsorships/review/rollups; closed codes `not_draft`, `not_live`, `bad_funder`, `bad_sponsor`, `stock_short`, `budget_short`, `no_trail`, `invalid_eligibility`, `not_held` map to catalogue keys. EN + FR-CA keys differ.
-- **Fake partner server** answers the four new functions in-memory (A3 checks aal + fresh `mfaUntil`; sessions minted at aal ≥ 2 get a fresh MFA window for fixtures).
-
-### 31.2 Decisions and departures
-
-- **WorkView extended** with `programme | offers | sponsorships | review | rollups` rather than a parallel `AdminView` field, so one `work` slot still replaces home.
-- **Invite/member admin tools** stay on the existing PIN/TOTP/enrol panels; this slice does not add invite-issue UI.
-- **Eligibility** is sent as JSON from a text field; schema validation remains the Edge's AT(14) gate.
-
-### 31.3 Not built, honestly
-
-- Settlement UI (billing / fee settlement surfaces).
-- Camera or richer editors for eligibility rules.
-- Merging with S6 will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
-
-### 31.4 Verification run for this slice
-
-- `pnpm --filter @golfraven/partners typecheck`: clean.
-- `pnpm --filter @golfraven/partners test:unit`: **21 files, 877 tests, all pass** (adds `admin.test.ts`: open programme/offers/review/rollups, A0 load, A3 aal gate, offer approve and review resolve; request bodies contain no tokens beyond closed ids).
-- CI on PR #72 tip `ec7a5cc`: all three checks green.
-
 ## 33. As built: S7 offer redeem + settlement export screens (`apps/partners`)
 
 Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (programme/sponsors Edge) claims section 30; P5.1b (offers-redeem / settlement Edge half, parallel branch) claims section 32; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls P5.1b Edge paths by name (`partner-offers-redeem`, `settlement-export`); the fake partner server stubs them so unit cells run without merging that tree. `exports-purge` stays on the system lane and is **not** allow-listed.
@@ -2410,3 +2380,33 @@ Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (progr
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **21 files, 917 tests, all pass** (adds offer-redeem A1 PIN + queue/redeem body cells; settlement A3 aal gate, export path/expiry, empty month; allow-list/CSP include the two functions and refuse `exports-purge`).
 - CI on PR #74 tip `fb8b5ea`: all three checks green.
+## 34. As built: S7b (attest and course-QR screens; `apps/partners`)
+
+Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4; S4 landed on main first via #73, so this UI as-built takes the next free section.) S2b (parallel) claims section 25 and S3 claims section 26; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page is the only thing that moved. It talks to the Edge routes S2b and S3 ship (`partner-attest`, `course-qr`, `qr-print`).
+
+### 34.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`. `connect-src` gains three path-scoped sources; `Permissions-Policy` is `camera=(self)` (paste-only attest today; a later scan into the token field needs no header change).
+- **`call()` query object.** GET routes that need `?facilityId=` take a closed `{ key: value }` map (facility-id charset), appended after the path is validated so a route string still cannot carry `?` or `#`.
+- **Typed work routes** (`src/api/work-routes.ts`): online/offline attest, shift-log, staff-activity, course PIN, rotate, mint, refresh, printed QR read/write. Response bodies are checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Attest a player** and **Course QR**. Every A1 action calls `requirePin("A1")` then the action in the same turn (24.3). Rotate PIN is A2: `reauthWithPasskey` then `requirePin("A2")` then rotate. Printed-QR write is A3: refused in the UI when `aal < 2`.
+- **Fake partner server** answers the three new functions in-memory (PIN-grant consume on A1, reauth window on A2, aal/mfa on A3) so the page's unit cells run without the S2b/S3 Edge trees on this branch.
+
+### 34.2 Decisions and departures
+
+- **`state.work` on signed-in**, not a new top-level `AppState` screen. The PIN prompt is `state.panel`; keeping work under signed-in means `requirePin` needs no second host. Design 20.5's "new AppState branch" is met as a new view branch of signed-in.
+- **Online attest token is pasted** (the check-in jti). Camera policy is open; a BarcodeDetector scan is not built.
+- **Staff-activity and shift-log** are A0 reads on the attest screen (no PIN). Staff who are not managers will get 403 from the server for staff-activity; the page does not hide the button by role (the session's role list has no per-facility rank beyond membership).
+
+### 34.3 Not built, honestly
+
+- Camera scan of a player QR into the token field.
+- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29); programme/offers/sponsorships/review/rollups are section 31.
+- Offers-redeem (S3 seam / P5.1b).
+- Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
+
+### 34.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).
+
