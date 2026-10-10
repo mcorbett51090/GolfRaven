@@ -67,6 +67,8 @@ export const ALLOWED_PLUGINS: ReadonlySet<string> = new Set([
 export const ALLOWED_IOS_ENTITLEMENTS: Readonly<Record<string, { values: readonly string[]; why: string }>> = {
   "com.apple.developer.applesignin": { values: ["Default"], why: "Sign in with Apple (P4.2a, `expo-apple-authentication`'s plugin)" },
   "com.apple.developer.devicecheck.appattest-environment": { values: ["development", "production"], why: "App Attest (P4.2b-2, `modules/golfraven-attest/app.plugin.js`)" },
+  // P5 §54: course-QR universal links (`/q/m`, `/q/f/*`). Host must match `GR_COURSE_QR_LINK_ORIGIN` / site AASA.
+  "com.apple.developer.associated-domains": { values: ["applinks:golfraven.app"], why: "Course-QR App Links (P5 §54, `app.json` ios.associatedDomains)" },
 };
 
 /** The Android permissions the GENERATED manifest may GRANT (a `tools:node="remove"` entry grants nothing). Today: network, the vibrate of Expo's template, the one Health

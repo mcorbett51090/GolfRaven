@@ -63,6 +63,7 @@ function runBuild(name, { dist, indexability, env: extraEnv }) {
   run("./node_modules/.bin/astro", ["build", "--outDir", dist]);
   run("node", ["./scripts/gen-headers.mjs", dist]);
   run("node", ["./scripts/gen-redirects.mjs", dist]);
+  run("node", ["./scripts/gen-applinks.mjs", dist]);
   run("node", ["./scripts/gen-sw.mjs", dist]);
   run("node", ["./scripts/pagefind-index.mjs", dist]);
   run("node", ["./scripts/verify-sitemap.mjs", dist]);

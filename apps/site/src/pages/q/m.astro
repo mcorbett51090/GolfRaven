@@ -1,0 +1,29 @@
+---
+/**
+ * Soft bounce for rotating shop QR universal links (`/q/m#<token>`).
+ * Fragment stays client-side (never logged). If the app is installed,
+ * associatedDomains / App Links open it instead; this page is the
+ * browser fallback. noindex; not in the sitemap.
+ */
+import BaseLayout from "../../layouts/BaseLayout.astro";
+import { loadSiteCatalog } from "../../lib/derive";
+
+const { usedDemoData } = await loadSiteCatalog();
+const title = "Open in GolfRaven";
+const description = "This shop QR opens in the GolfRaven app. Install GolfRaven, then open the link again or paste it on the facility page.";
+---
+
+<BaseLayout title={title} description={description} path="/q/m/" noindex={true} demo={usedDemoData}>
+  <main>
+    <h1>{title}</h1>
+    <p>
+      This link is a GolfRaven shop QR. With the app installed on your phone, open the
+      link again — it should launch GolfRaven. Otherwise install the app, then paste the
+      full link (including everything after <code>#</code>) on the facility page under
+      “Buying a marker”.
+    </p>
+    <p>
+      <a href="/">Back to GolfRaven</a>
+    </p>
+  </main>
+</BaseLayout>

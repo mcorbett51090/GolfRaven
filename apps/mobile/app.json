@@ -19,10 +19,22 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
-      "allowBackup": false
+      "allowBackup": false,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [
+            { "scheme": "https", "host": "golfraven.app", "pathPrefix": "/q/m" },
+            { "scheme": "https", "host": "golfraven.app", "pathPrefix": "/q/f" }
+          ]
+        }
+      ]
     },
     "ios": {
-      "bundleIdentifier": "com.golfraven.app"
+      "bundleIdentifier": "com.golfraven.app",
+      "associatedDomains": ["applinks:golfraven.app"]
     },
     "plugins": [
       "expo-router",

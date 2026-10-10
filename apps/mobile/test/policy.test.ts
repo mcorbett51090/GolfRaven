@@ -350,14 +350,33 @@ describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it m
   const SIWA = "<key>com.apple.developer.applesignin</key><array><string>Default</string></array>";
   const ATTEST = (v: string): string => `<key>com.apple.developer.devicecheck.appattest-environment</key><string>${v}</string>`;
 
-  it("the entitlement scanner accepts exactly the two allow-listed entitlements, and the App Attest value only as development | production", () => {
-    expect(scanEntitlements(plist(SIWA + ATTEST("production")))).toEqual([]);
+  const APPLINKS = "<key>com.apple.developer.associated-domains</key><array><string>applinks:golfraven.app</string></array>";
+
+  it("the entitlement scanner accepts exactly the allow-listed entitlements, and the App Attest value only as development | production", () => {
+    expect(scanEntitlements(plist(SIWA + ATTEST("production") + APPLINKS))).toEqual([]);
     expect(scanEntitlements(plist(SIWA + ATTEST("development")))).toEqual([]);
     expect(scanEntitlements(plist(ATTEST("staging"))).map((v) => v.rule)).toEqual(["ios-entitlement-value"]);
     expect(scanEntitlements(plist(SIWA + "<key>aps-environment</key><string>production</string>")).map((v) => v.rule)).toEqual(["ios-entitlement"]);
     expect(scanEntitlements(plist(SIWA + "<key>com.apple.developer.healthkit</key><true/>")).map((v) => v.rule)).toEqual(["ios-entitlement"]);
     expect(scanEntitlements(plist(`<key>com.apple.developer.applesignin</key><array><string>Other</string></array>`)).map((v) => v.rule)).toEqual(["ios-entitlement-value"]);
-    expect(Object.keys(ALLOWED_IOS_ENTITLEMENTS).sort()).toEqual(["com.apple.developer.applesignin", "com.apple.developer.devicecheck.appattest-environment"]);
+    expect(scanEntitlements(plist(`<key>com.apple.developer.associated-domains</key><array><string>applinks:evil.example</string></array>`)).map((v) => v.rule)).toEqual([
+      "ios-entitlement-value",
+    ]);
+    expect(Object.keys(ALLOWED_IOS_ENTITLEMENTS).sort()).toEqual([
+      "com.apple.developer.applesignin",
+      "com.apple.developer.associated-domains",
+      "com.apple.developer.devicecheck.appattest-environment",
+    ]);
+  });
+
+  it("app.json claims course-QR App Links for golfraven.app only (P5 §54)", () => {
+    const ios = appJson.expo?.ios as { associatedDomains?: string[] } | undefined;
+    const android = appJson.expo?.android as { intentFilters?: unknown[] } | undefined;
+    expect(ios?.associatedDomains).toEqual(["applinks:golfraven.app"]);
+    const filters = android?.intentFilters ?? [];
+    expect(JSON.stringify(filters)).toContain("golfraven.app");
+    expect(JSON.stringify(filters)).toContain("/q/m");
+    expect(JSON.stringify(filters)).toContain("/q/f");
   });
 
   it("PR #42 gate LOW-2: the entitlement scan FAILS CLOSED: an unknown key is a violation whatever its value element is (integer, empty string, data, date, real, dict, array, boolean), and an allow-listed key must hold a string or an array of strings", () => {

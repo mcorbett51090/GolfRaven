@@ -28,6 +28,8 @@ function Gate() {
       <Stack.Screen name="trail/[id]" options={{ title: t("tab.trails") }} />
       <Stack.Screen name="facility/[id]" options={{ title: t("tab.trails") }} />
       <Stack.Screen name="course/[id]" options={{ title: t("tab.trails") }} />
+      <Stack.Screen name="q/m" options={{ headerShown: false }} />
+      <Stack.Screen name="q/f/[slug]" options={{ headerShown: false }} />
       <Stack.Screen name="age-gate" options={{ title: t("ageGate.title"), presentation: "modal" }} />
       <Stack.Screen name="sign-in" options={{ title: t("signIn.title"), presentation: "modal" }} />
       <Stack.Screen name="sign-in-methods" options={{ title: t("methods.title") }} />

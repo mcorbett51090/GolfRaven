@@ -2,8 +2,8 @@
  * P5 §52: parse a course-QR universal link into the parts the player lane will eventually hand to
  * `POST marker-scan` (design "Course QR token format"; Edge `_shared/course-qr/format.ts`).
  *
- * Pure string work. No CAMERA and no network. Paste / OS-camera → open-URL / future associatedDomains
- * all land here first. Malformed input is `null` (one refusal; no probeable distinction).
+ * Pure string work. No CAMERA and no network. Paste / OS-camera → open-URL / associatedDomains
+ * (P5 §54) all land here first. Malformed input is `null` (one refusal; no probeable distinction).
  */
 
 export type ParsedCourseQrLink =
