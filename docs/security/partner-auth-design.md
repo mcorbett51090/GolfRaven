@@ -1269,7 +1269,7 @@ Slice S1.1b (the **database side of partner sign-in minting**: the SQL signature
 4. **The key is read from the table, never an argument**, and the counter is read **from the signed authenticator data** (there is no argument to differ from it).
 5. **The COSE parser is stricter than the wrapper.** It refuses a key that carries any parameter beyond the exact set (WebAuthn: the credential public key "MUST NOT contain any other OPTIONAL parameters"). The wrapper (`assertKeyAllowed`) reads only the fields it needs, so **a credential with extra COSE parameters would pass registration and then never sign in.** No conforming authenticator emits them, but the registration slice must either make the wrapper refuse them or store a re-encoded canonical key. **Ruling (S1.1b gate): accepted as a seam, with a BLOCKING S1.5 condition: `partner_credential_register_first` must call `partner_cose_parse` on the key it is about to store, so a credential with extra parameters is refused at registration.** S1.5 does not pass its own gate without it.
 6. **The Deno integration test speaks to the database directly** (`SET LOCAL ROLE edge_partner_minter` as `edge_gateway`): `privileged.ts` has no partner transaction kind until S1.2. It is the one suite that signs with a signer the database did not write (Web Crypto, 17.7).
-7. **The 60-per-hour limit is counted from `partner_session`**, not from a counter table, so it adds no table and cannot drift from the sessions it counts. Eviction beyond three live sessions (4.1) is not built. **Ruling (S1.1b gate): eviction (S1.5) must REVOKE sessions and never DELETE them**, because the limit is counted from `partner_session` rows and a DELETE would reset the 60-per-hour count.
+7. **The 60-per-hour limit is counted from `partner_session`**, not from a counter table, so it adds no table and cannot drift from the sessions it counts. Eviction beyond three live sessions (4.1) was not built in 0048; `register_first` closed it for first-credential mint (0054) and the sign-in mint closed it in §64 / `0078`. **Ruling (S1.1b gate): eviction must REVOKE sessions and never DELETE them**, because the limit is counted from `partner_session` rows and a DELETE would reset the 60-per-hour count.
 8. **`partner_auth_alarm` has no purge definer yet** (nor does `partner_auth_challenge`): section 9 lists both; the alarm table grows by at most one row per (kind, credential, minute).
 9. **The 0040 retention backlog test (`retention-purge.deno.test.ts`, an earlier slice's file) now `ANALYZE`s the four tables it bulk-loads.** Found by the full harness, not by any single suite: once this slice's longer concurrency steps moved when autovacuum ran, a vacuum that could not truncate `private.signin_email_proof` (a concurrent session held the xmin horizon) left `pg_class` saying 148 pages and 1 tuple; the planner then estimated the test's 5,003 new rows as one row and ran `purge_signin_email_proofs()` as an O(n^2) nested loop past the 10 s statement timeout. The base tree has the same latent dependence (it passes while autovacuum happens to leave that table truncated: with autovacuum off the base passes and this tree fails; with the `ANALYZE` both pass, checked on a clone of the failing harness template). The fix is in the test, not in the purge: the definer is 0040's and a production table that has been loaded for a while has been analyzed by autovacuum.
 
@@ -1907,7 +1907,7 @@ A later harness / Deno integration run should record file and test counts here t
 ### 22.3 Not built here, honestly
 
 - **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
-- **Eviction beyond three live sessions runs at `register_first` only.** The sign-in mint (0048) still does not evict; that is the 0048 seam, unchanged.
+- **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
 - **The out-of-band notice of a credential add** (open item U1) and **the operator alert on a TOTP reset** are `audit_log` rows only.
 - The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
 
@@ -3251,7 +3251,32 @@ Numbering: **migration `0077`, matrix `55`, this section 63.** Closes the operat
 
 ### 63.4 Verification
 
-Branch: `cursor/p5-course-qr-cap-ui-8ffd` (base main after #102 / `7f63a56`). Recorded when CI is green on the PR tip.
+Squash-merged as `51dadd8` (#103). Branch: `cursor/p5-course-qr-cap-ui-8ffd` (base main after #102 / `7f63a56`).
 
-- pgTAP matrix 55 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET cap-alerts + partners work capAlerts cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0076`.
+- pgTAP matrix 55 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET cap-alerts + partners work capAlerts cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0076`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 64. As built: sign-in mint session eviction (4.1)
+
+Numbering: **migration `0078`, matrix `56`, this section 64.** Closes the 0048 leftover left open by §17.8 / §22.3: `register_first` already called `partner_sessions_evict_oldest(..., 3)` after its session INSERT; the sign-in mint did not. Beyond three live sessions of a person, the mint now REVOKES the oldest (never DELETE — the 60/h count is from `partner_session` rows).
+
+### 64.1 What was built
+
+- **`CREATE OR REPLACE private.partner_session_mint`** — after a successful session INSERT, `PERFORM private.partner_sessions_evict_oldest(v_cred.user_id, 3)` (same helper / keep as `register_first`). Owner, EXECUTE grant, and refusal-as-status contract unchanged.
+- **COMMENT + `function_inventory` note** mention eviction (REVOKE, not DELETE).
+- **pgTAP matrix 56**: four older live + successful mint → three live; two oldest revoked with `session_limit`; rows remain; under-cap mint writes no `session_limit` revoke.
+
+### 64.2 Decisions and departures
+
+- **keep = 3 for everyone** — matches `register_first`. Design §4.1 table lists Admin concurrent = 2; that role-aware keep stays a separate intentional departure (would need a parallel change to `register_first` and ideally a policy helper column).
+- **No new privilege surface** — issuer already holds EXECUTE on the 0054 helper; no Edge / PWA change.
+
+### 64.3 Not built, honestly
+
+- Admin keep=2; credential display-note `PATCH`; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 64.4 Verification
+
+Branch: `cursor/p5-mint-session-evict-8ffd` (base main after #103 / `51dadd8`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 56; `verify-function-inventory`; migrations immutable for `0001`–`0077`.
 
