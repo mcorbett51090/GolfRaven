@@ -184,9 +184,14 @@ WHERE schema_name = 'private' AND function_name = 'partner_mint_alarm_write'
 DROP POLICY current_user_edit_function_inventory_0081 ON private.function_inventory;
 REVOKE INSERT, UPDATE ON private.function_inventory FROM CURRENT_USER;
 
+GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_seed_definer_policy_allowlist_0081 ON private.definer_policy_allowlist
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 UPDATE private.definer_policy_allowlist
 SET note = 'private.partner_mint_alarm_write / partner_rate_alarm_raise: INSERT ... ON CONFLICT reads the arbiter columns (kind, bucket_key, minute_bucket; column-level grant); no binding at all'
 WHERE policy_name = 'pd_partner_auth_alarm_select';
+DROP POLICY current_user_seed_definer_policy_allowlist_0081 ON private.definer_policy_allowlist;
+REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
 
 -- ============================================================================
 -- 5. DO asserts
