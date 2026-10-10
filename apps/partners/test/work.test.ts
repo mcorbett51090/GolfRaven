@@ -132,6 +132,27 @@ describe("S7b course-QR screen", () => {
     const gets = s.w.server.log.filter((r) => r.method === "GET" && r.path.includes("/course-qr/alarms"));
     expect(gets).toHaveLength(1);
   });
+
+  it("loads open static-PIN daily cap alerts (A0) for the open facility", async () => {
+    const s = await setup();
+    s.controller.openCourseQr(FACILITY);
+    await s.controller.loadCourseStaticPinCaps();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("course-qr");
+      if (w?.kind === "course-qr") {
+        expect(w.capAlerts).toHaveLength(1);
+        expect(w.capAlerts?.[0]).toMatchObject({
+          facilityId: FACILITY,
+          localDate: "2026-10-09",
+          count: 25,
+          raisedAt: "2026-10-09T16:00:00.000Z",
+        });
+      }
+    }
+    const gets = s.w.server.log.filter((r) => r.method === "GET" && r.path.includes("/course-qr/cap-alerts"));
+    expect(gets).toHaveLength(1);
+  });
 });
 
 describe("S7c stock screen", () => {

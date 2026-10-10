@@ -56,6 +56,7 @@ export interface CourseQrDeps {
 const ROUTES: readonly RouteSpec[] = [
   { name: "pin", path: "pin", methods: ["GET"], session: true },
   { name: "alarms", path: "alarms", methods: ["GET"], session: true },
+  { name: "cap-alerts", path: "cap-alerts", methods: ["GET"], session: true },
   { name: "pin-rotate", path: "pin/rotate", methods: ["POST"], session: true },
   { name: "tokens", path: "tokens", methods: ["POST"], session: true },
   { name: "tokens-refresh", path: "tokens/refresh", methods: ["POST"], session: true },
@@ -100,6 +101,8 @@ export async function handleCourseQrRequest(req: Request, deps: CourseQrDeps): P
             return await handlePin(req, deps, decision, tokenHash);
           case "alarms":
             return await handleAlarms(req, deps, decision, tokenHash);
+          case "cap-alerts":
+            return await handleCapAlerts(req, deps, decision, tokenHash);
           case "pin-rotate":
             return await handleRotate(req, deps, decision, tokenHash);
           case "tokens":
@@ -140,6 +143,22 @@ async function handleAlarms(req: Request, deps: CourseQrDeps, decision: Decision
       pinEpochBefore: a.pinEpochBefore,
       pinEpochAfter: a.pinEpochAfter,
       failures: a.failures,
+      raisedAt: a.raisedAt,
+    })),
+  });
+}
+
+async function handleCapAlerts(req: Request, deps: CourseQrDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseFacilityQuery(new URL(req.url));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const alerts = await deps.db.withCourseQr(tokenHash, (s) => s.staticPinCapList(parsed.value.facilityId));
+  return partnerOk(decision, 200, {
+    facilityId: parsed.value.facilityId,
+    alerts: alerts.map((a) => ({
+      id: a.id,
+      facilityId: a.facilityId,
+      localDate: a.localDate,
+      count: a.count,
       raisedAt: a.raisedAt,
     })),
   });

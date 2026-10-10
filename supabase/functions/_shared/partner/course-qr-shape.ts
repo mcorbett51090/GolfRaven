@@ -5,6 +5,7 @@
 //
 //   GET  course-qr/pin?facilityId=<id>           today's PIN (class A0)
 //   GET  course-qr/alarms?facilityId=<id>        wrong-PIN rotation alarms (class A0, manager / operator)
+//   GET  course-qr/cap-alerts?facilityId=<id>    open static-PIN daily cap alerts (class A0, manager / operator)
 //   POST course-qr/pin/rotate    { facilityId }  "Rotate PIN" (class A2)
 //   POST course-qr/tokens        { facilityId }  "Marker sold": mint a rotating token (class A1)
 //   POST course-qr/tokens/refresh { facilityId, nonceHash }   the sale screen's 30 s heartbeat for ONE token this person's own mint created (class A0_KEEPALIVE)

@@ -3224,7 +3224,34 @@ Numbering: **migration `0076`, matrix `54`, this section 62.** Closes the plan �
 
 ### 62.4 Verification
 
-Branch: `cursor/p5-course-qr-cap-alert-8ffd` (base main after #101 / `5207f5d`). Recorded when CI is green on the PR tip.
+Squash-merged as `7f63a56` (#102). Branch: `cursor/p5-course-qr-cap-alert-8ffd` (base main after #101 / `5207f5d`).
 
-- pgTAP matrix 54 (+ `partner_kind_readers` / function-inventory check 14); Vitest `marker-scan-handler` cap-alert cells; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0075`.
+- pgTAP matrix 54 (+ `partner_kind_readers` / function-inventory check 14); Vitest `marker-scan-handler` + `marker-scan-entrypoint` (no `console.*`); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0075`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 63. As built: course-QR static-PIN cap list (partners portal)
+
+Numbering: **migration `0077`, matrix `55`, this section 63.** Closes the operator surface left open by §62.3: partners Course QR screen can list open `fraud_signal` rows of kind `course_qr_static_pin_cap` for a facility (same A0 manager/operator gate as §59 PIN alarms).
+
+### 63.1 What was built
+
+- **`private.course_qr_static_pin_cap_list_for_partner(facility)`** — class A0, manager or operator at the facility; returns id / facility / local_date / count / raised_at for **open** signals only, newest first, at most 100.
+- **SELECT policy** `pd_course_qr_cap_partner_select` on `app.fraud_signal` keyed on `partner_bound_manager_at(detail->>'facilityId')` plus `kind = course_qr_static_pin_cap` and `cleared_at IS NULL`.
+- **Edge**: `GET /course-qr/cap-alerts` → `CourseQrTx.staticPinCapList` → the new definer; EXECUTE allowlists (matrices 10 / 25 / 28 + Deno PA-13b) name it.
+- **Partners PWA**: Course QR section with load button, empty / list states (local date + count + raised_at), en + fr-CA copy; fake-server route + Vitest cell.
+
+### 63.2 Decisions and departures
+
+- **Reuse `fraud_signal`, not `course_pin_alarm`** — §62 already writes the cap as `fraud_signal`; listing that kind is enough for “operator is told” on the Course QR surface.
+- **Open rows only** — cleared signals are excluded by the policy and the definer.
+- **Sibling section next to PIN alarms** — separate `GET cap-alerts` rather than folding into `/alarms`, so the A0 loads stay independent.
+
+### 63.3 Not built, honestly
+
+- Pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 63.4 Verification
+
+Branch: `cursor/p5-course-qr-cap-ui-8ffd` (base main after #102 / `7f63a56`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 55 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET cap-alerts + partners work capAlerts cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0076`.
 

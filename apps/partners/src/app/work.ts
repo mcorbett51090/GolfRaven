@@ -16,6 +16,7 @@ import {
   getCollectQueue,
   getCoursePin,
   getCoursePinAlarms,
+  getCourseStaticPinCaps,
   getOffersQueue,
   getPrintedQr,
   getShiftLog,
@@ -62,6 +63,7 @@ export interface WorkScreens {
   loadStaffActivity(days: number): Promise<void>;
   loadCoursePin(): Promise<void>;
   loadCoursePinAlarms(): Promise<void>;
+  loadCourseStaticPinCaps(): Promise<void>;
   rotatePin(): Promise<void>;
   mintToken(): Promise<void>;
   refreshSale(): Promise<void>;
@@ -188,7 +190,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
         return;
       }
-      withWork(s, { kind: "course-qr", facilityId: id, busy: false, pin: null, alarms: null, sale: null, refreshLeft: null, printed: null }, null);
+      withWork(s, { kind: "course-qr", facilityId: id, busy: false, pin: null, alarms: null, capAlerts: null, sale: null, refreshLeft: null, printed: null }, null);
     },
 
     openStock(facilityId) {
@@ -234,7 +236,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       const s = signedIn(host);
       if (s === null || s.work === null || s.busy !== null || s.panel !== null || !FACILITY_RE.test(facilityId)) return;
       if (s.work.kind === "attest") withWork(s, { ...s.work, facilityId, lastResult: null, shiftLog: null, staffActivity: null });
-      else if (s.work.kind === "course-qr") withWork(s, { ...s.work, facilityId, pin: null, alarms: null, sale: null, refreshLeft: null, printed: null });
+      else if (s.work.kind === "course-qr") withWork(s, { ...s.work, facilityId, pin: null, alarms: null, capAlerts: null, sale: null, refreshLeft: null, printed: null });
       else if (s.work.kind === "stock") withWork(s, { ...s.work, facilityId, rows: null, lastOnHand: null });
       else if (s.work.kind === "handover") withWork(s, { ...s.work, facilityId, queue: null, minted: null, lastRedeem: null });
       else if (s.work.kind === "offer-redeem") withWork(s, { ...s.work, facilityId, queue: null, selectedOfferCodeId: "", lastRedeem: null });
@@ -343,6 +345,22 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         const alarms = await getCoursePinAlarms(api, facilityId);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, alarms } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async loadCourseStaticPinCaps() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const capAlerts = await getCourseStaticPinCaps(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, capAlerts } });
       } catch (e) {
         const cur = live(host, grant);
         if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });

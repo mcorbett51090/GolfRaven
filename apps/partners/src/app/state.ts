@@ -24,6 +24,7 @@ import type {
   AttestResult,
   CoursePin,
   CoursePinAlarm,
+  CourseStaticPinCap,
   EntitlementQueueRow,
   HandoverMinted,
   MintedToken,
@@ -144,6 +145,7 @@ export type WorkView =
       readonly busy: boolean;
       readonly pin: CoursePin | null;
       readonly alarms: readonly CoursePinAlarm[] | null;
+      readonly capAlerts: readonly CourseStaticPinCap[] | null;
       readonly sale: MintedToken | null;
       readonly refreshLeft: number | null;
       readonly printed: PrintedQr | null;

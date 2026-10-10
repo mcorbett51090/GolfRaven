@@ -186,8 +186,8 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname LIKE 'pd\_c
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('course_qr_signing_key_read', 'course_pin_show_for_partner', 'course_pin_rotate_for_partner', 'course_qr_mint_for_partner', 'course_qr_refresh_for_partner',
   'course_qr_print_key_for_partner', 'course_qr_print_write_for_partner', 'course_qr_print_read_for_partner')), 8, 'registry: all 8 functions have a function_inventory row');
-SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name LIKE 'course\_%\_for\_partner' AND expected_edge_partner AND NOT (expected_anon OR expected_authenticated OR expected_service_role OR expected_edge_actor OR expected_edge_system OR expected_edge_partner_minter)), 8,
-  'registry: the eight lane functions are expected for edge_partner and nobody else');
+SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name LIKE 'course\_%\_for\_partner' AND expected_edge_partner AND NOT (expected_anon OR expected_authenticated OR expected_service_role OR expected_edge_actor OR expected_edge_system OR expected_edge_partner_minter)), 9,
+  'registry: the nine course_*_for_partner lane functions (0055 eight + 0077 cap list) are expected for edge_partner and nobody else');
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd\_course\_qr\_staff\_%' AND role_name = 'private_definer' AND scoped), 10, 'registry: the ten policies are in definer_policy_allowlist');
 SELECT tests.clear_actor();
 
