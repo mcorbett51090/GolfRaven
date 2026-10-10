@@ -2568,6 +2568,7 @@ Numbering: **this section 39.** No server, database or migration change. Closes 
 
 Branch: `cursor/p5-camera-scan-8ffd` (base main after #78).
 
-- Partners unit: camera-scan cells (normalize, unsupported/denied/happy/timeout/abort) plus existing work/i18n/source-scan.
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **22 files, 944 tests, all pass** (adds camera-scan normalize / unsupported / denied / happy / timeout / abort).
 - Restricted harness / CI recorded when green on the PR tip.
 
