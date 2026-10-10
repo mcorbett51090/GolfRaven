@@ -1174,7 +1174,7 @@ $$;
 SELECT pass('every function''s actual edge_partner and edge_partner_minter EXECUTE grants match private.function_inventory (0047)');
 SELECT is(
   (SELECT array_agg(function_name::text ORDER BY function_name::text COLLATE "C") FROM private.function_inventory WHERE expected_edge_partner),
-  ARRAY['bind_partner_session', 'course_pin_rotate_for_partner', 'course_pin_show_for_partner', 'course_qr_mint_for_partner', 'course_qr_print_key_for_partner', 'course_qr_print_read_for_partner', 'course_qr_print_write_for_partner', 'course_qr_refresh_for_partner', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_binding', 'partner_binding_kind',
+  ARRAY['bind_partner_session', 'course_pin_rotate_for_partner', 'course_pin_show_for_partner', 'course_qr_mint_for_partner', 'course_qr_print_key_for_partner', 'course_qr_print_read_for_partner', 'course_qr_print_write_for_partner', 'course_qr_refresh_for_partner', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_attest_for_partner', 'partner_binding', 'partner_binding_kind',
         'partner_credential_list_for_partner', 'partner_credential_options_for_partner', 'partner_credential_register_for_partner', 'partner_credential_revoke_for_partner',
         'partner_entitlement_queue_for_partner', 'partner_entitlement_redeem_for_partner', 'partner_entitlement_voucher_for_partner',
         'partner_facility_programme_list_for_partner', 'partner_facility_programme_upsert_for_partner',
