@@ -635,6 +635,12 @@ export interface Repo {
     attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult>;
     /** 0063: clears `offline_confirm_by` on the bound player's own redeemed_offline offer codes at this facility whose offline_step window holds the fix. */
     confirmOfferOffline(input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult>;
+    /**
+     * 0076 (plan §8.3 / P5 §62): facility-wide count of `credited` `marker_credit` rows whose
+     * purchase is `course_qr` / `static_pin` on `localDate` (`private.course_qr_static_pin_credit_count_for_actor`).
+     * Not a table SELECT for edge_actor.
+     */
+    staticPinCreditCount(facilityId: string, localDate: string): Promise<number>;
   };
 
   /** 0064: player-lane receipt upload (`receipt_intake_for_actor`). */

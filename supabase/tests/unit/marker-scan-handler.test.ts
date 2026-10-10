@@ -244,7 +244,7 @@ describe("the printed QR and today's PIN (Q2)", () => {
     const w = await world();
     const out = ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
     expect(out.body).toMatchObject({ outcome: "credited", cosignal: "counted" });
-    expect(w.ms.calls).toEqual(["publicKey:printed_qr:pq1", "attemptPin", "record"]);
+    expect(w.ms.calls).toEqual(["publicKey:printed_qr:pq1", "attemptPin", "record", "staticPinCreditCount:fac_x:2026-06-01"]);
     expect(w.ms.purchases[0]).toMatchObject({ qrVariant: "static_pin", refId: "pin:fac_x:2026-06-01" });
   });
 
@@ -563,5 +563,71 @@ describe("the database's own refusals of a co-signal and the rotating token's ki
     const t = await seedRotating(w);
     w.ms.tokens.get(t.hash)!.kid = "rk0";
     expect(await thrown(handleMarkerScan(body({ qr: { variant: "rotating", token: t.token } }), w.repo, deps))).toMatchObject({ status: 422, code: "invalid_qr" });
+  });
+});
+
+describe("P5 §62 / plan §8.3: static-PIN daily cap alert (signal, not block)", () => {
+  async function printed(w: World, pin: string, extra: Record<string, unknown> = {}) {
+    const sig = await mintPrintedQrSig(w.prtKey, FAC, "pq1");
+    return body({ qr: { variant: "static_pin", kid: "pq1", sig, pin }, ...extra });
+  }
+
+  it("at count 25 writes one course_qr_static_pin_cap fraud_signal; the HTTP response is unchanged", async () => {
+    const w = await world();
+    w.ms.staticPinCreditCountOverride = 25;
+    const out = ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
+    expect(out.status).toBe(201);
+    expect(out.body.outcome).toBe("credited");
+    expect(w.state.fraudSignals).toEqual([
+      { kind: "course_qr_static_pin_cap", detail: { facilityId: FAC, localDate: "2026-06-01", count: 25 } },
+    ]);
+  });
+
+  it("a multi-trail jump to 26 still writes the cap signal (threshold is >= 25)", async () => {
+    const w = await world();
+    w.ms.staticPinCreditCountOverride = 26;
+    ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
+    expect(w.state.fraudSignals).toEqual([
+      { kind: "course_qr_static_pin_cap", detail: { facilityId: FAC, localDate: "2026-06-01", count: 26 } },
+    ]);
+  });
+
+  it("a second insert for the same facility+localDate is a no-op (fake mirrors ON CONFLICT DO NOTHING)", async () => {
+    const w = await world();
+    w.ms.staticPinCreditCountOverride = 25;
+    ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
+    await w.repo.fraudSignal.insert("course_qr_static_pin_cap", {
+      facilityId: FAC,
+      localDate: "2026-06-01",
+      count: 99,
+    });
+    expect(w.state.fraudSignals).toHaveLength(1);
+    expect(w.state.fraudSignals[0]!.detail.count).toBe(25);
+  });
+
+  it("a rotating-token scan never counts and never raises the cap signal", async () => {
+    const w = await world();
+    w.ms.staticPinCreditCountOverride = 25;
+    const t = await seedRotating(w);
+    ok(await handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, qr: { variant: "rotating", token: t.token }, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
+    expect(w.ms.calls.filter((c) => c.startsWith("staticPinCreditCount"))).toEqual([]);
+    expect(w.state.fraudSignals).toHaveLength(0);
+  });
+
+  it("a failure counting or writing the alert does not fail the accepted scan", async () => {
+    const w = await world();
+    const repo = {
+      ...w.repo,
+      markerScan: {
+        ...w.repo.markerScan,
+        staticPinCreditCount: async () => {
+          throw new Error("count exploded");
+        },
+      },
+    };
+    const out = ok(await handleMarkerScan(await printed(w, "4321", { deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), repo, deps));
+    expect(out.status).toBe(201);
+    expect(out.body.outcome).toBe("credited");
+    expect(w.state.fraudSignals).toHaveLength(0);
   });
 });

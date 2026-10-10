@@ -1468,26 +1468,45 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
       // plain unconditional insert for every OTHER kind is simpler and
       // exactly as correct.
       async insert(kind: string, detail: Record<string, unknown>): Promise<void> {
-        if (kind !== "quarantined_evidence_row") {
-          await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
+        // Deduped kinds (each has a matching partial unique index):
+        //   quarantined_evidence_row — 0022 (playId, quarantineDigest)
+        //   course_qr_static_pin_cap — 0076 (facilityId, localDate) WHERE cleared_at IS NULL
+        // Every other kind is a plain unconditional insert.
+        if (kind === "quarantined_evidence_row") {
+          const playId = typeof detail.playId === "string" ? detail.playId : null;
+          const quarantineDigest = typeof detail.quarantineDigest === "string" ? detail.quarantineDigest : null;
+          if (playId === null || quarantineDigest === null) {
+            // Every REAL call site (evidence/handler.ts) always computes
+            // both before calling this — a missing one here is this
+            // codebase's own bug, not a client-triggerable shape, and
+            // silently falling back to an undeduped insert would defeat
+            // the entire point of this fix. Fail loud.
+            throw new Error(`Repo#fraudSignal.insert: kind "quarantined_evidence_row" requires detail.playId and detail.quarantineDigest to both be strings (got playId=${JSON.stringify(detail.playId)}, quarantineDigest=${JSON.stringify(detail.quarantineDigest)})`);
+          }
+          await trx`
+            insert into app.fraud_signal (user_id, kind, detail)
+            values (${uid}, ${kind}, ${trx.json(detail as never)})
+            on conflict ((detail ->> 'playId'), (detail ->> 'quarantineDigest')) where kind = 'quarantined_evidence_row'
+            do nothing
+          `;
           return;
         }
-        const playId = typeof detail.playId === "string" ? detail.playId : null;
-        const quarantineDigest = typeof detail.quarantineDigest === "string" ? detail.quarantineDigest : null;
-        if (playId === null || quarantineDigest === null) {
-          // Every REAL call site (evidence/handler.ts) always computes
-          // both before calling this — a missing one here is this
-          // codebase's own bug, not a client-triggerable shape, and
-          // silently falling back to an undeduped insert would defeat
-          // the entire point of this fix. Fail loud.
-          throw new Error(`Repo#fraudSignal.insert: kind "quarantined_evidence_row" requires detail.playId and detail.quarantineDigest to both be strings (got playId=${JSON.stringify(detail.playId)}, quarantineDigest=${JSON.stringify(detail.quarantineDigest)})`);
+        if (kind === "course_qr_static_pin_cap") {
+          const facilityId = typeof detail.facilityId === "string" ? detail.facilityId : null;
+          const localDate = typeof detail.localDate === "string" ? detail.localDate : null;
+          if (facilityId === null || localDate === null) {
+            throw new Error(`Repo#fraudSignal.insert: kind "course_qr_static_pin_cap" requires detail.facilityId and detail.localDate to both be strings (got facilityId=${JSON.stringify(detail.facilityId)}, localDate=${JSON.stringify(detail.localDate)})`);
+          }
+          await trx`
+            insert into app.fraud_signal (user_id, kind, detail)
+            values (${uid}, ${kind}, ${trx.json(detail as never)})
+            on conflict ((detail ->> 'facilityId'), (detail ->> 'localDate'))
+              where kind = 'course_qr_static_pin_cap' and cleared_at is null
+            do nothing
+          `;
+          return;
         }
-        await trx`
-          insert into app.fraud_signal (user_id, kind, detail)
-          values (${uid}, ${kind}, ${trx.json(detail as never)})
-          on conflict ((detail ->> 'playId'), (detail ->> 'quarantineDigest')) where kind = 'quarantined_evidence_row'
-          do nothing
-        `;
+        await trx`insert into app.fraud_signal (user_id, kind, detail) values (${uid}, ${kind}, ${trx.json(detail as never)})`;
       },
     },
 
@@ -3735,6 +3754,20 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
         return { status, cleared };
       }
       throw new Error("markerScan.confirmOfferOffline: private.offer_offline_confirm_for_actor returned an unexpected result");
+    },
+
+    async staticPinCreditCount(facilityId: string, localDate: string): Promise<number> {
+      // 0076: edge_actor has no SELECT on marker_credit / purchase_evidence.
+      // Facility-wide count of credited static_pin course_qr rows for plan §8.3.
+      let rows;
+      try {
+        rows = await trx`
+          select private.course_qr_static_pin_credit_count_for_actor(
+            ${facilityId}::text, ${localDate}::date) as n`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      return Number(rows[0]?.n ?? 0);
     },
   };
 }

@@ -3193,11 +3193,38 @@ Numbering: **migration `0075`, matrix `53`, this section 61.** Closes the operat
 
 ### 61.3 Not built, honestly
 
-- Pepper-rotation tooling, plan §8.3 cap alert, OCR / aHash / UI flag flips / CAMERA.
+- Pepper-rotation tooling, plan §8.3 cap alert → §62, OCR / aHash / UI flag flips / CAMERA.
 
 ### 61.4 Verification
 
-Branch: `cursor/p5-partner-auth-alarm-ui-8ffd` (base main after #100 / `2bc01b2`). Recorded when CI is green on the PR tip.
+Squash-merged as `5207f5d` (#101). Branch: `cursor/p5-partner-auth-alarm-ui-8ffd` (base main after #100 / `2bc01b2`).
 
-- pgTAP matrix 53 (+ 10 / 25 / 28 EXECUTE lists); Vitest partner-review-handler GET auth-alarms + partners admin authAlarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0074`.
+- pgTAP matrix 53 (+ 10 / 25 / 28 EXECUTE lists); Vitest partner-review-handler GET auth-alarms + partners admin authAlarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0074`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 62. As built: course-QR static-PIN daily cap alert (plan §8.3)
+
+Numbering: **migration `0076`, matrix `54`, this section 62.** Closes the plan §8.3 L4 cap left open by S2a / S2b / §61.3: **25 static-PIN course-QR credits per facility per local date is a signal and an alert, not a block.** The 26th printed-QR credit of a local date still credits; what changes is that an operator is told via one open `fraud_signal`.
+
+### 62.1 What was built
+
+- **`private.course_qr_static_pin_credit_count_for_actor(facility, local_date)`** — `edge_actor` only; SECURITY DEFINER `private_definer`; `search_path = ''`; requires a `user` or `system_delegate` binding. Returns the integer count of `app.marker_credit` rows with `status = 'credited'` joined to `app.purchase_evidence` on `method = 'course_qr' AND qr_variant = 'static_pin'` for that `facility_id` + `local_date` (facility-wide, not own-row only).
+- **SELECT policies** `pd_course_qr_cap_credit_select` / `pd_course_qr_cap_purchase_select` keyed on `private.actor_uid() IS NOT NULL` plus the narrow status/method/variant filters (named outside `pd_marker_scan_*` so matrix 24's exact 22-policy pin stays). No `edge_actor` table SELECT.
+- **Edge hook** in `handleMarkerScan` after an accepted `static_pin` `Repo#markerScan.record`: count via the new definer; when count **≥ 25**, `Repo#fraudSignal.insert('course_qr_static_pin_cap', { facilityId, localDate, count: n })`. HTTP response unchanged. Failures counting or writing are caught and logged; the scan still returns 201.
+- **Dedup**: partial unique index `fraud_signal_course_qr_static_pin_cap_open_idx` on `(detail->>'facilityId', detail->>'localDate') WHERE kind = 'course_qr_static_pin_cap' AND cleared_at IS NULL`; `fraudSignal.insert` uses `ON CONFLICT DO NOTHING` for that kind (same pattern as `quarantined_evidence_row`).
+
+### 62.2 Decisions and departures
+
+- **Reuse `fraudSignal.insert`** — no new write definer; kind has no CHECK. The PIN alarm is a separate table the portal lists; for this seam, writing `fraud_signal` is enough for closable.
+- **Fire when count ≥ 25** — not only `=== 25`, so a multi-trail jump that skips exactly 25 still raises one open signal; further scans at 26+ are absorbed by the unique index (`ON CONFLICT DO NOTHING`). Detail `count` is the observed count at first write.
+- **No PWA change** — partners Course QR PIN-alarms section does not surface this one-liner yet (not built).
+
+### 62.3 Not built, honestly
+
+- Partners PWA one-line status for this signal on the Course QR / PIN-alarms surface; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 62.4 Verification
+
+Branch: `cursor/p5-course-qr-cap-alert-8ffd` (base main after #101 / `5207f5d`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 54 (+ `partner_kind_readers` / function-inventory check 14); Vitest `marker-scan-handler` cap-alert cells; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0075`.
 

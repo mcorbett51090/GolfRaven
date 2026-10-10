@@ -532,6 +532,19 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
 
     fraudSignal: {
       async insert(kind: string, detail: Record<string, unknown>) {
+        // Mirrors Repo#fraudSignal.insert ON CONFLICT DO NOTHING for
+        // course_qr_static_pin_cap (0076 open unique index on facilityId+localDate).
+        if (kind === "course_qr_static_pin_cap") {
+          const facilityId = detail.facilityId;
+          const localDate = detail.localDate;
+          const already = state.fraudSignals.some(
+            (s) =>
+              s.kind === "course_qr_static_pin_cap" &&
+              s.detail.facilityId === facilityId &&
+              s.detail.localDate === localDate,
+          );
+          if (already) return;
+        }
         state.fraudSignals.push({ kind, detail });
       },
     },
