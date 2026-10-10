@@ -1,18 +1,63 @@
 -- 39_at10_issuance_staff_gate.sql
 -- P5.1b / 0061: AT(10) ISSUANCE STAFF GATE. A facility with no active staff/manager cannot
 -- first-issue an earned offer_code (held_review / heldFor=no_active_staff). Happy path on fac_x
--- still issues. Already-issued re-activate is not gated. Approve that would issue is refused.
+-- still issues. Already-issued re-activate is not gated. Approve that would issue is refused
+-- (app.resolve_held_offer_code 23514; partner apply status no_active_staff).
 --
--- HOW THIS FILE RUNS. One transaction, rolled back at the end. Calls app.activate_offer_code /
--- app.resolve_held_offer_code as service_role (the EXECUTE surface). Inventory / grant cells as
--- service_role. Partner apply status cell binds an admin with A3.
+-- HOW THIS FILE RUNS. One transaction, rolled back at the end. Activate / direct resolve cells
+-- run as service_role. The partner apply status cell binds admin with A3 (the 35 pattern).
 
 \set QUIET 1
 BEGIN;
 SELECT plan(14);
 
-GRANT private_definer TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
+ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
+CREATE POLICY zz39_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_sess ON app.partner_session FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+
+CREATE FUNCTION pg_temp.th(p_label text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$
+  SELECT md5('s39:' || p_label) || md5('s39b:' || p_label)
+$f$;
+CREATE FUNCTION pg_temp.mk_cred(p_label text, p_uid uuid) RETURNS uuid LANGUAGE sql AS $f$
+  INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg)
+  VALUES (p_uid, decode(md5('c39:' || p_label) || md5('c39b:' || p_label), 'hex'),
+          decode(md5('k39:' || p_label) || md5('k39b:' || p_label), 'hex'), -7)
+  RETURNING id
+$f$;
+CREATE FUNCTION pg_temp.mk_session(p_label text, p_uid uuid, p_cred uuid) RETURNS uuid LANGUAGE sql AS $f$
+  INSERT INTO app.partner_session (token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind,
+                                   mint_nonce_hash, mint_authenticator_data, mint_client_data_json, mint_signature)
+  VALUES (pg_temp.th(p_label), p_uid, p_cred, 2, now() - interval '1 hour', now(), now() + interval '7 hours', 'sign_in',
+          decode(md5('n39:' || p_label) || md5('n39b:' || p_label), 'hex'), decode(repeat('04', 40), 'hex'),
+          convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'))
+  RETURNING id
+$f$;
+CREATE FUNCTION pg_temp.seed_step(p_label text, p_cols jsonb) RETURNS void LANGUAGE plpgsql AS $f$
+BEGIN
+  EXECUTE 'SET CONSTRAINTS ALL IMMEDIATE';
+  EXECUTE 'ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_guard_trg';
+  UPDATE app.partner_session s SET
+    mfa_until = CASE WHEN p_cols ? 'mfa_s' THEN clock_timestamp() + ((p_cols ->> 'mfa_s')::numeric * interval '1 second') ELSE s.mfa_until END,
+    aal = CASE WHEN p_cols ? 'aal' THEN (p_cols ->> 'aal')::smallint ELSE s.aal END
+  WHERE s.token_hash = pg_temp.th(p_label);
+  EXECUTE 'ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_guard_trg';
+END
+$f$;
+CREATE FUNCTION pg_temp.res_oc(p_label text, p_id uuid, p_approve boolean) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE r record;
+BEGIN
+  PERFORM pg_temp.seed_step(p_label, '{"mfa_s": 240, "aal": 2}'::jsonb);
+  EXECUTE 'SET LOCAL ROLE edge_partner';
+  SELECT * INTO r FROM private.partner_resolve_held_offer_code_for_partner(p_id, p_approve);
+  EXECUTE 'RESET ROLE';
+  RETURN r.o_status || '|' || coalesce(r.o_state, '');
+END
+$f$;
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup: facility with no active staff (org + scope, only a revoked member)
@@ -40,7 +85,6 @@ INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, earned_at
   ('71000000-0000-0000-0000-0000000000f3', '61000000-0000-0000-0000-0000000000f3', '00000000-0000-0000-0000-00000000000a', 'fac_z', 'issued', now() - interval '1 day', now() + interval '20 days'),
   ('71000000-0000-0000-0000-0000000000f4', '61000000-0000-0000-0000-0000000000f4', '00000000-0000-0000-0000-00000000000a', 'fac_z', 'held_review', now() - interval '1 day', now() + interval '20 days');
 
--- Plant device + token on the issued and held codes so re-activate / approve-to-issue are meaningful.
 UPDATE app.offer_code SET
   activated_device_id = '20000000-0000-0000-0000-000000000001',
   devicecheck_token_hash = 'tok-f3',
@@ -58,6 +102,10 @@ UPDATE app.offer_code SET
   expiry_paused_at = now()
 WHERE id = '71000000-0000-0000-0000-0000000000f4';
 UPDATE app.offer SET budget_reserved = budget_reserved + 10 WHERE id = '61000000-0000-0000-0000-0000000000f4';
+
+SELECT pg_temp.mk_cred('ad', '00000000-0000-0000-0000-4000000000d0') AS c_ad \gset
+SELECT pg_temp.mk_session('ad', '00000000-0000-0000-0000-4000000000d0', :'c_ad') AS s_ad \gset
+SELECT pg_temp.th('ad') AS th_ad \gset
 
 -- ----------------------------------------------------------------------------
 -- 1. Helper + grants
@@ -117,14 +165,16 @@ SELECT is(
   'held_review',
   'AT(10): refused approve leaves the code held');
 
--- Partner apply maps the same refusal to status no_active_staff (EXECUTE: owner only).
-SET LOCAL ROLE private_definer;
-SELECT is(
-  (SELECT o_status FROM private.partner_resolve_held_offer_code_apply(
-     '71000000-0000-0000-0000-0000000000f4', true, '00000000-0000-0000-0000-4000000000d0')),
-  'no_active_staff',
-  'AT(10): partner apply maps the refusal to status no_active_staff');
+-- Partner A3 path: bind admin once, then status-map via for_partner (apply needs binding-keyed RLS).
+SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_ad');
 RESET ROLE;
+
+SELECT is(
+  pg_temp.res_oc('ad', '71000000-0000-0000-0000-0000000000f4', true),
+  'no_active_staff|',
+  'AT(10): partner apply maps the refusal to status no_active_staff');
 
 SELECT * FROM finish();
 ROLLBACK;
