@@ -194,9 +194,24 @@ REVOKE CREATE ON SCHEMA private FROM partner_session_issuer;
 REVOKE partner_session_issuer FROM CURRENT_USER;
 
 -- ============================================================================
--- 2. Inventory note
+-- 2. Inventory note (UPDATE needs the 0037/0040 grant + policy pattern)
 -- ============================================================================
+GRANT UPDATE ON private.function_inventory TO CURRENT_USER;
+CREATE POLICY current_user_edit_function_inventory_0078 ON private.function_inventory
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 UPDATE private.function_inventory
 SET note = '0048/0078: edge_partner_minter only; owned by partner_session_issuer; mints a sign-in session from a WebAuthn assertion: HMAC / purpose / expiry, the credential from the table, 60 per hour per credential, structural checks against partner_rp_config, the SQL signature check, the used nonce, the counter compare-and-set, the session with its mint_* evidence, then eviction beyond three live sessions (partner_sessions_evict_oldest, keep=3, REVOKE not DELETE); every refusal is a status, never a RAISE'
 WHERE schema_name = 'private' AND function_name = 'partner_session_mint'
   AND identity_args = 'p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea';
+DO $assert_0078_inventory$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM private.function_inventory
+    WHERE schema_name = 'private' AND function_name = 'partner_session_mint' AND note LIKE '0048/0078:%'
+  ) THEN
+    RAISE EXCEPTION '0078: partner_session_mint function_inventory note was not updated';
+  END IF;
+END
+$assert_0078_inventory$;
+DROP POLICY current_user_edit_function_inventory_0078 ON private.function_inventory;
+REVOKE UPDATE ON private.function_inventory FROM CURRENT_USER;
