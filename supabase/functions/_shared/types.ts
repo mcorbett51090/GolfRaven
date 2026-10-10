@@ -646,7 +646,8 @@ export interface Repo {
   purchases: {
     /**
      * Distinct `(facilityId, localDate)` of the BOUND actor's own `valid` purchases at `facilityId`
-     * whose `local_date` is within ±`CORROBORATION_WINDOW_DAYS` (7) of `aroundLocalDate`.
+     * whose `local_date` is within ±`CORROBORATION_WINDOW_DAYS` (7) of `aroundLocalDate`
+     * (`private.list_valid_purchases_around_for_actor`, migration 0066 — not a direct table SELECT).
      * SELECT via existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`).
      */
     listValidAround(facilityId: string, aroundLocalDate: string): Promise<{ facilityId: string; localDate: string }[]>;

@@ -2710,19 +2710,21 @@ Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Tip `381df29` CI
 
 ## 44. As built: purchase corroboration into scorePlay
 
-Numbering: **this section 44.** No migration. Closes the §4.6 / score-play trust-table seam: `ctx.purchases` is joined from `app.purchase_evidence` before every live `scorePlay` call.
+Numbering: **migration `0066`, matrix `44`, this section 44.** Closes the §4.6 / score-play trust-table seam: `ctx.purchases` is joined from `app.purchase_evidence` before every live `scorePlay` call (including catalog drain / rescore).
 
 ### 44.1 What was built
 
-- **`Repo#purchases.listValidAround(facilityId, aroundLocalDate)`**: distinct `(facilityId, localDate)` of the bound actor's own rows with `status = 'valid'` whose `local_date` is within ±7 days (`CORROBORATION_WINDOW_DAYS`). Window SQL uses `make_interval(days => $n::int)` (not `date ± $n`) because postgres.js binds JS numbers as float8. SELECT under existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`); no new policy/grant.
+- **`private.list_valid_purchases_around_for_actor(facility, around_local_date)`** (0066): SECURITY DEFINER under `private_definer`; returns distinct `(facility_id, local_date)` of the bound actor's own `status = 'valid'` rows within ±7 days (`CORROBORATION_WINDOW_DAYS`, hard-coded). Allows `user` and `system_delegate` bindings; refuses unbound / partner. `GRANT EXECUTE` to **`edge_actor` only**. Reuses `pd_marker_scan_purchase_select`; **no** `edge_actor` table SELECT (matrix 16/24 stay closed).
+- **`Repo#purchases.listValidAround`**: calls that definer (not a direct `FROM app.purchase_evidence`).
 - **`evidence/handler.ts`**: both scoring sites (single-item intake and `finalizeScoringForKey`) load purchases and pass them on `scorePlay` context when non-empty.
-- Fake repo + Vitest cells prove the join runs and filters void/out-of-window/other-user rows.
+- Fake repo + Vitest cells prove the join runs and filters void/out-of-window/other-user rows. Matrix 44 pins EXECUTE, closed table grant, happy path, other-user isolation, unbound/bad-args.
 
 ### 44.2 Decisions and departures
 
-- **Edge-only** — no migration; RLS already allows the actor's purchase SELECT for marker-scan.
+- **Definer, not table grant** — first tip tried a direct Edge SELECT and broke every drain/rescore path (`permission denied for table purchase_evidence`); matrix 16 forbids `edge_actor` SELECT on that table.
 - **`valid` only** — matches packages/rules §4.6 (`PurchaseCorroboration` doc); pending/held_review/void never corroborate.
 - **Omit empty `purchases`** — same as before when none qualify (parser treats the field as optional).
+- **`system_delegate` allowed** — catalog drain / promotion re-score must see the same corroboration as live intake.
 
 ### 44.3 Not built, honestly
 
@@ -2733,5 +2735,6 @@ Numbering: **this section 44.** No migration. Closes the §4.6 / score-play trus
 Branch: `cursor/p5-purchase-corroboration-8ffd` (base main after #83). Recorded when CI is green on the PR tip.
 
 - Vitest: `evidence-handler.test.ts` purchase-corroboration cells; fake `listValidAround` window/status filters.
+- pgTAP matrix 44; Deno integration (drain/rescore no longer trip on purchase_evidence).
 - `deno check` / typecheck: `Repo.purchases` on the real privileged builder.
 

@@ -3729,27 +3729,21 @@ const RECEIPT_INTAKE_STATUSES = new Set<ReceiptIntakeStatus>([
   "bad_args",
 ]);
 
-/** Matches packages/rules `CORROBORATION_WINDOW_DAYS` (vendored score-play.js). Kept local so privileged.ts does not import the scoring vendor. */
-const PURCHASE_CORROBORATION_WINDOW_DAYS = 7;
-
-function buildPurchasesRepo(trx: TxSql, uid: string): Repo["purchases"] {
+function buildPurchasesRepo(trx: TxSql, _uid: string): Repo["purchases"] {
   return {
     async listValidAround(facilityId, aroundLocalDate) {
-      // make_interval(+ ::int cast): postgres.js binds JS numbers as float8, so `date - $n` is not `date - integer`.
-      // Policy: pd_marker_scan_purchase_select (user_id = actor_uid).
+      // 0066: edge_actor has no SELECT on purchase_evidence (matrix 16/24). ±7d window
+      // (packages/rules CORROBORATION_WINDOW_DAYS) is hard-coded in the definer. SELECT under
+      // private_definer + pd_marker_scan_purchase_select; user + system_delegate bindings.
       const rows = await trx`
-        select distinct facility_id, local_date
-        from app.purchase_evidence
-        where user_id = ${uid}
-          and facility_id = ${facilityId}
-          and status = 'valid'
-          and local_date between (${aroundLocalDate}::date - make_interval(days => ${PURCHASE_CORROBORATION_WINDOW_DAYS}::int))::date
-                            and (${aroundLocalDate}::date + make_interval(days => ${PURCHASE_CORROBORATION_WINDOW_DAYS}::int))::date
-        order by local_date asc
-        limit 64`;
+        select o_facility_id, o_local_date
+        from private.list_valid_purchases_around_for_actor(
+          ${facilityId}::text,
+          ${aroundLocalDate}::date
+        )`;
       return rows.map((r) => ({
-        facilityId: String(r.facility_id),
-        localDate: r.local_date instanceof Date ? r.local_date.toISOString().slice(0, 10) : String(r.local_date).slice(0, 10),
+        facilityId: String(r.o_facility_id),
+        localDate: r.o_local_date instanceof Date ? r.o_local_date.toISOString().slice(0, 10) : String(r.o_local_date).slice(0, 10),
       }));
     },
   };
