@@ -2507,9 +2507,9 @@ Numbering: **migration `0063`, matrix `41`, this section 37.** Clears the §35 s
 
 ### 37.4 Verification
 
-Branch: `cursor/p5-offline-confirm-cosignal-8ffd` (base main after #76).
+Branch: `cursor/p5-offline-confirm-cosignal-8ffd` (base main after #76). Tip squash-merged when CI green as `96d2027` (#77).
 
-- **Matrix 41**: inventory/EXECUTE, offline redeem writes `offline_step`, happy clear of both same-window codes, other player's code untouched, `none_awaiting` / `cosignal_invalid` / `cosignal_used`.
+- **Matrix 41**: inventory/EXECUTE, offline redeem writes `offline_step` (partner bind isolated in SAVEPOINT), happy clear of the planted awaiting code, other player's code untouched, `none_awaiting` / `cosignal_invalid` / `cosignal_used`.
 - **Edge vitest** (`marker-scan-handler`): intake with confirm override → 200 credited, empty purchases.
-- Restricted harness / CI recorded when green on the PR tip.
+- CI green on PR #77 tip before merge (all three checks). Matrix 24 tip fixes on the same branch: NZ wrong-zone PIN non-vacuous when Chicago≡Auckland date; NIT same-day dedupe when `t0-2h` straddles Chicago midnight.
 
