@@ -899,7 +899,8 @@ export interface RetentionStep {
     | "partner_sign_in_failures"
     | "course_qr_tokens"
     | "course_pin_alarms"
-    | "abandoned_pending_purchases";
+    | "abandoned_pending_purchases"
+    | "course_pin_epoch_log";
   /** The most rows one batch removes (the definer's own `limit`, or its own constant bound); `null` = one unbatched pass (the definer has no row bound; no step is unbatched since 0040). The runner
    * repeats a batched step while a batch comes back FULL, up to its own per-run cap, so a backlog drains faster than one batch per run. */
   batchLimit: number | null;

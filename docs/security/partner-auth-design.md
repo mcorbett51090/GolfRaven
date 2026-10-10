@@ -3087,11 +3087,37 @@ Numbering: **migration `0071`, matrix `49`, this section 57.** Closes S2a depart
 
 ### 57.3 Not built, honestly
 
-- `course_pin_epoch_log` purge, PIN alarm UI, pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
+- `course_pin_epoch_log` purge (→ §58), PIN alarm UI, pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
 
 ### 57.4 Verification
 
-Branch: `cursor/p5-course-qr-pending-purge-8ffd` (base main after #96 / `257b187`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-course-qr-pending-purge-8ffd` (base main after #96 / `257b187`). Tip CI green on PR #97 (all three checks); squash-merged as `afa2789`.
 
 - pgTAP matrix 49 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0070`.
+
+## 58. As built: course_pin_epoch_log retention purge
+
+Numbering: **migration `0072`, matrix `50`, this section 58.** Closes the remaining 0046 / §57.3 retention follow-up for `app.course_pin_epoch_log`. Wired into the existing hourly `retention-purge` schedule (fifteen → sixteen steps).
+
+### 58.1 What was built
+
+- **`private.purge_course_pin_epoch_log()`** — `effective_from < now() - 90 days` and not the latest `pin_epoch` for that facility; LIMIT 5000; composite-PK FOR-loop batch (0050 shape).
+- Policies: DELETE + SELECT companions repeating the floor + keep-latest conjunct; closed under a partner binding. `GRANT DELETE` on `course_pin_epoch_log`.
+- Edge: one new `RetentionStep` name after the §57 course-QR steps; matrices 20 / 30 / Deno step-order updated.
+
+### 58.2 Decisions and departures
+
+- **Floor 90 days** — match alarm retention; challenge-window residual is ~24 h / 7 d, so 90 d is generous.
+- **Keep latest per facility (body only)** — `course_pin_epoch_at` needs a predecessor for pre-rotation instants; a sole-old latest row is never deleted. The keep-latest conjunct cannot live in the RLS policy: a same-table subquery recurses under FORCE RLS; `pd_marker_scan_epoch_log_select` (`USING (true)`) already lets the definer read every row for the body's `max(pin_epoch)` check.
+- **Reuse `retention-purge`** — no new Edge function.
+
+### 58.3 Not built, honestly
+
+- PIN alarm UI, pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
+
+### 58.4 Verification
+
+Branch: `cursor/p5-pin-epoch-log-purge-8ffd` (base main after #97 / `afa2789`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 50 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0071`.
 
