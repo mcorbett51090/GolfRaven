@@ -3144,7 +3144,33 @@ Numbering: **migration `0073`, matrix `51`, this section 59.** Closes the operat
 
 ### 59.4 Verification
 
-Branch: `cursor/p5-pin-alarm-ui-8ffd` (base main after #98 / `14c5b6c`). Recorded when CI is green on the PR tip.
+Squash-merged as `fefa6ff` (#99). Branch: `cursor/p5-pin-alarm-ui-8ffd` (base main after #98 / `14c5b6c`).
 
-- pgTAP matrix 51 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET alarms + partners work alarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0072`.
+- pgTAP matrix 51 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET alarms + partners work alarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0072`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 60. As built: partner_auth_alarm retention purge
+
+Numbering: **migration `0074`, matrix `52`, this section 60.** Closes the retention follow-up for `app.partner_auth_alarm` left open by 0048 / §9 / §59.3. Wired into the existing hourly `retention-purge` schedule (sixteen → seventeen steps).
+
+### 60.1 What was built
+
+- **`private.purge_partner_auth_alarms()`** — `raised_at < now() - 90 days`; LIMIT 5000; InitPlan `= ANY (ARRAY(...))` batch (0050 single-key shape).
+- Policies: DELETE + SELECT companions repeating the floor; closed under a partner binding. `GRANT DELETE, SELECT (id, raised_at)` on `partner_auth_alarm` (0048 granted INSERT + SELECT on the arbiter columns only).
+- Edge: one new `RetentionStep` name after the §58 epoch-log step; matrices 20 / 30 / Deno step-order updated.
+
+### 60.2 Decisions and departures
+
+- **Floor 90 days** — match `course_pin_alarm` / epoch-log retention; the table grows at most one row per (kind, credential, minute).
+- **Reuse `retention-purge`** — no new Edge function.
+- **Column-level SELECT for the batch** — the subquery reads `id` / `raised_at`; 0048's arbiter-column grant is insufficient alone.
+
+### 60.3 Not built, honestly
+
+- Pepper-rotation tooling, plan §8.3 cap alert, OCR / aHash / UI flag flips / CAMERA. Partner-auth-alarm operator UI (portal read) remains a later seam if wanted.
+
+### 60.4 Verification
+
+Branch: `cursor/p5-partner-auth-alarm-purge-8ffd` (base main after #99 / `fefa6ff`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrices 20 / 30 / 52; Deno retention-purge step order; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0073`.
 
