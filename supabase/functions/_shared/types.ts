@@ -641,6 +641,17 @@ export interface Repo {
   receipts: {
     intake(input: ReceiptIntakeInput): Promise<ReceiptIntakeResult>;
   };
+
+  /** P5 §44: feed `scorePlay`'s `ctx.purchases` from `purchase_evidence` (§4.6), not `app.evidence`. */
+  purchases: {
+    /**
+     * Distinct `(facilityId, localDate)` of the BOUND actor's own `valid` purchases at `facilityId`
+     * whose `local_date` is within ±`CORROBORATION_WINDOW_DAYS` (7) of `aroundLocalDate`
+     * (`private.list_valid_purchases_around_for_actor`, migration 0066 — not a direct table SELECT).
+     * SELECT via existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`).
+     */
+    listValidAround(facilityId: string, aroundLocalDate: string): Promise<{ facilityId: string; localDate: string }[]>;
+  };
 }
 
 export interface CourseQrPublicKey {

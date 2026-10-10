@@ -1504,6 +1504,7 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     offlineCode: buildOfflineCodeRepo(trx),
     markerScan: buildMarkerScanRepo(trx),
     receipts: buildReceiptsRepo(trx),
+    purchases: buildPurchasesRepo(trx, uid),
 
     device: {
       async findOwn(deviceId: string) {
@@ -3727,6 +3728,26 @@ const RECEIPT_INTAKE_STATUSES = new Set<ReceiptIntakeStatus>([
   "review_account",
   "bad_args",
 ]);
+
+function buildPurchasesRepo(trx: TxSql, _uid: string): Repo["purchases"] {
+  return {
+    async listValidAround(facilityId, aroundLocalDate) {
+      // 0066: edge_actor has no SELECT on purchase_evidence (matrix 16/24). ±7d window
+      // (packages/rules CORROBORATION_WINDOW_DAYS) is hard-coded in the definer. SELECT under
+      // private_definer + pd_marker_scan_purchase_select; user + system_delegate bindings.
+      const rows = await trx`
+        select o_facility_id, o_local_date
+        from private.list_valid_purchases_around_for_actor(
+          ${facilityId}::text,
+          ${aroundLocalDate}::date
+        )`;
+      return rows.map((r) => ({
+        facilityId: String(r.o_facility_id),
+        localDate: r.o_local_date instanceof Date ? r.o_local_date.toISOString().slice(0, 10) : String(r.o_local_date).slice(0, 10),
+      }));
+    },
+  };
+}
 
 function buildReceiptsRepo(trx: TxSql): Repo["receipts"] {
   return {

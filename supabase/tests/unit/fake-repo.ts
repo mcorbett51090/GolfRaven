@@ -144,6 +144,8 @@ export interface FakeState {
   courseTier: Map<string, "unverified" | "listed-verified" | "play-verified">;
   /** Play ids that already used their one re-pick (the real one is an audit_log row). */
   repicks: Set<string>;
+  /** P5 §44: in-memory `purchase_evidence` rows for `purchases.listValidAround` (status + facility + localDate). */
+  purchases: Array<{ userId: string; facilityId: string; localDate: string; status: "pending" | "held_review" | "valid" | "void" }>;
 }
 
 export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
@@ -181,6 +183,7 @@ export function makeFakeState(overrides: Partial<FakeState> = {}): FakeState {
     evidenceCreatedAt: new Map(),
     courseTier: new Map(),
     repicks: new Set(),
+    purchases: [],
     ...overrides,
   };
 }
@@ -561,6 +564,26 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
             creditStatus: "pending",
           }],
         };
+      },
+    },
+
+    purchases: {
+      async listValidAround(facilityId: string, aroundLocalDate: string) {
+        const center = Date.parse(`${aroundLocalDate}T00:00:00.000Z`);
+        const dayMs = 86_400_000;
+        const windowDays = 7;
+        const seen = new Set<string>();
+        const out: { facilityId: string; localDate: string }[] = [];
+        for (const p of state.purchases) {
+          if (p.userId !== uid || p.facilityId !== facilityId || p.status !== "valid") continue;
+          const t = Date.parse(`${p.localDate}T00:00:00.000Z`);
+          if (!Number.isFinite(t) || Math.abs(t - center) > windowDays * dayMs) continue;
+          const key = `${p.facilityId}:${p.localDate}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({ facilityId: p.facilityId, localDate: p.localDate });
+        }
+        return out.sort((a, b) => (a.localDate < b.localDate ? -1 : a.localDate > b.localDate ? 1 : 0));
       },
     },
 

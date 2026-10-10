@@ -577,6 +577,40 @@ describe("handleEvidenceIntake — replay of a terminal drained row (NEW-3)", ()
 // Round 3 gate (HIGH, §8.6 minimisation): raw fix coordinates are stored only
 // when a re-pick can actually happen.
 // ============================================================================
+describe("handleEvidenceIntake — purchase corroboration (§44 / §4.6)", () => {
+  it("loads the actor's valid purchase_evidence into scorePlay ctx (listValidAround)", async () => {
+    const state = makeFakeState();
+    state.purchases.push(
+      { userId: "user-a", facilityId: "fac_x", localDate: "2026-06-01", status: "valid" },
+      { userId: "user-a", facilityId: "fac_x", localDate: "2026-06-01", status: "pending" },
+      { userId: "user-a", facilityId: "fac_x", localDate: "2026-05-20", status: "valid" }, // outside ±7 days
+      { userId: "user-b", facilityId: "fac_x", localDate: "2026-06-01", status: "valid" },
+    );
+    const repo = makeFakeRepo(state, "user-a");
+    const seen: { facilityId: string; aroundLocalDate: string; out: { facilityId: string; localDate: string }[] }[] = [];
+    const orig = repo.purchases.listValidAround.bind(repo.purchases);
+    repo.purchases.listValidAround = async (facilityId, aroundLocalDate) => {
+      const out = await orig(facilityId, aroundLocalDate);
+      seen.push({ facilityId, aroundLocalDate, out });
+      return out;
+    };
+    const result = await handleEvidenceIntake(checkinBody(), repo);
+    expect(result.status).toBe("accepted");
+    expect(seen).toEqual([{ facilityId: "fac_x", aroundLocalDate: "2026-06-01", out: [{ facilityId: "fac_x", localDate: "2026-06-01" }] }]);
+    expect(state.plays.has("user-a:crs_x1:2026-06-01")).toBe(true);
+  });
+
+  it("scores successfully when no valid purchase falls in the corroboration window", async () => {
+    const state = makeFakeState();
+    state.purchases.push({ userId: "user-a", facilityId: "fac_x", localDate: "2026-06-01", status: "void" });
+    const repo = makeFakeRepo(state, "user-a");
+    expect(await repo.purchases.listValidAround("fac_x", "2026-06-01")).toEqual([]);
+    const result = await handleEvidenceIntake(checkinBody(), repo);
+    expect(result.status).toBe("accepted");
+    expect(state.plays.has("user-a:crs_x1:2026-06-01")).toBe(true);
+  });
+});
+
 describe("handleEvidenceIntake — fixCoords minimisation (§8.6)", () => {
   const evidenceOf = (state: ReturnType<typeof makeFakeState>) => [...state.evidence.values()][0]! as unknown as { integrity: Record<string, unknown> };
 
