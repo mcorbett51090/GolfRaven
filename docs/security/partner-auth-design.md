@@ -2693,12 +2693,12 @@ Numbering: **this section 43.** No migration. Closes the player-app half of §40
 ### 43.2 Decisions and departures
 
 - **API-first, flag off** — same pattern as `scanMarker` / `MARKER_COSIGNAL_UI_ENABLED`: store privacy (CAMERA / photo library) and product copy stay out of this slice.
-- **Handler-shaped fixtures, not `edge-contract.json` yet** — multipart recording is deferred; success/refusal bodies match `mapStatus` / `okResponse` / Edge error codes from §40.
+- **Handler-shaped fixtures at ship time** — multipart recording into `edge-contract.json` landed later as §56; at §43 ship, success/refusal bodies matched `mapStatus` / `okResponse` / Edge error codes from §40.
 - **No UI** — no image picker, no CAMERA permission, no gallery read.
 
 ### 43.3 Not built, honestly
 
-- Picker/camera screen, OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, edge-contract multipart recording.
+- Picker/camera screen, OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, edge-contract multipart recording (→ §56).
 
 ### 43.4 Verification
 
@@ -3031,11 +3031,38 @@ Numbering: **this section 55.** No migration. Closes the UI half of Edge `receip
 
 ### 55.3 Not built, honestly
 
-- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, multipart edge-contract recording, course-QR abandoned-pending purge.
+- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, multipart edge-contract recording (→ §56), course-QR abandoned-pending purge.
 
 ### 55.4 Verification
 
-Branch: `cursor/p5-receipt-number-ui-8ffd` (base main after #94 / `0c685cd`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-number-ui-8ffd` (base main after #94 / `0c685cd`). Tip CI green on PR #95 (all three checks); squash-merged as `e0ab1d3`.
 
 - Mobile Vitest: receipts-upload + i18n parity; typecheck.
+
+## 56. As built: receipts multipart edge-contract recording
+
+Numbering: **this section 56.** No migration. Closes the deferred §43.2 / §55.3 item: record `POST receipts` from the REAL handler into `edge-contract.json` and prove the mobile client against those answers.
+
+### 56.1 What was built
+
+- **Recorder** (`apps/mobile/scripts/record-edge-contract.rec.ts`): `receipts_` in `OWNED_PREFIXES`; `receiptsEndpoint` runs `parseReceiptMultipart` + `handleReceiptUpload` + the 60/hour member limit behind the real envelope, over the in-memory fake repo, no-op Storage, fixed object/purchase/credit ids. Intake outcomes scripted; sniff / EXIF strip / size cap are real.
+- **Fixture** (`receipts_201_ok` / `_duplicate` / `_review`, `_415`, `_413`, `_422_no_programme`, `_404`, `_403`, `_400`, `_429`) plus `_provenance_p5s56`. Logical `request` fields (not raw FormData); oversize carries `fileBytesLength` only (no megabytes of hex).
+- **Wire tests** (`receipts-wire.test.ts`): FormData built from recorded logical fields; every recorded success/refusal mapped; no retry; callers pin unchanged.
+- **`api-contract.test.ts`**: `receipts_*` errors excluded from the sign-in error table (owned by receipts-wire).
+
+### 56.2 Decisions and departures
+
+- **Logical multipart, not raw FormData** — Node/RN FormData boundaries are not byte-stable; the recorder stores facilityId / fileName / fileBytesHex (or length) / optional localDate / receiptNumberOcr.
+- **Oversize = length only** — embedding `RECEIPTS_MAX_BYTES + 1` of zeros would bloat the fixture ~10 MB; length proves the cap.
+- **Flag stays false** — recording does not flip `RECEIPTS_UPLOAD_UI_ENABLED`.
+
+### 56.3 Not built, honestly
+
+- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, course-QR abandoned-pending purge, CAMERA.
+
+### 56.4 Verification
+
+Branch: `cursor/p5-receipts-edge-contract-8ffd` (base main after #95 / `e0ab1d3`). Recorded when CI is green on the PR tip.
+
+- Recorder verify mode; mobile Vitest receipts-wire + api-contract; typecheck.
 

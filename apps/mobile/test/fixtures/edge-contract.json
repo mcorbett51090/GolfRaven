@@ -1907,6 +1907,108 @@
         },
         "jti": "jti10"
       }
+    },
+    "receipts_201_ok": {
+      "status": 201,
+      "body": "{\"data\":{\"status\":\"ok\",\"localDate\":\"2030-01-02\",\"dedupe\":\"clean\",\"purchases\":[{\"purchaseId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"trailId\":\"trl_t\",\"purchaseStatus\":\"pending\",\"creditId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"creditStatus\":\"pending\"}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9",
+        "localDate": "2030-01-02",
+        "receiptNumberOcr": "ABC-1"
+      }
+    },
+    "receipts_201_duplicate": {
+      "status": 201,
+      "body": "{\"data\":{\"status\":\"duplicate\",\"localDate\":\"2030-01-02\",\"dedupe\":\"same_user\",\"purchases\":[]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9",
+        "localDate": "2030-01-02",
+        "receiptNumberOcr": "ABC-1"
+      }
+    },
+    "receipts_201_review": {
+      "status": 201,
+      "body": "{\"data\":{\"status\":\"review\",\"localDate\":\"2030-01-02\",\"dedupe\":\"cross_user\",\"purchases\":[{\"purchaseId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"trailId\":\"trl_t\",\"purchaseStatus\":\"pending\",\"creditId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"creditStatus\":\"pending\"}]}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9",
+        "localDate": "2030-01-02",
+        "receiptNumberOcr": "ABC-1"
+      }
+    },
+    "receipts_415_unsupported_media": {
+      "status": 415,
+      "body": "{\"error\":{\"code\":\"unsupported_media_type\",\"message\":\"receipt image must be JPEG, PNG, or HEIC\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "x.pdf",
+        "fileBytesHex": "25504446"
+      }
+    },
+    "receipts_413_payload_too_large": {
+      "status": 413,
+      "body": "{\"error\":{\"code\":\"payload_too_large\",\"message\":\"receipt file exceeds 5242880 bytes\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "big.jpg",
+        "fileBytesLength": 5242881
+      }
+    },
+    "receipts_422_no_programme": {
+      "status": 422,
+      "body": "{\"error\":{\"code\":\"no_programme\",\"message\":\"no programme for facility\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9",
+        "localDate": "2030-01-02",
+        "receiptNumberOcr": "ABC-1"
+      }
+    },
+    "receipts_404_not_found": {
+      "status": 404,
+      "body": "{\"error\":{\"code\":\"not_found\",\"message\":\"facility not found\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9",
+        "localDate": "2030-01-02",
+        "receiptNumberOcr": "ABC-1"
+      }
+    },
+    "receipts_403_forbidden": {
+      "status": 403,
+      "body": "{\"error\":{\"code\":\"forbidden\",\"message\":\"review account may not upload receipts\"}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9",
+        "localDate": "2030-01-02",
+        "receiptNumberOcr": "ABC-1"
+      }
+    },
+    "receipts_400_bad_request": {
+      "status": 400,
+      "body": "{\"error\":{\"code\":\"bad_request\",\"message\":\"invalid receipt upload\",\"details\":{\"issues\":[{\"path\":\"facilityId\",\"message\":\"required\"}]}}}",
+      "request": {
+        "facilityId": "",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9"
+      }
+    },
+    "receipts_429_rate_limited": {
+      "status": 429,
+      "body": "{\"error\":{\"code\":\"rate_limited\",\"message\":\"receipts rate limit exceeded\",\"details\":{\"retryAfterSeconds\":3600}}}",
+      "request": {
+        "facilityId": "fac_x",
+        "fileName": "r.jpg",
+        "fileBytesHex": "ffd8ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080001000101011100ffc40014000100000000000000000000000000000003ffc400141001000000000000000000000000000000ffda0008010100003f007bbfffd9"
+      }
     }
   },
   "_provenance_p42b1": "Evidence-lane entries (keys starting challenge_, token_, evidence_, batch_, attestkey_) and `vectors` were recorded 2026-10-03 by apps/mobile/scripts/record-edge-contract.rec.ts, which runs the REAL handlers (evidence, evidence-batch (handleEvidenceBatchIntake unmodified), checkin-challenge, checkin-token, devices-attest-key) and the real binding / source-ref code over the server's own fakes; the Apple / Google verification PORTS are scripted (accept exactly the base64url of the binding the real code computed; see the script's header), behind the real envelope (http.ts). Only privileged.ts is replaced by in-memory rate limits and savepoint-less per-item isolation. Each entry carries the `request` that produced it, so the client's request builders are compared with bodies the real parser accepted or refused. Re-run the script (see its header) after any server change; with no RECORD_EDGE_CONTRACT it fails when the fixture is stale.",
@@ -2330,5 +2432,6 @@
   },
   "_provenance_p42b3b": "Entries starting offlineseed_ and activate_ (and `vectors.offlineCode`) were recorded by the same script (P4.2b-3b) from the REAL handlers: me-offline-seed (handleOfflineSeedRequest, over the server's in-memory offline-code repo; the seed is the server test suite's independent reference derivation under its TEST key, not a production secret) and rewards-activate (handleActivation, parseActivationBody, extractRewardId, enforceActivationRateLimits, over the in-memory rewards repo) with the scripted Apple / Google ports described above. Only privileged.ts is replaced (in-memory rate limits) and, as for checkin-token, the rollback of the handler's transaction on a thrown error is emulated. `vectors.offlineCode` holds codes the server's totp.ts computed.",
   "_provenance_p42c": "Entries starting checkin_ and `vectors.checkinWindow` / `vectors.localDate` were recorded by the same script (P4.2c) from the REAL evidence, checkin-challenge and checkin-token handlers: the request the check-in screen builds (device-shaped fix, facility-local date from the fix's own time), and how the server's challenge window (`issued_at <= capturedAt <= expires_at`) treats a prefetched challenge, a live challenge taken before the fix and a live challenge taken after it. `consumed` flags are read from the server fake's token row after the real handler ran; `localDate` samples are the server's own `localDateInTz`.",
-  "_provenance_p5s2a": "Entries starting markerscan_ were recorded by the same script (P5.1a S2a) from the REAL marker-scan handler (handleMarkerScan, parseMarkerScanBody, the 20-a-day limit, the envelope) over the server's in-memory marker-scan repo (supabase/tests/unit/fake-marker-scan-repo.ts), with two FIXED Ed25519 verification keys from obviously fake seeds, so the recorded rotating token and printed-QR signature are byte-stable. The database's own checks (the 120 s rule, single use, the PIN derivation and counters) are proven by the pgTAP matrix 24_* and the Deno integration suite, not here; as for checkin-token, the rollback of a thrown refusal is emulated. Each entry carries the request that produced it."
+  "_provenance_p5s2a": "Entries starting markerscan_ were recorded by the same script (P5.1a S2a) from the REAL marker-scan handler (handleMarkerScan, parseMarkerScanBody, the 20-a-day limit, the envelope) over the server's in-memory marker-scan repo (supabase/tests/unit/fake-marker-scan-repo.ts), with two FIXED Ed25519 verification keys from obviously fake seeds, so the recorded rotating token and printed-QR signature are byte-stable. The database's own checks (the 120 s rule, single use, the PIN derivation and counters) are proven by the pgTAP matrix 24_* and the Deno integration suite, not here; as for checkin-token, the rollback of a thrown refusal is emulated. Each entry carries the request that produced it.",
+  "_provenance_p5s56": "Entries starting receipts_ were recorded by the same script (P5 §56) from the REAL receipts handler (parseReceiptMultipart, handleReceiptUpload, the 60/hour member limit, the envelope) over the server's in-memory fake repo with a no-op Storage port and a FIXED object id. Intake outcomes (ok / duplicate / review / no_programme / no_facility / review_account) are scripted on the fake; image sniff / EXIF strip / size cap are the real code. Each entry's `request` is the logical multipart fields (facilityId, fileName, fileBytesHex or fileBytesLength for oversize, optional localDate / receiptNumberOcr), not raw FormData."
 }
