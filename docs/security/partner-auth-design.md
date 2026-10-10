@@ -2785,11 +2785,37 @@ Numbering: **migration `0067`, matrix `45`, this section 46.** Closes money-path
 
 ### 46.3 Not built, honestly
 
-- OCR, perceptual aHash, picker UI, attaching `coSignalFix` / promoting to `approved`, partner resolve of `receipt_cross_user_match`.
+- OCR, perceptual aHash, picker UI, attaching `coSignalFix` / promoting to `approved` (→ §47), partner resolve of `receipt_cross_user_match`.
 
 ### 46.4 Verification
 
-Branch: `cursor/p5-receipt-green-fee-8ffd` (base main after #85). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-green-fee-8ffd` (base main after #85). Tip CI green on PR #86 (all three checks); squash-merged as `524ac87`.
 
 - pgTAP matrix 45; Vitest `request-shape` pin that `receipt_green_fee` stays rejected at `POST /v1/evidence`.
+
+## 47. As built: receipt_green_fee promote on cosignal (0068)
+
+Numbering: **migration `0068`, matrix `46`, this section 47.** Closes the money half of §46: when an attested cosignal makes a `method=receipt` purchase `valid`, the matching facility-level `receipt_green_fee` evidence row is promoted to `summary.status=approved` with `coSignalFix` copied from the fix evidence.
+
+### 47.1 What was built
+
+- **`private.marker_cosignal_attach_for_actor` (REPLACE)**: after a successful attested attach of a receipt purchase, promote the actor's own `receipt_green_fee` row keyed by `receipt:{facility}:{phash}` when there is no open `receipt_cross_user_match` review item on that purchase set.
+- **`summary` after promote**: `{ localDate, status: "approved", fingerprint, coSignalFix }` where `coSignalFix` is the cosignal evidence's `summary.fix` object (scorePlay money path).
+- **Policies**: `pd_receipt_evidence_update` (own pending → approved with `coSignalFix` + fingerprint) and `pd_receipt_review_select` (open cross-user items on the actor's purchases, so the definer can see the block).
+
+### 47.2 Decisions and departures
+
+- **Promote inside attach, not a new endpoint** — the cosignal is the money-path gate; a separate promote call would race or skip the purchase state machine.
+- **Open cross-user blocks promote** — money-path §5 grief rule; purchase may still become `valid`, evidence stays `pending` until partner resolve (unbuilt).
+- **Unattestable stays pending** — held_review purchases never write `coSignalFix`.
+
+### 47.3 Not built, honestly
+
+- OCR, perceptual aHash, picker UI, partner resolve of `receipt_cross_user_match`.
+
+### 47.4 Verification
+
+Branch: `cursor/p5-receipt-cosignal-approve-8ffd` (base main after #86 / `524ac87`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 46: clean promote, unattestable holds, open cross-user blocks.
 
