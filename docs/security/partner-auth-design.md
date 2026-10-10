@@ -2618,8 +2618,8 @@ Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §3
 - **`private.refresh_rollups(p_month date)`** (`edge_system` only): NULL month = current UTC month. Opens GUC `app.edge.rollups_refresh = on` (never under a partner binding — policies require `partner_binding_kind() IS DISTINCT FROM 'partner'`). Recomputes:
   - **`operator_rollup` / `completions`**: non-revoked `user_achievement` with completion-family `award_key ~ '^v[0-9]+$'` on a trail-scoped `catalog_achievement_def`; `cohort_n` = distinct users; `value` = award count.
   - **`sponsor_rollup` / `markers_earned`**: non-void `entitlement` with `sponsorship_id`; bucketed by `earned_at`; same cohort/value shape.
-  - **k-anonymity**: upsert only when `cohort_n >= 10` (WITH CHECK + table CHECK); remove existing rows for those metrics/month when the live cohort falls below 10. Other metric names are left alone.
-- **Eleven `pd_rollups_refresh_*` policies** on `user_achievement`, `catalog_achievement_def`, `entitlement`, `operator_rollup`, `sponsor_rollup` (SELECT/INSERT/UPDATE/DELETE as needed).
+  - **k-anonymity**: upsert only when `cohort_n >= 10` (definer SQL + table CHECK; UPDATE WITH CHECK also repeats `cohort_n >= 10`); remove existing rows for those metrics/month when the live cohort falls below 10. Other metric names are left alone.
+- **Eleven `pd_rollups_refresh_*` policies** on `user_achievement`, `catalog_achievement_def`, `entitlement`, `operator_rollup`, `sponsor_rollup` (SELECT/INSERT/UPDATE/DELETE as needed). Partner conjunct is the last top-level AND (inventory check 15). UPDATE/DELETE scope `metric`; INSERT WITH CHECK is GUC + partner only (see §41.2).
 - **Edge**: service-role bearer → system rate limit `rollups-refresh` 12/hour → `refreshRollups` via `openScopedTx("system")`. Empty body or `{ "month": "YYYY-MM-01" }`. Deploy schedules it; nothing in-repo does.
 
 ### 41.2 Decisions and departures
@@ -2628,6 +2628,7 @@ Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §3
 - **System lane, not partner A3** — rollups are aggregates over every player; a partner session must not open the writer (GUC window closed under a partner binding).
 - **UTC month** — no facility TZ for programme-wide numbers; documented here.
 - **Completion family = `award_key` `vN`** — matches `user_achievement.award_key` comment in 0003 (“v\<N\> for the completion family”).
+- **INSERT WITH CHECK omits metric/cohort_n** — those predicates made the PA-4c plant-sweep unobservable (insert failed planted and unplanted). Metric scope stays on UPDATE/DELETE; k-anonymity stays on the table CHECK and in the definer; UPDATE WITH CHECK still repeats `cohort_n >= 10`.
 
 ### 41.3 Not built, honestly
 
@@ -2637,6 +2638,7 @@ Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §3
 
 Branch: `cursor/p5-rollups-refresh-8ffd` (base main after #80). Recorded when CI is green on the PR tip.
 
+- Restricted harness: **PASS** (matrix 43 + inventory check 15 + PA-4c plant of `app.edge.rollups_refresh`; tip `45445db`).
 - Matrix **43**: EXECUTE matrix, sub-threshold remove of seeded completions, happy write at cohort 10, remove after revoke drops cohort, `edge_actor` / `edge_partner` 42501.
 - Vitest: `rollups-refresh-handler.test.ts` (auth order, empty body, month shape, 429/500).
 - `deno check` / `deno cache --frozen` lists include `rollups-refresh/index.ts`; service-role-lint clean.
