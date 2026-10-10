@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { HttpError } from "../../functions/_shared/http.ts";
 import { handleReceiptUpload } from "../../functions/_shared/receipts/handler.ts";
 import { RECEIPTS_MAX_BYTES } from "../../functions/_shared/receipts/request-shape.ts";
-import { makeFakeRepo } from "./fake-repo.ts";
+import { makeFakeRepo, makeFakeState } from "./fake-repo.ts";
+
+const UID = "00000000-0000-0000-0000-00000000000a";
 
 const TINY_JPEG = Uint8Array.from([
   0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0a, 0x0c, 0x14, 0x0d, 0x0c, 0x0b, 0x0b, 0x0c, 0x19, 0x12, 0x13, 0x0f,
@@ -13,11 +15,11 @@ const TINY_JPEG = Uint8Array.from([
 
 describe("handleReceiptUpload", () => {
   it("maps ok intake to 201", async () => {
-    const repo = makeFakeRepo();
+    const repo = makeFakeRepo(makeFakeState(), UID);
     const uploads: string[] = [];
     const out = await handleReceiptUpload(
       { facilityId: "fac_x", fileBytes: TINY_JPEG, fileName: "r.jpg", localDate: null, receiptNumberOcr: null },
-      "00000000-0000-0000-0000-00000000000a",
+      UID,
       repo,
       {
         storage: {
@@ -29,15 +31,15 @@ describe("handleReceiptUpload", () => {
     );
     expect(out.status).toBe(201);
     expect(out.body.status).toBe("ok");
-    expect(uploads[0]).toBe("receipts/00000000-0000-0000-0000-00000000000a/11111111-1111-1111-1111-111111111111.jpg");
+    expect(uploads[0]).toBe(`receipts/${UID}/11111111-1111-1111-1111-111111111111.jpg`);
   });
 
   it("rejects PDF bytes with 415", async () => {
-    const repo = makeFakeRepo();
+    const repo = makeFakeRepo(makeFakeState(), UID);
     await expect(
       handleReceiptUpload(
         { facilityId: "fac_x", fileBytes: Uint8Array.from([0x25, 0x50, 0x44, 0x46]), fileName: "x.pdf", localDate: null, receiptNumberOcr: null },
-        "00000000-0000-0000-0000-00000000000a",
+        UID,
         repo,
         { storage: { putObject: async () => {}, removeObject: async () => {} }, newObjectId: () => crypto.randomUUID() },
       ),
@@ -49,7 +51,7 @@ describe("handleReceiptUpload", () => {
   });
 
   it("maps review_account to 403 and removes the uploaded object", async () => {
-    const repo = makeFakeRepo();
+    const repo = makeFakeRepo(makeFakeState(), UID);
     const removed: string[] = [];
     repo.receipts.intake = async () => ({
       status: "review_account",
@@ -60,7 +62,7 @@ describe("handleReceiptUpload", () => {
     await expect(
       handleReceiptUpload(
         { facilityId: "fac_x", fileBytes: TINY_JPEG, fileName: "r.jpg", localDate: null, receiptNumberOcr: null },
-        "00000000-0000-0000-0000-00000000000a",
+        UID,
         repo,
         {
           storage: {

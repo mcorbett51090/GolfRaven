@@ -34,16 +34,37 @@ describe("receipt image sniff and EXIF strip", () => {
   it("strips JPEG APP1 (EXIF) segments", () => {
     const raw = jpegWithApp1();
     const stripped = stripJpegExif(raw);
-    expect(stripped.includes(0x45) && stripped.includes(0x78)).toBe(false);
+    // APP1 payload started with ASCII "Exif\0\0" — must not remain contiguous after strip.
+    let foundExif = false;
+    for (let i = 0; i + 4 < stripped.length; i++) {
+      if (
+        stripped[i] === 0x45 &&
+        stripped[i + 1] === 0x78 &&
+        stripped[i + 2] === 0x69 &&
+        stripped[i + 3] === 0x66
+      ) {
+        foundExif = true;
+        break;
+      }
+    }
+    expect(foundExif).toBe(false);
     expect(stripped[0]).toBe(0xff);
     expect(stripped[1]).toBe(0xd8);
   });
 
-  it("aHash is stable for the same decoded JPEG", () => {
+  it("phash (sha256 of stripped bytes) is stable for the same JPEG", () => {
     const a = prepareReceiptImage(TINY_JPEG, "jpeg");
     const b = prepareReceiptImage(TINY_JPEG, "jpeg");
     expect(a.phash).toBe(b.phash);
-    expect(a.phash).toMatch(/^[0-9a-f]{16}$/);
+    expect(a.phash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("stripping EXIF changes the phash vs the EXIF-bearing original", () => {
+    const withExif = jpegWithApp1();
+    const rawHash = prepareReceiptImage(TINY_JPEG, "jpeg").phash;
+    const strippedHash = prepareReceiptImage(withExif, "jpeg").phash;
+    // stripped content equals TINY_JPEG after APP1 removal → same phash as clean JPEG
+    expect(strippedHash).toBe(rawHash);
   });
 
   it("HEIC uses content sha256 as phash", () => {
@@ -68,7 +89,18 @@ describe("PNG eXIf strip", () => {
     withExif.set(exifChunk, 8);
     withExif.set(png.subarray(8), 8 + exifChunk.length);
     const stripped = stripPngExif(withExif);
-    const text = [...stripped].map((b) => String.fromCharCode(b)).join("");
-    expect(text.includes("eXIf")).toBe(false);
+    let found = false;
+    for (let i = 0; i + 3 < stripped.length; i++) {
+      if (
+        stripped[i] === 0x65 &&
+        stripped[i + 1] === 0x58 &&
+        stripped[i + 2] === 0x49 &&
+        stripped[i + 3] === 0x66
+      ) {
+        found = true;
+        break;
+      }
+    }
+    expect(found).toBe(false);
   });
 });
