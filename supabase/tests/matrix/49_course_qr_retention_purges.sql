@@ -7,6 +7,8 @@
 --   3. pending credits of abandoned purchases go; valid / held_review / live awaiting stay;
 --   4. edge_actor / edge_partner / anon cannot EXECUTE.
 -- Every group is its own BEGIN ... ROLLBACK. No secret: synthetic ids 5a5a4900-.
+-- Restricted harness: inventory / auth.users / app seeds / post-purge reads go through
+-- service_role (FORCE RLS; same pattern as matrices 10 / 20).
 
 SELECT plan(30);
 
@@ -47,32 +49,45 @@ SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.
 SELECT is((SELECT count(*)::int FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
            WHERE n.nspname = 'app' AND (pol.polname LIKE 'pd\_purge\_course\_%' OR pol.polname LIKE 'pd\_purge\_abandoned\_%')), 8,
   'structure: eight purge policies (DELETE + SELECT companion for four targets)');
+-- SET LOCAL ROLE (authenticate_as) only lasts for the enclosing transaction
+-- (matrix 10 / 20 pattern). Outside BEGIN it evaporates under restricted.
+BEGIN;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM private.function_inventory
            WHERE function_name IN ('purge_course_qr_tokens', 'purge_course_pin_alarms', 'purge_abandoned_pending_purchases')
              AND expected_edge_system AND NOT expected_edge_actor AND NOT expected_service_role), 3,
   'inventory: three rows, edge_system only');
+ROLLBACK;
 
 -- ----------------------------------------------------------------------------
 -- 2. course_qr_token: 7 days past expires_at
 -- ----------------------------------------------------------------------------
 BEGIN;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 INSERT INTO auth.users (id, email) VALUES ('5a5a4900-0000-0000-0000-0000000000a1', 'p49-a@purge.test') ON CONFLICT (id) DO NOTHING;
 INSERT INTO app.course_qr_token (nonce_hash, facility_id, issued_by_staff, kid, issued_at, expires_at, used_by_user, used_at) VALUES
   (repeat('a1', 32), 'fac_x', '5a5a4900-0000-0000-0000-0000000000a1', 'kid49', now() - interval '10 days', now() - interval '8 days', '5a5a4900-0000-0000-0000-0000000000a1', now() - interval '8 days'),
   (repeat('a2', 32), 'fac_x', '5a5a4900-0000-0000-0000-0000000000a1', 'kid49', now() - interval '10 days', now() - interval '8 days', NULL, NULL),
   (repeat('a3', 32), 'fac_x', '5a5a4900-0000-0000-0000-0000000000a1', 'kid49', now() - interval '3 days', now() - interval '3 days' + interval '120 seconds', NULL, NULL),
   (repeat('a4', 32), 'fac_x', '5a5a4900-0000-0000-0000-0000000000a1', 'kid49', now(), now() + interval '120 seconds', NULL, NULL);
+RESET ROLE;
 GRANT edge_system TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
 SELECT is(pg_temp.purge_as('edge_system', 'purge_course_qr_tokens')::int >= 2, true, 'purge_course_qr_tokens deletes tokens 7+ days past expires_at (used and unused)');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT array_agg(nonce_hash ORDER BY nonce_hash) FROM app.course_qr_token WHERE nonce_hash IN (repeat('a1', 32), repeat('a2', 32), repeat('a3', 32), repeat('a4', 32))),
   ARRAY[repeat('a3', 32), repeat('a4', 32)], '... and keeps a 3-day-old expired token and a live one');
+RESET ROLE;
 SELECT is(pg_temp.purge_as('edge_system', 'purge_course_qr_tokens')::int, 0, 'a second token purge is idempotent');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------
 -- 3. course_pin_alarm: 90 days past raised_at
+-- service_role holds SELECT only (0046); seed through a temporary CURRENT_USER
+-- policy (matrix 32 pattern). ROLLBACK drops the grant + policy.
 -- ----------------------------------------------------------------------------
 BEGIN;
+GRANT SELECT, INSERT, DELETE ON app.course_pin_alarm TO CURRENT_USER;
+CREATE POLICY zz49_alarm ON app.course_pin_alarm FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO app.course_pin_alarm (facility_id, local_date, pin_epoch_before, pin_epoch_after, failures, raised_at) VALUES
   ('fac_x', current_date - 200, 0, 1, 30, now() - interval '100 days'),
   ('fac_x', current_date - 10, 1, 2, 30, now() - interval '10 days'),
@@ -88,6 +103,7 @@ ROLLBACK;
 -- 4. abandoned pending purchases (+ their pending credits)
 -- ----------------------------------------------------------------------------
 BEGIN;
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 INSERT INTO auth.users (id, email) VALUES
   ('5a5a4900-0000-0000-0000-0000000000b1', 'p49-b@purge.test'),
   ('5a5a4900-0000-0000-0000-0000000000b2', 'p49-c@purge.test')
@@ -122,8 +138,10 @@ INSERT INTO app.marker_credit (id, user_id, trail_id, facility_id, purchase_evid
   ('5a5a4900-0000-0000-0000-00000000c002', '5a5a4900-0000-0000-0000-0000000000b1', 'trl_t', 'fac_x', '5a5a4900-0000-0000-0000-00000000a002', 'pending'),
   ('5a5a4900-0000-0000-0000-00000000c003', '5a5a4900-0000-0000-0000-0000000000b1', 'trl_t', 'fac_x', '5a5a4900-0000-0000-0000-00000000a003', 'pending'),
   ('5a5a4900-0000-0000-0000-00000000c004', '5a5a4900-0000-0000-0000-0000000000b2', 'trl_t', 'fac_x', '5a5a4900-0000-0000-0000-00000000a004', 'credited');
+RESET ROLE;
 GRANT edge_system TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
 SELECT is(pg_temp.purge_as('edge_system', 'purge_abandoned_pending_purchases')::int, 2, 'purge_abandoned_pending_purchases deletes exactly the two abandoned pending purchases');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM app.purchase_evidence WHERE id IN ('5a5a4900-0000-0000-0000-00000000a001', '5a5a4900-0000-0000-0000-00000000a002')), 0, '... those rows are gone');
 SELECT is((SELECT count(*)::int FROM app.marker_credit WHERE id IN ('5a5a4900-0000-0000-0000-00000000c001', '5a5a4900-0000-0000-0000-00000000c002')), 0, '... and their pending credits are gone');
 SELECT is((SELECT array_agg(id::text ORDER BY id::text) FROM app.purchase_evidence WHERE id IN (
@@ -133,6 +151,7 @@ SELECT is((SELECT array_agg(id::text ORDER BY id::text) FROM app.purchase_eviden
   '... keeps live awaiting, valid, held_review, and pending-without-awaiting');
 SELECT is((SELECT count(*)::int FROM app.marker_credit WHERE id IN ('5a5a4900-0000-0000-0000-00000000c003', '5a5a4900-0000-0000-0000-00000000c004')), 2,
   '... keeps the live-awaiting pending credit and the credited one');
+RESET ROLE;
 SELECT is(pg_temp.purge_as('edge_system', 'purge_abandoned_pending_purchases')::int, 0, 'a second abandoned-pending purge is idempotent');
 ROLLBACK;
 
