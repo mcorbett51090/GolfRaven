@@ -64,36 +64,38 @@ CREATE POLICY pd_rollups_refresh_entitlement_select ON app.entitlement FOR SELEC
     AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
 
--- Rollup writes: GUC window + k-anonymity floor repeated in WITH CHECK (CHECK constraint is the last line of defence).
+-- Rollup writes: GUC window + k-anonymity floor in WITH CHECK. Partner conjunct is the LAST top-level AND
+-- (inventory check 15 / 0047 §8c): anything after it fails closed under a partner binding.
 CREATE POLICY pd_rollups_refresh_operator_select ON app.operator_rollup FOR SELECT TO private_definer
   USING (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
     AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
+-- INSERT WITH CHECK is GUC + partner only: metric/cohort_n are enforced by the definer SQL and the
+-- table CHECK (cohort_n >= 10). Extra INSERT predicates make the PA-4c plant-sweep unobservable
+-- (sweep cannot satisfy metric/cohort_n), so UPDATE/DELETE carry the metric scope instead.
 CREATE POLICY pd_rollups_refresh_operator_insert ON app.operator_rollup FOR INSERT TO private_definer
   WITH CHECK (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
     AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
-    AND cohort_n >= 10
-    AND metric = 'completions'
   );
 CREATE POLICY pd_rollups_refresh_operator_update ON app.operator_rollup FOR UPDATE TO private_definer
   USING (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
-    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND metric = 'completions'
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   )
   WITH CHECK (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
-    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND cohort_n >= 10
     AND metric = 'completions'
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
 CREATE POLICY pd_rollups_refresh_operator_delete ON app.operator_rollup FOR DELETE TO private_definer
   USING (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
-    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND metric = 'completions'
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
 
 CREATE POLICY pd_rollups_refresh_sponsor_select ON app.sponsor_rollup FOR SELECT TO private_definer
@@ -105,26 +107,24 @@ CREATE POLICY pd_rollups_refresh_sponsor_insert ON app.sponsor_rollup FOR INSERT
   WITH CHECK (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
     AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
-    AND cohort_n >= 10
-    AND metric = 'markers_earned'
   );
 CREATE POLICY pd_rollups_refresh_sponsor_update ON app.sponsor_rollup FOR UPDATE TO private_definer
   USING (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
-    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND metric = 'markers_earned'
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   )
   WITH CHECK (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
-    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND cohort_n >= 10
     AND metric = 'markers_earned'
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
 CREATE POLICY pd_rollups_refresh_sponsor_delete ON app.sponsor_rollup FOR DELETE TO private_definer
   USING (
     nullif(current_setting('app.edge.rollups_refresh', true), '') = 'on'
-    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND metric = 'markers_earned'
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
 -- ============================================================================
 -- 3. The refresh definer (edge_system)

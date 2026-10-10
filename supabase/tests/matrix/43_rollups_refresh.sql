@@ -1,5 +1,7 @@
 -- 43_rollups_refresh.sql
 -- 0065_rollups_refresh.sql: edge_system refresh of operator/sponsor rollups with k-anonymity.
+-- Inventory / allow-list reads run as service_role (FORCE RLS on the registry). Seed writes use
+-- temporary CURRENT_USER policies (restricted harness: migration_owner has no BYPASSRLS).
 
 \set QUIET 1
 BEGIN;
@@ -9,8 +11,17 @@ GRANT edge_system TO CURRENT_USER WITH SET TRUE;
 GRANT edge_actor TO CURRENT_USER WITH SET TRUE;
 GRANT edge_partner TO CURRENT_USER WITH SET TRUE;
 
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.catalog_id_ledger, app.catalog_achievement_def,
+  app.user_achievement, app.entitlement, app.operator_rollup, app.sponsor_rollup TO CURRENT_USER;
+CREATE POLICY zz43_ledger ON app.catalog_id_ledger FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz43_achdef ON app.catalog_achievement_def FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz43_ua ON app.user_achievement FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz43_ent ON app.entitlement FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz43_or ON app.operator_rollup FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz43_sr ON app.sponsor_rollup FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+
 -- ----------------------------------------------------------------------------
--- 1. EXECUTE matrix
+-- 1. EXECUTE matrix + registries
 -- ----------------------------------------------------------------------------
 SELECT is(
   (SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('edge_actor'), ('edge_partner'), ('edge_system'), ('service_role')) r(n)
@@ -24,11 +35,13 @@ SELECT ok(
   'app.entitlement.earned_at exists'
 );
 
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(
   (SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd_rollups_refresh_%'),
   11,
   'eleven rollups-refresh policies are in definer_policy_allowlist'
 );
+SELECT tests.clear_actor();
 
 SAVEPOINT s43_root;
 

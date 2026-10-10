@@ -812,14 +812,16 @@ GRANT EXECUTE ON FUNCTION pg_temp.consume() TO PUBLIC;
 -- THE SETTINGS, in one place: every setting a GUC-keyed private_definer policy has ever read, and the value that makes a row keyed on it visible (the settings are PLANTED at one player, A)
 CREATE FUNCTION pg_temp.plant_settings() RETURNS text[] LANGUAGE sql IMMUTABLE AS $f$
   SELECT ARRAY['app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym',
-               'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id',
+               'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash', 'app.edge.purge_fix_coords', 'app.edge.rollups_refresh',
+               'app.guard.entitlement_id', 'app.guard.offer_code_id',
                'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id']
 $f$;
 CREATE FUNCTION pg_temp.plant_value(p_setting text, p_user uuid) RETURNS text LANGUAGE sql IMMUTABLE AS $f$
   SELECT CASE p_setting WHEN 'app.delete_my_data.target_email' THEN 'player-a@example.test'
                         WHEN 'app.delete_my_data.target_handle' THEN 'x' WHEN 'app.delete_my_data.target_pseudonym' THEN 'x'
                         WHEN 'app.edge.link_attest_key' THEN 'x' WHEN 'app.edge.link_hash' THEN 'x'
-                        WHEN 'app.edge.purge_fix_coords' THEN 'on' WHEN 'app.signin.proof_purge' THEN 'on'
+                        WHEN 'app.edge.purge_fix_coords' THEN 'on' WHEN 'app.edge.rollups_refresh' THEN 'on'
+                        WHEN 'app.signin.proof_purge' THEN 'on'
                         ELSE p_user::text END
 $f$;
 CREATE FUNCTION pg_temp.plant_all(p_user uuid) RETURNS void LANGUAGE plpgsql AS $f$
