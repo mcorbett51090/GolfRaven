@@ -2409,3 +2409,4 @@ Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (progr
 
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **21 files, 917 tests, all pass** (adds offer-redeem A1 PIN + queue/redeem body cells; settlement A3 aal gate, export path/expiry, empty month; allow-list/CSP include the two functions and refuse `exports-purge`).
+- CI on PR #74 tip `fb8b5ea`: all three checks green.
