@@ -2172,7 +2172,7 @@ Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx`
 
 ### 32.4 Verification
 
-Tip of this slice: `54aab0a` on `cursor/p5-1b-offers-settlement-8ffd`.
+Tip of this slice: `b806edb` on `cursor/p5-1b-offers-settlement-8ffd`.
 
 - **Matrix 38** (`38_partner_offers_settlement.sql`): 32/32 PASS — foreign facility 403, A1 without PIN, happy redeem + budget consume, self-redeem 22023, A3 without TOTP refused, planted GUC, settlement line carries `sponsorship_id` for sponsor funder, export redemptions/`face_value_total` match planted redeem.
 - **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): **86/86** PASS.
