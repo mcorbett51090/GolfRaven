@@ -17,6 +17,10 @@
  * ERRORS are `PartnerApiError` values with a closed `kind` (see errors.ts). A 401 on an authenticated call means the
  * session is dead: the token is wiped here, before the caller sees the error, and listeners are told.
  *
+ * PRE-SESSION ROUTES (S1.5): `acceptStart` / `acceptVerify` (invite or enrolment token, no bearer) and `registerFirst` (the first credential, which OPENS the
+ * first session: its token is adopted exactly as `verify`'s is, by `adoptSession`, including the cancel handling) are beside `signInOptions`. The step-up routes
+ * (`pin`, `step-up/pin`, `pin/set`, ...) are session routes and go through `call()`; their typed wrappers are `session-routes.ts`.
+ *
  * ENDING A SESSION IS IMMEDIATE (threat model: a shared shop iPad). `signOut()` and `lock()` copy the token into a local, wipe
  * it and tell the listeners (the screen goes to sign-in) BEFORE a byte is sent, then send with the copy and drop the copy as
  * soon as `fetch` has been called, so a request that never answers neither keeps the screen up nor keeps the token in memory.
@@ -30,9 +34,13 @@
 
 import { kindForStatus, parseRetryAfter, PartnerApiError } from "./errors";
 import PARTNER_FUNCTION_LIST from "./partner-functions.json";
-import type { AssertionJson, ChallengeResponse, ReauthResult, SessionGrant, WhoAmI } from "./types";
+import type { AssertionJson, ChallengeResponse, EnrolmentChallenge, FirstSessionGrant, ReauthResult, RegistrationJson, SessionGrant, WhoAmI } from "./types";
 
 export const SESSION_FUNCTION = "partner-session";
+/** The function that serves the pre-session invite and enrolment routes (and the first credential). */
+export const INVITES_FUNCTION = "partner-invites";
+/** Which kind of one-time token the person holds: an invite link (`gr_inv_`, a new member) or an enrolment token (`gr_enr_`, a recovery or an admin enrolment). */
+export type EnrolmentKind = "invite" | "enrolment";
 /** The partner functions this page may talk to (and may send the bearer to). One list, read by the client here and by scripts/lib/csp.mjs for `connect-src`. */
 export const PARTNER_FUNCTIONS: readonly string[] = PARTNER_FUNCTION_LIST;
 /** Every request is cut off after this long (a request that never answers must not pin a screen or a token). */
@@ -51,6 +59,9 @@ function isIssuedToken(v: string): boolean {
     if (!ok) return false;
   }
   return true;
+}
+function acceptRoute(kind: EnrolmentKind, step: "start" | "verify"): string {
+  return `${kind === "invite" ? "invites" : "enrolments"}/accept/${step}`;
 }
 const ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -82,12 +93,23 @@ export interface VerifyOptions {
   readonly signal?: AbortSignal;
 }
 
+export interface RegisterFirstOptions {
+  /** As for `VerifyOptions`: a cancel while the request is on the wire revokes the session it opened instead of holding it. */
+  readonly signal?: AbortSignal;
+}
+
 export interface PartnerApi {
   hasSession(): boolean;
   /** `POST options`: a fresh sign-in challenge. */
   signInOptions(): Promise<ChallengeResponse>;
   /** `POST verify`: trades the assertion for a session. The token is kept inside the client and is NOT returned. */
   verify(input: { challengeToken: string; credential: AssertionJson }, opts?: VerifyOptions): Promise<SessionGrant>;
+  /** `POST invites/accept/start` or `POST enrolments/accept/start` (no session): mails a one-time code to the address ON the invite. The server answers one constant body whatever the token is. */
+  acceptStart(kind: EnrolmentKind, token: string): Promise<void>;
+  /** `POST .../accept/verify` (no session): the emailed code, and the create ceremony's options if the token and the code were good. A refusal is one 403. */
+  acceptVerify(kind: EnrolmentKind, input: { token: string; code: string }): Promise<EnrolmentChallenge>;
+  /** `POST credentials` in enrolment mode (no session): the FIRST credential, which opens the person's first session. The token is kept inside the client and is NOT returned. */
+  registerFirst(input: { challenge: EnrolmentChallenge; credential: RegistrationJson }, opts?: RegisterFirstOptions): Promise<FirstSessionGrant>;
   /** `GET session`: who am I (PEEK: does not extend the idle timer). */
   session(signal?: AbortSignal): Promise<WhoAmI>;
   /** `POST sign-out`: revokes the session on the server. The token is wiped (and the listeners told) BEFORE the request is sent, and the request uses a copy. */
@@ -101,8 +123,11 @@ export interface PartnerApi {
   reauthOptions(): Promise<ChallengeResponse>;
   /** `POST reauth`: a fresh passkey assertion by the session's own person. */
   reauth(input: { challengeToken: string; credential: AssertionJson }): Promise<ReauthResult>;
-  /** An authenticated call to another partner function on the same API origin (later screens: attest, hand-over, stock). Same headers, same error mapping, same 401 handling. */
-  call(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body?: unknown): Promise<unknown>;
+  /**
+   * An authenticated call to another partner function on the same API origin (attest, course-QR, hand-over, stock). Same headers, same error mapping, same 401 handling.
+   * `query` is optional GET parameters: closed key/value shapes only (no free-form encoding), appended after the path is validated so a route string still cannot carry `?` or `#`.
+   */
+  call(method: "GET" | "POST" | "PATCH" | "DELETE", fn: string, route: string, body?: unknown, query?: Readonly<Record<string, string>>): Promise<unknown>;
   /** Wipes the token without any request. */
   forgetSession(): void;
   /** Called after the token is wiped, with the reason. Returns an unsubscribe function. */
@@ -267,9 +292,30 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
     throw err;
   }
 
-  /** A request without a bearer (options, verify). */
-  function sendPublic(route: string, body: unknown, signal?: AbortSignal): Promise<{ status: number; data: unknown }> {
-    return finish(dispatch("POST", SESSION_FUNCTION, route, body, null, requestSignal(timeoutMs, [signal]), false), null);
+  /** A request without a bearer (options, verify, the invite and enrolment routes). */
+  function sendPublic(route: string, body: unknown, signal?: AbortSignal, fn: string = SESSION_FUNCTION): Promise<{ status: number; data: unknown }> {
+    return finish(dispatch("POST", fn, route, body, null, requestSignal(timeoutMs, [signal]), false), null);
+  }
+
+  /**
+   * The answer of a request that opens a session (`verify`, and `credentials` in enrolment mode): checks the token's shape, then either HOLDS it or, when the
+   * caller cancelled while the request was on the wire (or another sign-in finished first), revokes it with a copy and never holds it. Returns the other fields.
+   */
+  async function adoptSession(r: { status: number; data: unknown }, signal: AbortSignal | undefined): Promise<Record<string, unknown>> {
+    const d = r.data;
+    if (!isObject(d) || !isString(d["token"]) || !isIssuedToken(d["token"]) || !isString(d["expiresAt"]) || typeof d["aal"] !== "number") throw malformed(r.status);
+    if (signal?.aborted === true || token !== null) {
+      const aborted = signal?.aborted === true;
+      try {
+        await revokeCopy(d["token"], false);
+      } catch {
+        // best effort: nothing holds this token, and the idle timer ends the session
+      }
+      throw aborted ? new PartnerApiError("aborted") : new PartnerApiError("bad_request", { code: "session_exists" });
+    }
+    token = d["token"];
+    epoch += 1;
+    return d;
   }
 
   /** A request under the live session token: aborted by a wipe, timed out, and a 401 ends the session. */
@@ -318,23 +364,33 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
       if (token !== null) throw new PartnerApiError("bad_request", { code: "session_exists" });
       // no caller signal on the request itself: see VerifyOptions
       const r = await sendPublic("verify", { challengeToken: input.challengeToken, credential: input.credential });
+      const d = await adoptSession(r, opts.signal);
+      return { expiresAt: d["expiresAt"] as string, aal: d["aal"] as number };
+    },
+
+    async acceptStart(kind, oneTimeToken) {
+      const r = await sendPublic(acceptRoute(kind, "start"), { token: oneTimeToken }, undefined, INVITES_FUNCTION);
+      if (!isObject(r.data) || r.data["requested"] !== true) throw malformed(r.status);
+    },
+
+    async acceptVerify(kind, input) {
+      const r = await sendPublic(acceptRoute(kind, "verify"), { token: input.token, code: input.code }, undefined, INVITES_FUNCTION);
       const d = r.data;
-      if (!isObject(d) || !isString(d["token"]) || !isIssuedToken(d["token"]) || !isString(d["expiresAt"]) || typeof d["aal"] !== "number") throw malformed(r.status);
-      const expiresAt = d["expiresAt"];
-      const aal = d["aal"];
-      if (opts.signal?.aborted === true || token !== null) {
-        // the sign-in was cancelled while this request was on the wire (or another sign-in finished first): this session must not be held and must not outlive the cancel
-        const aborted = opts.signal?.aborted === true;
-        try {
-          await revokeCopy(d["token"], false);
-        } catch {
-          // best effort: nothing holds this token, and the idle timer ends the session
-        }
-        throw aborted ? new PartnerApiError("aborted") : new PartnerApiError("bad_request", { code: "session_exists" });
-      }
-      token = d["token"];
-      epoch += 1;
-      return { expiresAt, aal };
+      if (
+        !isObject(d) || !isObject(d["options"]) || !isString(d["challengeToken"]) || !isString(d["expiresAt"]) || !isString(d["userId"]) || !isString(d["refId"]) ||
+        d["refKind"] !== kind
+      ) throw malformed(r.status);
+      return { options: d["options"], challengeToken: d["challengeToken"], expiresAt: d["expiresAt"], userId: d["userId"], refKind: kind, refId: d["refId"] };
+    },
+
+    async registerFirst(input, opts = {}) {
+      if (token !== null) throw new PartnerApiError("bad_request", { code: "session_exists" });
+      const c = input.challenge;
+      const r = await sendPublic("credentials", { userId: c.userId, refKind: c.refKind, refId: c.refId, challengeToken: c.challengeToken, credential: input.credential }, undefined, INVITES_FUNCTION);
+      // a session without the enrolment window is not the documented answer: refused before the token is held
+      if (!isObject(r.data) || !isString(r.data["enrolmentUntil"])) throw malformed(r.status);
+      const d = await adoptSession(r, opts.signal);
+      return { expiresAt: d["expiresAt"] as string, aal: d["aal"] as number, enrolmentUntil: r.data["enrolmentUntil"] };
     },
 
     async session(signal) {
@@ -357,11 +413,21 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
       return { reauthUntil: r.data["reauthUntil"] };
     },
 
-    async call(method, fn, route, body) {
+    async call(method, fn, route, body, query) {
       // the bearer is attached here, so the target is a closed shape: a function on the explicit partner allow-list (never any other path on the API host, and the
-      // same list the CSP's connect-src is built from), and a route of path-safe characters, no dot segments, no query, no fragment
+      // same list the CSP's connect-src is built from), and a route of path-safe characters, no dot segments, no query, no fragment. Query keys and values are a
+      // separate, closed charset (facility ids, day counts): they are not taken from a free-form string the caller could smuggle a second path into.
       if (!allowedFunctions.includes(fn) || !/^[a-z][a-z0-9-]{0,63}$/.test(fn) || !/^[A-Za-z0-9_~/-]{0,200}$/.test(route) || route.includes("//")) throw new PartnerApiError("bad_request");
-      return (await sendAuthed(method, fn, route, body)).data;
+      let path = route;
+      if (query !== undefined) {
+        const pairs: string[] = [];
+        for (const [k, v] of Object.entries(query)) {
+          if (!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(k) || typeof v !== "string" || !/^[A-Za-z0-9_.:-]{0,128}$/.test(v)) throw new PartnerApiError("bad_request");
+          pairs.push(`${k}=${v}`);
+        }
+        if (pairs.length > 0) path = `${route}?${pairs.join("&")}`;
+      }
+      return (await sendAuthed(method, fn, path, body)).data;
     },
 
     forgetSession: () => wipe("forgotten"),

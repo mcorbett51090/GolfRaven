@@ -1,0 +1,344 @@
+/**
+ * Typed wrappers for the S7b/S7c/S7 work screens: `partner-attest`, `course-qr`, `qr-print`, `stock-admin`,
+ * `partner-entitlements` and `partner-offers-redeem` (docs/security/partner-auth-design.md 26, 25, 28, 32, 33).
+ *
+ * Every call goes through `PartnerApi.call`, so the bearer, the function allow-list and the closed route/query shapes apply. Response bodies are checked
+ * field-by-field: a malformed answer is `malformed_response`, never trusted into the UI.
+ */
+
+import type { PartnerApi } from "./client";
+import { PartnerApiError } from "./errors";
+
+export type AttestKind = "presence" | "marker_purchase";
+
+export interface AttestResult {
+  readonly attestationId: string;
+  readonly held: boolean;
+}
+
+export interface ShiftLogEntry {
+  readonly id: string;
+  readonly facilityId: string;
+  readonly createdAt: string;
+  readonly kind: string;
+  readonly playerHandle: string;
+  readonly staffHandle: string;
+}
+
+export interface StaffActivityRow {
+  readonly staffUserId: string;
+  readonly facilityId: string;
+  readonly day: string;
+  readonly attests: number;
+  readonly activations: number;
+  readonly anomalies: number;
+}
+
+export interface CoursePin {
+  readonly facilityId: string;
+  readonly pin: string;
+  readonly localDate: string;
+  readonly validUntil: string;
+  readonly pinEpoch: number;
+}
+
+export interface MintedToken {
+  readonly facilityId: string;
+  readonly token: string;
+  readonly link: string | null;
+  readonly nonceHash: string;
+  readonly kid: string;
+  readonly issuedAt: string;
+  readonly expiresAt: string;
+}
+
+export interface TokenRefresh {
+  readonly state: string;
+  readonly secondsLeft: number;
+}
+
+export interface PrintedQr {
+  readonly facilityId: string;
+  readonly qrKid: string;
+  readonly sig: string;
+  readonly printedAt: string;
+  readonly revoked: boolean;
+  readonly revokedAt: string | null;
+  readonly link?: string | null;
+  readonly changed?: boolean;
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+const isString = (v: unknown): v is string => typeof v === "string";
+const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === "string";
+const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+function malformed(): never {
+  throw new PartnerApiError("malformed_response");
+}
+
+function parseAttest(data: unknown): AttestResult {
+  if (!isObject(data) || !isString(data["attestationId"]) || !isBool(data["held"])) malformed();
+  return { attestationId: data["attestationId"], held: data["held"] };
+}
+
+export async function postOnlineAttest(api: PartnerApi, input: { facilityId: string; kind: AttestKind; token: string }): Promise<AttestResult> {
+  return parseAttest(await api.call("POST", "partner-attest", "attest", input));
+}
+
+export async function postOfflineAttest(api: PartnerApi, input: { facilityId: string; kind: AttestKind; handle: string; code: string }): Promise<AttestResult> {
+  return parseAttest(await api.call("POST", "partner-attest", "attest/offline", input));
+}
+
+export async function getShiftLog(api: PartnerApi, facilityId: string): Promise<readonly ShiftLogEntry[]> {
+  const data = await api.call("GET", "partner-attest", "shift-log", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["entries"])) malformed();
+  return data["entries"].map((e) => {
+    if (!isObject(e) || !isString(e["id"]) || !isString(e["facilityId"]) || !isString(e["createdAt"]) || !isString(e["kind"]) || !isString(e["playerHandle"]) || !isString(e["staffHandle"])) malformed();
+    return { id: e["id"], facilityId: e["facilityId"], createdAt: e["createdAt"], kind: e["kind"], playerHandle: e["playerHandle"], staffHandle: e["staffHandle"] };
+  });
+}
+
+export async function getStaffActivity(api: PartnerApi, facilityId: string, days: number): Promise<readonly StaffActivityRow[]> {
+  const data = await api.call("GET", "partner-attest", "staff-activity", undefined, { facilityId, days: String(days) });
+  if (!isObject(data) || !Array.isArray(data["activity"])) malformed();
+  return data["activity"].map((r) => {
+    if (!isObject(r) || !isString(r["staffUserId"]) || !isString(r["facilityId"]) || !isString(r["day"]) || !isNum(r["attests"]) || !isNum(r["activations"]) || !isNum(r["anomalies"])) malformed();
+    return { staffUserId: r["staffUserId"], facilityId: r["facilityId"], day: r["day"], attests: r["attests"], activations: r["activations"], anomalies: r["anomalies"] };
+  });
+}
+
+export async function getCoursePin(api: PartnerApi, facilityId: string): Promise<CoursePin> {
+  const data = await api.call("GET", "course-qr", "pin", undefined, { facilityId });
+  if (!isObject(data) || !isString(data["facilityId"]) || !isString(data["pin"]) || !isString(data["localDate"]) || !isString(data["validUntil"]) || !isNum(data["pinEpoch"])) malformed();
+  return { facilityId: data["facilityId"], pin: data["pin"], localDate: data["localDate"], validUntil: data["validUntil"], pinEpoch: data["pinEpoch"] };
+}
+
+export async function postRotatePin(api: PartnerApi, facilityId: string): Promise<{ facilityId: string; pinEpoch: number }> {
+  const data = await api.call("POST", "course-qr", "pin/rotate", { facilityId });
+  if (!isObject(data) || !isString(data["facilityId"]) || !isNum(data["pinEpoch"])) malformed();
+  return { facilityId: data["facilityId"], pinEpoch: data["pinEpoch"] };
+}
+
+export async function postMintToken(api: PartnerApi, facilityId: string): Promise<MintedToken> {
+  const data = await api.call("POST", "course-qr", "tokens", { facilityId });
+  if (
+    !isObject(data) || !isString(data["facilityId"]) || !isString(data["token"]) || !isStringOrNull(data["link"] ?? null) ||
+    !isString(data["nonceHash"]) || !isString(data["kid"]) || !isString(data["issuedAt"]) || !isString(data["expiresAt"])
+  ) malformed();
+  return {
+    facilityId: data["facilityId"],
+    token: data["token"],
+    link: (data["link"] as string | null) ?? null,
+    nonceHash: data["nonceHash"],
+    kid: data["kid"],
+    issuedAt: data["issuedAt"],
+    expiresAt: data["expiresAt"],
+  };
+}
+
+export async function postRefreshToken(api: PartnerApi, facilityId: string, nonceHash: string): Promise<TokenRefresh> {
+  const data = await api.call("POST", "course-qr", "tokens/refresh", { facilityId, nonceHash });
+  if (!isObject(data) || !isString(data["state"]) || !isNum(data["secondsLeft"])) malformed();
+  return { state: data["state"], secondsLeft: data["secondsLeft"] };
+}
+
+export async function getPrintedQr(api: PartnerApi, facilityId: string): Promise<PrintedQr> {
+  const data = await api.call("GET", "qr-print", "", undefined, { facilityId });
+  if (
+    !isObject(data) || !isString(data["facilityId"]) || !isString(data["qrKid"]) || !isString(data["sig"]) ||
+    !isString(data["printedAt"]) || !isBool(data["revoked"]) || !isStringOrNull(data["revokedAt"] ?? null)
+  ) malformed();
+  return {
+    facilityId: data["facilityId"],
+    qrKid: data["qrKid"],
+    sig: data["sig"],
+    printedAt: data["printedAt"],
+    revoked: data["revoked"],
+    revokedAt: (data["revokedAt"] as string | null) ?? null,
+  };
+}
+
+export async function postPrintedQr(api: PartnerApi, facilityId: string): Promise<PrintedQr> {
+  const data = await api.call("POST", "qr-print", "", { facilityId });
+  if (
+    !isObject(data) || !isString(data["facilityId"]) || !isString(data["qrKid"]) || !isString(data["sig"]) ||
+    !isString(data["printedAt"]) || !isBool(data["revoked"]) || !isStringOrNull(data["revokedAt"] ?? null)
+  ) malformed();
+  const out: PrintedQr = {
+    facilityId: data["facilityId"],
+    qrKid: data["qrKid"],
+    sig: data["sig"],
+    printedAt: data["printedAt"],
+    revoked: data["revoked"],
+    revokedAt: (data["revokedAt"] as string | null) ?? null,
+  };
+  if (isStringOrNull(data["link"] ?? null)) (out as { link?: string | null }).link = data["link"] as string | null;
+  if (isBool(data["changed"])) (out as { changed?: boolean }).changed = data["changed"];
+  return out;
+}
+
+/** Staff-initiated stock moves (never `redeemed` / `voucher_redeemed`: those are redeem's). */
+export const STOCK_MOVE_KINDS = ["delivered", "transfer_in", "transfer_out", "count_adjustment", "damaged"] as const;
+export type StockMoveKind = (typeof STOCK_MOVE_KINDS)[number];
+
+export interface StockRow {
+  readonly trailId: string;
+  readonly onHand: number;
+  readonly lowThreshold: number;
+  readonly status: string;
+  readonly lastCountedAt: string | null;
+}
+
+export interface StockMoveResult {
+  readonly onHand: number;
+  readonly availability: string | null;
+}
+
+export interface EntitlementQueueRow {
+  readonly entitlementId: string;
+  readonly trailId: string;
+  readonly state: string;
+  readonly playerHandle: string;
+  readonly activatedAt: string | null;
+  readonly voucherIssuedAt: string | null;
+}
+
+export interface HandoverMinted {
+  readonly token: string;
+  readonly expiresAt: string;
+}
+
+export type RedeemMethod = "staff_scan" | "hand_over_token";
+
+export interface RedeemResult {
+  readonly attestationId: string;
+  readonly movement: string;
+  readonly availability: string | null;
+}
+
+export async function getStock(api: PartnerApi, facilityId: string): Promise<readonly StockRow[]> {
+  const data = await api.call("GET", "stock-admin", "stock", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["stock"])) malformed();
+  return data["stock"].map((r) => {
+    if (
+      !isObject(r) || !isString(r["trailId"]) || !isNum(r["onHand"]) || !isNum(r["lowThreshold"]) ||
+      !isString(r["status"]) || !isStringOrNull(r["lastCountedAt"] ?? null)
+    ) malformed();
+    return {
+      trailId: r["trailId"],
+      onHand: r["onHand"],
+      lowThreshold: r["lowThreshold"],
+      status: r["status"],
+      lastCountedAt: (r["lastCountedAt"] as string | null) ?? null,
+    };
+  });
+}
+
+export async function postStockMove(
+  api: PartnerApi,
+  input: { facilityId: string; trailId: string; kind: StockMoveKind; qty: number; note?: string | null },
+): Promise<StockMoveResult> {
+  const data = await api.call("POST", "stock-admin", "stock/move", {
+    facilityId: input.facilityId,
+    trailId: input.trailId,
+    kind: input.kind,
+    qty: input.qty,
+    ...(input.note !== undefined && input.note !== null ? { note: input.note } : {}),
+  });
+  if (!isObject(data) || !isNum(data["onHand"]) || !isStringOrNull(data["availability"] ?? null)) malformed();
+  return { onHand: data["onHand"], availability: (data["availability"] as string | null) ?? null };
+}
+
+export async function getCollectQueue(api: PartnerApi, facilityId: string): Promise<readonly EntitlementQueueRow[]> {
+  const data = await api.call("GET", "partner-entitlements", "collect", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["entitlements"])) malformed();
+  return data["entitlements"].map((r) => {
+    if (
+      !isObject(r) || !isString(r["entitlementId"]) || !isString(r["trailId"]) || !isString(r["state"]) ||
+      !isString(r["playerHandle"]) || !isStringOrNull(r["activatedAt"] ?? null) || !isStringOrNull(r["voucherIssuedAt"] ?? null)
+    ) malformed();
+    return {
+      entitlementId: r["entitlementId"],
+      trailId: r["trailId"],
+      state: r["state"],
+      playerHandle: r["playerHandle"],
+      activatedAt: (r["activatedAt"] as string | null) ?? null,
+      voucherIssuedAt: (r["voucherIssuedAt"] as string | null) ?? null,
+    };
+  });
+}
+
+export async function postHandoverMint(api: PartnerApi, facilityId: string, entitlementId: string): Promise<HandoverMinted> {
+  const data = await api.call("POST", "partner-entitlements", "handover/mint", { facilityId, entitlementId });
+  if (!isObject(data) || !isString(data["token"]) || !isString(data["expiresAt"])) malformed();
+  return { token: data["token"], expiresAt: data["expiresAt"] };
+}
+
+export async function postRedeem(
+  api: PartnerApi,
+  input: { facilityId: string; entitlementId: string; method: RedeemMethod; credential: string },
+): Promise<RedeemResult> {
+  const data = await api.call("POST", "partner-entitlements", "redeem", input);
+  if (
+    !isObject(data) || !isString(data["attestationId"]) || !isString(data["movement"]) ||
+    !isStringOrNull(data["availability"] ?? null)
+  ) malformed();
+  return {
+    attestationId: data["attestationId"],
+    movement: data["movement"],
+    availability: (data["availability"] as string | null) ?? null,
+  };
+}
+
+export async function postVoucher(api: PartnerApi, facilityId: string, entitlementId: string): Promise<{ voucherIssuedAt: string }> {
+  const data = await api.call("POST", "partner-entitlements", "voucher", { facilityId, entitlementId });
+  if (!isObject(data) || !isString(data["voucherIssuedAt"])) malformed();
+  return { voucherIssuedAt: data["voucherIssuedAt"] };
+}
+
+/** Offer redeem is staff_scan only on this slice (P5.1b / design 32); offline_code is refused by Edge. */
+export type OfferRedeemMethod = "staff_scan";
+
+export interface OfferQueueRow {
+  readonly offerCodeId: string;
+  readonly offerId: string;
+  readonly playerHandle: string | null;
+  readonly expiresAt: string | null;
+  readonly faceValue: number | null;
+}
+
+export interface OfferRedeemResult {
+  readonly attestationId: string;
+}
+
+export async function getOffersQueue(api: PartnerApi, facilityId: string): Promise<readonly OfferQueueRow[]> {
+  const data = await api.call("GET", "partner-offers-redeem", "queue", undefined, { facilityId });
+  if (!isObject(data) || !Array.isArray(data["offerCodes"])) malformed();
+  return data["offerCodes"].map((r) => {
+    if (
+      !isObject(r) || !isString(r["offerCodeId"]) || !isString(r["offerId"]) ||
+      !isStringOrNull(r["playerHandle"] ?? null) || !isStringOrNull(r["expiresAt"] ?? null) ||
+      !(r["faceValue"] === null || isNum(r["faceValue"]))
+    ) malformed();
+    return {
+      offerCodeId: r["offerCodeId"],
+      offerId: r["offerId"],
+      playerHandle: (r["playerHandle"] as string | null) ?? null,
+      expiresAt: (r["expiresAt"] as string | null) ?? null,
+      faceValue: (r["faceValue"] as number | null) ?? null,
+    };
+  });
+}
+
+export async function postOfferRedeem(
+  api: PartnerApi,
+  input: { facilityId: string; offerCodeId: string; method: OfferRedeemMethod; credential: string },
+): Promise<OfferRedeemResult> {
+  const data = await api.call("POST", "partner-offers-redeem", "redeem", input);
+  if (!isObject(data) || !isString(data["attestationId"])) malformed();
+  return { attestationId: data["attestationId"] };
+}

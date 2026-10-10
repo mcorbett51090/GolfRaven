@@ -112,7 +112,16 @@ export function staticServer(dist: () => string | null, extra: Record<string, st
  *     `channel: "chromium"` runs the full Chromium in its new headless mode, where the cache works.
  */
 export async function launchWithBackForwardCache(): Promise<Browser> {
-  return await chromium.launch({ channel: "chromium", args: ["--no-sandbox"], ignoreDefaultArgs: ["--disable-back-forward-cache"] });
+  return await chromium.launch({ ...browserChoice({ channel: "chromium" }), args: ["--no-sandbox"], ignoreDefaultArgs: ["--disable-back-forward-cache"] });
+}
+
+/**
+ * Which browser to launch: Playwright's pinned Chromium (PLAYWRIGHT_BROWSERS_PATH) by default, or the executable named by `GOLFRAVEN_E2E_CHROME` (a machine that has a
+ * Chrome but not the pinned build; the suite then runs against that browser, which is the only difference). CI never sets it.
+ */
+function browserChoice(pinned: { channel?: "chromium"; headless?: boolean }): { channel?: "chromium"; headless?: boolean; executablePath?: string } {
+  const exe = process.env["GOLFRAVEN_E2E_CHROME"];
+  return exe === undefined || exe === "" ? pinned : { headless: true, executablePath: exe };
 }
 
 /** Launches Chromium, or explains why it could not. Under CI a launch failure is a failure; elsewhere it is a skip (the repo's rule, apps/site/scripts/run-e2e.mjs). */
@@ -120,7 +129,7 @@ export async function launchOrSkip(): Promise<{ browser: Browser | null; reason:
   if (process.env["GOLFRAVEN_E2E_SKIP"] === "1") return { browser: null, reason: "GOLFRAVEN_E2E_SKIP=1" };
   const inCi = process.env["CI"] === "true" || process.env["CI"] === "1";
   try {
-    return { browser: await chromium.launch({ headless: true, args: ["--no-sandbox"] }), reason: null };
+    return { browser: await chromium.launch({ ...browserChoice({ headless: true }), args: ["--no-sandbox"] }), reason: null };
   } catch (e) {
     const reason = e instanceof Error ? (e.message.split("\n")[0] ?? "launch failed") : String(e);
     if (inCi) throw new Error(`Chromium could not be launched under CI (${reason}); CI installs the pinned browser, so this is a failure. Set GOLFRAVEN_E2E_SKIP=1 to opt out deliberately.`);

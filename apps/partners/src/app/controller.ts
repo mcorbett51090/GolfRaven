@@ -15,24 +15,31 @@
  * it is inside the API client's closure, and this module never receives it.
  */
 
+import type {
+  FacilityProgrammeUpsert,
+  OfferUpsert,
+  SponsorshipUpsert,
+  TrailProgrammeUpsert,
+} from "../api/admin-routes";
 import type { PartnerApi, SessionEndReason } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
-import type { SessionGrant, WhoAmI } from "../api/types";
+import type { AttestKind, RedeemMethod, StockMoveKind } from "../api/work-routes";
+import type { SessionGrant } from "../api/types";
+import { pinSetupMode } from "../auth/pin-setup";
 import { signInWithPasskey } from "../auth/sign-in";
+import type { StepUp } from "../auth/step-up";
 import type { GetAssertionDeps } from "../webauthn/assertion";
-import { messageForError, type UiMessage } from "./messages";
+import type { CreateCredentialDeps } from "../webauthn/registration";
+import { createAdminScreens } from "./admin";
+import { createEnrolFlow } from "./enrol-flow";
+import { messageForError } from "./messages";
+import { createPanels, type PinSetupInput } from "./panels";
+import type { AppState, Notice } from "./state";
+import { createWorkScreens } from "./work";
 
-export type Notice =
-  | { readonly kind: "locked" | "signed-out" | "expired" | "sign-out-offline" | "lock-offline" }
-  | { readonly kind: "error"; readonly message: UiMessage };
+export type { AppState, EnrolState, Notice, Panel, SignedInState, WorkView } from "./state";
 
-export type AppState =
-  /** `retryUntilMs`: after a 429 with a readable Retry-After, the sign-in button stays disabled until this time (epoch ms). */
-  | { readonly screen: "signed-out"; readonly notice: Notice | null; readonly retryUntilMs?: number }
-  | { readonly screen: "signing-in" }
-  | { readonly screen: "signed-in"; readonly grant: SessionGrant; readonly session: WhoAmI; readonly busy: "refresh" | null; readonly notice: Notice | null };
-
-export interface AppController {
+export interface AppController extends StepUp {
   getState(): AppState;
   subscribe(listener: (state: AppState) => void): () => void;
   signIn(): Promise<void>;
@@ -42,13 +49,108 @@ export interface AppController {
   lock(): Promise<void>;
   /** The page went away (pagehide) or came back from the back/forward cache (pageshow persisted): signed-out, nothing held, no matter what the state was. */
   reset(opts?: { keepalive?: boolean }): void;
+
+  /** Invite and enrolment acceptance (pre-session; see enrol-flow.ts). `startEnrol({ token })` is what an invite link calls. */
+  startEnrol(opts?: { token?: string }): void;
+  cancelEnrol(): void;
+  requestEnrolCode(pasted?: string): Promise<void>;
+  submitEnrolCode(code: string): Promise<void>;
+  createPasskey(): Promise<void>;
+
+  /** The PIN prompt (`requirePin` opens it) and the PIN, email-proof and second-factor panels (see panels.ts). */
+  submitPin(pin: string): void;
+  cancelPin(): void;
+  openPinSetup(): Promise<void>;
+  submitPinSetup(input: PinSetupInput): Promise<void>;
+  startEmailProof(): Promise<void>;
+  submitEmailProof(code: string): Promise<void>;
+  openTotp(mode: "verify" | "enrol"): Promise<void>;
+  startTotpEnrol(): Promise<void>;
+  submitTotp(code: string): Promise<void>;
+  closePanel(): void;
+
+  /** S7b/S7c/S7 work screens (attest, course-QR, stock, hand-over, offer redeem; see work.ts). */
+  openAttest(facilityId: string): void;
+  openCourseQr(facilityId: string): void;
+  openStock(facilityId: string): void;
+  openHandover(facilityId: string): void;
+  openOfferRedeem(facilityId: string): void;
+  closeWork(): void;
+  setWorkFacility(facilityId: string): void;
+  setAttestMode(mode: "online" | "offline"): void;
+  setAttestKind(kind: AttestKind): void;
+  submitOnlineAttest(token: string): Promise<void>;
+  submitOfflineAttest(handle: string, code: string): Promise<void>;
+  loadShiftLog(): Promise<void>;
+  loadStaffActivity(days: number): Promise<void>;
+  loadCoursePin(): Promise<void>;
+  rotatePin(): Promise<void>;
+  mintToken(): Promise<void>;
+  refreshSale(): Promise<void>;
+  loadPrintedQr(): Promise<void>;
+  printQr(): Promise<void>;
+  loadStock(): Promise<void>;
+  submitStockMove(trailId: string, kind: StockMoveKind, qty: number, note: string | null): Promise<void>;
+  loadCollectQueue(): Promise<void>;
+  setRedeemMethod(method: RedeemMethod): void;
+  mintHandover(entitlementId: string): Promise<void>;
+  dismissHandoverMint(): void;
+  submitRedeem(entitlementId: string, credential: string): Promise<void>;
+  submitVoucher(entitlementId: string): Promise<void>;
+  loadOffersQueue(): Promise<void>;
+  selectOfferCode(offerCodeId: string): void;
+  submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
+
+  /** S7d/S7 manager/operator/admin screens (see admin.ts). */
+  openProgramme(trailId: string): void;
+  openOffers(trailId: string): void;
+  openSponsorships(trailId: string): void;
+  openReview(): void;
+  openRollups(trailId: string): void;
+  openSettlement(trailId: string): void;
+  setAdminTrail(trailId: string): void;
+  setAdminSponsorshipId(sponsorshipId: string): void;
+  setSettlementMonth(month: string): void;
+  loadProgramme(): Promise<void>;
+  saveTrailProgramme(body: TrailProgrammeUpsert): Promise<void>;
+  saveFacilityProgramme(body: FacilityProgrammeUpsert): Promise<void>;
+  loadOffers(): Promise<void>;
+  saveOffer(body: OfferUpsert): Promise<void>;
+  approveOffer(id: string): Promise<void>;
+  endOffer(id: string): Promise<void>;
+  loadSponsorships(): Promise<void>;
+  saveSponsorship(body: SponsorshipUpsert): Promise<void>;
+  approveSponsorship(id: string): Promise<void>;
+  loadReview(): Promise<void>;
+  resolveOfferCode(id: string, approve: boolean): Promise<void>;
+  resolveEntitlement(id: string, approve: boolean): Promise<void>;
+  loadOperatorRollups(): Promise<void>;
+  loadSponsorRollups(): Promise<void>;
+  exportSettlement(month?: string): Promise<void>;
+  dismissSettlementExport(): void;
+}
+
+export interface ControllerWebAuthn {
+  /** `navigator.credentials`: sign-in needs `get`, an enrolment needs `create`. */
+  readonly credentials: (Pick<CredentialsContainer, "get"> & Partial<Pick<CredentialsContainer, "create">>) | undefined;
+  readonly supported?: boolean;
 }
 
 export interface ControllerDeps {
   readonly api: PartnerApi;
-  readonly webauthn: GetAssertionDeps;
+  readonly webauthn: ControllerWebAuthn;
   /** Injected for tests. */
   readonly nowMs?: () => number;
+}
+
+function assertionDeps(w: ControllerWebAuthn): GetAssertionDeps {
+  return w.supported === undefined ? { credentials: w.credentials } : { credentials: w.credentials, supported: w.supported };
+}
+
+function creationDeps(w: ControllerWebAuthn): CreateCredentialDeps {
+  const c = w.credentials;
+  const credentials = c?.create === undefined ? undefined : { create: c.create.bind(c) };
+  return w.supported === undefined ? { credentials } : { credentials, supported: w.supported };
 }
 
 const NOTICE_FOR_REASON: Record<SessionEndReason, Notice> = {
@@ -66,6 +168,30 @@ export function createController(deps: ControllerDeps): AppController {
   const { api } = deps;
   const nowMs = deps.nowMs ?? (() => Date.now());
   let state: AppState = { screen: "signed-out", notice: null };
+  const host = {
+    getState: () => state,
+    set: (next: AppState) => set(next),
+  };
+  const panels = createPanels({ api, host, nowMs });
+  const work = createWorkScreens({ api, host, stepUp: panels, webauthn: assertionDeps(deps.webauthn) });
+  const admin = createAdminScreens({ api, host });
+  const enrol = createEnrolFlow({
+    api,
+    webauthn: creationDeps(deps.webauthn),
+    host,
+    // the first session is open: show it, and ask for the first PIN before anything else (design 6.1 step 5). A person who already has one (a recovery) goes home.
+    async onSession(grant: SessionGrant, signal: AbortSignal) {
+      const session = await api.session(signal);
+      let mode: "set" | "change" | "locked" = "set";
+      try {
+        mode = await pinSetupMode(api);
+      } catch {
+        // unknown: ask for a PIN, the safe side
+      }
+      const panel = mode === "set" ? ({ kind: "pin-setup", mode: "set", forced: true, canSkip: false, busy: false, notice: null } as const) : null;
+      set({ screen: "signed-in", grant, session, busy: null, notice: null, panel, work: null });
+    },
+  });
   /** The sign-in in progress; null when none, or once it was cancelled (the flow then drops whatever it produces). */
   let abort: AbortController | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -83,6 +209,7 @@ export function createController(deps: ControllerDeps): AppController {
 
   // Every way a session ends (sign-out, lock, a 401 anywhere, an explicit forget) arrives here AFTER the token has been wiped.
   api.onSessionEnded((reason) => {
+    panels.sessionEnded();
     if (state.screen === "signed-in") set({ screen: "signed-out", notice: NOTICE_FOR_REASON[reason] });
   });
 
@@ -140,7 +267,7 @@ export function createController(deps: ControllerDeps): AppController {
       set({ screen: "signing-in" });
       try {
         // verify() holds no token for a sign-in that was cancelled while it was on the wire (it revokes the session it just opened instead)
-        const grant = await signInWithPasskey(api, deps.webauthn, mine.signal);
+        const grant = await signInWithPasskey(api, assertionDeps(deps.webauthn), mine.signal);
         if (!live()) {
           await dropSession();
           return;
@@ -151,7 +278,7 @@ export function createController(deps: ControllerDeps): AppController {
           return;
         }
         abort = null;
-        set({ screen: "signed-in", grant, session, busy: null, notice: null });
+        set({ screen: "signed-in", grant, session, busy: null, notice: null, panel: null, work: null });
       } catch (e) {
         if (!live()) {
           // cancelled: cancelSignIn() already showed signed-out; make sure nothing is held
@@ -192,6 +319,82 @@ export function createController(deps: ControllerDeps): AppController {
       }
     },
 
+    startEnrol: (opts) => enrol.start(opts),
+    cancelEnrol: () => enrol.cancel(),
+    requestEnrolCode: (pasted) => enrol.requestCode(pasted),
+    submitEnrolCode: (code) => enrol.submitCode(code),
+    createPasskey: () => enrol.createPasskey(),
+
+    requirePin: (actionClass, signal) => panels.requirePin(actionClass, signal),
+    submitPin: (pin) => panels.submitPin(pin),
+    cancelPin: () => panels.cancelPin(),
+    openPinSetup: () => panels.openPinSetup(),
+    submitPinSetup: (input) => panels.submitPinSetup(input),
+    startEmailProof: () => panels.startEmailProof(),
+    submitEmailProof: (code) => panels.submitEmailProof(code),
+    openTotp: (mode) => panels.openTotp(mode),
+    startTotpEnrol: () => panels.startTotpEnrol(),
+    submitTotp: (code) => panels.submitTotp(code),
+    closePanel: () => panels.closePanel(),
+
+    openAttest: (facilityId) => work.openAttest(facilityId),
+    openCourseQr: (facilityId) => work.openCourseQr(facilityId),
+    openStock: (facilityId) => work.openStock(facilityId),
+    openHandover: (facilityId) => work.openHandover(facilityId),
+    openOfferRedeem: (facilityId) => work.openOfferRedeem(facilityId),
+    closeWork: () => work.closeWork(),
+    setWorkFacility: (facilityId) => work.setFacility(facilityId),
+    setAttestMode: (mode) => work.setAttestMode(mode),
+    setAttestKind: (kind) => work.setAttestKind(kind),
+    submitOnlineAttest: (token) => work.submitOnlineAttest(token),
+    submitOfflineAttest: (handle, code) => work.submitOfflineAttest(handle, code),
+    loadShiftLog: () => work.loadShiftLog(),
+    loadStaffActivity: (days) => work.loadStaffActivity(days),
+    loadCoursePin: () => work.loadCoursePin(),
+    rotatePin: () => work.rotatePin(),
+    mintToken: () => work.mintToken(),
+    refreshSale: () => work.refreshSale(),
+    loadPrintedQr: () => work.loadPrintedQr(),
+    printQr: () => work.printQr(),
+    loadStock: () => work.loadStock(),
+    submitStockMove: (trailId, kind, qty, note) => work.submitStockMove(trailId, kind, qty, note),
+    loadCollectQueue: () => work.loadCollectQueue(),
+    setRedeemMethod: (method) => work.setRedeemMethod(method),
+    mintHandover: (entitlementId) => work.mintHandover(entitlementId),
+    dismissHandoverMint: () => work.dismissHandoverMint(),
+    submitRedeem: (entitlementId, credential) => work.submitRedeem(entitlementId, credential),
+    submitVoucher: (entitlementId) => work.submitVoucher(entitlementId),
+    loadOffersQueue: () => work.loadOffersQueue(),
+    selectOfferCode: (offerCodeId) => work.selectOfferCode(offerCodeId),
+    submitOfferRedeem: (offerCodeId, credential) => work.submitOfferRedeem(offerCodeId, credential),
+
+    openProgramme: (trailId) => admin.openProgramme(trailId),
+    openOffers: (trailId) => admin.openOffers(trailId),
+    openSponsorships: (trailId) => admin.openSponsorships(trailId),
+    openReview: () => admin.openReview(),
+    openRollups: (trailId) => admin.openRollups(trailId),
+    openSettlement: (trailId) => admin.openSettlement(trailId),
+    setAdminTrail: (trailId) => admin.setTrail(trailId),
+    setAdminSponsorshipId: (sponsorshipId) => admin.setSponsorshipId(sponsorshipId),
+    setSettlementMonth: (month) => admin.setSettlementMonth(month),
+    loadProgramme: () => admin.loadProgramme(),
+    saveTrailProgramme: (body) => admin.saveTrail(body),
+    saveFacilityProgramme: (body) => admin.saveFacility(body),
+    loadOffers: () => admin.loadOffers(),
+    saveOffer: (body) => admin.saveOffer(body),
+    approveOffer: (id) => admin.approveOffer(id),
+    endOffer: (id) => admin.endOffer(id),
+    loadSponsorships: () => admin.loadSponsorships(),
+    saveSponsorship: (body) => admin.saveSponsorship(body),
+    approveSponsorship: (id) => admin.approveSponsorship(id),
+    loadReview: () => admin.loadReview(),
+    resolveOfferCode: (id, approve) => admin.resolveOfferCode(id, approve),
+    resolveEntitlement: (id, approve) => admin.resolveEntitlement(id, approve),
+    loadOperatorRollups: () => admin.loadOperatorRollups(),
+    loadSponsorRollups: () => admin.loadSponsorRollups(),
+    exportSettlement: (month) => admin.exportSettlement(month),
+    dismissSettlementExport: () => admin.dismissSettlementExport(),
+
     signOut: () => end(() => api.signOut(), "sign-out-offline", "signed-out"),
 
     lock: () => end(() => api.lock(), "lock-offline", "locked"),
@@ -199,6 +402,8 @@ export function createController(deps: ControllerDeps): AppController {
     reset(opts = {}) {
       abort?.abort();
       abort = null;
+      enrol.reset();
+      panels.sessionEnded();
       clearRetryTimer();
       void dropSession(opts.keepalive === true);
       set({ screen: "signed-out", notice: { kind: "expired" } });

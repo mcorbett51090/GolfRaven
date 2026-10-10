@@ -53,7 +53,7 @@ suite("apps/partners in Chromium", () => {
         {
           // the SAME pages under other URLs, for the bfcache cells: the harness (no pagehide handler) with and without `Cache-Control: no-store`, and the real app at a URL
           // the generated `_headers` does not mark no-store (so only the page's own pagehide/pageshow handlers stand between Back and a signed-in screen)
-          alias: { "/harness-nostore.html": "/harness.html", "/harness-cacheable.html": "/harness.html", "/app-cacheable.html": "/index.html" },
+          alias: { "/harness-nostore.html": "/harness.html", "/harness-cacheable.html": "/harness.html", "/app-cacheable.html": "/index.html", "/invite": "/index.html" },
           extraHeaders: { "/harness-nostore.html": { "Cache-Control": "no-store" } },
         },
       ),
@@ -681,6 +681,156 @@ suite("apps/partners in Chromium", () => {
       server.state.reauthLimit = 0;
       const r = await click(w, "reauth");
       expect(r).toMatchObject({ ok: false, kind: "rate_limited", status: 429, retryAfterSeconds: 1800 });
+    });
+  });
+
+  describe("S7a: invite acceptance and the PIN, in a real browser under the real CSP", () => {
+    const EMAIL = "new.hire@partners.example.test";
+    const PIN = "7391";
+    const fill = async (w: Watch, id: string, value: string) => w.page.locator(`#${id}`).fill(value);
+    const wire = () => server.log.filter((r) => r.method !== "OPTIONS");
+
+    it("an invite link opens the enrolment screen and its fragment is removed from the address bar; nothing is sent until the person asks for a code", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open(`/invite#${token}`);
+      expect(await screen(w)).toBe("enrol");
+      expect(w.page.url()).toBe(`${pageOrigin}/invite`);
+      expect(await w.page.evaluate(() => location.hash)).toBe("");
+      expect(server.log).toEqual([]);
+      expect(await w.page.content()).not.toContain(token);
+      expect(await w.violations()).toEqual([]);
+    });
+
+    it("link -> emailed code -> a real passkey created by the browser -> the forced PIN -> home; zero violations, a clean console, no PIN digits on the wire, nothing in storage", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open(`/invite#${token}`);
+      await w.page.getByTestId("enrol-send-code").click();
+      await w.page.locator('#enrol-code').waitFor();
+      expect(server.state.mailed).toEqual([EMAIL]);
+      await fill(w, "enrol-code", server.state.otpCode);
+      await w.page.locator("#enrol-code").press("Enter"); // the form submits on Enter
+      await w.page.getByTestId("enrol-create-passkey").waitFor();
+      expect(await w.auth.credentials()).toHaveLength(1); // only the preloaded one: nothing is created until the button
+      await w.page.getByTestId("enrol-create-passkey").click();
+      await w.page.locator('[data-screen="pin-setup"]').waitFor();
+      expect(await w.auth.credentials()).toHaveLength(2); // the browser's authenticator made the new resident credential
+      expect(server.credentialsOf(server.userByEmail(EMAIL)!.id)).toHaveLength(1);
+      expect(server.sessions()).toHaveLength(1);
+
+      // the forced first PIN: no way to leave, a refused PIN is explained and sends nothing, a good one is saved
+      expect(await w.page.getByTestId("panel-cancel").count()).toBe(0);
+      await fill(w, "pin-new", "1234");
+      await fill(w, "pin-confirm", "1234");
+      await w.page.getByTestId("pin-save").click();
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("run of digits");
+      expect(wire().filter((r) => r.path.endsWith("/pin/set"))).toHaveLength(0);
+      await fill(w, "pin-new", PIN);
+      await fill(w, "pin-confirm", PIN);
+      await w.page.getByTestId("pin-save").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("PIN is set");
+      expect(server.pinRecord(server.userByEmail(EMAIL)!.id)).not.toBeNull();
+
+      const set = wire().find((r) => r.path.endsWith("/pin/set"))!;
+      expect(Object.keys(JSON.parse(set.body) as object).sort()).toEqual(["derived", "iterations", "salt"]);
+      for (const r of server.log) {
+        expect(r.body, `${r.method} ${r.path}`).not.toContain(`"${PIN}"`);
+        expect(r.path).not.toContain(PIN);
+      }
+      expect(w.requests.filter((u) => u.includes(PIN))).toEqual([]);
+      expect(w.requests.some((u) => /rest\/v1|postgrest|supabase/i.test(u))).toBe(false);
+      expect([...new Set(w.requests.map((u) => new URL(u).origin))].sort()).toEqual([apiOrigin, pageOrigin].sort());
+      expect(await w.violations()).toEqual([]);
+      expect(w.pageErrors).toEqual([]);
+      expect(w.console).toEqual([]);
+
+      const stores = await w.page.evaluate(async () => ({ local: Object.entries(localStorage), session: Object.entries(sessionStorage), idb: (await indexedDB.databases()).map((d) => d.name), cookie: document.cookie, caches: await caches.keys() }));
+      expect(stores).toEqual({ local: [], session: [], idb: [], cookie: "", caches: [] });
+      const state = JSON.stringify(await w.context.storageState({ indexedDB: true }));
+      expect(state).not.toContain(token);
+      expect(state).not.toContain(server.issuedTokens[0]!);
+      expect(state).not.toContain("gr_inv_");
+    });
+
+    it("a pasted token works from the plain page, and a wrong emailed code is refused with the one message", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open("/");
+      await w.page.getByTestId("have-invite").click();
+      expect(await screen(w)).toBe("enrol");
+      await fill(w, "enrol-token", `https://partners.example.test/invite#${token}`);
+      await w.page.getByTestId("enrol-send-code").click();
+      await w.page.locator("#enrol-code").waitFor();
+      await fill(w, "enrol-code", "000000");
+      await w.page.getByTestId("enrol-submit-code").click();
+      await w.page.getByTestId("notice").filter({ hasText: "was not accepted" }).waitFor();
+      expect(await screen(w)).toBe("enrol");
+      expect(await w.violations()).toEqual([]);
+    });
+
+    it("the enrolment screen is keyboard-first: the code field takes focus on arrival, and the screens are in French on request", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open(`/invite#${token}`);
+      await w.page.getByTestId("enrol-send-code").click();
+      await w.page.locator("#enrol-code").waitFor();
+      expect(await w.page.evaluate(() => document.activeElement?.id)).toBe("enrol-code");
+      await w.page.getByTestId("lang-toggle").click();
+      expect(await textOf(w.page.getByTestId("heading"))).toBe("Accepter votre invitation");
+    });
+
+    it("the PIN prompt an A1 screen would open: masked numeric input, a refused PIN is explained, a wrong one is counted, the right one resolves with a grant; only { derived } is sent", async () => {
+      await server.seedPin(PIN, { iterations: 210_000 });
+      const w = await open("/harness.html");
+      await w.page.locator("#mount-app").click();
+      await w.page.getByTestId("sign-in").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      await w.page.locator("#request-pin-a1").click();
+      await w.page.locator('[data-screen="pin-prompt"]').waitFor();
+      const attrs = await w.page.locator("#pin").evaluate((el) => ({ type: el.getAttribute("type"), mode: el.getAttribute("inputmode"), max: el.getAttribute("maxlength"), complete: el.getAttribute("autocomplete"), focused: document.activeElement === el }));
+      expect(attrs).toEqual({ type: "password", mode: "numeric", max: "4", complete: "off", focused: true });
+
+      await fill(w, "pin", "1234");
+      await w.page.locator("#pin").press("Enter");
+      await w.page.getByTestId("notice").filter({ hasText: "run of digits" }).waitFor();
+      expect(wire().filter((r) => r.path.endsWith("/step-up/pin"))).toHaveLength(0);
+      await fill(w, "pin", "7392");
+      await w.page.getByTestId("pin-submit").click();
+      await w.page.getByTestId("notice").filter({ hasText: "not correct" }).waitFor();
+      expect(server.pinRecord()!.failures).toBe(1);
+      await fill(w, "pin", PIN);
+      await w.page.getByTestId("pin-submit").click();
+      await w.page.waitForFunction(() => (document.querySelector('[data-testid="out"]')?.textContent ?? "").includes("granted"));
+      expect(JSON.parse((await w.page.getByTestId("out").textContent())!)).toMatchObject({ ok: true, granted: "A1" });
+      expect(server.pinRecord()!.failures).toBe(0);
+      expect(server.state.pinGrantsIssued).toBe(1);
+
+      const bodies = wire().filter((r) => r.path.endsWith("/step-up/pin")).map((r) => JSON.parse(r.body) as Record<string, unknown>);
+      expect(bodies).toHaveLength(2);
+      for (const b of bodies) expect(Object.keys(b)).toEqual(["derived"]);
+      for (const r of server.log) {
+        expect(r.body).not.toContain(`"${PIN}"`);
+        expect(r.body).not.toContain('"7392"');
+        expect(r.path).not.toContain(PIN);
+      }
+      expect(w.requests.filter((u) => u.includes(PIN) || u.includes("7392"))).toEqual([]);
+      expect(await w.violations()).toEqual([]);
+      expect(w.pageErrors).toEqual([]);
+      // the browser's own network log of the wrong PIN's 403 (and the harness page's missing favicon) is all the console holds: the page itself logs nothing
+      expect(w.console.filter((m) => !m.startsWith("error: Failed to load resource"))).toEqual([]);
+    });
+
+    it("Cancel on the prompt rejects the caller with 'cancelled' and closes the prompt", async () => {
+      await server.seedPin(PIN, { iterations: 210_000 });
+      const w = await open("/harness.html");
+      await w.page.locator("#mount-app").click();
+      await w.page.getByTestId("sign-in").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      await w.page.locator("#request-pin-a1").click();
+      await w.page.locator('[data-screen="pin-prompt"]').waitFor();
+      await w.page.getByTestId("panel-cancel").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      await w.page.waitForFunction(() => (document.querySelector('[data-testid="out"]')?.textContent ?? "").includes("stepUp"));
+      expect(JSON.parse((await w.page.getByTestId("out").textContent())!)).toMatchObject({ ok: true, stepUp: "cancelled" });
+      expect(wire().filter((r) => r.path.endsWith("/step-up/pin"))).toHaveLength(0);
     });
   });
 });

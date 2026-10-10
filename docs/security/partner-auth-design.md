@@ -1945,6 +1945,39 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 - The PWA screens and `apps/partners` client; the out-of-band notice of a credential add (U1) is still an `audit_log` row.
 - `gr_enr_` is not on `getActorFromRequest`'s refusal list (it is never a bearer); add it if a bearer use ever appears.
 
+## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
+
+Closes the seams 20.5 left for S1.3, S1.4 and S1.5, now that their Edge routes exist. **No server, database or migration change**: the page is the only thing that moved.
+
+### 24.1 What was built
+
+- **PIN step-up** (`src/auth/pin.ts`, `step-up.ts`, `pin-setup.ts`). The browser derives with the shared contract (19.4): `pin-contract.ts`, `pin-deny-list.ts` and, for the base64url helpers it imports, `token.ts` are imported **by relative path** (not copied), so the browser cannot drift from what the Edge and the database tests run. `scripts/lib/inputs.mjs` allows exactly those three files outside `src/` (an exact-path list; a fourth fails the build; `node_modules` is still refused) and `tsconfig.json` gains `allowImportingTsExtensions` for their `./token.ts` import. `createStepUp` is the real `StepUp`: `GET pin` (a locked, unset or must-change PIN ends the call before any prompt), the prompt, the rule and deny-list check **before** any derivation, PBKDF2 with the stored salt and iteration count, `POST step-up/pin { derived }`. The controller exposes it as `requirePin(actionClass)`; `unavailableStepUp` stays exported.
+- **Set, change and the email proof**: `pin/set`, `pin/change`, `otp-proof/start`, `otp-proof/verify` (6.3), with a fresh CSPRNG salt and the contract's default 600,000 iterations. The first PIN after an enrolment is forced (6.1 step 5).
+- **Invite and enrolment acceptance** (6.1 branch N): client methods `acceptStart`, `acceptVerify`, `registerFirst` beside `signInOptions`; `src/webauthn/registration.ts` (`navigator.credentials.create` for the server's options, refused if they weaken the ceremony; serialised into exactly the strict shape `registration-shape.ts` accepts); the enrolment flow (token, emailed code, passkey, first session, forced PIN); the invite link (`/invite#<token>`, the fragment removed from the address bar on load).
+- **TOTP** (6.4), the nice-to-have: enter a code (`step-up/totp`) or add an authenticator (`totp/enrol`, `totp/confirm`) when `aal < requiredAal`. The seed is shown once as text (and the `otpauth://` link); there is no QR renderer, because no dependency may be added.
+- **CSP and client allow-list**: `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, so `connect-src` carries three path-scoped sources (the same list is the bearer allow-list of `call()`); `_headers` marks `/invite` no-store. Error kinds `conflict` (409), `gone` (410) and `unprocessable` (422) join the client's closed set (the new routes answer them).
+
+### 24.2 Decisions and departures
+
+- **A PIN the rules refuse is refused at a verify too**, not only at a set. The server cannot tell a denied PIN from another (it sees derived bytes), and 19.4 puts the rules where the PIN is typed. A refused PIN at a verify cannot be a PIN this page ever set; refusing it sends nothing and costs the member no failure against the lockout of 5. The cost: a PIN set by a custom client to a denied value cannot be used through this page until a manager resets it.
+- **A hostile or broken server cannot choose the work factor.** `GET pin` iterations outside `[210000, 1000000]`, or a salt that is not 16 canonical bytes, end the call with `bad_params` before anything is derived (a floor below the contract weakens the member's verifier; a ceiling above it is a denial of service on the page).
+- **`GET pin` is read before the prompt**, on every loop, so a locked PIN is never asked for and the prompt can show the server's back-off; the deny-list runs before the derivation and the POST.
+- **No "check my PIN" button.** A grant that nothing consumes would leave a 60-second window in which whoever holds the iPad could run an A1 action without a PIN. The prompt is reachable only from `requirePin`, i.e. from a screen that makes the action call straight after.
+- **`registerFirst` holds the first session's token exactly as `verify` does** (one closure variable, never returned, revoked with a copy if the flow was cancelled while the request was on the wire); the invite token and the emailed code are in the flow's closure only, never in the state, never drawn.
+- **The create ceremony starts from a button**, not automatically after the code, so Safari's user-activation rule holds and the options (good for a few minutes) are used on the person's tap.
+
+### 24.3 Not built, honestly
+
+- No screen consumes a PIN grant yet (S7b onward); `requirePin("A2")` does not also run the passkey reauth (`reauthWithPasskey` exists; the A2 screens compose the two).
+- Invite create / list / revoke, branch E (`invites/accept` for an existing member), `members/*` and the credential screens are not built; their CSP origins and the `call()` allow-list are in place.
+- No QR for the TOTP seed (text only).
+- A JavaScript string cannot be wiped: the four digits stay in the page's heap until collected (measured: a V8 heap snapshot after a set still finds them; the invite token and the session token are gone once their flow ends). The guarantee is the one the design needs: the digits are in no request, URL, header, storage, console or controller state.
+- `[unverified]`: PBKDF2 at 600,000 iterations on a low-end iPad (S0 owns the measurement), and the French strings (not reviewed by a native fr-CA speaker).
+
+### 24.4 Tests
+
+`pin.test.ts` (the four shared vectors, node's PBKDF2 as an independent oracle, every deny-list entry refused with no key derived, the work-factor and salt bounds), `step-up.test.ts` and `pin-setup.test.ts` (the real `partner-session` handler over the fake: the request body is exactly `{ derived }`, the PIN's digits in no request, wrong, back-off, lock, unset, must-change, hostile parameters), `registration.test.ts` (options strength; the serialised ceremony accepted by the server's own `parseEnrolCredentialBody`), `client-enrol.test.ts`, `enrol.test.ts` (token, code, passkey, first session, forced PIN, and the credential the page created **signs in afterwards**), `panels.test.ts` (prompt, set / change, proof, TOTP), plus source-scan, CSP, build-output and bundle-input cells. The Playwright suite adds six cells in real Chromium under the real CSP (invite link to first PIN, the PIN prompt, zero violations, nothing in storage, no PIN digits on the wire). `fake-partner-server.ts` now runs the real `partner-invites` handler with working in-memory PIN, email proof, TOTP, enrolment and a registration verifier that parses the attestation object.
+
 ## 25. As built: S2b (the staff lane of the course QR)
 
 Slice S2b of P5.1a: the staff half of a marker purchase. The player half is S2a (`marker-scan`, migration 0046); this slice **mints** what S2a verifies, shows and rotates the PIN S2a judges, and signs and registers the printed QR. Migration `0055_course_qr_staff.sql` is the database half; `course-qr` and `qr-print` are the Edge half. Migrations 0001 to 0054 are untouched (`tools/db/check-migrations-immutable.sh`).
@@ -2158,6 +2191,35 @@ Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055`
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 36's **65/65** cells; all other pgTAP matrices (**5286** tests PASS); partner serialisation; **partner stock concurrency** (`test-partner-stock-concurrency.sh`: six last-unit rounds, same-entitlement race, play guard at a real commit); review-account tool checks; Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest stock + entitlements handler suites (status map, hash-only hand-over token, strict shapes, bucket order). CI on PR #69 tip `b433f81`: all three checks green.
 
+## 29. As built: S7c (hand-over and stock screens; `apps/partners`)
+
+Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parallel Edge/DB half) claims section 28; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page talks to the Edge routes S5 ships (`stock-admin`, `partner-entitlements`).
+
+### 29.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `stock-admin` and `partner-entitlements`; `connect-src` gains two path-scoped sources.
+- **Typed work routes** (`src/api/work-routes.ts`): stock read/move; collect queue; hand-over mint (plaintext once); redeem (`staff_scan` / `hand_over_token`); voucher. Response bodies checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Hand over a marker** and **Stock** beside attest and course-QR. Every A1 action calls `requirePin("A1")` then the action in the same turn. Hand-over token plaintext lives only in `work.minted` until dismissed.
+- **Fake partner server** answers the two new functions in-memory (PIN-grant consume on A1) so the page's unit cells run without the S5 Edge tree on this branch.
+
+### 29.2 Decisions and departures
+
+- **Hand-over token shape is checked without a regexp** (same V8 last-match reason as the session token).
+- **Queue mint/voucher buttons** sit on each collect row; redeem uses a shared form (entitlement id + credential) so a pasted id still works when the queue is empty.
+- **Stock move kinds** match the Edge allow-list (never `redeemed` / `voucher_redeemed`).
+
+### 29.3 Not built, honestly
+
+- Camera scan into redeem credential fields.
+- S7d manager/operator/admin screens (section 31).
+- Offline-code redeem (P5.1b).
+- Merging with S5 will conflict textually in enumeration files the way S7b notes for S2b/S3.
+
+### 29.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 761 tests, all pass** (extends `work.test.ts`: stock load + A1 move; hand-over mint + staff_scan redeem after PIN; request bodies contain no PIN digits).
+
 ## 30. As built: S6 (programme and sponsors)
 
 Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055` / matrix `33` / section 25; S3–S5 claim 0056–0058 / 34–36 / 26–28; **§29 is reserved for S7c UI.** Nothing from 0001–0058 is edited.
@@ -2200,6 +2262,36 @@ Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOff
 ### 30.4 Verification
 
 Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on tip `5782bd8`: matrix 37's **58/58** cells; all other pgTAP matrices (**5344** tests PASS across 57 files, including updated 10 / 24 / 25 / 28 inventory and grant cells); Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest programme / offers / sponsorships handler suites plus related PartnerDb fakes (**96** focused cells; broader partner handler run **268**). `definer_policy_exprs.txt` holds the fourteen `pd_partner_programme_*` policies. CI on PR #71 tip `e2b11ac`: all three checks green.
+
+## 31. As built: S7d (manager / operator / admin screens; `apps/partners`)
+
+Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (programme/sponsors Edge half, parallel branch) claims section 30; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls S6/S4 Edge paths by name (`programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`); the fake partner server stubs them so unit cells run without merging those trees.
+
+### 31.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`; `connect-src` gains four path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`).
+- **Typed admin routes** (`src/api/admin-routes.ts`): programme read + trail/facility upsert; offers list/upsert/approve/end; sponsorships list/upsert/approve; review queue + SLA + resolve offer-code/entitlement; operator and sponsor rollups. Response bodies checked field-by-field (camelCase wire shapes match the S6 handlers).
+- **Admin screens** (`src/app/admin.ts`, extended `WorkView` kinds, `ui/views-admin.ts`). Signed-in home gains a **Programme and ops** section: programme / offers / sponsorships / rollups for `isAdmin` or any `operator` membership; **Review queue** for `isAdmin` only. Staff keep shop-floor only. A0 reads call directly; A3 writes refuse on the client unless `aal` 2 (same gate as printed-QR write).
+- **Errors and i18n.** `ErrorContext` gains programme/offers/sponsorships/review/rollups; closed codes `not_draft`, `not_live`, `bad_funder`, `bad_sponsor`, `stock_short`, `budget_short`, `no_trail`, `invalid_eligibility`, `not_held` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers the four new functions in-memory (A3 checks aal + fresh `mfaUntil`; sessions minted at aal ≥ 2 get a fresh MFA window for fixtures).
+
+### 31.2 Decisions and departures
+
+- **WorkView extended** with `programme | offers | sponsorships | review | rollups` rather than a parallel `AdminView` field, so one `work` slot still replaces home.
+- **Invite/member admin tools** stay on the existing PIN/TOTP/enrol panels; this slice does not add invite-issue UI.
+- **Eligibility** is sent as JSON from a text field; schema validation remains the Edge's AT(14) gate.
+
+### 31.3 Not built, honestly
+
+- Settlement UI (billing / fee settlement surfaces).
+- Camera or richer editors for eligibility rules.
+- Merging with S6 will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 31.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 877 tests, all pass** (adds `admin.test.ts`: open programme/offers/review/rollups, A0 load, A3 aal gate, offer approve and review resolve; request bodies contain no tokens beyond closed ids).
+- CI on PR #72 tip `ec7a5cc`: all three checks green.
 
 ## 32. As built: P5.1b (offers-redeem + settlement-export + exports-purge)
 
@@ -2256,3 +2348,65 @@ Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited
 **Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
 
 **Verification:** on this branch, `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38. CI green with §32.4 tip.
+
+## 33. As built: S7 offer redeem + settlement export screens (`apps/partners`)
+
+Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (programme/sponsors Edge) claims section 30; P5.1b (offers-redeem / settlement Edge half, parallel branch) claims section 32; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls P5.1b Edge paths by name (`partner-offers-redeem`, `settlement-export`); the fake partner server stubs them so unit cells run without merging that tree. `exports-purge` stays on the system lane and is **not** allow-listed.
+
+### 33.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `partner-offers-redeem` and `settlement-export`; `connect-src` gains two path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`). `exports-purge` is explicitly refused by the bearer allow-list cells.
+- **Typed routes.** `work-routes.ts`: `GET partner-offers-redeem/queue`, `POST …/redeem` (staff_scan only; camelCase wire matches P5.1b). `admin-routes.ts`: `POST settlement-export/export` → `{ path, signedUrl, expiresAt, lines }` (signed URL never logged).
+- **Offer redeem screen** (`work.ts` / `views-work.ts`, WorkView kind `offer-redeem`). Facility-scoped like stock/handover. Home button for staff/manager (or admin). A0 queue load; A1 redeem via `requirePin("A1")` then redeem in the same turn.
+- **Settlement export screen** (`admin.ts` / `views-admin.ts`, WorkView kind `settlement`). Home button with Programme and ops (operator/admin). Trail + month form; A3 aal gate (same as printed-QR / S7d writes); shows path, expiry, line count and a download link; dismiss clears the signed URL from state.
+- **Errors and i18n.** `ErrorContext` gains `offer-redeem` and `settlement`; closed codes `not_issued`, `expired`, `wrong_facility`, `token_invalid`, `replayed`, `budget_short`, `cold_start_cap`, `empty` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers both functions in-memory (PIN grant for redeem; aal + fresh `mfaUntil` for export).
+
+### 33.2 Decisions and departures
+
+- Offer redeem stays on the shop-floor `work` slot (facility picker); settlement stays with admin ops (trail picker) — one `work` field still replaces home.
+- Settlement signed URL is held only in `work.export` for display (like a hand-over token); request logs and notices never include it.
+- Month inputs accept `YYYY-MM` (HTML `type=month`) or `YYYY-MM-DD` and normalize to `YYYY-MM-01` for the Edge body.
+
+### 33.3 Not built, honestly
+
+- Camera scan for check-in tokens.
+- Offline offer redeem (`offline_code` remains refused by Edge and UI).
+- `exports-purge` UI (system lane).
+- Merging with P5.1b will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 33.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 917 tests, all pass** (adds offer-redeem A1 PIN + queue/redeem body cells; settlement A3 aal gate, export path/expiry, empty month; allow-list/CSP include the two functions and refuse `exports-purge`).
+- CI on PR #74 tip `fb8b5ea`: all three checks green.
+## 34. As built: S7b (attest and course-QR screens; `apps/partners`)
+
+Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4; S4 landed on main first via #73, so this UI as-built takes the next free section.) S2b (parallel) claims section 25 and S3 claims section 26; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page is the only thing that moved. It talks to the Edge routes S2b and S3 ship (`partner-attest`, `course-qr`, `qr-print`).
+
+### 34.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`. `connect-src` gains three path-scoped sources; `Permissions-Policy` is `camera=(self)` (paste-only attest today; a later scan into the token field needs no header change).
+- **`call()` query object.** GET routes that need `?facilityId=` take a closed `{ key: value }` map (facility-id charset), appended after the path is validated so a route string still cannot carry `?` or `#`.
+- **Typed work routes** (`src/api/work-routes.ts`): online/offline attest, shift-log, staff-activity, course PIN, rotate, mint, refresh, printed QR read/write. Response bodies are checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Attest a player** and **Course QR**. Every A1 action calls `requirePin("A1")` then the action in the same turn (24.3). Rotate PIN is A2: `reauthWithPasskey` then `requirePin("A2")` then rotate. Printed-QR write is A3: refused in the UI when `aal < 2`.
+- **Fake partner server** answers the three new functions in-memory (PIN-grant consume on A1, reauth window on A2, aal/mfa on A3) so the page's unit cells run without the S2b/S3 Edge trees on this branch.
+
+### 34.2 Decisions and departures
+
+- **`state.work` on signed-in**, not a new top-level `AppState` screen. The PIN prompt is `state.panel`; keeping work under signed-in means `requirePin` needs no second host. Design 20.5's "new AppState branch" is met as a new view branch of signed-in.
+- **Online attest token is pasted** (the check-in jti). Camera policy is open; a BarcodeDetector scan is not built.
+- **Staff-activity and shift-log** are A0 reads on the attest screen (no PIN). Staff who are not managers will get 403 from the server for staff-activity; the page does not hide the button by role (the session's role list has no per-facility rank beyond membership).
+
+### 34.3 Not built, honestly
+
+- Camera scan of a player QR into the token field.
+- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29); programme/offers/sponsorships/review/rollups are section 31.
+- Offers-redeem (S3 seam / P5.1b).
+- Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
+
+### 34.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).
+
