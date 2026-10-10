@@ -105,6 +105,276 @@ export function stripJpegExif(bytes: Uint8Array): Uint8Array {
   return Uint8Array.from(out);
 }
 
+function readU16(bytes: Uint8Array, i: number): number {
+  return ((bytes[i]! << 8) | bytes[i + 1]!) >>> 0;
+}
+
+function readU32(bytes: Uint8Array, i: number): number {
+  return ((bytes[i]! << 24) | (bytes[i + 1]! << 16) | (bytes[i + 2]! << 8) | bytes[i + 3]!) >>> 0;
+}
+
+function typeAt(bytes: Uint8Array, i: number): string {
+  return String.fromCharCode(bytes[i]!, bytes[i + 1]!, bytes[i + 2]!, bytes[i + 3]!);
+}
+
+/** Standard XMP UUID in HEIF/HEIC uuid boxes (BE7ACFCB-97A9-42E8-9C71-999491E3AFAC). */
+function isXmpUuidBox(bytes: Uint8Array, contentStart: number): boolean {
+  if (contentStart + 16 > bytes.length) return false;
+  const xmp = [0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3, 0xaf, 0xac];
+  let i = 0;
+  while (i < 16) {
+    if (bytes[contentStart + i] !== xmp[i]) return false;
+    i += 1;
+  }
+  return true;
+}
+
+type BmffBox = { start: number; end: number; type: string; headerSize: number; contentStart: number };
+
+/** Read one ISO BMFF box header at `start`; null if truncated / unreadable. */
+function readBmffBox(bytes: Uint8Array, start: number, limit: number): BmffBox | null {
+  if (start + 8 > limit) return null;
+  let size = readU32(bytes, start);
+  const type = typeAt(bytes, start + 4);
+  let headerSize = 8;
+  let end: number;
+  if (size === 1) {
+    if (start + 16 > limit) return null;
+    // 64-bit size; we only accept values that fit in JS safe integer range for this walk.
+    const hi = readU32(bytes, start + 8);
+    const lo = readU32(bytes, start + 12);
+    if (hi !== 0) return null;
+    size = lo;
+    headerSize = 16;
+    end = start + size;
+  } else if (size === 0) {
+    end = limit;
+  } else {
+    end = start + size;
+  }
+  if (end > limit || end < start + headerSize) return null;
+  return { start, end, type, headerSize, contentStart: start + headerSize };
+}
+
+/**
+ * HEIC/HEIF privacy strip (pure BMFF walk, no decoder):
+ *  - drop top-level `uuid` boxes that carry the standard XMP UUID;
+ *  - inside `meta`, find `iinf` items of type `Exif` (or XMP mime) and zero their
+ *    `iloc` extents in a copy (offsets stay valid; GPS/camera bytes are gone).
+ * Residual metadata in non-item forms is accepted (same honesty as JPEG APP13).
+ */
+export function stripHeicExif(bytes: Uint8Array): Uint8Array {
+  if (!isHeic(bytes)) return bytes.slice();
+  const out = bytes.slice();
+  const topParts: Uint8Array[] = [];
+  let i = 0;
+  while (i < out.length) {
+    const box = readBmffBox(out, i, out.length);
+    if (!box) {
+      topParts.push(out.subarray(i));
+      break;
+    }
+    if (box.type === "uuid" && isXmpUuidBox(out, box.contentStart)) {
+      i = box.end;
+      continue;
+    }
+    if (box.type === "meta") {
+      zeroHeicMetaExifItems(out, box);
+    }
+    topParts.push(out.subarray(box.start, box.end));
+    i = box.end;
+  }
+  let total = 0;
+  for (const p of topParts) total += p.length;
+  const rebuilt = new Uint8Array(total);
+  let o = 0;
+  for (const p of topParts) {
+    rebuilt.set(p, o);
+    o += p.length;
+  }
+  return rebuilt;
+}
+
+function zeroHeicMetaExifItems(bytes: Uint8Array, meta: BmffBox): void {
+  // meta is a FullBox: version (1) + flags (3) then children.
+  let p = meta.contentStart + 4;
+  if (p > meta.end) return;
+  const exifItemIds = new Set<number>();
+  // First pass: collect Exif / XMP item ids from iinf.
+  let q = p;
+  while (q < meta.end) {
+    const child = readBmffBox(bytes, q, meta.end);
+    if (!child) break;
+    if (child.type === "iinf") collectExifItemIds(bytes, child, exifItemIds);
+    q = child.end;
+  }
+  if (exifItemIds.size === 0) return;
+  // Second pass: zero iloc extents for those ids (file-absolute offsets).
+  q = p;
+  while (q < meta.end) {
+    const child = readBmffBox(bytes, q, meta.end);
+    if (!child) break;
+    if (child.type === "iloc") zeroIlocExtents(bytes, child, exifItemIds);
+    q = child.end;
+  }
+}
+
+function collectExifItemIds(bytes: Uint8Array, iinf: BmffBox, out: Set<number>): void {
+  // iinf FullBox: version/flags, then entry_count, then infe boxes.
+  let p = iinf.contentStart;
+  if (p + 4 > iinf.end) return;
+  const version = bytes[p]!;
+  p += 4;
+  let entryCount: number;
+  if (version === 0) {
+    if (p + 2 > iinf.end) return;
+    entryCount = readU16(bytes, p);
+    p += 2;
+  } else {
+    if (p + 4 > iinf.end) return;
+    entryCount = readU32(bytes, p);
+    p += 4;
+  }
+  let n = 0;
+  while (n < entryCount && p < iinf.end) {
+    const infe = readBmffBox(bytes, p, iinf.end);
+    if (!infe || infe.type !== "infe") break;
+    const itemId = parseInfeItem(bytes, infe);
+    if (itemId !== null) out.add(itemId);
+    p = infe.end;
+    n += 1;
+  }
+}
+
+function parseInfeItem(bytes: Uint8Array, infe: BmffBox): number | null {
+  // infe FullBox. v2/v3: item_ID, item_protection_index, item_type (4cc), then name / content_type.
+  let p = infe.contentStart;
+  if (p + 4 > infe.end) return null;
+  const version = bytes[p]!;
+  p += 4;
+  let itemId: number;
+  if (version >= 2) {
+    if (version === 2) {
+      if (p + 2 > infe.end) return null;
+      itemId = readU16(bytes, p);
+      p += 2;
+    } else {
+      if (p + 4 > infe.end) return null;
+      itemId = readU32(bytes, p);
+      p += 4;
+    }
+    if (p + 2 + 4 > infe.end) return null;
+    p += 2; // item_protection_index
+    const itemType = typeAt(bytes, p);
+    p += 4;
+    if (itemType === "Exif") return itemId;
+    if (itemType === "mime") {
+      // item_name (nul), content_type (nul) — look for application/rdf+xml (XMP).
+      let nameEnd = p;
+      while (nameEnd < infe.end && bytes[nameEnd] !== 0) nameEnd += 1;
+      let ct = nameEnd + 1;
+      let ctEnd = ct;
+      while (ctEnd < infe.end && bytes[ctEnd] !== 0) ctEnd += 1;
+      const contentType = String.fromCharCode(...bytes.subarray(ct, ctEnd));
+      if (contentType === "application/rdf+xml") return itemId;
+    }
+    return null;
+  }
+  // v0/v1: item_ID (16), protection (16), name — no item_type; treat as non-Exif.
+  return null;
+}
+
+function zeroIlocExtents(bytes: Uint8Array, iloc: BmffBox, itemIds: Set<number>): void {
+  let p = iloc.contentStart;
+  if (p + 6 > iloc.end) return;
+  const version = bytes[p]!;
+  p += 4; // FullBox version + flags
+  const offsetSize = (bytes[p]! >> 4) & 0xf;
+  const lengthSize = bytes[p]! & 0xf;
+  p += 1;
+  const baseOffsetSize = (bytes[p]! >> 4) & 0xf;
+  const indexSize = version === 1 || version === 2 ? bytes[p]! & 0xf : 0;
+  p += 1;
+  let itemCount: number;
+  if (version < 2) {
+    if (p + 2 > iloc.end) return;
+    itemCount = readU16(bytes, p);
+    p += 2;
+  } else {
+    if (p + 4 > iloc.end) return;
+    itemCount = readU32(bytes, p);
+    p += 4;
+  }
+  const readSized = (size: number): number | null => {
+    if (size === 0) return 0;
+    if (size === 4) {
+      if (p + 4 > iloc.end) return null;
+      const v = readU32(bytes, p);
+      p += 4;
+      return v;
+    }
+    if (size === 8) {
+      if (p + 8 > iloc.end) return null;
+      const hi = readU32(bytes, p);
+      p += 4;
+      const lo = readU32(bytes, p);
+      p += 4;
+      if (hi !== 0) return null;
+      return lo;
+    }
+    if (size === 2) {
+      if (p + 2 > iloc.end) return null;
+      const v = readU16(bytes, p);
+      p += 2;
+      return v;
+    }
+    return null;
+  };
+  let n = 0;
+  while (n < itemCount && p < iloc.end) {
+    let itemId: number;
+    if (version < 2) {
+      if (p + 2 > iloc.end) return;
+      itemId = readU16(bytes, p);
+      p += 2;
+    } else {
+      if (p + 4 > iloc.end) return;
+      itemId = readU32(bytes, p);
+      p += 4;
+    }
+    if (version === 1 || version === 2) {
+      if (p + 2 > iloc.end) return;
+      p += 2; // construction_method
+    }
+    if (p + 2 > iloc.end) return;
+    p += 2; // data_reference_index
+    const baseOffset = readSized(baseOffsetSize);
+    if (baseOffset === null) return;
+    if (p + 2 > iloc.end) return;
+    const extentCount = readU16(bytes, p);
+    p += 2;
+    let e = 0;
+    while (e < extentCount) {
+      if (indexSize > 0) {
+        if (readSized(indexSize) === null) return;
+      }
+      const extentOffset = readSized(offsetSize);
+      const extentLength = readSized(lengthSize);
+      if (extentOffset === null || extentLength === null) return;
+      if (itemIds.has(itemId) && extentLength > 0) {
+        const abs = baseOffset + extentOffset;
+        let z = 0;
+        while (z < extentLength && abs + z < bytes.length) {
+          bytes[abs + z] = 0;
+          z += 1;
+        }
+      }
+      e += 1;
+    }
+    n += 1;
+  }
+}
+
 /** Remove eXIf ancillary chunks from PNG. */
 export function stripPngExif(bytes: Uint8Array): Uint8Array {
   if (!startsWithPng(bytes)) return bytes.slice();
@@ -161,7 +431,8 @@ export function sha256Hex(bytes: Uint8Array): string {
  */
 export function prepareReceiptImage(bytes: Uint8Array, kind: ReceiptImageKind): { stripped: Uint8Array; phash: string } {
   if (kind === "heic") {
-    const stripped = bytes.slice();
+    const stripped = stripHeicExif(bytes);
+    if (stripped.length < 12) throw new Error("invalid heic");
     return { stripped, phash: sha256Hex(stripped) };
   }
   if (kind === "jpeg") {

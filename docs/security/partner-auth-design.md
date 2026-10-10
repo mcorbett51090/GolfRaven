@@ -2728,13 +2728,41 @@ Numbering: **migration `0066`, matrix `44`, this section 44.** Closes the §4.6 
 
 ### 44.3 Not built, honestly
 
-- `receipt_green_fee` evidence writer (still `REJECTED_SOURCES` at `POST evidence`), OCR, perceptual aHash, HEIC metadata strip, picker UI.
+- `receipt_green_fee` evidence writer (still `REJECTED_SOURCES` at `POST evidence`), OCR, perceptual aHash, HEIC metadata strip (→ §45), picker UI.
 
 ### 44.4 Verification
 
-Branch: `cursor/p5-purchase-corroboration-8ffd` (base main after #83). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-purchase-corroboration-8ffd` (base main after #83). Tip `afa198b` CI green on PR #84 (all three checks); squash-merged as `ceeeb66`.
 
 - Vitest: `evidence-handler.test.ts` purchase-corroboration cells; fake `listValidAround` window/status filters.
 - pgTAP matrix 44; Deno integration (drain/rescore no longer trip on purchase_evidence).
+- Matrix 10 / `partner_kind_readers.txt` allow-list the new definer (check 14(c)).
 - `deno check` / typecheck: `Repo.purchases` on the real privileged builder.
+
+## 45. As built: HEIC Exif/XMP strip on receipt intake
+
+Numbering: **this section 45.** No migration. Closes the HEIC half of §40.1's EXIF strip (JPEG APP1 and PNG `eXIf` already shipped).
+
+### 45.1 What was built
+
+- **`stripHeicExif`** in `receipts/image.ts` (pure ISO BMFF walk, no decoder):
+  - Drop top-level `uuid` boxes whose UUID is the standard XMP UUID (`BE7ACFCB-97A9-42E8-9C71-999491E3AFAC`).
+  - Inside `meta`, collect `iinf`/`infe` items of type `Exif` or `mime`/`application/rdf+xml`, then **zero** their `iloc` extents in a copy (offsets stay valid; GPS/camera bytes are gone).
+- **`prepareReceiptImage(..., "heic")`** runs the strip before `phash = sha256(stripped)` (same contract as JPEG/PNG).
+
+### 45.2 Decisions and departures
+
+- **Zero extents, do not rewrite `iloc`/`iinf`** — removing items would require offset surgery across `mdat`; zeroing keeps the file structurally intact for any later decoder while removing privacy payload.
+- **No perceptual aHash** — still blocked by Edge import lint (§40.2).
+- **Residual risk** — non-item metadata forms (if any) are accepted, same honesty as JPEG APP13/COM (§40.3).
+
+### 45.3 Not built, honestly
+
+- `receipt_green_fee` evidence writer, OCR, perceptual aHash, picker UI, full HEIC re-encode.
+
+### 45.4 Verification
+
+Branch: `cursor/p5-heic-exif-strip-8ffd` (base main after #84). Recorded when CI is green on the PR tip.
+
+- Vitest: `receipts-image.test.ts` XMP uuid drop + Exif item extent zero + phash change.
 
