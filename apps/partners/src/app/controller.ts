@@ -124,6 +124,7 @@ export interface AppController extends StepUp {
   saveSponsorship(body: SponsorshipUpsert): Promise<void>;
   approveSponsorship(id: string): Promise<void>;
   loadReview(): Promise<void>;
+  loadReceiptCrossUserPreview(id: string): Promise<void>;
   resolveOfferCode(id: string, approve: boolean): Promise<void>;
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
   resolveReceiptCrossUser(id: string, approve: boolean): Promise<void>;
@@ -394,6 +395,7 @@ export function createController(deps: ControllerDeps): AppController {
     saveSponsorship: (body) => admin.saveSponsorship(body),
     approveSponsorship: (id) => admin.approveSponsorship(id),
     loadReview: () => admin.loadReview(),
+    loadReceiptCrossUserPreview: (id) => admin.loadReceiptCrossUserPreview(id),
     resolveOfferCode: (id, approve) => admin.resolveOfferCode(id, approve),
     resolveEntitlement: (id, approve) => admin.resolveEntitlement(id, approve),
     resolveReceiptCrossUser: (id, approve) => admin.resolveReceiptCrossUser(id, approve),

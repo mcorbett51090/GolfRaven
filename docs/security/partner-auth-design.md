@@ -2892,11 +2892,39 @@ Numbering: **this section 50.** No migration. Closes the player-app picker half 
 
 ### 50.3 Not built, honestly
 
-- OCR pipeline, perceptual aHash, camera capture, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, partners review image preview.
+- OCR pipeline, perceptual aHash, camera capture, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, partners review image preview (→ §51).
 
 ### 50.4 Verification
 
-Branch: `cursor/p5-receipt-picker-ui-8ffd` (base main after #89 / `983c90a`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-picker-ui-8ffd` (base main after #89 / `983c90a`). Tip CI green on PR #90 (all three checks); squash-merged as `77ab8dd`.
 
 - Mobile Vitest: receipts-upload + policy + flag inventory; typecheck.
+
+## 51. As built: partners review image preview (receipt_cross_user_match)
+
+Numbering: **migration `0070`, matrix `48`, this section 51.** Closes the review-queue image half left open by §49 / §50: an admin with A0 fetches short-lived signed URLs for subject (+ matched) receipt images on an open `receipt_cross_user_match` item; the partners PWA shows them on the queue row.
+
+### 51.1 What was built
+
+- **Storage**: `receiptsStorage.createSignedUrl(path, expiresInSeconds)` (service-role; mirror of exports settlement signing).
+- **DB**: `private.partner_receipt_cross_user_preview_for_partner(review_id)` (class **A0**, **ADMIN only**). Statuses: `ok | not_found | not_open | no_image`. Returns subject (+ matched if in detail) `purchase_evidence.ref_id` under existing `pd_partner_review_item_select` / `pd_partner_receipt_pe_select` (no new policies).
+- **Edge**: `GET /partner-review/preview/receipt-cross-user?id=<uuid>` → opaque labels `subject` / `matched` + signed URLs (TTL 180s). **Never** returns full storage paths (uid leak); **never** logs signed URLs.
+- **Partners PWA**: `getReceiptCrossUserPreview`; `loadReceiptCrossUserPreview` + auto-load on `loadReview`; queue row shows `<img>` (or a load button if the auto-fetch failed).
+- **CSP**: `img-src 'self' ${apiOrigin}/storage/v1/` so signed Storage URLs can load as images.
+
+### 51.2 Decisions and departures
+
+- **Refs stay on the Edge** — the definer returns storage paths only to the Edge transaction; the wire uses labels + signed URLs.
+- **Matched is best-effort** — if `matched_purchase_evidence_id` is missing, not a receipt, or has no `ref_id`, only the subject image is returned when present.
+- **Flag discipline** — no mobile `RECEIPTS_UPLOAD_UI_ENABLED` flip.
+
+### 51.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, camera capture, flipping the mobile upload flag.
+
+### 51.4 Verification
+
+Branch: `cursor/p5-receipt-review-preview-8ffd` (base main after #90 / `77ab8dd`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 48; PA-13b / function_inventory EXECUTE lists; partners Vitest (admin preview + CSP img-src); unit partner-review preview route.
 

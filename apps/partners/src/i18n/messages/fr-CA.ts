@@ -417,6 +417,9 @@ export const frCA: Record<MessageKey, string> = {
   "review.readonly": "Aucune action de résolution pour cet élément.",
   "review.approve": "Approuver",
   "review.reject": "Refuser",
+  "review.previewLoad": "Charger les images de reçu",
+  "review.previewSubject": "Reçu sujet",
+  "review.previewMatched": "Reçu correspondant",
   "review.lastState": "Résolu en {state}.",
   "notice.reviewResolved": "Élément de revue résolu.",
 

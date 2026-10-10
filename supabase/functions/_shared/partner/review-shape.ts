@@ -26,3 +26,18 @@ export function parseResolveBody(body: unknown): ShapeResult<{ readonly id: stri
   if (typeof body.approve !== "boolean") return fail(["approve must be a boolean"]);
   return { ok: true, value: { id: body.id.toLowerCase(), approve: body.approve } };
 }
+
+/** GET preview/receipt-cross-user: query may hold `id` (uuid) once and nothing else. */
+export function parsePreviewQuery(url: string): ShapeResult<{ readonly id: string }> {
+  const params = new URL(url).searchParams;
+  const issues: string[] = [];
+  for (const k of new Set(params.keys())) {
+    if (k !== "id") issues.push(`unknown query parameter: ${k}`);
+    else if (params.getAll(k).length > 1) issues.push("id must appear once");
+  }
+  const raw = params.get("id");
+  if (raw === null || raw === "") issues.push("id is required");
+  else if (!UUID_RE.test(raw)) issues.push("id must be a uuid");
+  if (issues.length > 0 || raw === null || !UUID_RE.test(raw)) return fail(issues.length > 0 ? issues : ["id must be a uuid"]);
+  return { ok: true, value: { id: raw.toLowerCase() } };
+}

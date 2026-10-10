@@ -4,12 +4,13 @@ import { CspParser } from "csp_evaluator/dist/parser.js";
 import { describe, expect, it } from "vitest";
 import { PARTNER_FUNCTIONS as CLIENT_FUNCTIONS } from "../src/api/client";
 import { DEFAULT_API_BASE, isLocalOrIpHost, isPlaceholderHost, resolveApiBase } from "../scripts/lib/config.mjs";
-import { buildCsp, buildHeadersFile, connectSources, PARTNER_FUNCTIONS } from "../scripts/lib/csp.mjs";
+import { buildCsp, buildHeadersFile, connectSources, PARTNER_FUNCTIONS, storageImgSource } from "../scripts/lib/csp.mjs";
 
 const API_ORIGIN = "https://abc123.example.test";
 const API = `${API_ORIGIN}/functions/v1`;
 /** One connect-src entry per partner function: path-scoped, trailing slash (a prefix match). */
 const CONNECT = PARTNER_FUNCTIONS.map((fn) => `${API}/${fn}/`);
+const STORAGE_IMG = storageImgSource(API);
 
 /**
  * A reference model of CSP Level 3 host-source matching for a URL, enough for connect-src: scheme, host and port must match; an EMPTY source path
@@ -44,8 +45,15 @@ describe("the policy", () => {
 
   it("is exactly the documented directive set", () => {
     expect(csp).toBe(
-      `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src ${CONNECT.join(" ")}; manifest-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`,
+      `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' ${STORAGE_IMG}; connect-src ${CONNECT.join(" ")}; manifest-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`,
     );
+  });
+
+  it("img-src allows 'self' and the API host Storage path for receipt preview signed URLs", () => {
+    expect(d.get("img-src")).toEqual(["'self'", STORAGE_IMG]);
+    expect(STORAGE_IMG).toBe(`${API_ORIGIN}/storage/v1/`);
+    expect(cspAllows(STORAGE_IMG, `${API_ORIGIN}/storage/v1/object/sign/receipts/x.jpg?token=t`)).toBe(true);
+    expect(cspAllows(STORAGE_IMG, `${API_ORIGIN}/rest/v1/orgs`)).toBe(false);
   });
 
   it("starts from default-src 'none' and allows scripts and styles from 'self' only", () => {

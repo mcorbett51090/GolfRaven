@@ -18,6 +18,7 @@ import {
   getOffers,
   getOperatorRollups,
   getProgramme,
+  getReceiptCrossUserPreview,
   getReviewQueue,
   getReviewSla,
   getSponsorRollups,
@@ -60,6 +61,7 @@ export interface AdminScreens {
   saveSponsorship(body: SponsorshipUpsert): Promise<void>;
   approveSponsorship(id: string): Promise<void>;
   loadReview(): Promise<void>;
+  loadReceiptCrossUserPreview(id: string): Promise<void>;
   resolveOfferCode(id: string, approve: boolean): Promise<void>;
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
   resolveReceiptCrossUser(id: string, approve: boolean): Promise<void>;
@@ -212,7 +214,7 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
     openReview() {
       const s = signedIn(host);
       if (s === null || s.busy !== null || s.panel !== null || !canOpenReview(s.session)) return;
-      withWork(host, s, { kind: "review", busy: false, items: null, sla: null, lastState: null }, null);
+      withWork(host, s, { kind: "review", busy: false, items: null, sla: null, lastState: null, previews: {} }, null);
     },
 
     openRollups(trailId) {
@@ -401,8 +403,36 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
       const grant = s.grant;
       await runA0(grant, "review", async () => {
         const [items, sla] = await Promise.all([getReviewQueue(api), getReviewSla(api)]);
+        const rxuIds = items.filter((i) => i.kind === "review_item" && i.reviewKind === "receipt_cross_user_match").map((i) => i.id);
+        const previewEntries = await Promise.all(
+          rxuIds.map(async (id) => {
+            try {
+              return [id, await getReceiptCrossUserPreview(api, id)] as const;
+            } catch {
+              return null;
+            }
+          }),
+        );
+        const previews: Record<string, Awaited<ReturnType<typeof getReceiptCrossUserPreview>>> = {};
+        for (const entry of previewEntries) {
+          if (entry !== null) previews[entry[0]] = entry[1];
+        }
         const cur = live(host, grant);
-        if (cur !== null && cur.work?.kind === "review") host.set({ ...cur, busy: null, work: { ...cur.work, items, sla } });
+        if (cur !== null && cur.work?.kind === "review") host.set({ ...cur, busy: null, work: { ...cur.work, items, sla, previews } });
+      });
+    },
+
+    async loadReceiptCrossUserPreview(id) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "review" || !UUID_RE.test(id)) return;
+      const grant = s.grant;
+      const reviewId = id.toLowerCase();
+      await runA0(grant, "review", async () => {
+        const preview = await getReceiptCrossUserPreview(api, reviewId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "review") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, previews: { ...cur.work.previews, [reviewId]: preview } } });
+        }
       });
     },
 
@@ -414,7 +444,7 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
         const { state } = await postResolveOfferCode(api, id.toLowerCase(), approve);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "review") {
-          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state }, notice: { kind: "review-resolved" } });
+          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state, previews: {} }, notice: { kind: "review-resolved" } });
         }
       });
     },
@@ -427,7 +457,7 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
         const { state } = await postResolveEntitlement(api, id.toLowerCase(), approve);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "review") {
-          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state }, notice: { kind: "review-resolved" } });
+          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state, previews: {} }, notice: { kind: "review-resolved" } });
         }
       });
     },
@@ -440,7 +470,7 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
         const { state } = await postResolveReceiptCrossUser(api, id.toLowerCase(), approve);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "review") {
-          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state }, notice: { kind: "review-resolved" } });
+          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state, previews: {} }, notice: { kind: "review-resolved" } });
         }
       });
     },

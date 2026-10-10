@@ -9,7 +9,8 @@
  *   default-src 'none'            nothing is allowed unless a directive below names it
  *   script-src 'self'             our own bundle only: no inline script, no eval, no third-party origin
  *   style-src 'self'              an external stylesheet only: no `<style>`, no `style=""` attribute
- *   img-src 'self'                the favicon (no `data:`: nothing in the page needs it)
+ *   img-src 'self' <storage>      the favicon, plus short-lived Supabase Storage signed URLs for receipt review previews (§51):
+ *                                 `${origin}/storage/v1/` derived from the same API host as connect-src (path-scoped prefix; no `data:` / `blob:`).
  *   connect-src <fn URL prefixes> one source PER PARTNER FUNCTION, scoped by path: `https://<host>/functions/v1/partner-session/` (a source whose path
  *                                 ends in `/` matches every URL under that prefix; CSP3 "path-part match"). Not the whole API origin: the same
  *                                 host serves /rest/v1 (PostgREST) and every other edge function, and this page may reach none of them (design 4.6).
@@ -23,7 +24,7 @@
  *                                 so none can: the code uses `textContent` only. Chromium enforces this today; Safari's support is [unverified]
  *                                 and an unsupporting browser simply ignores both directives.
  *
- * Departures from the design's section 4.6 list, all STRICTER: `connect-src` drops 'self'; `img-src` drops `data:`; `worker-src` is 'none', not 'self'.
+ * Departures from the design's section 4.6 list, all STRICTER: `connect-src` drops 'self'; `img-src` drops `data:` (Storage host added for §51); `worker-src` is 'none', not 'self'.
  */
 
 import { readFileSync } from "node:fs";
@@ -45,6 +46,16 @@ export function connectSources(apiBase, functions = PARTNER_FUNCTIONS) {
 }
 
 /**
+ * Path-scoped Storage host for receipt preview `<img>` (signed URLs under `/storage/v1/...` on the same origin as the functions root).
+ *
+ * @param {string} apiBase
+ * @returns {string}
+ */
+export function storageImgSource(apiBase) {
+  return `${new URL(apiBase).origin}/storage/v1/`;
+}
+
+/**
  * @param {string} apiBase the functions root the page may connect to (`https://<host>/functions/v1`); only the partner functions under it are allowed
  * @param {{ meta?: boolean, functions?: readonly string[] }} [opts]
  */
@@ -53,7 +64,7 @@ export function buildCsp(apiBase, opts = {}) {
     `default-src 'none'`,
     `script-src 'self'`,
     `style-src 'self'`,
-    `img-src 'self'`,
+    `img-src 'self' ${storageImgSource(apiBase)}`,
     `connect-src ${connectSources(apiBase, opts.functions).join(" ")}`,
     `manifest-src 'self'`,
     `worker-src 'none'`,

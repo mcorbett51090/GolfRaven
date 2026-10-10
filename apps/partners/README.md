@@ -77,7 +77,7 @@ on any bundle input that is not under `src/` or that comes from `node_modules`.
 
 ## The CSP
 
-`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src` one path-scoped source per entry of `partner-functions.json`
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' <api-origin>/storage/v1/; connect-src` one path-scoped source per entry of `partner-functions.json`
 (`partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`, `stock-admin`, `partner-entitlements`); `manifest-src 'self'; worker-src 'none';
 object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`.
 Emitted by `scripts/lib/csp.mjs`, once as the response header and once as the `<meta>`. Stricter than design 4.6 in three places (no `'self'` in

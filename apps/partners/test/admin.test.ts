@@ -231,6 +231,27 @@ describe("S7d review screen", () => {
     expect(JSON.parse(posts[0]!.body)).toEqual({ id: RECEIPT_CROSS_USER_ID, approve: false });
   });
 
+  it("loads receipt_cross_user preview images on the review queue (A0; never logs signedUrl)", async () => {
+    const s = await setup(adminWhoami);
+    s.controller.openReview();
+    await s.controller.loadReview();
+    await until(() => {
+      const w = home(s.controller).work;
+      return w?.kind === "review" && w.previews[RECEIPT_CROSS_USER_ID] !== undefined;
+    }, "receipt preview never loaded");
+    const w = home(s.controller).work;
+    expect(w?.kind).toBe("review");
+    if (w?.kind === "review") {
+      const preview = w.previews[RECEIPT_CROSS_USER_ID];
+      expect(preview?.images.map((i) => i.label)).toEqual(["subject", "matched"]);
+      expect(preview?.images.every((i) => i.signedUrl.includes("token="))).toBe(true);
+    }
+    const gets = s.w.server.log.filter((r) => r.method === "GET" && r.path.endsWith("/partner-review/preview/receipt-cross-user"));
+    expect(gets.length).toBeGreaterThanOrEqual(1);
+    const logBlob = JSON.stringify(s.w.server.log);
+    expect(logBlob).not.toMatch(/fake-preview-token|signedUrl/i);
+  });
+
   it("staff without isAdmin cannot open review", async () => {
     const s = await setup(operatorWhoami);
     s.controller.openReview();

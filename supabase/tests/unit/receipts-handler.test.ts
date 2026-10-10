@@ -25,6 +25,7 @@ describe("handleReceiptUpload", () => {
         storage: {
           putObject: async (path) => { uploads.push(path); },
           removeObject: async () => {},
+          createSignedUrl: async () => ({ signedUrl: "https://example.test/x", expiresAt: new Date().toISOString() }),
           purgeOlderThan: async () => 0,
         },
         newObjectId: () => "11111111-1111-1111-1111-111111111111",
@@ -43,7 +44,12 @@ describe("handleReceiptUpload", () => {
         UID,
         repo,
         {
-          storage: { putObject: async () => {}, removeObject: async () => {}, purgeOlderThan: async () => 0 },
+          storage: {
+            putObject: async () => {},
+            removeObject: async () => {},
+            createSignedUrl: async () => ({ signedUrl: "https://example.test/x", expiresAt: new Date().toISOString() }),
+            purgeOlderThan: async () => 0,
+          },
           newObjectId: () => crypto.randomUUID(),
         },
       ),
@@ -72,6 +78,7 @@ describe("handleReceiptUpload", () => {
           storage: {
             putObject: async () => {},
             removeObject: async (path) => { removed.push(path); },
+            createSignedUrl: async () => ({ signedUrl: "https://example.test/x", expiresAt: new Date().toISOString() }),
             purgeOlderThan: async () => 0,
           },
           newObjectId: () => "22222222-2222-2222-2222-222222222222",

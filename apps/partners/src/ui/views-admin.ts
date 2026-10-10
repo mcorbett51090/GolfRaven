@@ -375,10 +375,42 @@ export function adminView(state: SignedInState, controller: AppController, local
                         h("button", { type: "button", disabled: busy, "data-testid": `review-reject-rxu-${item.id}`, onclick: () => void controller.resolveReceiptCrossUser(item.id, false) }, t("review.reject")),
                       ]
                     : [h("span", { class: "muted", "data-testid": `review-readonly-${item.id}` }, t("review.readonly"))];
+              const preview = isReceiptCrossUser ? work.previews[item.id] : undefined;
+              const previewBlock =
+                isReceiptCrossUser
+                  ? preview !== undefined
+                    ? h(
+                        "div",
+                        { class: "review-previews", "data-testid": `review-preview-${item.id}` },
+                        ...preview.images.map((img) =>
+                          h(
+                            "figure",
+                            {},
+                            h("img", {
+                              src: img.signedUrl,
+                              alt: t(img.label === "subject" ? "review.previewSubject" : "review.previewMatched"),
+                              "data-testid": `review-preview-img-${item.id}-${img.label}`,
+                            }),
+                            h("figcaption", { class: "muted" }, t(img.label === "subject" ? "review.previewSubject" : "review.previewMatched")),
+                          ),
+                        ),
+                      )
+                    : h(
+                        "button",
+                        {
+                          type: "button",
+                          disabled: busy,
+                          "data-testid": `review-preview-load-${item.id}`,
+                          onclick: () => void controller.loadReceiptCrossUserPreview(item.id),
+                        },
+                        t("review.previewLoad"),
+                      )
+                  : null;
               return h(
                 "li",
                 {},
                 h("span", {}, t("review.row", { kind: rowKind, handle: handleLabel, breached: item.slaBreached ? t("common.yes") : t("common.no") })),
+                previewBlock,
                 h("div", { class: "actions" }, ...actions),
               );
             }),

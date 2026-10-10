@@ -416,6 +416,9 @@ export const en = {
   "review.readonly": "No resolve action on this item.",
   "review.approve": "Approve",
   "review.reject": "Reject",
+  "review.previewLoad": "Load receipt images",
+  "review.previewSubject": "Subject receipt",
+  "review.previewMatched": "Matched receipt",
   "review.lastState": "Resolved to {state}.",
   "notice.reviewResolved": "Review item resolved.",
 
