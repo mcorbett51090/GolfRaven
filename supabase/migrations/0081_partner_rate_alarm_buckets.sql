@@ -229,12 +229,7 @@ BEGIN
      OR has_function_privilege('service_role', 'private.partner_rate_alarm_raise(text, text, jsonb)', 'EXECUTE') THEN
     RAISE EXCEPTION '0081: partner_rate_alarm_raise must not be EXECUTEable by client / partner / actor / system / service_role';
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM private.function_inventory
-    WHERE function_name = 'partner_rate_alarm_raise' AND expected_edge_partner_minter AND NOT expected_edge_partner
-  ) THEN
-    RAISE EXCEPTION '0081: function_inventory row for partner_rate_alarm_raise expected_edge_partner_minter=true';
-  END IF;
+  -- function_inventory is FORCE RLS; matrix 59 proves the inventory row as service_role.
   SELECT count(*)::int INTO v_n
   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname = 'private' AND p.proname = 'partner_rate_alarm_raise'
