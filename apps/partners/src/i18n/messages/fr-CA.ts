@@ -439,6 +439,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.load": "Afficher les alarmes de connexion",
   "review.authAlarms.empty": "Aucune alarme de connexion partenaire enregistrée.",
   "review.authAlarms.row": "{kind} · justificatif {credential} · {at}",
+  "review.authAlarms.rowNoCredential": "{kind} · {at}",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",

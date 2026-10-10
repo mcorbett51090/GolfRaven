@@ -257,27 +257,47 @@ describe("handlePartnerReviewRequest", () => {
 
   it("GET auth-alarms returns partner_auth_alarm rows from the database", async () => {
     const fake = makeFake({
-      authAlarms: [{
-        id: "a5300000-0000-0000-0000-000000000099",
-        kind: "signature_invalid",
-        credentialId: "a5300000-0000-0000-0000-000000000001",
-        minuteBucket: 1000,
-        detail: { src: "test" },
-        raisedAt: "2026-01-01T00:00:00.000Z",
-      }],
-    });
-    const res = await call(fake, "GET", "auth-alarms");
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      data: {
-        alarms: [{
+      authAlarms: [
+        {
           id: "a5300000-0000-0000-0000-000000000099",
           kind: "signature_invalid",
           credentialId: "a5300000-0000-0000-0000-000000000001",
           minuteBucket: 1000,
           detail: { src: "test" },
           raisedAt: "2026-01-01T00:00:00.000Z",
-        }],
+        },
+        {
+          id: "a5300000-0000-0000-0000-000000000098",
+          kind: "rate_options_ip",
+          credentialId: null,
+          minuteBucket: 1001,
+          detail: { stage: "options" },
+          raisedAt: "2026-01-01T00:01:00.000Z",
+        },
+      ],
+    });
+    const res = await call(fake, "GET", "auth-alarms");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      data: {
+        alarms: [
+          {
+            id: "a5300000-0000-0000-0000-000000000099",
+            kind: "signature_invalid",
+            credentialId: "a5300000-0000-0000-0000-000000000001",
+            minuteBucket: 1000,
+            detail: { src: "test" },
+            raisedAt: "2026-01-01T00:00:00.000Z",
+          },
+          {
+            id: "a5300000-0000-0000-0000-000000000098",
+            kind: "rate_options_ip",
+            credentialId: null,
+            minuteBucket: 1001,
+            detail: { stage: "options" },
+            raisedAt: "2026-01-01T00:01:00.000Z",
+          },
+        ],
       },
     });
     expect(fake.calls).toContain("authAlarmList");

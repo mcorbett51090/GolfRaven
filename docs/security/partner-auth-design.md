@@ -3352,11 +3352,41 @@ Numbering: **matrix n/a (PWA only), this section 67.** Closes the §65 leftover:
 
 ### 67.3 Not built, honestly
 
-- IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- IP / global alert-only rate buckets → §68; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 67.4 Verification
 
-Branch: `cursor/p5-credential-note-ui-8ffd` (base after #106 / `6246993`). Recorded when CI is green on the PR tip.
+Squash-merged as `5d760f7` (#107). Branch: `cursor/p5-credential-note-ui-8ffd` (base after #106 / `6246993`).
 
 - `@golfraven/partners` unit tests (incl. credentials screen) + typecheck; i18n EN/FR parity; no Edge / migration change.
+
+## 68. As built: IP / global alert-only rate buckets
+
+Numbering: **migration `0081`, matrix `59`, this section 68.** Closes design §8 / §18.5 / §67.3: pre-auth options and verify-failure buckets that **never refuse** a request (a shared office NAT must not be a login DoS lever). They only raise `app.partner_auth_alarm` rows for operators.
+
+### 68.1 What was built
+
+- **`app.partner_auth_alarm.bucket_key`** — arbiter with `(kind, minute_bucket)`; mint kinds keep `credential_id` and set `bucket_key = credential_id::text`; rate kinds leave `credential_id` NULL and key on sha256(IP) hex or `global`.
+- **Kinds** — `signature_invalid` | `counter_regression` | `rate_options_ip` | `rate_options_global` | `rate_verify_ip`.
+- **`private.partner_mint_alarm_write`** — sets `bucket_key`; `ON CONFLICT (kind, bucket_key, minute_bucket)`.
+- **`private.partner_rate_alarm_raise`** — `edge_partner_minter` only; refuses any binding; `INSERT ON CONFLICT DO NOTHING`; `audit_log` `partner.rate.<kind>` only when new.
+- **Edge** — `PartnerMintTx.raiseRateAlarm`; `partnerClientIp` → first `X-Forwarded-For` / `CF-Connecting-IP` / `unknown`, then sha256 hex (never store raw IP); options: 600/h IP + 20,000/h global alert-only; verify: on Edge assertion failure that records a failure, 100/h IP alert-only. Never 429; writer errors swallowed.
+- **§61 null-safe list** — `credentialId: string | null` on Edge/PWA; Review UI shows `kind · at` when null (no `.slice`).
+- **pgTAP matrix 59** + PA-8 minter EXECUTE allowlists (10 / 25 / 26) + kind_readers.
+
+### 68.2 Decisions and departures
+
+- **Alert-only, not hard limit** — matches design §8; invite hard-limit behaviour of `hitSystemRateLimit` is unchanged.
+- **No raw IP in the database** — only the 64-hex hash (or `global`) as `bucket_key`.
+- **Separate minter writer** — rate kinds cannot use `partner_mint_alarm_write` (credential required); `partner_rate_alarm_raise` is the minter-lane twin.
+
+### 68.3 Not built, honestly
+
+- Pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 68.4 Verification
+
+Branch: `cursor/p5-alert-rate-buckets-8ffd` (base after #107 / `5d760f7`). Recorded when CI is green on the PR tip.
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → Result PASS; matrix 59; focused Deno/Vitest session-handler + partners admin.
 

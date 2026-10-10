@@ -164,11 +164,11 @@ export interface ReviewSla {
   readonly slaHours: number;
 }
 
-/** GET partner-review/auth-alarms (0075 / §61): partner_auth_alarm rows for admins. */
+/** GET partner-review/auth-alarms (0075 / §61 / §68): partner_auth_alarm rows for admins. Rate kinds leave credentialId null. */
 export interface PartnerAuthAlarm {
   readonly id: string;
   readonly kind: string;
-  readonly credentialId: string;
+  readonly credentialId: string | null;
   readonly minuteBucket: number;
   readonly detail: unknown;
   readonly raisedAt: string;
@@ -415,13 +415,13 @@ export async function getAuthAlarms(api: PartnerApi): Promise<readonly PartnerAu
   if (!isObject(data) || !Array.isArray(data["alarms"])) malformed();
   return data["alarms"].map((a) => {
     if (
-      !isObject(a) || !isString(a["id"]) || !isString(a["kind"]) || !isString(a["credentialId"]) ||
+      !isObject(a) || !isString(a["id"]) || !isString(a["kind"]) || !isStringOrNull(a["credentialId"] ?? null) ||
       !isNum(a["minuteBucket"]) || !isString(a["raisedAt"])
     ) malformed();
     return {
       id: a["id"],
       kind: a["kind"],
-      credentialId: a["credentialId"],
+      credentialId: a["credentialId"] as string | null,
       minuteBucket: a["minuteBucket"],
       detail: a["detail"] ?? null,
       raisedAt: a["raisedAt"],

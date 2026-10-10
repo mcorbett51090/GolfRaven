@@ -325,6 +325,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         async recordFailure() {
           return "counted";
         },
+        async raiseRateAlarm() {
+          /* alert-only; fake never trips soft caps */
+        },
         async mint(input: MintInput): Promise<MintResult> {
           if (!consume(input.nonce, input.exp, input.mac, null)) return { status: "challenge_invalid", aal: null, expiresAt: null };
           const c = credentials.get(toB64u(input.credentialId));
@@ -1312,14 +1315,24 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       }
       if (route === "auth-alarms" && req.method === "GET") {
         return ok(200, {
-          alarms: [{
-            id: "a5300000-0000-0000-0000-000000000099",
-            kind: "signature_invalid",
-            credentialId: "a5300000-0000-0000-0000-000000000001",
-            minuteBucket: 1000,
-            detail: { src: "fake" },
-            raisedAt: "2026-01-01T12:00:00.000Z",
-          }],
+          alarms: [
+            {
+              id: "a5300000-0000-0000-0000-000000000099",
+              kind: "signature_invalid",
+              credentialId: "a5300000-0000-0000-0000-000000000001",
+              minuteBucket: 1000,
+              detail: { src: "fake" },
+              raisedAt: "2026-01-01T12:00:00.000Z",
+            },
+            {
+              id: "a5300000-0000-0000-0000-000000000098",
+              kind: "rate_options_ip",
+              credentialId: null,
+              minuteBucket: 1001,
+              detail: { stage: "options" },
+              raisedAt: "2026-01-01T12:01:00.000Z",
+            },
+          ],
         });
       }
       if (route === "preview/receipt-cross-user" && req.method === "GET") {

@@ -382,6 +382,9 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       maybeThrow("mint");
       return state.mintStatus === "ok" ? { status: "ok", aal: 1, expiresAt: "2030-01-01T20:00:00.000Z" } : { status: state.mintStatus, aal: null, expiresAt: null };
     },
+    async raiseRateAlarm(kind, bucketKey) {
+      calls.push(`mint.raiseRateAlarm:${kind}:${bucketKey}`);
+    },
     async inviteEmailForToken(hash) {
       calls.push("mint.inviteEmailForToken");
       rec.emailLookups.push({ kind: "invite", hash });

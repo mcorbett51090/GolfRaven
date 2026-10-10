@@ -438,6 +438,7 @@ export const en = {
   "review.authAlarms.load": "Show sign-in alarms",
   "review.authAlarms.empty": "No partner sign-in alarms recorded.",
   "review.authAlarms.row": "{kind} · credential {credential} · {at}",
+  "review.authAlarms.rowNoCredential": "{kind} · {at}",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",

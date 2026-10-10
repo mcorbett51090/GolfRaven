@@ -428,11 +428,13 @@ export function adminView(state: SignedInState, controller: AppController, local
                 h(
                   "li",
                   {},
-                  t("review.authAlarms.row", {
-                    kind: a.kind,
-                    credential: a.credentialId.slice(0, 8),
-                    at: a.raisedAt,
-                  }),
+                  a.credentialId === null
+                    ? t("review.authAlarms.rowNoCredential", { kind: a.kind, at: a.raisedAt })
+                    : t("review.authAlarms.row", {
+                      kind: a.kind,
+                      credential: a.credentialId.slice(0, 8),
+                      at: a.raisedAt,
+                    }),
                 ),
               ),
             )

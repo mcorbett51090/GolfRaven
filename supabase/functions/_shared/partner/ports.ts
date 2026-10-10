@@ -50,6 +50,9 @@ export interface MintResult {
   readonly expiresAt: string | null;
 }
 
+/** Alert-only rate alarm kinds written by `partner_rate_alarm_raise` (0081 / §68). Never a hard refuse. */
+export type PartnerRateAlarmKind = "rate_options_ip" | "rate_options_global" | "rate_verify_ip";
+
 /** One transaction as `edge_partner_minter`: no actor is bound. It COMMITS when the callback returns, whatever status it holds (the alarm rows, the burned nonce and the failure counter are written by refusals). */
 export interface PartnerMintTx {
   rpConfig(): Promise<RpConfig>;
@@ -58,6 +61,8 @@ export interface PartnerMintTx {
   /** Counts one failed verification of a credential (design 8): `counted`, `cooldown` or `unknown`. */
   recordFailure(credentialId: Uint8Array): Promise<"counted" | "cooldown" | "unknown">;
   mint(input: MintInput): Promise<MintResult>;
+  /** Alert-only IP/global rate signal (0081 / §68): one partner_auth_alarm row per (kind, bucket_key, minute). Never refuses the request. */
+  raiseRateAlarm(kind: PartnerRateAlarmKind, bucketKey: string, detail: unknown): Promise<void>;
 }
 
 export interface ReauthCredential extends StoredCredentialRow {
@@ -427,11 +432,11 @@ export interface ReviewSlaSummary {
   readonly slaBreachedReviewItems: number;
   readonly slaHours: number;
 }
-/** GET partner-review/auth-alarms (partner_auth_alarm_list_for_partner, class A0, admin): sign-in alarms after the Edge passed (newest first, ≤100). */
+/** GET partner-review/auth-alarms (partner_auth_alarm_list_for_partner, class A0, admin): sign-in / rate alarms (newest first, ≤100). Rate kinds leave credentialId null (0081 / §68). */
 export interface PartnerAuthAlarmRow {
   readonly id: string;
   readonly kind: string;
-  readonly credentialId: string;
+  readonly credentialId: string | null;
   readonly minuteBucket: number;
   readonly detail: unknown;
   readonly raisedAt: string;

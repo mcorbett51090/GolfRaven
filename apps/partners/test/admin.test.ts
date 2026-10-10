@@ -263,11 +263,16 @@ describe("S7d review screen", () => {
     {
       const w = home(s.controller).work;
       if (w?.kind === "review") {
-        expect(w.authAlarms).toHaveLength(1);
+        expect(w.authAlarms).toHaveLength(2);
         expect(w.authAlarms?.[0]).toMatchObject({
           kind: "signature_invalid",
           credentialId: "a5300000-0000-0000-0000-000000000001",
           raisedAt: "2026-01-01T12:00:00.000Z",
+        });
+        expect(w.authAlarms?.[1]).toMatchObject({
+          kind: "rate_options_ip",
+          credentialId: null,
+          raisedAt: "2026-01-01T12:01:00.000Z",
         });
       }
     }
