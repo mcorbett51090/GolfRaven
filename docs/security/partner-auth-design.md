@@ -2172,4 +2172,7 @@ Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx`
 
 ### 32.4 Verification
 
-See tip commit message / restricted harness log after matrix 38 and Edge vitest land. Claims in-slice: **AT(17)** (signed URL after A3 role check + 7-day purge), **AT(20)** (settlement lines carry `sponsorship_id` for sponsor funder), **AT(10)** reconcile half (export matches redemptions); issuance staff gate deferred (§32.3).
+- **Matrix 38** (`38_partner_offers_settlement.sql`): 32/32 PASS — foreign facility 403, A1 without PIN, happy redeem + budget consume, self-redeem 22023, A3 without TOTP refused, planted GUC, settlement line carries `sponsorship_id` for sponsor funder, export redemptions/`face_value_total` match planted redeem.
+- **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): focused suite green.
+- **`HARNESS_MODE=restricted tools/db/test.sh`**: run after tip; `verify-function-inventory` includes the nine `pd_partner_offers_*` allow-list rows (fixture regenerated). Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary.
+- Claims in-slice: **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions); issuance staff gate deferred (§32.3).
