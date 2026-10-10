@@ -372,6 +372,8 @@ export const en = {
   "receipt.title": "Upload a receipt",
   "receipt.button": "Choose receipt photo",
   "receipt.hint": "Upload a photo of your green-fee receipt for this facility. JPEG, PNG, or HEIC, up to 5 MB.",
+  "receipt.number.label": "Receipt number (optional)",
+  "receipt.number.hint": "If the receipt shows an invoice or ticket number, type it here to help match your purchase.",
   "receipt.a11y.hint": "Opens your photo library so you can choose a receipt image to upload.",
   "receipt.working": "Uploading…",
   "receipt.outcome.ok": "Receipt received. Your purchase is pending confirmation.",
