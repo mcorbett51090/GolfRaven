@@ -99,6 +99,33 @@ describe("the order: origin, preflight, route, method, bearer, body, rate limit,
   });
 });
 
+describe("GET alarms: wrong-PIN rotation list", () => {
+  it("returns the facility's alarms from the database", async () => {
+    const w = await makeCourseQrWorld();
+    const res = await handleCourseQrRequest(get(`alarms?facilityId=${FACILITY}`), deps(w));
+    expect(res.status).toBe(200);
+    expect((await json(res)).data).toEqual({
+      facilityId: FACILITY,
+      alarms: [{
+        id: "a1000000-0000-0000-0000-000000000001",
+        facilityId: FACILITY,
+        localDate: "2030-01-01",
+        pinEpochBefore: 4,
+        pinEpochAfter: 5,
+        failures: 30,
+        raisedAt: "2030-01-01T12:00:00.000Z",
+      }],
+    });
+    expect(w.calls).toEqual(["db.withCourseQr", "tx.pinAlarmList"]);
+  });
+
+  it("staff at X asking for Y is 403", async () => {
+    const w = await makeCourseQrWorld();
+    const res = await handleCourseQrRequest(get(`alarms?facilityId=${OTHER_FACILITY}`), deps(w));
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("GET pin: today's PIN comes from the database and nowhere else", () => {
   it("returns the PIN, the local date, the end of the day and the epoch", async () => {
     const w = await makeCourseQrWorld();

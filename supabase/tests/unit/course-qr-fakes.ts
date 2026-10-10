@@ -119,6 +119,22 @@ export async function makeCourseQrWorld(over: Partial<CourseQrState> = {}): Prom
       if (!state.programme) return { status: "no_programme" };
       return { status: "ok", dailyPin: "4821", localDate: "2030-01-01", validUntil: "2030-01-02T06:00:00.000Z", pinEpoch: 0 };
     },
+    async pinAlarmList(facilityId) {
+      calls.push("tx.pinAlarmList");
+      scope(facilityId);
+      state.lastSeenAt = state.nowS;
+      return [
+        {
+          id: "a1000000-0000-0000-0000-000000000001",
+          facilityId,
+          localDate: "2030-01-01",
+          pinEpochBefore: 4,
+          pinEpochAfter: 5,
+          failures: 30,
+          raisedAt: "2030-01-01T12:00:00.000Z",
+        },
+      ];
+    },
     async pinRotate(facilityId) {
       calls.push("tx.pinRotate");
       scope(facilityId);

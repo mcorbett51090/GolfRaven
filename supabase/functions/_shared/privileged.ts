@@ -79,6 +79,7 @@ import {
   type CourseQrRefreshResult,
   type CourseQrTx,
   type CoursePinRotateResult,
+  type CoursePinAlarmRow,
   type CoursePinShowResult,
   type CredentialLookup,
   type CredentialOptionsResult,
@@ -4942,6 +4943,31 @@ function buildCourseQrTx(trx: TxSql): CourseQrTx {
       const validUntil = isoOrNull(r.o_valid_until);
       if (typeof r.o_pin !== "string" || typeof r.o_local_date !== "string" || validUntil === null) throw new Error("course_pin_show_for_partner returned ok without a PIN");
       return { status: "ok", dailyPin: r.o_pin, localDate: r.o_local_date, validUntil, pinEpoch: Number(r.o_pin_epoch) };
+    },
+    async pinAlarmList(facilityId: string): Promise<readonly CoursePinAlarmRow[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_facility_id, o_local_date::text as o_local_date,
+               o_pin_epoch_before::int as o_pin_epoch_before, o_pin_epoch_after::int as o_pin_epoch_after,
+               o_failures::int as o_failures, o_raised_at
+        from private.course_pin_alarm_list_for_partner(${facilityId}::text)`;
+      return rows.map((r) => {
+        const raisedAt = isoOrNull(r.o_raised_at);
+        if (
+          typeof r.o_id !== "string" || typeof r.o_facility_id !== "string" || typeof r.o_local_date !== "string" ||
+          raisedAt === null
+        ) {
+          throw new Error("course_pin_alarm_list_for_partner returned a malformed row");
+        }
+        return {
+          id: r.o_id,
+          facilityId: r.o_facility_id,
+          localDate: r.o_local_date,
+          pinEpochBefore: Number(r.o_pin_epoch_before),
+          pinEpochAfter: Number(r.o_pin_epoch_after),
+          failures: Number(r.o_failures),
+          raisedAt,
+        };
+      });
     },
     async pinRotate(facilityId: string): Promise<CoursePinRotateResult> {
       const rows = await trx`select o_status, o_pin_epoch::int as o_pin_epoch from private.course_pin_rotate_for_partner(${facilityId}::text)`;

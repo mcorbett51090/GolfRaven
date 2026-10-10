@@ -141,10 +141,10 @@ SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN (
   AND p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND p.proowner = 'private_definer'::regrole), 8, 'the eight functions of 0055 are SECURITY DEFINER with search_path = '''', owned by private_definer');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
                                                            ('partner_pin_verifier'), ('partner_session_issuer'), ('partner_session_toucher')) r(n)
-           CROSS JOIN (VALUES ('private.course_pin_show_for_partner(text)'), ('private.course_pin_rotate_for_partner(text)'), ('private.course_qr_mint_for_partner(text, text)'), ('private.course_qr_refresh_for_partner(text, text)'),
+           CROSS JOIN (VALUES ('private.course_pin_show_for_partner(text)'), ('private.course_pin_rotate_for_partner(text)'), ('private.course_pin_alarm_list_for_partner(text)'), ('private.course_qr_mint_for_partner(text, text)'), ('private.course_qr_refresh_for_partner(text, text)'),
                               ('private.course_qr_print_key_for_partner(text)'), ('private.course_qr_print_write_for_partner(text, text, text, text)'), ('private.course_qr_print_read_for_partner(text)')) f(sig)
            WHERE has_function_privilege(r.n, f.sig::regprocedure, 'EXECUTE')),
-  ARRAY['edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner'], 'of every client, edge and owner role, ONLY edge_partner can execute any of the seven lane functions (seven grants, no other role)');
+  ARRAY['edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner', 'edge_partner'], 'of every client, edge and owner role, ONLY edge_partner can execute any of the eight lane functions (eight grants, no other role)');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
                                             ('partner_pin_verifier'), ('partner_session_issuer'), ('partner_session_toucher'), ('partner_totp_verifier'), ('partner_reauth_verifier')) r(n)
            WHERE has_function_privilege(r.n, 'private.course_qr_signing_key_read(text)'::regprocedure, 'EXECUTE')), 0, 'the Vault signing-key reader: no client role, no edge role and no owner role can execute it (only its owner, from inside a wrapper)');
@@ -186,8 +186,8 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname LIKE 'pd\_c
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('course_qr_signing_key_read', 'course_pin_show_for_partner', 'course_pin_rotate_for_partner', 'course_qr_mint_for_partner', 'course_qr_refresh_for_partner',
   'course_qr_print_key_for_partner', 'course_qr_print_write_for_partner', 'course_qr_print_read_for_partner')), 8, 'registry: all 8 functions have a function_inventory row');
-SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name LIKE 'course\_%\_for\_partner' AND expected_edge_partner AND NOT (expected_anon OR expected_authenticated OR expected_service_role OR expected_edge_actor OR expected_edge_system OR expected_edge_partner_minter)), 7,
-  'registry: the seven lane functions are expected for edge_partner and nobody else');
+SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name LIKE 'course\_%\_for\_partner' AND expected_edge_partner AND NOT (expected_anon OR expected_authenticated OR expected_service_role OR expected_edge_actor OR expected_edge_system OR expected_edge_partner_minter)), 8,
+  'registry: the eight lane functions are expected for edge_partner and nobody else');
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name LIKE 'pd\_course\_qr\_staff\_%' AND role_name = 'private_definer' AND scoped), 10, 'registry: the ten policies are in definer_policy_allowlist');
 SELECT tests.clear_actor();
 

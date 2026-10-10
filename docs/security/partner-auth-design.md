@@ -3113,11 +3113,38 @@ Numbering: **migration `0072`, matrix `50`, this section 58.** Closes the remain
 
 ### 58.3 Not built, honestly
 
-- PIN alarm UI, pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
+- PIN alarm UI (→ §59), pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
 
 ### 58.4 Verification
 
-Branch: `cursor/p5-pin-epoch-log-purge-8ffd` (base main after #97 / `afa2789`). Recorded when CI is green on the PR tip.
+Squash-merged as `14c5b6c` (#98). Branch: `cursor/p5-pin-epoch-log-purge-8ffd` (base main after #97 / `afa2789`).
 
-- pgTAP matrix 50 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0071`.
+- pgTAP matrices 24 / 49 / 50 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0071`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 59. As built: PIN alarm list (partners portal)
+
+Numbering: **migration `0073`, matrix `51`, this section 59.** Closes the operator-facing half of `app.course_pin_alarm` left open by 0046 / §58.3: a class-A0 list of automatic wrong-PIN rotations (30 failures → `pin_epoch + 1`) on the Course QR screen.
+
+### 59.1 What was built
+
+- **`private.course_pin_alarm_list_for_partner(facility)`** — class A0, manager or operator at the facility (admin via authorize); returns row columns only (no user id, no PIN), newest first, at most 100.
+- **SELECT policy** `pd_course_pin_alarm_partner_select` keyed on `partner_bound_manager_at` (InitPlan form). 0046's `actor_uid` policy stays for the player-lane writer; purge companions stay closed under a partner binding.
+- **Edge**: `GET /course-qr/alarms?facilityId=` → `CourseQrTx.pinAlarmList` → the new definer; EXECUTE allowlists (matrices 10 / 25 / 28 + Deno PA-13b) name it.
+- **Partners PWA**: Course QR screen section with load button, empty / list states, en + fr-CA copy; fake-server route + Vitest cell.
+
+### 59.2 Decisions and departures
+
+- **Authorize before empty-facility check** — matches other `_for_partner` readers: unbound → 42501; NULL facility after a live manager binding → 22023; blank string is a scope refusal at authorize.
+- **Manager / operator only** — staff can show today's PIN but not the rotation history (same reach as `partner_bound_manager_at` for operators of a covering trail).
+- **Reuse `course-qr`** — no new Edge function; alarms sit next to PIN / mint on the same screen.
+
+### 59.3 Not built, honestly
+
+- Pepper-rotation tooling, plan §8.3 cap alert, `partner_auth_alarm` purge, OCR / aHash / UI flag flips / CAMERA.
+
+### 59.4 Verification
+
+Branch: `cursor/p5-pin-alarm-ui-8ffd` (base main after #98 / `14c5b6c`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 51 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET alarms + partners work alarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0072`.
 

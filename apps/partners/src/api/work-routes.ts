@@ -42,6 +42,16 @@ export interface CoursePin {
   readonly pinEpoch: number;
 }
 
+export interface CoursePinAlarm {
+  readonly id: string;
+  readonly facilityId: string;
+  readonly localDate: string;
+  readonly pinEpochBefore: number;
+  readonly pinEpochAfter: number;
+  readonly failures: number;
+  readonly raisedAt: string;
+}
+
 export interface MintedToken {
   readonly facilityId: string;
   readonly token: string;
@@ -115,6 +125,26 @@ export async function getCoursePin(api: PartnerApi, facilityId: string): Promise
   const data = await api.call("GET", "course-qr", "pin", undefined, { facilityId });
   if (!isObject(data) || !isString(data["facilityId"]) || !isString(data["pin"]) || !isString(data["localDate"]) || !isString(data["validUntil"]) || !isNum(data["pinEpoch"])) malformed();
   return { facilityId: data["facilityId"], pin: data["pin"], localDate: data["localDate"], validUntil: data["validUntil"], pinEpoch: data["pinEpoch"] };
+}
+
+export async function getCoursePinAlarms(api: PartnerApi, facilityId: string): Promise<readonly CoursePinAlarm[]> {
+  const data = await api.call("GET", "course-qr", "alarms", undefined, { facilityId });
+  if (!isObject(data) || !isString(data["facilityId"]) || !Array.isArray(data["alarms"])) malformed();
+  return data["alarms"].map((a) => {
+    if (
+      !isObject(a) || !isString(a["id"]) || !isString(a["facilityId"]) || !isString(a["localDate"]) ||
+      !isNum(a["pinEpochBefore"]) || !isNum(a["pinEpochAfter"]) || !isNum(a["failures"]) || !isString(a["raisedAt"])
+    ) malformed();
+    return {
+      id: a["id"],
+      facilityId: a["facilityId"],
+      localDate: a["localDate"],
+      pinEpochBefore: a["pinEpochBefore"],
+      pinEpochAfter: a["pinEpochAfter"],
+      failures: a["failures"],
+      raisedAt: a["raisedAt"],
+    };
+  });
 }
 
 export async function postRotatePin(api: PartnerApi, facilityId: string): Promise<{ facilityId: string; pinEpoch: number }> {
