@@ -418,6 +418,7 @@ jobs:
             supabase/functions/settlement-export/index.ts \
             supabase/functions/exports-purge/index.ts \
             supabase/functions/rollups-refresh/index.ts \
+            supabase/functions/receipts-purge/index.ts \
             supabase/functions/course-qr/index.ts \
             supabase/functions/qr-print/index.ts \
             supabase/functions/_shared/privileged.ts \
@@ -493,6 +494,7 @@ jobs:
             supabase/functions/settlement-export/index.ts \
             supabase/functions/exports-purge/index.ts \
             supabase/functions/rollups-refresh/index.ts \
+            supabase/functions/receipts-purge/index.ts \
             supabase/functions/course-qr/index.ts \
             supabase/functions/qr-print/index.ts \
             supabase/functions/_shared/privileged.ts \
@@ -588,6 +590,7 @@ jobs:
             supabase/functions/settlement-export/index.ts \
             supabase/functions/exports-purge/index.ts \
             supabase/functions/rollups-refresh/index.ts \
+            supabase/functions/receipts-purge/index.ts \
             supabase/functions/course-qr/index.ts \
             supabase/functions/qr-print/index.ts \
             supabase/functions/_shared/privileged.ts \
