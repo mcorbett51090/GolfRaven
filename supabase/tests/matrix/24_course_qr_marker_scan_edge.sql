@@ -315,7 +315,18 @@ SELECT private.course_pin_derive('fac_s24e', (now() AT TIME ZONE 'America/Chicag
 SELECT private.course_pin_derive('fac_s24e', (now() AT TIME ZONE 'America/Chicago')::date - 1, 0) AS pin_e_yday \gset
 SELECT private.course_pin_derive('fac_s24g', (now() AT TIME ZONE 'Pacific/Auckland')::date, 0) AS pin_g \gset
 SELECT private.course_pin_derive('fac_s24g', (now() AT TIME ZONE 'Pacific/Auckland')::date - 1, 0) AS pin_g_yday \gset
-SELECT private.course_pin_derive('fac_s24g', (now() AT TIME ZONE 'America/Chicago')::date, 0) AS pin_g_utcday \gset
+-- Another zone's calendar date, forced ≠ from Auckland's so the cell stays non-vacuous
+-- when Chicago and Auckland share a day (common near UTC morning / NZ evening).
+SELECT private.course_pin_derive(
+  'fac_s24g',
+  CASE
+    WHEN (now() AT TIME ZONE 'America/Chicago')::date
+       = (now() AT TIME ZONE 'Pacific/Auckland')::date
+    THEN (now() AT TIME ZONE 'America/Chicago')::date - 1
+    ELSE (now() AT TIME ZONE 'America/Chicago')::date
+  END,
+  0
+) AS pin_g_utcday \gset
 SELECT private.course_pin_derive('fac_s24h', (now() AT TIME ZONE 'America/Chicago')::date, 0) AS pin_h \gset
 -- fac_s24r: the PIN displayed at each instant, under the epoch live then, for the facility-local date OF THAT INSTANT
 SELECT private.course_pin_derive('fac_s24r', ((:'t0'::timestamptz - interval '4 hours') AT TIME ZONE 'America/Chicago')::date, 0) AS pin_r_a \gset
