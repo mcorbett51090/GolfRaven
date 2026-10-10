@@ -8,6 +8,7 @@ import {
   type AdminEnrolmentResult,
   type AssertionVerifier,
   type ChallengeIssue,
+  type CredentialNoteStatus,
   type CredentialOptionsResult,
   type CredentialRegisterInput,
   type CredentialRevokeStatus,
@@ -120,6 +121,7 @@ export interface Recorded {
   readonly revokeAll: Array<{ org: string; createdAfter: string | null }>;
   readonly adminEnrol: Array<{ target: string; hash: string }>;
   readonly credentialRegister: CredentialRegisterInput[];
+  readonly credentialNote: Array<{ id: string; note: string | null }>;
   readonly credentialRevoke: string[];
 }
 
@@ -200,6 +202,7 @@ export interface Fakes {
     credentialSubject: CredentialSubject;
     credentialRegister: { status: string; credentialId: string | null };
     credentialList: CredentialView[];
+    credentialNote: CredentialNoteStatus;
     credentialRevoke: CredentialRevokeStatus;
     /** a bound-transaction method (`inviteCreate`, `memberRevoke` ...) that throws `PartnerAuthorityRefused` (42501) / `PartnerInvalidArgument` (22023) */
     authorityRefusedIn: string | null;
@@ -279,6 +282,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     revokeAll: [],
     adminEnrol: [],
     credentialRegister: [],
+    credentialNote: [],
     credentialRevoke: [],
   };
   const newTokens: Fakes["newTokens"] = { session: [], invite: [], enrolment: [] };
@@ -340,6 +344,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     credentialSubject: { userId: USER_ID, email: "staff@example.test" },
     credentialRegister: { status: "ok", credentialId: CRED_ROW_ID },
     credentialList: [],
+    credentialNote: "ok",
     credentialRevoke: "ok",
     authorityRefusedIn: null,
     invalidArgumentIn: null,
@@ -552,6 +557,12 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       calls.push("session.credentialList");
       maybeThrow("credentialList");
       return state.credentialList;
+    },
+    async credentialNote(id, note) {
+      calls.push("session.credentialNote");
+      rec.credentialNote.push({ id, note });
+      maybeThrow("credentialNote");
+      return state.credentialNote;
     },
     async credentialRevoke(id) {
       calls.push("session.credentialRevoke");

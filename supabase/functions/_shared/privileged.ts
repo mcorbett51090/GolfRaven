@@ -83,6 +83,7 @@ import {
   type CourseStaticPinCapRow,
   type CoursePinShowResult,
   type CredentialLookup,
+  type CredentialNoteStatus,
   type CredentialOptionsResult,
   type CredentialRegisterInput,
   type CredentialRevokeStatus,
@@ -4192,6 +4193,7 @@ function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
 const INVITE_REVOKE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "already_accepted", "already_revoked"]);
 const INVITE_MEMBER_ACCEPT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "locked", "email_mismatch", "email_unconfirmed", "already_member"]);
 const CREDENTIAL_REVOKE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "already_revoked"]);
+const CREDENTIAL_NOTE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found"]);
 
 /** The invite definers of the bound lane (0054 7a to 7d). */
 function buildPartnerInvitesTx(trx: TxSql): PartnerInvitesTx {
@@ -4331,6 +4333,12 @@ function buildPartnerMembersTx(trx: TxSql): Omit<PartnerMembersTx, "totpReset"> 
         backupEligible: r.o_backup_eligible === true,
         backupState: r.o_backup_state === true,
       }));
+    },
+    async credentialNote(credentialId: string, note: string | null): Promise<CredentialNoteStatus> {
+      const rows = await trx`select o_status from private.partner_credential_note_for_partner(${credentialId}::uuid, ${note}::text)`;
+      const status = rows[0]?.o_status;
+      if (typeof status !== "string" || !CREDENTIAL_NOTE_STATUSES.has(status)) throw new Error("partner_credential_note_for_partner returned no usable status");
+      return status as CredentialNoteStatus;
     },
     async credentialRevoke(credentialId: string): Promise<CredentialRevokeStatus> {
       const rows = await trx`select o_status from private.partner_credential_revoke_for_partner(${credentialId}::uuid)`;

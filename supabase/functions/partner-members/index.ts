@@ -12,6 +12,7 @@
 //   POST   credentials/options            create options for a second credential (class A2 + reauth)
 //   POST   credentials                    { challengeToken, credential }: register a second credential (class A2 + reauth)
 //   DELETE credentials/{id}               revoke a credential (class A2)
+//   PATCH  credentials/{id}               { note }: display-only note on one's own credential (class A0)
 //
 // `verify_jwt = false` (supabase/config.toml): the gateway must not demand a Supabase JWT in the header the partner token occupies. A partner token is NEVER a Supabase identity: this function never calls
 // `getActorFromRequest`. Thin entrypoint: every rule lives in _shared/partner/members-handler.ts (pure, unit-tested). No `console`, no log line, no environment read here.

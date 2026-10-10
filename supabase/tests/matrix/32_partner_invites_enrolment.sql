@@ -1275,8 +1275,8 @@ ROLLBACK TO SAVEPOINT cred_a2;
 
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.partner_credential_register_for_partner(bytea, bigint, bytea, bytea, bytea, bytea, bytea, text[])'::regprocedure
            AND (pg_get_function_arguments(p.oid) ~* 'label|note')), 0, 'PA-22: the register definer takes NO label and NO note: nothing the client sends reaches the label');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'partner\_%' AND p.prosrc ~* '\mc\.note\M|\.note\M' AND p.proname NOT IN ('partner_credential_list_for_partner')), 0,
-  'PA-22: no partner definer reads the display-only note (only the list returns it, as a column, never in a decision)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname LIKE 'partner\_%' AND p.prosrc ~* '\mc\.note\M|\.note\M' AND p.proname NOT IN ('partner_credential_list_for_partner', 'partner_credential_note_for_partner')), 0,
+  'PA-22: only the list and the note writer touch the display-only note (never in a security decision)');
 
 SAVEPOINT cred_list;
 SELECT pg_temp.bind(:'th_sx');

@@ -16,6 +16,7 @@
 //   POST credentials/options             {}: create options for a SECOND credential (class A2 + reauth)
 //   POST credentials                     { challengeToken, credential }: register a second credential (class A2 + reauth)
 //   DELETE credentials/{id}              revoke a credential, one's own included (class A2); another person's under the reach rule
+//   PATCH  credentials/{id}              { note }: display-only note on one's own credential (class A0); null/"" clears
 //
 // THE ORDER, for every request: (1) the Origin check, before routing and for every method; (2) `OPTIONS` is answered here, with no port touched; (3) the route and the method (404 / 405); (4) the bearer:
 // exactly `gr_ps_` + 43 characters, else the ONE 401 with no port touched; (5) the exact JSON media type (415) and the strict body (400); (6) the work.
@@ -39,7 +40,7 @@ import {
   type RouteSpec,
 } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
-import { parseAdminEnrolmentBody, parseMemberRevokeBody, parseRevokeAllBody } from "./members-shape.ts";
+import { parseAdminEnrolmentBody, parseCredentialNoteBody, parseMemberRevokeBody, parseRevokeAllBody } from "./members-shape.ts";
 import { type CredentialView, type PartnerDb, PartnerNotConfigured, type RegistrationVerifier } from "./ports.ts";
 import { parseSecondCredentialBody } from "./registration-shape.ts";
 import { formatChallengeToken } from "./session-handler.ts";
@@ -71,7 +72,7 @@ const ROUTES: readonly RouteSpec[] = [
   { name: "admin-enrolments", path: "admin/enrolments", methods: ["POST"], session: true },
   { name: "credential-options", path: "credentials/options", methods: ["POST"], session: true },
   { name: "credentials", path: "credentials", methods: ["GET", "POST"], session: true },
-  { name: "credential", path: "credentials/{id}", methods: ["DELETE"], session: true },
+  { name: "credential", path: "credentials/{id}", methods: ["DELETE", "PATCH"], session: true },
 ];
 
 export async function handlePartnerMembersRequest(req: Request, deps: PartnerMembersDeps): Promise<Response> {
@@ -120,7 +121,9 @@ export async function handlePartnerMembersRequest(req: Request, deps: PartnerMem
           case "credentials":
             return req.method === "POST" ? await handleCredentialRegister(req, deps, decision, tokenHash) : await handleCredentialList(deps, decision, tokenHash);
           case "credential":
-            return await handleCredentialRevoke(deps, decision, tokenHash, id);
+            return req.method === "PATCH"
+              ? await handleCredentialNote(req, deps, decision, tokenHash, id)
+              : await handleCredentialRevoke(deps, decision, tokenHash, id);
           default:
             return partnerError(decision, 404, "not_found", "not found");
         }
@@ -265,4 +268,12 @@ async function handleCredentialRevoke(deps: PartnerMembersDeps, decision: Decisi
     default:
       return partnerError(decision, 409, "already_revoked", "this credential has already been revoked");
   }
+}
+
+/** PATCH credentials/{id}: display note only (A0). Not a credential *change* for the 10/h bucket. */
+async function handleCredentialNote(req: Request, deps: PartnerMembersDeps, decision: Decision, tokenHash: string, credentialId: string): Promise<Response> {
+  const parsed = parseCredentialNoteBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const status = await deps.db.withMembers(tokenHash, (s) => s.credentialNote(credentialId, parsed.value.note));
+  return status === "ok" ? partnerOk(decision, 200, { note: parsed.value.note }) : partnerError(decision, 404, "not_found", "not found");
 }
