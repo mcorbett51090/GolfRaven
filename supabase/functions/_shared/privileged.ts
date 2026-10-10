@@ -80,6 +80,7 @@ import {
   type CourseQrTx,
   type CoursePinRotateResult,
   type CoursePinAlarmRow,
+  type CourseStaticPinCapRow,
   type CoursePinShowResult,
   type CredentialLookup,
   type CredentialOptionsResult,
@@ -5026,6 +5027,28 @@ function buildCourseQrTx(trx: TxSql): CourseQrTx {
           pinEpochBefore: Number(r.o_pin_epoch_before),
           pinEpochAfter: Number(r.o_pin_epoch_after),
           failures: Number(r.o_failures),
+          raisedAt,
+        };
+      });
+    },
+    async staticPinCapList(facilityId: string): Promise<readonly CourseStaticPinCapRow[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_facility_id, o_local_date::text as o_local_date,
+               o_count::int as o_count, o_raised_at
+        from private.course_qr_static_pin_cap_list_for_partner(${facilityId}::text)`;
+      return rows.map((r) => {
+        const raisedAt = isoOrNull(r.o_raised_at);
+        if (
+          typeof r.o_id !== "string" || typeof r.o_facility_id !== "string" || typeof r.o_local_date !== "string" ||
+          raisedAt === null
+        ) {
+          throw new Error("course_qr_static_pin_cap_list_for_partner returned a malformed row");
+        }
+        return {
+          id: r.o_id,
+          facilityId: r.o_facility_id,
+          localDate: r.o_local_date,
+          count: Number(r.o_count),
           raisedAt,
         };
       });

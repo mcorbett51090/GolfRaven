@@ -126,6 +126,31 @@ describe("GET alarms: wrong-PIN rotation list", () => {
   });
 });
 
+describe("GET cap-alerts: static-PIN daily cap list", () => {
+  it("returns the facility's open cap alerts from the database", async () => {
+    const w = await makeCourseQrWorld();
+    const res = await handleCourseQrRequest(get(`cap-alerts?facilityId=${FACILITY}`), deps(w));
+    expect(res.status).toBe(200);
+    expect((await json(res)).data).toEqual({
+      facilityId: FACILITY,
+      alerts: [{
+        id: "a2000000-0000-0000-0000-000000000001",
+        facilityId: FACILITY,
+        localDate: "2030-01-01",
+        count: 25,
+        raisedAt: "2030-01-01T12:30:00.000Z",
+      }],
+    });
+    expect(w.calls).toEqual(["db.withCourseQr", "tx.staticPinCapList"]);
+  });
+
+  it("staff at X asking for Y is 403", async () => {
+    const w = await makeCourseQrWorld();
+    const res = await handleCourseQrRequest(get(`cap-alerts?facilityId=${OTHER_FACILITY}`), deps(w));
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("GET pin: today's PIN comes from the database and nowhere else", () => {
   it("returns the PIN, the local date, the end of the day and the epoch", async () => {
     const w = await makeCourseQrWorld();

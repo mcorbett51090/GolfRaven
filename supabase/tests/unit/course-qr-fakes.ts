@@ -135,6 +135,20 @@ export async function makeCourseQrWorld(over: Partial<CourseQrState> = {}): Prom
         },
       ];
     },
+    async staticPinCapList(facilityId) {
+      calls.push("tx.staticPinCapList");
+      scope(facilityId);
+      state.lastSeenAt = state.nowS;
+      return [
+        {
+          id: "a2000000-0000-0000-0000-000000000001",
+          facilityId,
+          localDate: "2030-01-01",
+          count: 25,
+          raisedAt: "2030-01-01T12:30:00.000Z",
+        },
+      ];
+    },
     async pinRotate(facilityId) {
       calls.push("tx.pinRotate");
       scope(facilityId);

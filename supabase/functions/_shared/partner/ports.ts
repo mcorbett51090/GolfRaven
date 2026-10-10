@@ -997,6 +997,15 @@ export interface CoursePinAlarmRow {
   readonly raisedAt: string;
 }
 
+/** GET course-qr/cap-alerts (course_qr_static_pin_cap_list_for_partner, class A0): open static-PIN daily cap fraud_signals (newest first, ≤100). */
+export interface CourseStaticPinCapRow {
+  readonly id: string;
+  readonly facilityId: string;
+  readonly localDate: string;
+  readonly count: number;
+  readonly raisedAt: string;
+}
+
 /** POST course-qr/pin/rotate (course_pin_rotate_for_partner, class A2). */
 export type CoursePinRotateResult = { readonly status: "ok"; readonly pinEpoch: number } | { readonly status: "no_programme" };
 
@@ -1045,6 +1054,7 @@ export type CourseQrPrintReadResult =
 export interface CourseQrTx {
   pinShow(facilityId: string): Promise<CoursePinShowResult>;
   pinAlarmList(facilityId: string): Promise<readonly CoursePinAlarmRow[]>;
+  staticPinCapList(facilityId: string): Promise<readonly CourseStaticPinCapRow[]>;
   pinRotate(facilityId: string): Promise<CoursePinRotateResult>;
   mint(facilityId: string, nonceHash: string): Promise<CourseQrMintResult>;
   refresh(facilityId: string, nonceHash: string): Promise<CourseQrRefreshResult>;

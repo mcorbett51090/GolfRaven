@@ -798,6 +798,19 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           }],
         });
       }
+      if (route === "cap-alerts" && req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        return ok(200, {
+          facilityId,
+          alerts: [{
+            id: "a2000000-0000-0000-0000-000000000099",
+            facilityId,
+            localDate: "2026-10-09",
+            count: 25,
+            raisedAt: "2026-10-09T16:00:00.000Z",
+          }],
+        });
+      }
       if (route === "pin/rotate" && req.method === "POST") {
         // A2: need reauth window and a PIN grant
         if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
