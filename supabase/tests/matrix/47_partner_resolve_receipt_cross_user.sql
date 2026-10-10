@@ -211,12 +211,14 @@ SELECT is(
   'not_found|',
   'unknown review id is not_found'
 );
+SET LOCAL ROLE edge_partner;
 SELECT throws_ok(
   $$SELECT * FROM private.partner_resolve_receipt_cross_user_match_for_partner(NULL, true)$$,
   '22023',
   NULL,
   'NULL review id is 22023'
 );
+RESET ROLE;
 
 SELECT finish();
 ROLLBACK;
