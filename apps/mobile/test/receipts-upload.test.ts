@@ -120,6 +120,22 @@ describe("ON (injected): picker then upload", () => {
     ]);
   });
 
+  it("forwards a typed receipt number and omits blanks (P5 §55)", async () => {
+    const picker = fakePicker({ kind: "picked", uri: "file:///r.jpg", name: "r.jpg", type: "image/jpeg" });
+    const api = fakeApi(async () => ({ status: "ok", localDate: null, dedupe: "clean", purchases: [] }));
+    const deps = {
+      enabled: true as const,
+      api,
+      picker,
+      currentUserId: () => "user-a",
+      accessTokenFor: async () => "tok",
+    };
+    await uploadReceiptImage(deps, { facilityId: "fac_1", receiptNumberOcr: "  ABC-99  " });
+    expect(api.calls[0]).toMatchObject({ req: { receiptNumberOcr: "ABC-99" } });
+    await uploadReceiptImage(deps, { facilityId: "fac_1", receiptNumberOcr: "   " });
+    expect((api.calls[1] as { req: { receiptNumberOcr?: string } }).req.receiptNumberOcr).toBeUndefined();
+  });
+
   it("maps cancelled / denied without calling the API", async () => {
     const api = fakeApi(async () => ({ status: "ok", localDate: null, dedupe: null, purchases: [] }));
     expect(

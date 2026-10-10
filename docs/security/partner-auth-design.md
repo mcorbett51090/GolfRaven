@@ -3008,7 +3008,34 @@ Numbering: **this section 54.** No migration. Closes the associatedDomains / App
 
 ### 54.4 Verification
 
-Branch: `cursor/p5-course-qr-applinks-8ffd` (base main after #93 / `2a92a04`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-course-qr-applinks-8ffd` (base main after #93 / `2a92a04`). Tip CI green on PR #94 (all three checks); squash-merged as `0c685cd`.
 
 - Mobile: marker-pending-link, policy associatedDomains; site: applinks unit tests; typecheck.
+
+## 55. As built: typed receipt number on upload card
+
+Numbering: **this section 55.** No migration. Closes the UI half of Edge `receiptNumberOcr` (already accepted since §40 / mobile API §43): optional typed invoice/ticket number on `ReceiptUploadCard`, forwarded on multipart upload. Still no OCR pipeline; `RECEIPTS_UPLOAD_UI_ENABLED` stays false.
+
+### 55.1 What was built
+
+- **`ReceiptUploadInput.receiptNumberOcr`** + `normalizeReceiptNumber` (trim, max 64, empty → omit).
+- **`ReceiptUploadCard`**: optional TextInput before Choose photo; passes value into `uploadReceipt`.
+- **i18n**: en + fr-CA label/hint.
+- **Tests**: upload forwards trimmed number; blanks omitted.
+
+### 55.2 Decisions and departures
+
+- **Typed entry only** — field name stays `receiptNumberOcr` to match Edge multipart; no on-device ML.
+- **Optional** — empty omits the FormData key (server treats missing/blank as null).
+- **Flag stays false** — same photo-library privacy gate as §50.
+
+### 55.3 Not built, honestly
+
+- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, multipart edge-contract recording, course-QR abandoned-pending purge.
+
+### 55.4 Verification
+
+Branch: `cursor/p5-receipt-number-ui-8ffd` (base main after #94 / `0c685cd`). Recorded when CI is green on the PR tip.
+
+- Mobile Vitest: receipts-upload + i18n parity; typecheck.
 

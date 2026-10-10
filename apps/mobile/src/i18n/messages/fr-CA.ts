@@ -374,6 +374,8 @@ export const frCA: Record<MessageKey, string> = {
   "receipt.title": "Téléverser un reçu",
   "receipt.button": "Choisir une photo de reçu",
   "receipt.hint": "Téléversez une photo de votre reçu de green fee pour cet établissement. JPEG, PNG ou HEIC, jusqu'à 5 Mo.",
+  "receipt.number.label": "Numéro de reçu (facultatif)",
+  "receipt.number.hint": "Si le reçu indique un numéro de facture ou de billet, saisissez-le ici pour aider à associer votre achat.",
   "receipt.a11y.hint": "Ouvre votre photothèque pour choisir une image de reçu à téléverser.",
   "receipt.working": "Téléversement…",
   "receipt.outcome.ok": "Reçu reçu. Votre achat est en attente de confirmation.",

@@ -17,6 +17,15 @@ export interface ReceiptUploadDeps {
 export interface ReceiptUploadInput {
   readonly facilityId: string;
   readonly localDate?: string;
+  /** Optional typed receipt / invoice number (Edge `receiptNumberOcr`; empty omitted). */
+  readonly receiptNumberOcr?: string;
+}
+
+/** Trim and bound a typed receipt number for the multipart field; empty → undefined (omit). */
+export function normalizeReceiptNumber(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim().slice(0, 64);
+  return trimmed.length === 0 ? undefined : trimmed;
 }
 
 export async function uploadReceiptImage(deps: ReceiptUploadDeps, input: ReceiptUploadInput): Promise<ReceiptUploadOutcome> {
@@ -37,12 +46,15 @@ export async function uploadReceiptImage(deps: ReceiptUploadDeps, input: Receipt
   }
   if (accessToken === null) return { status: "sign_in_required" };
 
+  const receiptNumberOcr = normalizeReceiptNumber(input.receiptNumberOcr);
+
   try {
     const answer = await deps.api.uploadReceipt(
       {
         facilityId: input.facilityId,
         file: { uri: picked.uri, name: picked.name, type: picked.type },
         localDate: input.localDate,
+        ...(receiptNumberOcr !== undefined ? { receiptNumberOcr } : {}),
       },
       { userId: owner, accessToken },
     );
