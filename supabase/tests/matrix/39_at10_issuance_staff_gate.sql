@@ -10,9 +10,9 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(14);
+SELECT plan(13);
 
-GRANT edge_partner, private_definer, service_role TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.offer, app.offer_code, app.partner_org, app.partner_member, app.partner_scope TO CURRENT_USER;
 GRANT SELECT, INSERT ON app.catalog_id_ledger, app.catalog_facility TO CURRENT_USER;
