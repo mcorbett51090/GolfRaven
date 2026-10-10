@@ -414,9 +414,10 @@ Status against this doc's own items:
   (`supabase/functions/_shared/evidence/request-shape.ts`).
 - **§2 (each row type from its own path) — enforced.** `staff_presence`/`booking`/`receipt_green_fee`/
   `arccos`/`garmin`/`ghin` are rejected outright at `POST /v1/evidence` (`request-shape.ts`'s
-  `REJECTED_SOURCES`) — none of their own server paths (partner-attest, the P7 webhook, the receipts
-  endpoint, the P8 connectors) are built yet. `courseId: null` (vs. omitted) is rejected as a
-  structural error, matching the OMITTED-not-null rule.
+  `REJECTED_SOURCES`). **`receipt_green_fee` has its own path** (0067 / design §46): player-lane
+  `POST /v1/receipts` → `receipt_intake_for_actor` writes the evidence row. Partner-attest,
+  the P7 webhook, and the P8 connectors remain unbuilt for the other rejected sources.
+  `courseId: null` (vs. omitted) is rejected as a structural error, matching the OMITTED-not-null rule.
 - **§3 (limits/fraud signals) — enforced for what's in scope.** Clock skew > 24h, a `failed`-grade
   fix, and an on-play quarantine (`scorePlay`'s own `excludedRows`) each raise a `fraud_signal` at
   intake (`evidence/handler.ts`). Rate limits (60/user/h evidence, 200/device/day, 2000/user/day
