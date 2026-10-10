@@ -2615,6 +2615,37 @@ export async function hitSystemRateLimit(bucketKey: string, windowSeconds: numbe
 }
 
 /**
+ * 0065 (rollups-refresh, design §41): recompute operator_rollup.completions and sponsor_rollup.markers_earned for a
+ * UTC month via `private.refresh_rollups`. edge_system only. `month` is `YYYY-MM-01` or null (current UTC month).
+ */
+export async function refreshRollups(month: string | null): Promise<{
+  operatorWritten: number;
+  operatorRemoved: number;
+  sponsorWritten: number;
+  sponsorRemoved: number;
+  month: string;
+}> {
+  return await openScopedTx("system", { expectedUid: null }, async (trx) => {
+    const rows = await trx`
+      select o_month::text as o_month,
+             o_operator_written::int as op_w,
+             o_operator_removed::int as op_r,
+             o_sponsor_written::int as sp_w,
+             o_sponsor_removed::int as sp_r
+        from private.refresh_rollups(${month}::date)`;
+    const r = rows[0] ?? {};
+    const resolved = typeof r.o_month === "string" && r.o_month.length >= 10 ? r.o_month.slice(0, 10) : (month ?? "");
+    return {
+      operatorWritten: Number(r.op_w ?? 0),
+      operatorRemoved: Number(r.op_r ?? 0),
+      sponsorWritten: Number(r.sp_w ?? 0),
+      sponsorRemoved: Number(r.sp_r ?? 0),
+      month: resolved,
+    };
+  });
+}
+
+/**
  * Edge role PR4b (E5, launch-blocking): the INDEPENDENT retention schedule. Before this, the fix-coordinate purge and the install-link tombstone
  * purge ran only inside a catalog import's drain pass, and the sign-in proof / revocation-queue purges only inside `signin-revocation-drain`, so a
  * quiet catalog (or an unscheduled drain) stopped retention. `retention-purge` runs the four promised classes (and, since 0040, the two hygiene classes), as `edge_system`, on its own schedule.

@@ -2593,7 +2593,8 @@ Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-au
 
 ### 40.3 Not built, honestly
 
-- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, 90-day image purge, rollups-refresh, perceptual aHash, HEIC metadata strip.
+- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, 90-day image purge, perceptual aHash, HEIC metadata strip.
+- **Rollups-refresh writer** — moved to **§41** (migration `0065`).
 - JPEG ancillary markers beyond APP1 (e.g. APP13/COM) are not stripped; residual metadata risk is accepted until a re-encode path exists.
 
 ### 40.4 Verification
@@ -2604,4 +2605,39 @@ Branch: `cursor/p5-receipts-upload-8ffd` (base main after #79). Tip `ed6aae8` CI
 - Vitest: `receipts-image.test.ts` (EXIF strip, MIME reject, sha256 phash stability, size constant), `receipts-handler.test.ts` (status map, Storage path, orphan remove).
 - `deno check` includes `receipts/index.ts` in CI function lists; service-role-lint clean.
 - CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 41. As built: rollups-refresh writer (0065)
+
+Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §30.3 / receipts §40.3 seam: a scheduled system job writes `operator_rollup` / `sponsor_rollup` instead of ops seed. Nothing from 0001–0064 is edited.
+
+### 41.1 What was built
+
+**Migration `0065_rollups_refresh.sql`** and **matrix `43_rollups_refresh.sql`**, then Edge function **`rollups-refresh`** (`POST`).
+
+- **`app.entitlement.earned_at`**: NOT NULL DEFAULT `now()`; backfilled from `play.play_date` (UTC), then `activated_at` / `redeemed_at` / `voucher_issued_at`, then `now()`. Month bucket for `markers_earned`.
+- **`private.refresh_rollups(p_month date)`** (`edge_system` only): NULL month = current UTC month. Opens GUC `app.edge.rollups_refresh = on` (never under a partner binding — policies require `partner_binding_kind() IS DISTINCT FROM 'partner'`). Recomputes:
+  - **`operator_rollup` / `completions`**: non-revoked `user_achievement` with completion-family `award_key ~ '^v[0-9]+$'` on a trail-scoped `catalog_achievement_def`; `cohort_n` = distinct users; `value` = award count.
+  - **`sponsor_rollup` / `markers_earned`**: non-void `entitlement` with `sponsorship_id`; bucketed by `earned_at`; same cohort/value shape.
+  - **k-anonymity**: upsert only when `cohort_n >= 10` (WITH CHECK + table CHECK); remove existing rows for those metrics/month when the live cohort falls below 10. Other metric names are left alone.
+- **Eleven `pd_rollups_refresh_*` policies** on `user_achievement`, `catalog_achievement_def`, `entitlement`, `operator_rollup`, `sponsor_rollup` (SELECT/INSERT/UPDATE/DELETE as needed).
+- **Edge**: service-role bearer → system rate limit `rollups-refresh` 12/hour → `refreshRollups` via `openScopedTx("system")`. Empty body or `{ "month": "YYYY-MM-01" }`. Deploy schedules it; nothing in-repo does.
+
+### 41.2 Decisions and departures
+
+- **Closed metric set** (`completions`, `markers_earned`) matching the helpers seed and S6 reads; the build plan’s per-metric table names are already one table + `metric` column (0005 AMBIGUITY).
+- **System lane, not partner A3** — rollups are aggregates over every player; a partner session must not open the writer (GUC window closed under a partner binding).
+- **UTC month** — no facility TZ for programme-wide numbers; documented here.
+- **Completion family = `award_key` `vN`** — matches `user_achievement.award_key` comment in 0003 (“v\<N\> for the completion family”).
+
+### 41.3 Not built, honestly
+
+- Additional metrics, partner-triggered refresh, sponsor portal (P6), in-repo scheduler, OCR/receipt follow-ons from §40.3.
+
+### 41.4 Verification
+
+Branch: `cursor/p5-rollups-refresh-8ffd` (base main after #80). Recorded when CI is green on the PR tip.
+
+- Matrix **43**: EXECUTE matrix, sub-threshold remove of seeded completions, happy write at cohort 10, remove after revoke drops cohort, `edge_actor` / `edge_partner` 42501.
+- Vitest: `rollups-refresh-handler.test.ts` (auth order, empty body, month shape, 429/500).
+- `deno check` / `deno cache --frozen` lists include `rollups-refresh/index.ts`; service-role-lint clean.
 
