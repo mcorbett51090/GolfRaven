@@ -39,14 +39,14 @@ AS $$
   ) a
 $$;
 
-RESET ROLE;
-REVOKE CREATE ON SCHEMA private FROM private_definer;
-
 REVOKE EXECUTE ON FUNCTION private.partner_session_policy(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.partner_session_policy(uuid) TO partner_session_issuer;
 
 COMMENT ON FUNCTION private.partner_session_policy(uuid) IS
   '0047/0080 (4.1). Required aal, idle, absolute ceiling, and concurrent live-session keep of a person (highest role wins: admin keep=2, others 3). EXECUTE for partner_session_issuer; bind_partner_session / partner_authorize (same owner) call it without a grant.';
+
+RESET ROLE;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
 
 -- ============================================================================
 -- 2. Mint: evict with role keep (issuer bracket)
