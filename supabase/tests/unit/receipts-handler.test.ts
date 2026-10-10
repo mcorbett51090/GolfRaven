@@ -25,6 +25,7 @@ describe("handleReceiptUpload", () => {
         storage: {
           putObject: async (path) => { uploads.push(path); },
           removeObject: async () => {},
+          purgeOlderThan: async () => 0,
         },
         newObjectId: () => "11111111-1111-1111-1111-111111111111",
       },
@@ -41,7 +42,10 @@ describe("handleReceiptUpload", () => {
         { facilityId: "fac_x", fileBytes: Uint8Array.from([0x25, 0x50, 0x44, 0x46]), fileName: "x.pdf", localDate: null, receiptNumberOcr: null },
         UID,
         repo,
-        { storage: { putObject: async () => {}, removeObject: async () => {} }, newObjectId: () => crypto.randomUUID() },
+        {
+          storage: { putObject: async () => {}, removeObject: async () => {}, purgeOlderThan: async () => 0 },
+          newObjectId: () => crypto.randomUUID(),
+        },
       ),
     ).rejects.toMatchObject({ status: 415 });
   });
@@ -68,6 +72,7 @@ describe("handleReceiptUpload", () => {
           storage: {
             putObject: async () => {},
             removeObject: async (path) => { removed.push(path); },
+            purgeOlderThan: async () => 0,
           },
           newObjectId: () => "22222222-2222-2222-2222-222222222222",
         },

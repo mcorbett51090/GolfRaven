@@ -3772,7 +3772,7 @@ function buildReceiptsRepo(trx: TxSql): Repo["receipts"] {
   };
 }
 
-/** Service-role Storage upload for the private `receipts` bucket (0012_storage.sql). */
+/** Service-role Storage for the private `receipts` bucket (0012_storage.sql): upload, orphan remove, 90-day purge. */
 export const receiptsStorage = {
   async putObject(path: string, body: Uint8Array, contentType: string): Promise<void> {
     const client = adminClient();
@@ -3783,6 +3783,35 @@ export const receiptsStorage = {
     const client = adminClient();
     const { error } = await client.storage.from("receipts").remove([path]);
     if (error) throw new Error(`receiptsStorage.removeObject: remove failed: ${error.message}`);
+  },
+  async purgeOlderThan(olderThanMs: number): Promise<number> {
+    const client = adminClient();
+    const cutoffIso = new Date(olderThanMs).toISOString();
+    let removed = 0;
+    // Paths are receipts/<uid>/<objectId>.ext; Storage list is shallow, so recurse folders.
+    const queue: string[] = [""];
+    while (queue.length > 0) {
+      const prefix = queue.shift()!;
+      const { data, error } = await client.storage.from("receipts").list(prefix === "" ? undefined : prefix, { limit: 1000 });
+      if (error) throw new Error(`receiptsStorage.purgeOlderThan: list failed: ${error.message}`);
+      if (!data || data.length === 0) continue;
+      const toDelete: string[] = [];
+      for (const item of data) {
+        const full = prefix === "" ? item.name : `${prefix}/${item.name}`;
+        if (item.id === null && !item.metadata) {
+          queue.push(full);
+          continue;
+        }
+        const created = item.created_at ?? (item.metadata as { created_at?: string } | null)?.created_at;
+        if (typeof created === "string" && created < cutoffIso) toDelete.push(full);
+      }
+      if (toDelete.length > 0) {
+        const { error: delErr } = await client.storage.from("receipts").remove(toDelete);
+        if (delErr) throw new Error(`receiptsStorage.purgeOlderThan: remove failed: ${delErr.message}`);
+        removed += toDelete.length;
+      }
+    }
+    return removed;
   },
 };
 

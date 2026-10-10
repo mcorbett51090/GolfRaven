@@ -2593,7 +2593,8 @@ Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-au
 
 ### 40.3 Not built, honestly
 
-- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, 90-day image purge, perceptual aHash, HEIC metadata strip.
+- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip.
+- **90-day image purge** — moved to **§42** (`receipts-purge`).
 - **Rollups-refresh writer** — moved to **§41** (migration `0065`).
 - JPEG ancillary markers beyond APP1 (e.g. APP13/COM) are not stripped; residual metadata risk is accepted until a re-encode path exists.
 
@@ -2632,7 +2633,7 @@ Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §3
 
 ### 41.3 Not built, honestly
 
-- Additional metrics, partner-triggered refresh, sponsor portal (P6), in-repo scheduler, OCR/receipt follow-ons from §40.3.
+- Additional metrics, partner-triggered refresh, sponsor portal (P6), in-repo scheduler, OCR/receipt follow-ons from §40.3 (90-day purge → §42).
 
 ### 41.4 Verification
 
@@ -2643,4 +2644,34 @@ Branch: `cursor/p5-rollups-refresh-8ffd` (base main after #80). Tip `3b84b48` CI
 - Vitest: `rollups-refresh-handler.test.ts` (auth order, empty body, month shape, 429/500); `review-account-gate` lists `rollups-refresh` as system lane.
 - `deno check` / `deno cache --frozen` lists include `rollups-refresh/index.ts`; service-role-lint clean.
 - CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 42. As built: receipts 90-day image purge
+
+Numbering: **this section 42.** No migration: Storage lifecycle for the private `receipts` bucket (0012 TODO / build plan A66; §40.3 seam). Closes the retention half of player-lane receipt upload (§40).
+
+### 42.1 What was built
+
+Edge function **`receipts-purge`** (`POST`).
+
+- Service-role bearer → system rate limit `receipts-purge` 12/hour → `receiptsStorage.purgeOlderThan(now − 90 days)`.
+- Recursive Storage list under `receipts/` (paths are `receipts/<uid>/<objectId>.ext`); deletes objects whose `created_at` is older than the cutoff.
+- Port: `ReceiptsStoragePort.purgeOlderThan` (upload/remove already existed for intake).
+- Deploy schedules it; nothing in-repo does.
+
+### 42.2 Decisions and departures
+
+- **90 days** — matches 0012 / build plan A66 (exports stay at 7 days via `exports-purge`).
+- **System lane, not player** — same auth order as `exports-purge` / `rollups-refresh` / `retention-purge`.
+- **No DB rows purged** — `purchase_evidence` / fingerprints remain; only the image object is removed (metadata retention is a later product call).
+
+### 42.3 Not built, honestly
+
+- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, in-repo scheduler, native Storage lifecycle rules (if the platform gains them).
+
+### 42.4 Verification
+
+Branch: `cursor/p5-receipts-purge-8ffd` (base main after #81). Recorded when CI is green on the PR tip.
+
+- Vitest: `receipts-purge-handler.test.ts` (auth order, 90-day cutoff, 429/500); `ci-function-lists` + `review-account-gate` list `receipts-purge` as system lane.
+- `deno check` / `deno cache --frozen` lists include `receipts-purge/index.ts`; service-role-lint clean.
 

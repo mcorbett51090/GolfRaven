@@ -36,4 +36,6 @@ export interface ReceiptsStoragePort {
   putObject(path: string, body: Uint8Array, contentType: string): Promise<void>;
   /** Best-effort delete when intake refuses after upload (orphan compensation). */
   removeObject(path: string): Promise<void>;
+  /** System-lane retention: delete objects with created_at older than the cutoff (epoch ms). */
+  purgeOlderThan(olderThanMs: number): Promise<number>;
 }

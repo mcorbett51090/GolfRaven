@@ -103,7 +103,7 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
   // the pure handler suite (the real wrapper and the software authenticator, no network) is cached by the same step that runs it.
   // Partner auth S1.5: the two functions of the Edge half of 0054 are named the same way.
   for (const step of STEPS) {
-    it(`"${step}" lists the partner-session, partner-invites, partner-members, partner-attest, partner-review, stock-admin, partner-entitlements, programme-config, offers-admin, sponsorships-admin, partner-offers-redeem, settlement-export, exports-purge and rollups-refresh entrypoints`, () => {
+    it(`"${step}" lists the partner-session, partner-invites, partner-members, partner-attest, partner-review, stock-admin, partner-entitlements, programme-config, offers-admin, sponsorships-admin, partner-offers-redeem, settlement-export, exports-purge, rollups-refresh and receipts-purge entrypoints`, () => {
       const listed = listedPaths(step);
       for (const fn of [
         "partner-session",
@@ -120,6 +120,7 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
         "settlement-export",
         "exports-purge",
         "rollups-refresh",
+        "receipts-purge",
       ]) expect(listed).toContain(`supabase/functions/${fn}/index.ts`);
     });
   }
