@@ -2172,7 +2172,9 @@ Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx`
 
 ### 32.4 Verification
 
+Tip of this slice: see `cursor/p5-1b-offers-settlement-8ffd` HEAD after the commits below.
+
 - **Matrix 38** (`38_partner_offers_settlement.sql`): 32/32 PASS — foreign facility 403, A1 without PIN, happy redeem + budget consume, self-redeem 22023, A3 without TOTP refused, planted GUC, settlement line carries `sponsorship_id` for sponsor funder, export redemptions/`face_value_total` match planted redeem.
-- **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): focused suite green.
-- **`HARNESS_MODE=restricted tools/db/test.sh`**: run after tip; `verify-function-inventory` includes the nine `pd_partner_offers_*` allow-list rows (fixture regenerated). Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary.
+- **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): **86/86** PASS.
+- **`HARNESS_MODE=restricted tools/db/test.sh`**: **Files=58, Tests=5376, Result: PASS**; Deno integration **382 passed | 0 failed** (Deno 2.5.2 as CI pins); `verify-function-inventory: OK` (nine `pd_partner_offers_*` allow-list rows in `definer_policy_exprs.txt`); `service-role-lint: clean`. Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary. Settlement policy uses `offer_code.facility_id` (bare `facility_id` deparsed as a tautology).
 - Claims in-slice: **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions); issuance staff gate deferred (§32.3).
