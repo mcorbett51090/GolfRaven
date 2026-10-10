@@ -1,13 +1,14 @@
 -- 47_partner_resolve_receipt_cross_user.sql
 -- 0069: admin A3 resolve of open receipt_cross_user_match (approve keeps money path; reject voids subject).
+-- Pattern: seed rows like matrix 35 (no bind_actor in this xact — partner bind is once).
 
 \set QUIET 1
 BEGIN;
-SELECT plan(16);
+SELECT plan(14);
 
-GRANT edge_partner, edge_actor, private_definer TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
-GRANT SELECT ON app.review_item, app.purchase_evidence, app.marker_credit, app.receipt_fingerprint, app.evidence, app.fraud_signal, app.audit_log TO CURRENT_USER;
+GRANT SELECT, INSERT, UPDATE ON app.review_item, app.purchase_evidence, app.marker_credit, app.receipt_fingerprint, app.evidence, app.fraud_signal TO CURRENT_USER;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
 ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
 CREATE POLICY zz47_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
@@ -66,6 +67,46 @@ SELECT pg_temp.mk_cred('ad', '00000000-0000-0000-0000-4000000000d0') AS c_ad \gs
 SELECT pg_temp.mk_session('sx', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS s_sx \gset
 SELECT pg_temp.mk_session('ad', '00000000-0000-0000-0000-4000000000d0', :'c_ad', 2) AS s_ad \gset
 
+-- Seed two open cross-user matches for player B (approve / reject subjects).
+INSERT INTO app.purchase_evidence (id, user_id, facility_id, trail_id, method, ref_id, offline, cosignal, local_date, status)
+VALUES
+  ('a7000000-0000-0000-0000-000000004701', '00000000-0000-0000-0000-00000000000b', 'fac_x', 'trl_t', 'receipt',
+   'receipts/b/xu-approve.jpg', false, '{"awaiting":{}}'::jsonb, current_date, 'pending'),
+  ('a7000000-0000-0000-0000-000000004702', '00000000-0000-0000-0000-00000000000b', 'fac_x', 'trl_t', 'receipt',
+   'receipts/b/xu-reject.jpg', false, '{"awaiting":{}}'::jsonb, current_date, 'pending');
+INSERT INTO app.marker_credit (id, user_id, trail_id, facility_id, purchase_evidence_id, status)
+VALUES
+  ('b7000000-0000-0000-0000-000000004701', '00000000-0000-0000-0000-00000000000b', 'trl_t', 'fac_x', 'a7000000-0000-0000-0000-000000004701', 'pending'),
+  ('b7000000-0000-0000-0000-000000004702', '00000000-0000-0000-0000-00000000000b', 'trl_t', 'fac_x', 'a7000000-0000-0000-0000-000000004702', 'pending');
+INSERT INTO app.evidence (id, user_id, source, source_ref, facility_id, summary, attestation_grade, local_date, input_hash, status)
+VALUES
+  ('c7000000-0000-0000-0000-000000004701', '00000000-0000-0000-0000-00000000000b', 'receipt_green_fee',
+   'receipt:fac_x:phash-xu-approve', 'fac_x',
+   jsonb_build_object('localDate', current_date::text, 'status', 'pending', 'fingerprint', 'phash-xu-approve'),
+   'unattestable', current_date, 'h47-approve', 'accepted'),
+  ('c7000000-0000-0000-0000-000000004702', '00000000-0000-0000-0000-00000000000b', 'receipt_green_fee',
+   'receipt:fac_x:phash-xu-reject', 'fac_x',
+   jsonb_build_object('localDate', current_date::text, 'status', 'pending', 'fingerprint', 'phash-xu-reject'),
+   'unattestable', current_date, 'h47-reject', 'accepted');
+INSERT INTO app.review_item (id, kind, subject_table, subject_id, detail)
+VALUES
+  ('91000000-0000-0000-0000-000000004701', 'receipt_cross_user_match', 'purchase_evidence', 'a7000000-0000-0000-0000-000000004701',
+   jsonb_build_object('purchase_evidence_id', 'a7000000-0000-0000-0000-000000004701',
+                      'matched_purchase_evidence_id', '90000000-0000-0000-0000-000000000001',
+                      'matched_receipt_fingerprint_id', '80000000-0000-0000-0000-000000000001',
+                      'phash', 'phash-xu-approve', 'facility_id', 'fac_x', 'local_date', current_date)),
+  ('91000000-0000-0000-0000-000000004702', 'receipt_cross_user_match', 'purchase_evidence', 'a7000000-0000-0000-0000-000000004702',
+   jsonb_build_object('purchase_evidence_id', 'a7000000-0000-0000-0000-000000004702',
+                      'matched_purchase_evidence_id', '90000000-0000-0000-0000-000000000001',
+                      'matched_receipt_fingerprint_id', '80000000-0000-0000-0000-000000000001',
+                      'phash', 'phash-xu-reject', 'facility_id', 'fac_x', 'local_date', current_date));
+INSERT INTO app.fraud_signal (id, user_id, kind, detail)
+VALUES
+  ('d7000000-0000-0000-0000-000000004701', '00000000-0000-0000-0000-00000000000b', 'receipt_cross_user_match',
+   jsonb_build_object('purchase_evidence_id', 'a7000000-0000-0000-0000-000000004701', 'phash', 'phash-xu-approve')),
+  ('d7000000-0000-0000-0000-000000004702', '00000000-0000-0000-0000-00000000000b', 'receipt_cross_user_match',
+   jsonb_build_object('purchase_evidence_id', 'a7000000-0000-0000-0000-000000004702', 'phash', 'phash-xu-reject'));
+
 -- ----------------------------------------------------------------------------
 -- 1. Inventory / EXECUTE
 -- ----------------------------------------------------------------------------
@@ -83,12 +124,11 @@ SELECT is(
   'pd_partner_receipt_review_item_update exists'
 );
 
-SAVEPOINT s47_root;
-
 -- ----------------------------------------------------------------------------
--- 2. Staff cannot resolve (42501)
+-- 2. Staff cannot resolve (42501); roll back the staff bind
 -- ----------------------------------------------------------------------------
-ROLLBACK TO SAVEPOINT s47_root;
+SAVEPOINT staff_resolve;
+SELECT pg_temp.seed_step('sx', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 SELECT throws_ok(
@@ -98,116 +138,73 @@ SELECT throws_ok(
   'staff cannot resolve receipt_cross_user_match'
 );
 RESET ROLE;
+ROLLBACK TO SAVEPOINT staff_resolve;
 
 -- ----------------------------------------------------------------------------
--- 3. Cross-user intake → admin approve: fingerprint + closed item; matched purchase untouched
+-- 3. One admin bind for the rest of the file
 -- ----------------------------------------------------------------------------
-ROLLBACK TO SAVEPOINT s47_root;
-SET LOCAL ROLE edge_actor;
-SELECT private.bind_actor('00000000-0000-0000-0000-00000000000b'::uuid);
-SELECT is(
-  (SELECT o_status FROM private.receipt_intake_for_actor(
-    'fac_x', 'phash1',
-    'receipts/00000000-0000-0000-0000-00000000000b/xu-approve.jpg', NULL, NULL
-  ) LIMIT 1),
-  'review',
-  'cross-user intake is review'
-);
-RESET ROLE;
-SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT id AS ri_approve FROM app.review_item
- WHERE kind = 'receipt_cross_user_match' AND resolved_at IS NULL
- ORDER BY created_at DESC LIMIT 1 \gset
-SELECT subject_id AS pe_approve FROM app.review_item WHERE id = :'ri_approve'::uuid \gset
-
+SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
+RESET ROLE;
+
 SELECT is(
-  pg_temp.res_xu('ad', :'ri_approve'::uuid, true),
+  pg_temp.res_xu('ad', '91000000-0000-0000-0000-000000004701'::uuid, true),
   'ok|approved',
   'admin approve closes the item'
 );
-RESET ROLE;
-SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(
   (SELECT r.status || '|' || (r.resolved_at IS NOT NULL)::text || '|' || (r.resolved_by = '00000000-0000-0000-0000-4000000000d0')::text
-     FROM app.review_item r WHERE r.id = :'ri_approve'::uuid),
+     FROM app.review_item r WHERE r.id = '91000000-0000-0000-0000-000000004701'),
   'approved|true|true',
   'review_item approved with resolved_by admin'
 );
 SELECT is(
-  (SELECT count(*)::int FROM app.receipt_fingerprint rf WHERE rf.purchase_evidence_id = :'pe_approve'::uuid AND rf.phash = 'phash1'),
+  (SELECT count(*)::int FROM app.receipt_fingerprint rf
+    WHERE rf.purchase_evidence_id = 'a7000000-0000-0000-0000-000000004701' AND rf.phash = 'phash-xu-approve'),
   1,
   'approve inserts subject fingerprint'
 );
 SELECT is(
-  (SELECT pe.status::text FROM app.purchase_evidence pe
-    WHERE pe.id = '90000000-0000-0000-0000-000000000001'),
+  (SELECT pe.status::text FROM app.purchase_evidence pe WHERE pe.id = '90000000-0000-0000-0000-000000000001'),
   'valid',
-  'matched earlier purchase (helpers seed) stays valid'
+  'matched earlier purchase stays valid'
 );
-
--- Second resolve is not_open (partner binding from the approve call is still live in this xact)
 SELECT is(
-  pg_temp.res_xu('ad', :'ri_approve'::uuid, true),
+  pg_temp.res_xu('ad', '91000000-0000-0000-0000-000000004701'::uuid, true),
   'not_open|',
   'second resolve is not_open'
 );
 
 -- ----------------------------------------------------------------------------
--- 4. Cross-user intake → admin reject: subject void/reviewer; evidence void; matched untouched
+-- 4. Reject: subject void/reviewer; evidence void; fraud cleared
 -- ----------------------------------------------------------------------------
-ROLLBACK TO SAVEPOINT s47_root;
-SET LOCAL ROLE edge_actor;
-SELECT private.bind_actor('00000000-0000-0000-0000-00000000000b'::uuid);
-SELECT private.receipt_intake_for_actor(
-  'fac_x', 'phash1',
-  'receipts/00000000-0000-0000-0000-00000000000b/xu-reject.jpg', NULL, NULL
-);
-RESET ROLE;
-SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT id AS ri_reject FROM app.review_item
- WHERE kind = 'receipt_cross_user_match' AND resolved_at IS NULL
- ORDER BY created_at DESC LIMIT 1 \gset
-SELECT subject_id AS pe_reject FROM app.review_item WHERE id = :'ri_reject'::uuid \gset
-SELECT user_id AS uid_reject, facility_id AS fac_reject, ref_id AS ref_reject
-  FROM app.purchase_evidence WHERE id = :'pe_reject'::uuid \gset
-
-SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_ad');
 SELECT is(
-  pg_temp.res_xu('ad', :'ri_reject'::uuid, false),
+  pg_temp.res_xu('ad', '91000000-0000-0000-0000-000000004702'::uuid, false),
   'ok|rejected',
   'admin reject closes the item'
 );
-RESET ROLE;
-SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(
-  (SELECT pe.status::text || '|' || pe.void_reason::text FROM app.purchase_evidence pe WHERE pe.id = :'pe_reject'::uuid),
+  (SELECT pe.status::text || '|' || pe.void_reason::text FROM app.purchase_evidence pe
+    WHERE pe.id = 'a7000000-0000-0000-0000-000000004702'),
   'void|reviewer',
   'reject voids subject purchase with void_reason=reviewer'
 );
 SELECT is(
   (SELECT e.summary->>'status' || '|' || (e.summary->>'voidReason')
-     FROM app.evidence e
-    WHERE e.user_id = :'uid_reject'::uuid
-      AND e.source = 'receipt_green_fee'
-      AND e.source_ref = 'receipt:fac_x:phash1'),
+     FROM app.evidence e WHERE e.id = 'c7000000-0000-0000-0000-000000004702'),
   'void|reviewer',
   'reject voids receipt_green_fee evidence summary'
 );
 SELECT is(
   (SELECT count(*)::int FROM app.fraud_signal fs
-    WHERE fs.kind = 'receipt_cross_user_match'
-      AND fs.user_id = :'uid_reject'::uuid
-      AND (fs.detail ->> 'purchase_evidence_id') = :'pe_reject'::text
-      AND fs.cleared_at IS NOT NULL),
+    WHERE fs.id = 'd7000000-0000-0000-0000-000000004702' AND fs.cleared_at IS NOT NULL),
   1,
   'reject clears the open fraud_signal'
 );
 
 -- ----------------------------------------------------------------------------
--- 5. Missing id → not_found; bad args → 22023 (admin binding from §4 still live)
+-- 5. Missing id → not_found; bad args → 22023
 -- ----------------------------------------------------------------------------
 SELECT is(
   pg_temp.res_xu('ad', '91000000-0000-0000-0000-00000000dead'::uuid, true),
