@@ -2668,6 +2668,10 @@ export async function refreshRollups(month: string | null): Promise<{
  *   partner_invites          `private.purge_partner_invites()`              invites 90 days past their acceptance, revocation or expiry
  *   partner_enrolment_tokens `private.purge_partner_enrolment_tokens()`     enrolment tokens 90 days past their consumption, revocation or expiry
  *   partner_sign_in_failures `private.purge_partner_sign_in_failures()`     failure counters a day idle
+ * and, since 0071 (P5 §57 / S2a departure 6), the three course-QR retention classes, each the same shape:
+ *   course_qr_tokens             `private.purge_course_qr_tokens()`              tokens 7 days past expires_at
+ *   course_pin_alarms            `private.purge_course_pin_alarms()`             alarms 90 days past raised_at
+ *   abandoned_pending_purchases  `private.purge_abandoned_pending_purchases()`   pending purchases past awaiting.until (+ their pending credits)
  * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
  * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
  *
@@ -2726,6 +2730,10 @@ export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): R
     step("partner_invites", fixed, async (trx) => n(await trx`select private.purge_partner_invites() as n`)),
     step("partner_enrolment_tokens", fixed, async (trx) => n(await trx`select private.purge_partner_enrolment_tokens() as n`)),
     step("partner_sign_in_failures", fixed, async (trx) => n(await trx`select private.purge_partner_sign_in_failures() as n`)),
+    // 0071 (P5 §57): course-QR retention (S2a departure 6)
+    step("course_qr_tokens", fixed, async (trx) => n(await trx`select private.purge_course_qr_tokens() as n`)),
+    step("course_pin_alarms", fixed, async (trx) => n(await trx`select private.purge_course_pin_alarms() as n`)),
+    step("abandoned_pending_purchases", fixed, async (trx) => n(await trx`select private.purge_abandoned_pending_purchases() as n`)),
   ];
 }
 
