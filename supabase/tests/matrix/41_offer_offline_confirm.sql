@@ -8,7 +8,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(15);
+SELECT plan(14);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -183,8 +183,9 @@ SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_n
 RESET ROLE;
 
 -- ----------------------------------------------------------------------------
--- 2. Offline redeem records offline_step
+-- 2. Offline redeem records offline_step (partner bind; rolled back so section 3 can bind_actor)
 -- ----------------------------------------------------------------------------
+SAVEPOINT redeem_step;
 SELECT pg_temp.seed_step('sx', '{"pin_grant_s": 50}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
@@ -197,22 +198,21 @@ SELECT is((SELECT offline_step FROM app.offer_code WHERE id = '78000000-0000-000
 SELECT ok((SELECT offline_confirm_by IS NOT NULL AND offline_confirm_by > now() + interval '23 hours'
              FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000050'),
   'offline redeem still sets offline_confirm_by ~24 h ahead');
+ROLLBACK TO SAVEPOINT redeem_step;
 
 -- ----------------------------------------------------------------------------
--- 3. Happy confirm + refusals (one bind for the transaction)
+-- 3. Happy confirm + refusals (actor bind; partner binding was rolled back above)
 -- ----------------------------------------------------------------------------
 SET LOCAL ROLE edge_actor;
 SELECT private.bind_actor('00000000-0000-0000-0000-00000000000b');
 RESET ROLE;
 
 SELECT is(pg_temp.confirm('fac_x', :'t0'::timestamptz, 'attested', 'fix41ok', :'ev_ok'::uuid),
-  'confirmed|2', 'qualifying fix clears both same-window awaiting offline offers for the bound player');
+  'confirmed|1', 'qualifying fix clears the planted awaiting offline offer for the bound player');
 SELECT ok((SELECT offline_confirm_by IS NULL FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000051'),
   'planted code offline_confirm_by is cleared');
 SELECT ok((SELECT offline_confirm_by IS NOT NULL FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000052'),
   'another player''s awaiting code at the same facility is untouched');
-SELECT ok((SELECT offline_confirm_by IS NULL FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000050'),
-  'same-window offline redeem from section 2 is also cleared by the same fix');
 
 SELECT is(pg_temp.confirm('fac_x', :'t0'::timestamptz, 'attested', 'fix41ok', :'ev_ok'::uuid),
   'none_awaiting|0', 'second confirm with nothing left awaiting is none_awaiting');
