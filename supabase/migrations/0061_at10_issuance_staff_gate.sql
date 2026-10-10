@@ -64,6 +64,9 @@ DECLARE
   v_code app.offer_code%ROWTYPE;
   v_reserve numeric := 0;
 BEGIN
+  IF private.is_demo_account(p_user_id) THEN
+    RAISE EXCEPTION 'activate_offer_code: the review account may not activate a reward' USING ERRCODE = '42501';
+  END IF;
   IF p_decision IS NULL OR p_decision NOT IN ('activate', 'held_review') THEN
     RAISE EXCEPTION 'activate_offer_code: p_decision must be ''activate'' or ''held_review'' (got %)', p_decision
       USING ERRCODE = '22023';
@@ -201,6 +204,9 @@ BEGIN
   SELECT * INTO v_code FROM app.offer_code WHERE id = p_code_id FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'resolve_held_offer_code: no offer_code %', p_code_id USING ERRCODE = 'P0002';
+  END IF;
+  IF private.is_demo_account(v_code.user_id) THEN
+    RAISE EXCEPTION 'resolve_held_offer_code: the review account may not receive a reward' USING ERRCODE = '42501';
   END IF;
   IF v_code.state <> 'held_review' THEN
     RAISE EXCEPTION 'resolve_held_offer_code: offer_code % is % (not held_review)', p_code_id, v_code.state

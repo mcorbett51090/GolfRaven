@@ -287,6 +287,12 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     withSponsorships() {
       return Promise.reject(new Error("fake partner server: sponsorships are not implemented (S7d)"));
     },
+    withOffersRedeem() {
+      return Promise.reject(new Error("fake partner server: offers-redeem is not implemented (P5.1b)"));
+    },
+    withSettlementExport() {
+      return Promise.reject(new Error("fake partner server: settlement-export is not implemented (P5.1b)"));
+    },
     async hitSystemRateLimit() {
       return { ok: true, retryAfterSeconds: 0 };
     },
