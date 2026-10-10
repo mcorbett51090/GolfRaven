@@ -327,8 +327,9 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
           count: n,
         });
       }
-    } catch (err) {
-      console.error("marker-scan: static-pin daily cap alert failed", err);
+    } catch {
+      // Cap alert is best-effort: never fail or change the accepted scan.
+      // Player-lane modules must not console.* (marker-scan-entrypoint pin).
     }
   }
 
