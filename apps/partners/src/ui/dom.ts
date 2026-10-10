@@ -16,6 +16,9 @@ export interface Props {
   readonly tabindex?: string;
   readonly hidden?: boolean;
   readonly disabled?: boolean;
+  readonly muted?: boolean;
+  readonly autoplay?: boolean;
+  readonly playsinline?: boolean;
   readonly "aria-live"?: "polite" | "assertive";
   readonly "aria-busy"?: "true" | "false";
   readonly "aria-label"?: string;

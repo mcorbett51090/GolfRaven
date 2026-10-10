@@ -2531,7 +2531,7 @@ Numbering: **this section 38.** No migration. Closes the §37.3 dual-await follo
 
 - Rollups-refresh writer (S6 seam).
 - Receipts upload / EXIF / phash player lane.
-- Camera scan for check-in tokens (§33 seam).
+- Camera scan for check-in tokens (§33 seam) — **built in §39**.
 
 ### 38.4 Verification
 
@@ -2539,4 +2539,35 @@ Branch: `cursor/p5-offline-confirm-order-8ffd` (base main after #77). Tip `6a352
 
 - Focused vitest (`marker-scan-handler`): 47/47, including confirm-before-attach order and dual pending-purchase + confirm path.
 - CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 39. As built: camera scan of check-in tokens (`apps/partners`)
+
+Numbering: **this section 39.** No server, database or migration change. Closes the §33 / §34 / §38 shop-floor seam: a player check-in QR (or hand-over token QR) fills the existing paste field.
+
+### 39.1 What was built
+
+- **`scanCheckinQr`** (`src/ui/camera-scan.ts`): injected ports (`getUserMedia`, `BarcodeDetector`-shaped `detect`, clock, delay). QR only. First non-empty `rawValue` is trimmed to the first token and capped at 256 characters. `stopCameraScan` aborts and stops tracks.
+- **`tokenScanField`**: paste input plus Scan / Stop and a muted preview. Status names only closed failure keys (`unsupported` / `denied` / `timeout`); the scanned value is never copied into status text.
+- Wired on **online attest**, **offer-redeem staff_scan**, and **handover credential** (staff scan or hand-over token). Offline six-digit fields stay typed.
+- **`render`** calls `stopCameraScan` before every rebuild so a PIN prompt, lock, or screen change cannot leave a live track.
+- Permissions-Policy stays `camera=(self)`. Paste remains the fallback when `BarcodeDetector` or the camera is missing.
+
+### 39.2 Decisions and departures
+
+- **No third-party scanner.** `BarcodeDetector` is the platform API; no wasm/zxing in the bundle (every import is still relative).
+- **Rebuild tears down the camera** rather than re-attaching a stream across `replaceChildren`. A scan in progress is aborted honestly; the person taps Scan again.
+- **No new AppState.** The field writes the input the submit handler already reads.
+
+### 39.3 Not built, honestly
+
+- Rollups-refresh writer (S6 seam).
+- Receipts upload / EXIF / phash player lane.
+- A dedicated player-app QR payload schema beyond "the token string in a QR".
+
+### 39.4 Verification
+
+Branch: `cursor/p5-camera-scan-8ffd` (base main after #78).
+
+- Partners unit: camera-scan cells (normalize, unsupported/denied/happy/timeout/abort) plus existing work/i18n/source-scan.
+- Restricted harness / CI recorded when green on the PR tip.
 

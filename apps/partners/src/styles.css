@@ -157,3 +157,14 @@ button:disabled {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   overflow-wrap: anywhere;
 }
+.scan-preview {
+  display: block;
+  width: min(100%, 20rem);
+  max-height: 14rem;
+  margin: 0.5rem 0;
+  background: #111;
+  border-radius: 0.5rem;
+}
+.scan-preview[hidden] {
+  display: none;
+}
