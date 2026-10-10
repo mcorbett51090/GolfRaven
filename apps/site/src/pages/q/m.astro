@@ -6,12 +6,14 @@
  * browser fallback. noindex; not in the sitemap.
  */
 import BaseLayout from "../../layouts/BaseLayout.astro";
+import { loadSiteCatalog } from "../../lib/derive";
 
+const { usedDemoData } = await loadSiteCatalog();
 const title = "Open in GolfRaven";
 const description = "This shop QR opens in the GolfRaven app. Install GolfRaven, then open the link again or paste it on the facility page.";
 ---
 
-<BaseLayout title={title} description={description} path="/q/m/" noindex={true}>
+<BaseLayout title={title} description={description} path="/q/m/" noindex={true} demo={usedDemoData}>
   <main>
     <h1>{title}</h1>
     <p>
