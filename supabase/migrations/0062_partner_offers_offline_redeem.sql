@@ -365,11 +365,11 @@ WHERE schema_name = 'private' AND function_name = 'partner_settlement_export_for
 DROP POLICY current_user_edit_function_inventory_0062 ON private.function_inventory;
 REVOKE UPDATE ON private.function_inventory FROM CURRENT_USER;
 
-GRANT UPDATE ON private.policy_inventory TO CURRENT_USER;
-CREATE POLICY current_user_edit_policy_inventory_0062 ON private.policy_inventory
+GRANT UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
+CREATE POLICY current_user_edit_definer_policy_allowlist_0062 ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 
-UPDATE private.policy_inventory
+UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid),
     note = 'S3/0062: same_device_attest and offer_offline_unconfirmed fraud_signal inserts under a partner binding'
@@ -377,9 +377,20 @@ FROM pg_policy pol
 JOIN pg_class c ON c.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'app' AND c.relname = 'fraud_signal' AND pol.polname = 'pd_partner_attest_fraud_insert'
-  AND private.policy_inventory.schema_name = 'app'
-  AND private.policy_inventory.table_name = 'fraud_signal'
-  AND private.policy_inventory.policy_name = 'pd_partner_attest_fraud_insert';
+  AND al.schema_name = 'app'
+  AND al.table_name = 'fraud_signal'
+  AND al.policy_name = 'pd_partner_attest_fraud_insert';
 
-DROP POLICY current_user_edit_policy_inventory_0062 ON private.policy_inventory;
-REVOKE UPDATE ON private.policy_inventory FROM CURRENT_USER;
+DO $assert_0062_allowlist$
+BEGIN
+  IF (SELECT count(*) FROM private.definer_policy_allowlist
+      WHERE policy_name = 'pd_partner_attest_fraud_insert'
+        AND with_check_expr IS NOT NULL
+        AND with_check_expr LIKE '%offer_offline_unconfirmed%') <> 1 THEN
+    RAISE EXCEPTION '0062: pd_partner_attest_fraud_insert allowlist row was not refreshed for offer_offline_unconfirmed';
+  END IF;
+END
+$assert_0062_allowlist$;
+
+DROP POLICY current_user_edit_definer_policy_allowlist_0062 ON private.definer_policy_allowlist;
+REVOKE UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
