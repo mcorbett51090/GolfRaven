@@ -2758,11 +2758,38 @@ Numbering: **this section 45.** No migration. Closes the HEIC half of §40.1's E
 
 ### 45.3 Not built, honestly
 
-- `receipt_green_fee` evidence writer, OCR, perceptual aHash, picker UI, full HEIC re-encode.
+- `receipt_green_fee` evidence writer (→ §46), OCR, perceptual aHash, picker UI, full HEIC re-encode.
 
 ### 45.4 Verification
 
-Branch: `cursor/p5-heic-exif-strip-8ffd` (base main after #84). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-heic-exif-strip-8ffd` (base main after #84). Tip `7abf645` CI green on PR #85 (all three checks); squash-merged as `8348102`.
 
-- Vitest: `receipts-image.test.ts` XMP uuid drop + Exif item extent zero + phash change.
+- Vitest: `receipts-image.test.ts` XMP uuid drop + Exif item extent zero + phash change; `service-role-lint` clean (numeric FourCC / sequential byte reads).
+
+## 46. As built: receipt_green_fee evidence writer (0067)
+
+Numbering: **migration `0067`, matrix `45`, this section 46.** Closes money-path §2 for receipts: the player-lane upload path writes the scoreable `receipt_green_fee` row. `POST /v1/evidence` keeps the source in `REJECTED_SOURCES`.
+
+### 46.1 What was built
+
+- **`private.receipt_intake_for_actor` (REPLACE)**: after the purchase/credit loop, INSERT one facility-level `app.evidence` row (`source=receipt_green_fee`, `status=accepted`, `course_id` NULL, `attestation_grade=unattestable`) with `source_ref = 'receipt:' || facility_id || ':' || phash` and `ON CONFLICT DO NOTHING`.
+- **`summary`**: `{ localDate, status: "pending"|"void", fingerprint: phash, voidReason?: "duplicate" }` so `listForPlay` → `reconstructOneStoredRow` spreads into `scorePlay`'s `Evidence` shape (pending badge weight 0.2; money still needs `coSignalFix`).
+- **Dedupe**: clean/review → `summary.status=pending`; same-user duplicate with no prior evidence → `void` + `voidReason=duplicate`; same-user re-upload after a pending row → conflict, original pending kept (no second scoreable row).
+- **Policy**: `pd_receipt_evidence_insert` (private_definer INSERT; own user; source/status/course/device locked).
+
+### 46.2 Decisions and departures
+
+- **Extend intake, not a new endpoint** — design §40 / request-shape already reserved the receipt path; forging via `POST /v1/evidence` stays closed.
+- **Idempotency on facility+phash** — Storage object id is new every upload; phash is the natural key.
+- **Cross-user stays pending** — money-path §5 grief rule; review_item path unchanged.
+
+### 46.3 Not built, honestly
+
+- OCR, perceptual aHash, picker UI, attaching `coSignalFix` / promoting to `approved`, partner resolve of `receipt_cross_user_match`.
+
+### 46.4 Verification
+
+Branch: `cursor/p5-receipt-green-fee-8ffd` (base main after #85). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 45; Vitest `request-shape` pin that `receipt_green_fee` stays rejected at `POST /v1/evidence`.
 
