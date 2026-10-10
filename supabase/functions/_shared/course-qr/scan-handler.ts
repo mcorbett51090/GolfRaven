@@ -230,15 +230,19 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     const counted = await countCoSignal(repo, deps, body, facilityId, tz);
     if (counted === null) throw Errors.conflict("fix_not_consumable", "this location fix could not be counted; capture a new one");
     const cosignal = { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId };
+    // Confirm BEFORE attach: attach writes purchase_evidence.cosignal.evidenceId, after which
+    // marker_cosignal_check returns cosignal_used and offline clear would miss. Confirm does not
+    // consume the fix (§37), so a pending marker purchase still attaches afterward.
+    const confirmed = await repo.markerScan.confirmOfferOffline({ facilityId, at, cosignal });
     const attached = await repo.markerScan.attachCosignal({ facilityId, at, cosignal });
+    if (attached.status === "attached") {
+      return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, attached.purchases) };
+    }
     if (attached.status === "no_pending_purchase") {
-      // 0063: the same fix may clear an awaiting offline offer redeem (no pending marker purchase).
-      const confirmed = await repo.markerScan.confirmOfferOffline({ facilityId, at, cosignal });
       if (confirmed.status === "confirmed") return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, []) };
       throw Errors.unprocessable("no_pending_purchase", "no pending marker purchase at this facility is waiting for this location fix");
     }
-    if (attached.status !== "attached") throw mapRecordRefusal(attached.status);
-    return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, attached.purchases) };
+    throw mapRecordRefusal(attached.status);
   }
 
   // 2. Verify the QR's signature BEFORE anything is consumed. A forged one is an attack signal: it writes a fraud_signal and COMMITS.

@@ -324,7 +324,19 @@ describe("the player's co-signal intake (no QR)", () => {
     const out = ok(await handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
     expect(out.status).toBe(200);
     expect(out.body).toMatchObject({ outcome: "credited", localDate: null, cosignal: "counted", purchases: [] });
-    expect(w.ms.calls.filter((c) => c === "attachCosignal" || c === "confirmOfferOffline")).toEqual(["attachCosignal", "confirmOfferOffline"]);
+    expect(w.ms.calls.filter((c) => c === "attachCosignal" || c === "confirmOfferOffline")).toEqual(["confirmOfferOffline", "attachCosignal"]);
+  });
+
+  it("0063/§38: confirm runs before attach so a pending marker purchase does not block offline clear", async () => {
+    const w = await world();
+    const t = await seedRotating(w);
+    ok(await handleMarkerScan(body({ qr: { variant: "rotating", token: t.token } }), w.repo, deps)); // pending
+    w.ms.confirmOverride = { status: "confirmed", cleared: 1 };
+    const out = ok(await handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w, -20_000), jti: seedToken(w) }), w.repo, deps));
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ outcome: "credited", cosignal: "counted" });
+    expect(out.body.purchases.length).toBeGreaterThan(0);
+    expect(w.ms.calls.filter((c) => c === "attachCosignal" || c === "confirmOfferOffline")).toEqual(["confirmOfferOffline", "attachCosignal"]);
   });
 
   it("a fix that is not a co-signal completes nothing: 422 not_a_cosignal", async () => {
