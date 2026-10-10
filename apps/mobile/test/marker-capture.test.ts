@@ -1,5 +1,5 @@
 /**
- * P4.2c: "Buying a marker" (build plan §7.6 G2-03): the capture and the LOCAL queue. What is deliberately NOT here: any sending (no server path accepts a marker-purchase co-signal yet;
+ * P4.2c / P5 §52: "Buying a marker" (build plan §7.6 G2-03): the capture and the local queue. Sending is `marker/send.ts` (fix-only `marker-scan`); flags stay false. Historical note on what was missing:
  * `test/marker-no-sender.test.ts`-style scans below pin that nothing reads the queue to send it).
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -204,31 +204,34 @@ describe("the SQLite table is created by the v4 migration and survives a re-open
   });
 });
 
-describe("NOTHING SENDS A MARKER CO-SIGNAL (the server path exists since P5.1a S2a, the sender does not): the queue has a producer and no consumer", () => {
+describe("MARKER CO-SIGNAL QUEUE (P5 §52): capture produces; send.ts is the sole consumer via scanMarker", () => {
   const root = dirname(dirname(fileURLToPath(import.meta.url)));
   const files = (dir: string): string[] => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? files(join(dir, n)) : /\.tsx?$/.test(n) ? [join(dir, n)] : []));
   const all = [...files(join(root, "src")), ...files(join(root, "app"))];
-  const where = (needle: RegExp, from = all): string[] => from.filter((f) => needle.test(readFileSync(f, "utf8"))).map((f) => relative(root, f)).sort();
 
   const strip = (t: string): string => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   const code = (f: string): string => strip(readFileSync(join(root, f), "utf8"));
 
-  it("the queue is read by nobody: the only code that touches the store is the capture (insert), the composition root (wiring) and account deletion (deleteOwner)", () => {
+  it("listByOwner for marker rows is only capture (caps), store, send (drain), and composition wiring", () => {
     expect(all.filter((f) => /\bmarkerStore\b/.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f)).sort()).toEqual(["src/runtime/AppProvider.tsx", "src/runtime/services.ts"]);
-    for (const f of all) expect(strip(readFileSync(f, "utf8")), relative(root, f)).not.toMatch(/\bmarkerStore\s*\.\s*listByOwner|\bstore\s*\.\s*listByOwner[^;]*marker/);
-    // the capture READS the store, for its persisted caps only (P4.2c-1); it never hands a record to anything that sends
-    expect(all.filter((f) => /\blistByOwner\b/.test(strip(readFileSync(f, "utf8"))) && /marker/i.test(f)).map((f) => relative(root, f)).sort()).toEqual(["src/marker/capture.ts", "src/marker/store.ts"]);
+    expect(
+      all
+        .filter((f) => /\blistByOwner\b/.test(strip(readFileSync(f, "utf8"))) && /marker/i.test(f))
+        .map((f) => relative(root, f))
+        .sort(),
+    ).toEqual(["src/marker/capture.ts", "src/marker/send.ts", "src/marker/store.ts"]);
     for (const f of ["src/outbox/runner.ts", "src/evidence/send.ts", "src/evidence/payload.ts"]) expect(code(f), f).not.toMatch(/marker/i);
-    // the API surface names a marker purchase ONLY through the P5.1a S2a client (`api.scanMarker`, its request / answer types and its schema): nothing else
-    const S2A_CLIENT = /MarkerScan\w*|scanMarker|markerScanResultSchema|marker-scan/g;
-    for (const f of ["src/api/http-client.ts", "src/api/types.ts"]) expect(code(f).replace(S2A_CLIENT, ""), f).not.toMatch(/marker/i);
   });
 
-  it("no API member, evidence source or wire name for a marker purchase exists on the client (no wire shape is invented)", () => {
+  it("scanMarker is only called from the API client and marker/send.ts", () => {
     const needle = /marker_purchase|purchase_evidence|staff_presence/;
     expect(all.filter((f) => needle.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f))).toEqual([]);
-    // P5.1a S2a: the ONE wire name that now exists is the `marker-scan` function, named in the HTTP client alone (`api.scanMarker`; nothing calls it: test/marker-scan-wire.test.ts)
-    expect(all.filter((f) => /marker-scan/.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f))).toEqual(["src/api/http-client.ts"]);
+    expect(all.filter((f) => /\.scanMarker\b|scanMarker\s*\(/.test(strip(readFileSync(f, "utf8")))).map((f) => relative(root, f)).sort()).toEqual([
+      "src/api/http-client.ts",
+      "src/api/mock.ts",
+      "src/api/types.ts",
+      "src/marker/send.ts",
+    ]);
   });
 
   it("it is behind BOTH switches: the marker one and the check-in one", () => {

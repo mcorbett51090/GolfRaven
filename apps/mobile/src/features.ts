@@ -29,11 +29,9 @@ export const OFFLINE_CODE_UI_ENABLED = false;
 export const WALLET_ACTIVATION_UI_ENABLED = false;
 
 /**
- * `MARKER_COSIGNAL_UI_ENABLED` (P4.2c): whether the facility page shows "Buying a marker" (build plan §7.6 "Offline marker purchase", G2-03), which captures a foreground fix against a
- * prefetched challenge and keeps it LOCALLY (`src/marker/`). It is `false`, and it needs `CHECKIN_UI_ENABLED` as well (the button consumes a prefetched challenge, which only exist
- * while prefetch is on). The reason it is its own switch: NO server path accepts a marker-purchase co-signal yet (no `marker-scan` function, no evidence kind for it, `staff_presence` is
- * refused by `POST evidence`), so flipping the check-in switch alone must not put a button in front of a player that spends a challenge on a record nothing can send.
- * Flip it in the change that adds the server endpoint and the sender (README, "Before flipping the flags").
+ * `MARKER_COSIGNAL_UI_ENABLED` (P4.2c / P5 §52): whether the facility page shows "Buying a marker" (build plan §7.6 "Offline marker purchase", G2-03), which captures a foreground fix against a
+ * prefetched challenge into the local queue (`src/marker/`). The sender (`marker/send.ts` → `api.scanMarker`) is built; this switch stays `false` until the real-device / store privacy items in
+ * the README are done. It also needs `CHECKIN_UI_ENABLED` (shared location permission / geometry / challenge prefetch). Drain of already-queued rows is not gated by this flag.
  */
 export const MARKER_COSIGNAL_UI_ENABLED = false;
 

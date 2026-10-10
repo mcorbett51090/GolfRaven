@@ -9,7 +9,7 @@ import { Banner, Body, Button, Card, H2 } from "../ui/components";
 /**
  * "Buying a marker" on the facility page (build plan §7.6 "Offline marker purchase", G2-03). Rendered ONLY while `markerCosignalUiAvailable()` (both `CHECKIN_UI_ENABLED` and
  * `MARKER_COSIGNAL_UI_ENABLED`); the capture refuses anyway while either is false. The location prompt is `services.markerCosignal`'s, called from `onMarkerPress`, the button's `onPress` only.
- * What it captures stays on the phone: no server path takes it yet (`marker/capture.ts`).
+ * Captured rows are drained by `marker/send.ts` on sync (P5 §52); both flags stay false in release builds.
  */
 export function MarkerCard({ entry }: { entry: CourseEntry }) {
   const { t, locale, session, services, snapshot } = useApp();

@@ -2924,7 +2924,35 @@ Numbering: **migration `0070`, matrix `48`, this section 51.** Closes the review
 
 ### 51.4 Verification
 
-Branch: `cursor/p5-receipt-review-preview-8ffd` (base main after #90 / `77ab8dd`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-review-preview-8ffd` (base main after #90 / `77ab8dd`). Tip CI green on PR #91 (all three checks); squash-merged as `770815b`.
 
 - pgTAP matrix 48; PA-13b / function_inventory EXECUTE lists; partners Vitest (admin preview + CSP img-src); unit partner-review preview route.
+
+## 52. As built: mobile marker cosignal sender + course-QR link parse
+
+Numbering: **this section 52.** No migration. Closes the orphaned `marker_cosignal` queue left by P4.2c / S2a: a sender redeems the held challenge and POSTs fix-only `marker-scan`; pure link parse is ready for paste / OS-camera open-URL. Capture UI stays behind `MARKER_COSIGNAL_UI_ENABLED` (still `false`).
+
+### 52.1 What was built
+
+- **`marker/link.ts`**: `parseCourseQrLink` for `https://…/q/m#<token>` (rotating) and `https://…/q/f/<slug>#<kid>.<sig>` (printed). Pure string; malformed → `null`.
+- **`marker/send.ts`**: redeem-then-`scanMarker({ facilityId, deviceId, fix, jti })` (no `qr`). Crash-safe `redeemed` persist before POST. `422 no_pending_purchase` retryable until 7 days after `fix.capturedAt`; then drop. `drainMarkerCoSignals` on sync.
+- **Store**: `update` / `deleteById` on Memory + Sqlite stores.
+- **Wiring**: `services.drainMarkerCosignals` from `syncOutbox` after the outbox runner.
+- **Tests**: `marker-link.test.ts`, `marker-send.test.ts`; capture/wire pins updated so `marker/send.ts` is the sole non-api `scanMarker` caller.
+
+### 52.2 Decisions and departures
+
+- **No CAMERA** — paste / deep-link parse only; in-app barcode scanner stays blocked (`CAMERA` in `blockedPermissions`).
+- **Drain not flag-gated** — capture stays behind both UI flags; already-queued rows may clear while flags are false.
+- **Flag stays false** — store privacy / field test for location still open (README).
+
+### 52.3 Not built, honestly
+
+- In-app QR scanner, Q2 PIN UI for online scan+credit, `associatedDomains` / App Links hosting, flipping `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED`, OCR / aHash / receipts flag flip.
+
+### 52.4 Verification
+
+Branch: `cursor/p5-marker-cosignal-sender-8ffd` (base main after #91 / `770815b`). Recorded when CI is green on the PR tip.
+
+- Mobile Vitest: marker-link, marker-send, marker-capture, marker-scan-wire; typecheck.
 

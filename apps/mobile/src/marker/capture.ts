@@ -2,8 +2,8 @@
  * "Buying a marker" (build plan §7.6 "Offline marker purchase", G2-03, case 1: staff online, player offline): the player taps the button at the pro shop and the app captures a
  * co-signal, a foreground fix against a PREFETCHED challenge, and queues it.
  *
- * WHAT IS BUILT, AND WHAT IS NOT. The capture and the local queue (`marker/store.ts`) are built. The sending is NOT: no server path accepts a marker-purchase co-signal yet, so the record
- * stays on the device, behind `MARKER_COSIGNAL_UI_ENABLED` (and `CHECKIN_UI_ENABLED`), and no wire shape is invented. README, "Marker purchase: what the server does not have yet".
+ * WHAT IS BUILT. The capture and the local queue (`marker/store.ts`) are built; the sender (`marker/send.ts`, P5 §52) redeems the held challenge and POSTs `marker-scan`. Capture stays
+ * behind `MARKER_COSIGNAL_UI_ENABLED` (and `CHECKIN_UI_ENABLED`); both flags remain false in release builds.
  *
  * Same discipline as the check-in: build switch first (no prompt while off), signed in, the facility has geometry on the device, the permission read-then-ask from this explicit tap,
  * one foreground fix validated the same way, matched to the FACILITY's circle (a pro shop is at the facility; "a fix outside polygon + 50 m: the row stays pending"), and then the challenge:
@@ -21,7 +21,7 @@ import type { MarkerCosignal, MarkerCosignalStore } from "./store";
 
 const SITE_VERSION = /^\d{8}-[0-9a-f]{7}$/;
 
-/** P4.2c-1. Every marker capture consumes one prefetched challenge that the SERVER keeps counting as open (it is never redeemed: nothing sends the record) until it expires, 24 h later, out of
+/** P4.2c-1. Every marker capture consumes one prefetched challenge the SERVER counts as open until the sender redeems it (or it expires, 24 h later), out of
  * the device's 10. Unbounded, ten captures would starve the offline check-ins the pool exists for. So: at most 1 per facility per facility-local day and 2 per rolling 24 h overall (persisted:
  * counted from the stored records, so a restart does not reset them), and a capture never takes any of the last `reserveForCheckins` usable challenges. The challenge manager's top-up
  * also subtracts the held ones (`heldOpenCount`), so the client's room estimate matches the server's. */

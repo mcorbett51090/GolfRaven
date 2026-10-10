@@ -397,7 +397,7 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
       });
     },
 
-    /** `POST marker-scan` (P5.1a S2a): ONE request as the owner, never retried here (a scan is single-use and a repeat is a 409; the retry policy of a queued co-signal is the sender's, not built yet). 201 for a scan, 200 for a co-signal intake. */
+    /** `POST marker-scan` (P5.1a S2a): ONE request as the owner, never retried here (a scan is single-use and a repeat is a 409; queued co-signal retries live in `marker/send.ts`, P5 §52). 201 for a scan, 200 for a co-signal intake. */
     scanMarker(req, credentials) {
       return call({
         fn: "marker-scan",
