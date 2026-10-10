@@ -169,6 +169,9 @@ export const en = {
   "home.pin.title": "PIN",
   "home.pin.button": "Set or change PIN",
   "home.pin.hint": "Your PIN confirms sensitive actions. It is turned into a scrambled value on this device; the PIN itself is never sent.",
+  "home.credentials.title": "Passkeys",
+  "home.credentials.button": "Manage passkey notes",
+  "home.credentials.hint": "List your passkeys and edit a short display note. Notes are for you only; they never affect sign-in.",
   "home.totp.title": "Second factor",
   "home.totp.enter": "Enter authenticator code",
   "home.totp.add": "Add an authenticator",
@@ -458,6 +461,16 @@ export const en = {
   "settlement.empty": "No redemptions for that trail and month.",
   "settlement.failed": "That settlement export could not be completed.",
   "notice.settlementExported": "Settlement export ready. Download before the link expires.",
+
+  "credentials.title": "Your passkeys",
+  "credentials.hint": "Edit a display note (at most 40 characters). Clearing the note removes it. Revoking or adding a passkey is not available here.",
+  "credentials.load": "Load passkeys",
+  "credentials.empty": "No active passkeys on this account.",
+  "credentials.label": "Passkey",
+  "credentials.note": "Display note",
+  "credentials.save": "Save note",
+  "credentials.noteTooLong": "A display note can be at most 40 characters.",
+  "notice.credentialNoteSaved": "Display note saved.",
 } as const;
 
 export type MessageKey = keyof typeof en;

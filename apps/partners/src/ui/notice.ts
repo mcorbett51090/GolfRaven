@@ -35,6 +35,7 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "review-resolved": "notice.reviewResolved",
   "offer-redeem-ok": "notice.offerRedeemOk",
   "settlement-exported": "notice.settlementExported",
+  "credential-note-saved": "notice.credentialNoteSaved",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {

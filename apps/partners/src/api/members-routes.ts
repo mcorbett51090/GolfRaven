@@ -1,0 +1,69 @@
+/**
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67).
+ *
+ * List + display-note PATCH only (class A0). Revoke and add stay out of this surface.
+ * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
+ */
+
+import type { PartnerApi } from "./client";
+import { PartnerApiError, isPartnerApiError } from "./errors";
+
+/** Edge `CredentialView` (GET credentials). Active rows are those with `revokedAt === null`. */
+export interface PartnerCredential {
+  readonly id: string;
+  readonly label: string;
+  readonly note: string | null;
+  readonly createdAt: string;
+  readonly lastUsedAt: string | null;
+  readonly revokedAt: string | null;
+  readonly backupEligible: boolean;
+  readonly backupState: boolean;
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+const isString = (v: unknown): v is string => typeof v === "string";
+const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === "string";
+const isBool = (v: unknown): v is boolean => typeof v === "boolean";
+
+function malformed(): never {
+  throw new PartnerApiError("malformed_response");
+}
+
+function parseCredential(raw: unknown): PartnerCredential {
+  if (
+    !isObject(raw) || !isString(raw["id"]) || !isString(raw["label"]) || !isStringOrNull(raw["note"] ?? null) ||
+    !isString(raw["createdAt"]) || !isStringOrNull(raw["lastUsedAt"] ?? null) || !isStringOrNull(raw["revokedAt"] ?? null) ||
+    !isBool(raw["backupEligible"]) || !isBool(raw["backupState"])
+  ) malformed();
+  return {
+    id: raw["id"],
+    label: raw["label"],
+    note: (raw["note"] as string | null) ?? null,
+    createdAt: raw["createdAt"],
+    lastUsedAt: (raw["lastUsedAt"] as string | null) ?? null,
+    revokedAt: (raw["revokedAt"] as string | null) ?? null,
+    backupEligible: raw["backupEligible"],
+    backupState: raw["backupState"],
+  };
+}
+
+export async function getCredentials(api: PartnerApi): Promise<readonly PartnerCredential[]> {
+  const data = await api.call("GET", "partner-members", "credentials");
+  if (!isObject(data) || !Array.isArray(data["credentials"])) malformed();
+  return data["credentials"].map(parseCredential);
+}
+
+/** PATCH credentials/{id} body `{ note }` (null / "" clears; ≤40 chars on the wire). 404 → `not_found`. */
+export async function patchCredentialNote(api: PartnerApi, id: string, note: string | null): Promise<void> {
+  try {
+    const data = await api.call("PATCH", "partner-members", `credentials/${id}`, { note });
+    if (!isObject(data) || !isStringOrNull(data["note"] ?? null)) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
+      throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
+    }
+    throw e;
+  }
+}

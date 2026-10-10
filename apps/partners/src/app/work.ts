@@ -11,6 +11,7 @@
 
 import type { PartnerApi } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
+import { getCredentials, patchCredentialNote } from "../api/members-routes";
 import type { WhoAmI } from "../api/types";
 import {
   getCollectQueue,
@@ -82,6 +83,9 @@ export interface WorkScreens {
   setOfferRedeemMode(mode: OfferRedeemMode): void;
   submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
   submitOfferRedeemOffline(offerCodeId: string, handle: string, code: string, nameConfirmed: boolean): Promise<void>;
+  openCredentials(): void;
+  loadCredentials(): Promise<void>;
+  saveCredentialNote(id: string, note: string): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -224,6 +228,12 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         return;
       }
       withWork(s, { kind: "offer-redeem", facilityId: id, busy: false, queue: null, selectedOfferCodeId: "", mode: "staff_scan", lastRedeem: null }, null);
+    },
+
+    openCredentials() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      withWork(s, { kind: "credentials", busy: false, rows: null, lastSavedId: null }, null);
     },
 
     closeWork() {
@@ -678,6 +688,57 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
           return { ...cur, busy: null, work, notice: { kind: "offer-redeem-ok" } };
         },
       );
+    },
+
+    async loadCredentials() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const listed = await getCredentials(api);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
+    async saveCredentialNote(id, note) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      if (!UUID_RE.test(id)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const trimmed = note.trim();
+      if (trimmed.length > 40) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "credentials.noteTooLong" } } });
+        return;
+      }
+      const wireNote = trimmed.length === 0 ? null : trimmed;
+      const grant = s.grant;
+      const credId = id.toLowerCase();
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await patchCredentialNote(api, credId, wireNote);
+        const listed = await getCredentials(api);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, rows, lastSavedId: credId },
+            notice: { kind: "credential-note-saved" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
     },
   };
 }
