@@ -169,16 +169,18 @@ SELECT is((SELECT o_status || '|' || o_offline_count::text || '|' || o_unconfirm
            FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date)
            WHERE o_status = 'ok' LIMIT 1),
   'ok|1|1', 'settlement: offline_count and unconfirmed_count are 1 when confirm deadline passed');
+RESET ROLE;
 SELECT is((SELECT count(*)::int FROM app.fraud_signal f WHERE f.kind = 'offer_offline_unconfirmed'
              AND f.user_id = '00000000-0000-0000-0000-00000000000b'
              AND f.detail ->> 'offer_code_id' = '78000000-0000-0000-0000-000000000041'), 1,
   'settlement inserts fraud_signal offer_offline_unconfirmed once');
+SET LOCAL ROLE edge_partner;
 SELECT is((SELECT o_unconfirmed_count::text FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date)
            WHERE o_status = 'ok' LIMIT 1), '1', 'second settlement export still reports unconfirmed_count 1');
+RESET ROLE;
 SELECT is((SELECT count(*)::int FROM app.fraud_signal f WHERE f.kind = 'offer_offline_unconfirmed'
              AND f.detail ->> 'offer_code_id' = '78000000-0000-0000-0000-000000000041'), 1,
   'fraud_signal is not duplicated on a second export');
-RESET ROLE;
 ROLLBACK TO SAVEPOINT sett_unc;
 
 -- ----------------------------------------------------------------------------
