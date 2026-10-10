@@ -44,6 +44,9 @@ export interface Props {
   readonly href?: string;
   readonly target?: string;
   readonly rel?: string;
+  /** Image source (receipt preview signed URL). Never log the src value. */
+  readonly src?: string;
+  readonly alt?: string;
   readonly onclick?: (ev: MouseEvent) => void;
   readonly onsubmit?: (ev: SubmitEvent) => void;
   readonly onchange?: (ev: Event) => void;
