@@ -42,8 +42,8 @@ SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge
   'no client role and no edge role holds ANY privilege on the epoch log or the proof (every path is a definer)');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid IN ('app.course_pin_epoch_log'::regclass, 'private.course_pin_proof'::regclass) AND p.polroles <> ARRAY['private_definer'::regrole::oid]), 0,
   'the epoch log and the proof have policies for private_definer ONLY');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_epoch_log' AND p.proname NOT IN ('course_pin_epoch_log_write', 'course_pin_epoch_at')), 0,
-  'no function but the log''s trigger function (the only writer) and the epoch reader names the epoch log');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_epoch_log' AND p.proname NOT IN ('course_pin_epoch_log_write', 'course_pin_epoch_at', 'purge_course_pin_epoch_log')), 0,
+  'no function but the log''s trigger function (the only writer), the epoch reader and the 0072 retention purge names the epoch log');
 SELECT has_table('app', 'course_pin_pepper_epoch', 'app.course_pin_pepper_epoch exists (WHEN the current pepper took effect: the operator writes it, never inferred from Vault timestamps)');
 SELECT columns_are('app', 'course_pin_pepper_epoch', ARRAY['effective_from', 'recorded_at'], 'the pepper epoch holds a time only: no user id, no secret');
 SELECT is((SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'app.course_pin_pepper_epoch'::regclass), true, 'the pepper epoch has RLS enabled AND forced');

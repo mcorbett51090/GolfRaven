@@ -47,8 +47,8 @@ SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.
              AND p.prosrc ~ 'v_limit constant int := 5000' AND p.prosrc ~ '= ANY \(ARRAY\('), 3,
   'structure: all three are SECURITY DEFINER / private_definer / search_path='''' / constant 5000 / InitPlan array batch');
 SELECT is((SELECT count(*)::int FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-           WHERE n.nspname = 'app' AND (pol.polname LIKE 'pd\_purge\_course\_%' OR pol.polname LIKE 'pd\_purge\_abandoned\_%')), 8,
-  'structure: eight purge policies (DELETE + SELECT companion for four targets)');
+           WHERE n.nspname = 'app' AND (pol.polname LIKE 'pd\_purge\_course\_qr\_%' OR pol.polname LIKE 'pd\_purge\_course\_pin\_alarm%' OR pol.polname LIKE 'pd\_purge\_abandoned\_%')), 8,
+  'structure: eight §57 purge policies (DELETE + SELECT companion for four targets; epoch-log policies are matrix 50 / 0072)');
 -- SET LOCAL ROLE (authenticate_as) only lasts for the enclosing transaction
 -- (matrix 10 / 20 pattern). Outside BEGIN it evaporates under restricted.
 BEGIN;
