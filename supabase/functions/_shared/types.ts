@@ -630,6 +630,8 @@ export interface Repo {
     record(input: MarkerScanRecordInput): Promise<MarkerScanRecordResult>;
     /** The co-signal intake: ties a qualifying fix to the player's own pending purchase at that facility whose window holds it (the seam S3's offline-code row plugs into). */
     attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult>;
+    /** 0063: clears `offline_confirm_by` on the bound player's own redeemed_offline offer codes at this facility whose offline_step window holds the fix. */
+    confirmOfferOffline(input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult>;
   };
 }
 
@@ -699,6 +701,10 @@ export interface MarkerCosignalAttachInput {
 }
 
 export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" | "cosignal_invalid" | "cosignal_used" | "review_account" };
+
+export type OfferOfflineConfirmResult =
+  | { status: "confirmed"; cleared: number }
+  | { status: "none_awaiting" | "cosignal_invalid" | "cosignal_used" | "review_account"; cleared: number };
 
 /** What `Repo#offlineCode.provisionSeed` returns: the raw 32-byte seed, its version, and the database clock at issue (ISO-8601). */
 export interface OfflineSeedProvision {

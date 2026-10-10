@@ -2418,9 +2418,9 @@ Numbering: **migration `0062`, matrix `40`, this section 35.** P5.1b (0060 / mat
 
 **Migration `0062_partner_offers_offline_redeem.sql`** and **matrix `40_partner_offers_offline_redeem.sql`**, then Edge route **`POST partner-offers-redeem/redeem/offline`**.
 
-- **`app.offer_code.offline_confirm_by`**: set to `now() + 24 h` on an offline redeem; NULL for staff_scan or after a future cosignal clear (clear is still a seam).
+- **`app.offer_code.offline_confirm_by`**: set to `now() + 24 h` on an offline redeem; NULL for staff_scan or after a player-lane cosignal clear (§37 / 0063).
 - **`private.partner_offers_redeem_offline_for_partner(facility, offer_code_id, handle, code, name_confirmed)`** (A1, staff/manager): same verify-and-record counters/candidates as S3 offline attest (0056); `name_confirmed` must be true; redeems with `redeemed_offline = true` and sets `offline_confirm_by`. Statuses: `ok | not_found | not_issued | expired | wrong_facility | wrong_player | verification_failed | replayed | rate_limited | name_unconfirmed | no_facility | cold_start_cap | budget_short`.
-- **`private.partner_offers_redeem_apply_offline`**: owner-only apply tail (consume, attest with `ofr-off:` jti prefix, nonce, code update).
+- **`private.partner_offers_redeem_apply_offline`**: owner-only apply tail (consume, attest with `ofr-off:` jti prefix, nonce, code update). 0063 extends it with `p_offline_step` / `offline_step`.
 - **`CREATE OR REPLACE private.partner_settlement_export_for_partner`**: `unconfirmed_count` uses overdue `offline_confirm_by`; inserts `fraud_signal` kind `offer_offline_unconfirmed` once per overdue code.
 - **Fraud INSERT policy** widens to allow `offer_offline_unconfirmed` under a partner binding.
 - **Edge**: `parseOfferRedeemOfflineBody` / `POST redeem/offline`; port `redeemOfferOffline`; privileged calls the new definer. Online `POST redeem` remains staff_scan only (0060 still refuses `offline_code` with 22023).
@@ -2430,12 +2430,12 @@ Numbering: **migration `0062`, matrix `40`, this section 35.** P5.1b (0060 / mat
 - **Separate route and definer** (not a method on `partner_offers_redeem_for_partner`) — offline needs handle + six digits + `nameConfirmed`; keeping staff_scan's wire shape closed avoids a polymorphic body and matches the attest online/offline split.
 - **`nameConfirmed` is boolean true on the wire** — Edge refuses anything else with 400; the database also returns `name_unconfirmed` if false (defence in depth for a non-Edge caller).
 - **Settlement marks overdue once** — `NOT EXISTS` on `fraud_signal.detail.offer_code_id` so a second export does not duplicate the signal; `unconfirmed_count` still reads the deadline column every time.
-- **Cosignal clear of `offline_confirm_by`** is deliberately out of this slice (player-lane attach against the recorded `offline_code_step`).
+- **Cosignal clear of `offline_confirm_by`** was deliberately out of this slice; **built in §37**.
 
 ### 35.3 Not built, honestly
 
 - **Partners PWA offline redeem form** — **built in §36**.
-- **Player-lane cosignal that clears `offline_confirm_by`**.
+- **Player-lane cosignal that clears `offline_confirm_by`** — **built in §37**.
 - **Rollups-refresh writer** (S6 seam).
 - **No mutation pass** was run for this slice.
 
@@ -2469,14 +2469,47 @@ Numbering: **this section 36.** Edge/DB offline redeem landed in §35 (0062 / ma
 ### 36.3 Not built, honestly
 
 - Camera scan for check-in tokens (still a seam from §33).
-- Player-lane cosignal that clears `offline_confirm_by` (§35 seam).
+- Player-lane cosignal that clears `offline_confirm_by` (§35 seam) — **built in §37**.
 - Rollups-refresh writer (S6 seam).
 
 ### 36.4 Verification run for this slice
 
-Branch: `cursor/p5-offline-offer-ui-8ffd` (base main after #75).
+Branch: `cursor/p5-offline-offer-ui-8ffd` (base main after #75). Tip squash-merged to main as `dc83096` (#76).
 
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **21 files, 930 tests, all pass** (adds offline offer-redeem A1 PIN + body cell — handle lower-cased, `nameConfirmed: true`, no PIN digits — and a client-side name-unconfirmed refusal that never hits the server).
-- CI recorded when green on the PR tip.
+- CI green on PR #76 tip before merge.
+
+## 37. As built: player-lane offline offer cosignal clear (0063)
+
+Numbering: **migration `0063`, matrix `41`, this section 37.** Clears the §35 seam: a qualifying player fix within the offline code's step window confirms the redeem before the 24 h deadline.
+
+### 37.1 What was built
+
+**Migration `0063_offer_offline_confirm.sql`** and **matrix `41_offer_offline_confirm.sql`**, plus an Edge hook on the marker-scan co-signal intake.
+
+- **`app.offer_code.offline_step`**: HOTP step accepted at offline redeem (survives `offline_code_step` prune).
+- **`private.partner_offers_redeem_apply_offline`**: DROP+CREATE with `p_offline_step`; redeem call site passes the hit step.
+- **`private.offer_offline_confirm_for_actor`** (`edge_actor` only): same co-signal proof as `marker_cosignal_attach_for_actor` (`marker_cosignal_check`); clears `offline_confirm_by` on the bound player's own `redeemed_offline` codes at the facility whose step window holds the fix (`step start −10 min … +20 min`) and whose deadline is still in the future. Statuses: `confirmed | none_awaiting | cosignal_invalid | cosignal_used | review_account`.
+- **Edge**: after `attachCosignal` answers `no_pending_purchase`, call `confirmOfferOffline`; `confirmed` → 200 with empty purchases (`[].every` → outcome `credited`).
+
+### 37.2 Decisions and departures
+
+- **Step on the code, not only on `offline_code_step`** — step rows prune after ~3 steps; the 24 h confirm window needs the step on `offer_code`.
+- **Confirm does not consume the fix** — it only clears deadlines; `cosignal_used` still means a `purchase_evidence` row already referenced the evidence id. Intake order is attach first, then confirm on `no_pending_purchase` (dual pending-purchase + offline-awaiting on one fix remains a rare follow-up).
+- **No `partner_audit_write` from the actor lane** — that helper requires a partner binding and `^partner\.` action; marker attach also leaves no audit row.
+
+### 37.3 Not built, honestly
+
+- Rollups-refresh writer (S6 seam).
+- Receipts upload / EXIF / phash player lane.
+- Confirm-before-attach when both a pending marker purchase and an offline offer await the same fix.
+
+### 37.4 Verification
+
+Branch: `cursor/p5-offline-confirm-cosignal-8ffd` (base main after #76). Tip squash-merged when CI green as `96d2027` (#77).
+
+- **Matrix 41**: inventory/EXECUTE, offline redeem writes `offline_step` (partner bind isolated in SAVEPOINT), happy clear of the planted awaiting code, other player's code untouched, `none_awaiting` / `cosignal_invalid` / `cosignal_used`.
+- **Edge vitest** (`marker-scan-handler`): intake with confirm override → 200 credited, empty purchases.
+- CI green on PR #77 tip before merge (all three checks). Matrix 24 tip fixes on the same branch: NZ wrong-zone PIN non-vacuous when Chicago≡Auckland date; NIT same-day dedupe when `t0-2h` straddles Chicago midnight.
 
