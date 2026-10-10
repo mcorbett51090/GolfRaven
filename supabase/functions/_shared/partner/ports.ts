@@ -392,7 +392,7 @@ export interface PartnerAttestTx {
 }
 
 /** What `partner_resolve_held_*_for_partner` answers (0057). Every status except a raise is a returned value. */
-export type ResolveHeldStatus = "ok" | "not_found" | "not_held" | "budget_short";
+export type ResolveHeldStatus = "ok" | "not_found" | "not_held" | "budget_short" | "not_open";
 export interface ResolveHeldResult {
   readonly status: ResolveHeldStatus;
   /** Present only on `ok`: the resulting offer_code_state or entitlement_state. */
@@ -434,6 +434,8 @@ export interface PartnerReviewTx {
   resolveHeldOfferCode(codeId: string, approve: boolean): Promise<ResolveHeldResult>;
   /** POST resolve/entitlement (class A3, admin). */
   resolveHeldEntitlement(entitlementId: string, approve: boolean): Promise<ResolveHeldResult>;
+  /** POST resolve/receipt-cross-user (class A3, admin; 0069). */
+  resolveReceiptCrossUserMatch(reviewId: string, approve: boolean): Promise<ResolveHeldResult>;
 }
 
 /** The stock movements a member may record (0058): redeemed and voucher_redeemed are written only by the redeem path. */

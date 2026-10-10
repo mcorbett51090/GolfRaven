@@ -8,6 +8,7 @@
 //   GET  sla                           class A0 (admin): counts for the ops alert surface (48 h SLA, [inference])
 //   POST resolve/offer-code            class A3 (admin): `{ id, approve }` — wraps app.resolve_held_offer_code (E20)
 //   POST resolve/entitlement           class A3 (admin): `{ id, approve }` — wraps app.resolve_held_entitlement
+//   POST resolve/receipt-cross-user    class A3 (admin): `{ id, approve }` — 0069 receipt_cross_user_match resolve
 // Every route is a session route. Scope, class, the admin gate and the resolve state machine are the DATABASE's.
 //
 // THE ORDER, for every request: (1) the Origin check; (2) OPTIONS with no port touched; (3) route and method; (4) the bearer; (5) exact JSON media type and strict body (POST) or empty query (GET);
@@ -36,6 +37,7 @@ const ROUTES: readonly RouteSpec[] = [
   { name: "sla", path: "sla", methods: ["GET"], session: true },
   { name: "resolve-offer-code", path: "resolve/offer-code", methods: ["POST"], session: true },
   { name: "resolve-entitlement", path: "resolve/entitlement", methods: ["POST"], session: true },
+  { name: "resolve-receipt-cross-user", path: "resolve/receipt-cross-user", methods: ["POST"], session: true },
 ];
 
 export async function handlePartnerReviewRequest(req: Request, deps: PartnerReviewDeps): Promise<Response> {
@@ -63,6 +65,8 @@ export async function handlePartnerReviewRequest(req: Request, deps: PartnerRevi
             return await handleResolveOfferCode(req, deps, decision, tokenHash);
           case "resolve-entitlement":
             return await handleResolveEntitlement(req, deps, decision, tokenHash);
+          case "resolve-receipt-cross-user":
+            return await handleResolveReceiptCrossUser(req, deps, decision, tokenHash);
           default:
             return partnerError(decision, 404, "not_found", "not found");
         }
@@ -116,6 +120,8 @@ function resolveResponse(decision: Decision, r: ResolveHeldResult): Response {
       return partnerError(decision, 404, "not_found", "not found");
     case "not_held":
       return partnerError(decision, 409, "not_held", "this reward is not awaiting review");
+    case "not_open":
+      return partnerError(decision, 409, "not_open", "this review item is not open");
     case "budget_short":
       return partnerError(decision, 422, "budget_short", "the offer cannot cover this code: raise its budget or reject the code");
   }
@@ -150,5 +156,14 @@ async function handleResolveEntitlement(req: Request, deps: PartnerReviewDeps, d
   const limited = await memberLimit(deps, decision, tokenHash);
   if (limited !== null) return limited;
   const result = await deps.db.withReview(tokenHash, (s) => s.resolveHeldEntitlement(parsed.value.id, parsed.value.approve));
+  return resolveResponse(decision, result);
+}
+
+async function handleResolveReceiptCrossUser(req: Request, deps: PartnerReviewDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseResolveBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const limited = await memberLimit(deps, decision, tokenHash);
+  if (limited !== null) return limited;
+  const result = await deps.db.withReview(tokenHash, (s) => s.resolveReceiptCrossUserMatch(parsed.value.id, parsed.value.approve));
   return resolveResponse(decision, result);
 }

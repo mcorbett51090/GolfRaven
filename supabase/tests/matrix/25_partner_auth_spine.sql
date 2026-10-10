@@ -106,7 +106,7 @@ SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C"
                 'partner_offers_queue_for_partner', 'partner_offers_redeem_for_partner', 'partner_offers_redeem_offline_for_partner',
                 'partner_offline_attest_for_partner', 'partner_operator_rollup_for_partner', 'partner_org_sessions_revoke_for_partner', 'partner_pin_change_for_partner',
                 'partner_pin_params_for_partner', 'partner_pin_reset_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner',
-                'partner_resolve_held_entitlement_for_partner', 'partner_resolve_held_offer_code_for_partner', 'partner_review_sla_for_partner',
+                'partner_resolve_held_entitlement_for_partner', 'partner_resolve_held_offer_code_for_partner', 'partner_resolve_receipt_cross_user_match_for_partner', 'partner_review_sla_for_partner',
                 'partner_session_lock_for_partner',
                 'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
                 'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_settlement_export_for_partner', 'partner_shift_log_for_partner',
