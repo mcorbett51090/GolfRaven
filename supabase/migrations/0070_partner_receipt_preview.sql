@@ -72,12 +72,15 @@ BEGIN
     RETURN;
   END IF;
 
+  -- No EXCEPTION block in a _for_partner function (check 14 a2). Validate the uuid text first.
   v_matched_ref := NULL;
-  BEGIN
-    v_matched_id := NULLIF(pg_catalog.btrim(coalesce(v_detail ->> 'matched_purchase_evidence_id', '')), '')::uuid;
-  EXCEPTION WHEN invalid_text_representation THEN
-    v_matched_id := NULL;
-  END;
+  v_matched_id := NULL;
+  IF v_detail IS NOT NULL
+     AND pg_catalog.nullif(pg_catalog.btrim(coalesce(v_detail ->> 'matched_purchase_evidence_id', '')), '') IS NOT NULL
+     AND (v_detail ->> 'matched_purchase_evidence_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  THEN
+    v_matched_id := (v_detail ->> 'matched_purchase_evidence_id')::uuid;
+  END IF;
   IF v_matched_id IS NOT NULL THEN
     SELECT pe.ref_id INTO v_matched_ref
     FROM app.purchase_evidence pe
