@@ -28,9 +28,12 @@ import {
   SqliteMarkerCosignalStore,
   captureMarkerCoSignal,
   drainMarkerCoSignals,
+  scanMarkerFromLink,
   type MarkerCaptureInput,
   type MarkerCaptureOutcome,
   type MarkerCosignalStore,
+  type MarkerScanInput,
+  type MarkerScanOutcome,
   type MarkerSendOutcome,
   heldOpenCount,
 } from "../marker";
@@ -95,6 +98,8 @@ export interface AppServices {
   checkin: (input: CheckInInput) => Promise<CheckInOutcome>;
   /** "Buying a marker" (P4.2c, `marker/capture.ts`): captures a co-signal into the local queue. Refuses while `MARKER_COSIGNAL_UI_ENABLED` or `CHECKIN_UI_ENABLED` is false. */
   markerCosignal: (input: MarkerCaptureInput) => Promise<MarkerCaptureOutcome>;
+  /** Online paste scan of a shop QR (P5 §53, `marker/scan.ts`). Same UI flags as capture. */
+  markerScanFromLink: (input: MarkerScanInput) => Promise<MarkerScanOutcome>;
   /** Drain queued marker co-signals through `marker/send.ts` → `api.scanMarker` (P5 §52). Not flag-gated: already-queued rows may clear while capture UI is off. */
   drainMarkerCosignals: () => Promise<MarkerSendOutcome[]>;
   /** The local marker co-signal records (account deletion wipes the deleted user's). */
@@ -317,6 +322,22 @@ export async function createServices(): Promise<AppServices> {
           store: markerStore,
           deviceId,
           newId: () => randomUuid(expoRandomBytes),
+          newFixId: () => newFixId(expoRandomBytes),
+          now: () => Date.now(),
+        },
+        input,
+      ),
+    markerScanFromLink: (input) =>
+      scanMarkerFromLink(
+        {
+          enabled: markerCosignalUiAvailable(),
+          location,
+          currentUserId,
+          accessTokenFor: (userId) => session.accessTokenFor(userId),
+          challenges,
+          redeem: (req, credentials) => api.redeemCheckinChallenge(req, credentials),
+          scan: api,
+          deviceId,
           newFixId: () => newFixId(expoRandomBytes),
           now: () => Date.now(),
         },

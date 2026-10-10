@@ -113,8 +113,8 @@ describe("api.scanMarker against the real handler's recorded answers", () => {
   });
 });
 
-describe("scanMarker callers (P5 §52)", () => {
-  it("MARKER_COSIGNAL_UI_ENABLED is false; only marker/send.ts outside src/api calls scanMarker", () => {
+describe("scanMarker callers (P5 §52–§53)", () => {
+  it("MARKER_COSIGNAL_UI_ENABLED is false; only marker/scan.ts and marker/send.ts outside src/api call scanMarker", () => {
     expect(MARKER_COSIGNAL_UI_ENABLED).toBe(false);
     const root = fileURLToPath(new URL("../src", import.meta.url));
     const walk = (dir: string): string[] => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? walk(join(dir, n)) : n.endsWith(".ts") || n.endsWith(".tsx") ? [join(dir, n)] : []));
@@ -123,7 +123,7 @@ describe("scanMarker callers (P5 §52)", () => {
       .filter((f) => !f.startsWith(join(root, "api")) && /\.scanMarker\b|scanMarker\s*\(/.test(strip(readFileSync(f, "utf8"))))
       .map((f) => f.slice(root.length + 1))
       .sort();
-    expect(callers).toEqual(["marker/send.ts"]);
+    expect(callers).toEqual(["marker/scan.ts", "marker/send.ts"]);
   });
 });
 
