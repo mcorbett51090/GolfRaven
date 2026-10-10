@@ -277,6 +277,69 @@ export function workView(state: SignedInState, controller: AppController, locale
     );
   }
 
+  if (work.kind === "credentials") {
+    const active = work.rows === null ? null : work.rows.filter((c) => c.revokedAt === null);
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "credentials" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("credentials.title")),
+      noticeElement(state.notice, locale),
+      h("p", { class: "muted" }, t("credentials.hint")),
+      active !== null
+        ? active.length === 0
+          ? h("p", { "data-testid": "credentials-empty" }, t("credentials.empty"))
+          : h(
+              "ul",
+              { "data-testid": "credentials-list" },
+              ...active.map((c) =>
+                h(
+                  "li",
+                  {},
+                  h("p", {}, t("credentials.label"), ": ", c.label),
+                  h(
+                    "form",
+                    {
+                      "data-testid": `credential-form-${c.id}`,
+                      onsubmit: (e: SubmitEvent) => {
+                        e.preventDefault();
+                        const fd = new FormData(e.target as HTMLFormElement);
+                        void controller.saveCredentialNote(c.id, String(fd.get("note") ?? ""));
+                      },
+                    },
+                    h(
+                      "label",
+                      { class: "field" },
+                      h("span", {}, t("credentials.note")),
+                      h("input", {
+                        name: "note",
+                        type: "text",
+                        value: c.note ?? "",
+                        maxlength: 40,
+                        autocomplete: "off",
+                        "data-testid": `credential-note-${c.id}`,
+                        disabled: busy,
+                      }),
+                    ),
+                    h(
+                      "div",
+                      { class: "actions" },
+                      h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": `credential-save-${c.id}` }, t("credentials.save")),
+                    ),
+                  ),
+                ),
+              ),
+            )
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "credentials-load", onclick: () => void controller.loadCredentials() }, t("credentials.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
   if (work.kind === "offer-redeem") {
     const scan = work.mode === "staff_scan";
     const codeField = h(

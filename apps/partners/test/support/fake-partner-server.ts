@@ -163,6 +163,10 @@ interface FakeCredential {
   alg: number;
   publicKey: Uint8Array;
   signCount: number;
+  /** Member-chosen display note (≤40); null when unset. Never used by a security decision. */
+  note: string | null;
+  /** When set, the credential is revoked (UI filters these out). */
+  revokedAt: string | null;
 }
 interface FakeInvite {
   id: string;
@@ -211,7 +215,15 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
   /** The signed-in test user and the credential the virtual authenticators hold. */
   function seed(): void {
     users.set(USER_ID, { id: USER_ID, email: "staff@partners.example.test", memberships: defaultMemberships(), pin: null, totp: null });
-    credentials.set(toB64u(opts.credential.credentialId), { id: "11111111-1111-4111-8111-111111111111", userId: USER_ID, alg: -7, publicKey: opts.credential.publicKeySpki, signCount: 0 });
+    credentials.set(toB64u(opts.credential.credentialId), {
+      id: "11111111-1111-4111-8111-111111111111",
+      userId: USER_ID,
+      alg: -7,
+      publicKey: opts.credential.publicKeySpki,
+      signCount: 0,
+      note: null,
+      revokedAt: null,
+    });
   }
   seed();
   const userOf = (hash: string): FakeUser => users.get(sessions.get(hash)!.userId)!;
@@ -501,7 +513,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           if (!consume(input.nonce, input.exp, input.mac, null, `${input.userId}:${kind}:${input.refId}`)) return refuse("bad_challenge");
           const id = toB64u(input.credentialId);
           if (credentials.has(id)) return refuse("credential_in_use");
-          credentials.set(id, { id: randomUUID(), userId: input.userId, alg: -7, publicKey: input.publicKey, signCount: 0 });
+          credentials.set(id, { id: randomUUID(), userId: input.userId, alg: -7, publicKey: input.publicKey, signCount: 0, note: null, revokedAt: null });
           const now = Date.now();
           const aal = opts.whoami?.aal ?? 1;
           sessions.set(input.sessionTokenHash, { userId: input.userId, createdAt: new Date(now), aal, enrolmentUntil: now + 15 * 60_000, otpProofUntil: null, pinGrantUntil: null, mfaUntil: null });
@@ -728,7 +740,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         status: 204,
         headers: {
           "access-control-allow-origin": opts.pageOrigin,
-          "access-control-allow-methods": "GET, POST, OPTIONS",
+          "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
           "access-control-allow-headers": "authorization, content-type",
           "access-control-max-age": "600",
           vary: "Origin",
@@ -740,7 +752,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     const fnIdx = parts.findIndex((p) =>
       p === "partner-attest" || p === "course-qr" || p === "qr-print" || p === "stock-admin" || p === "partner-entitlements" ||
       p === "programme-config" || p === "offers-admin" || p === "sponsorships-admin" || p === "partner-review" ||
-      p === "partner-offers-redeem" || p === "settlement-export"
+      p === "partner-offers-redeem" || p === "settlement-export" || p === "partner-members"
     );
     if (fnIdx < 0) return err(404, "not_found");
     const fn = parts[fnIdx]!;
@@ -1353,6 +1365,42 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       return err(404, "not_found");
     }
 
+    if (fn === "partner-members") {
+      if (route === "credentials" && req.method === "GET") {
+        const views = [...credentials.values()]
+          .filter((c) => c.userId === session.userId)
+          .map((c) => ({
+            id: c.id,
+            label: `Passkey · ${c.id.slice(0, 8)}`,
+            note: c.note,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            lastUsedAt: null as string | null,
+            revokedAt: c.revokedAt,
+            backupEligible: false,
+            backupState: false,
+          }));
+        return ok(200, { credentials: views });
+      }
+      const credMatch = /^credentials\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(route);
+      if (credMatch !== null && req.method === "PATCH") {
+        const credId = credMatch[1]!.toLowerCase();
+        const body = (await req.json()) as { note?: unknown };
+        if (!("note" in body)) return err(400, "bad_request");
+        let wire: string | null;
+        if (body.note === null) wire = null;
+        else if (typeof body.note === "string") {
+          const trimmed = body.note.trim();
+          if (trimmed.length > 40) return err(400, "bad_request");
+          wire = trimmed.length === 0 ? null : trimmed;
+        } else return err(400, "bad_request");
+        const entry = [...credentials.entries()].find(([, c]) => c.id === credId && c.userId === session.userId);
+        if (entry === undefined) return err(404, "not_found");
+        entry[1].note = wire;
+        return ok(200, { note: wire });
+      }
+      return err(404, "not_found");
+    }
+
     return err(404, "not_found");
   }
 
@@ -1363,7 +1411,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       path.includes("/partner-attest/") || path.includes("/course-qr/") || path.includes("/qr-print") ||
       path.includes("/stock-admin/") || path.includes("/partner-entitlements/") ||
       path.includes("/programme-config/") || path.includes("/offers-admin/") || path.includes("/sponsorships-admin/") ||
-      path.includes("/partner-review/") || path.includes("/partner-offers-redeem/") || path.includes("/settlement-export/")
+      path.includes("/partner-review/") || path.includes("/partner-offers-redeem/") || path.includes("/settlement-export/") ||
+      path.includes("/partner-members/")
     ) return workHandler(req);
     return sessionHandler(req);
   };

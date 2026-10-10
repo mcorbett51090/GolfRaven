@@ -301,3 +301,49 @@ describe("S7 offer-redeem screen", () => {
     expect(posts).toHaveLength(0);
   });
 });
+
+describe("§67 credentials display-note screen", () => {
+  const SEEDED_CRED = "11111111-1111-4111-8111-111111111111";
+
+  it("opens, loads the seeded passkey, and PATCHes a display note (A0)", async () => {
+    const s = await setup();
+    s.controller.openCredentials();
+    expect(home(s.controller).work).toMatchObject({ kind: "credentials", rows: null, lastSavedId: null });
+
+    await s.controller.loadCredentials();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") {
+        expect(w.rows).toHaveLength(1);
+        expect(w.rows?.[0]).toMatchObject({ id: SEEDED_CRED, note: null, revokedAt: null });
+      }
+    }
+    const gets = s.w.server.log.filter((r) => r.method === "GET" && r.path.endsWith("/partner-members/credentials"));
+    expect(gets).toHaveLength(1);
+
+    await s.controller.saveCredentialNote(SEEDED_CRED, "  Front desk iPad  ");
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") {
+        expect(w.rows?.[0]?.note).toBe("Front desk iPad");
+        expect(w.lastSavedId).toBe(SEEDED_CRED);
+      }
+    }
+    expect(home(s.controller).notice).toEqual({ kind: "credential-note-saved" });
+    const patches = s.w.server.log.filter((r) => r.method === "PATCH" && r.path.endsWith(`/partner-members/credentials/${SEEDED_CRED}`));
+    expect(patches).toHaveLength(1);
+    expect(JSON.parse(patches[0]!.body)).toEqual({ note: "Front desk iPad" });
+  });
+
+  it("refuses a note longer than 40 characters without calling the server", async () => {
+    const s = await setup();
+    s.controller.openCredentials();
+    await s.controller.loadCredentials();
+    await s.controller.saveCredentialNote(SEEDED_CRED, "x".repeat(41));
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "credentials.noteTooLong" } });
+    const patches = s.w.server.log.filter((r) => r.method === "PATCH" && r.path.includes("/partner-members/credentials/"));
+    expect(patches).toHaveLength(0);
+  });
+});

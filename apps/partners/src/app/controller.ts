@@ -104,6 +104,9 @@ export interface AppController extends StepUp {
   setOfferRedeemMode(mode: OfferRedeemMode): void;
   submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
   submitOfferRedeemOffline(offerCodeId: string, handle: string, code: string, nameConfirmed: boolean): Promise<void>;
+  openCredentials(): void;
+  loadCredentials(): Promise<void>;
+  saveCredentialNote(id: string, note: string): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -379,6 +382,9 @@ export function createController(deps: ControllerDeps): AppController {
     submitOfferRedeem: (offerCodeId, credential) => work.submitOfferRedeem(offerCodeId, credential),
     submitOfferRedeemOffline: (offerCodeId, handle, code, nameConfirmed) =>
       work.submitOfferRedeemOffline(offerCodeId, handle, code, nameConfirmed),
+    openCredentials: () => work.openCredentials(),
+    loadCredentials: () => work.loadCredentials(),
+    saveCredentialNote: (id, note) => work.saveCredentialNote(id, note),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

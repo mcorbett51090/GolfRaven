@@ -27,7 +27,8 @@ export type ErrorContext =
   | "sponsorships"
   | "review"
   | "rollups"
-  | "settlement";
+  | "settlement"
+  | "credentials";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {

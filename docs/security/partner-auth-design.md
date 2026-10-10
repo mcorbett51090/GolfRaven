@@ -3299,7 +3299,7 @@ Numbering: **migration `0079`, matrix `57`, this section 65.** Closes the 0054 l
 
 ### 65.3 Not built, honestly
 
-- Admin keep=2 → §66; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Admin keep=2 → §66; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI → §67. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 65.4 Verification
 
@@ -3324,11 +3324,39 @@ Numbering: **migration `0080`, matrix `58`, this section 66.** Closes the §4.1 
 
 ### 66.3 Not built, honestly
 
-- IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI → §67. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 66.4 Verification
 
-Branch: `cursor/p5-admin-session-keep-8ffd` (base main after #105 / `34b8b74`). Recorded when CI is green on the PR tip.
+Squash-merged as `6246993` (#106). Branch: `cursor/p5-admin-session-keep-8ffd` (base main after #105 / `34b8b74`).
 
-- pgTAP matrix 58 (+ 56 regression); `verify-function-inventory`; migrations immutable for `0001`–`0079`.
+- pgTAP matrix 58 (+ 56 regression); `verify-function-inventory`; migrations immutable for `0001`–`0079`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 67. As built: partners credential display-note settings UI
+
+Numbering: **matrix n/a (PWA only), this section 67.** Closes the §65 leftover: partners UI to list the signed-in person's own passkeys and edit the ≤40-character display note (class A0). No revoke, no add, no migration, no UI flag flips.
+
+### 67.1 What was built
+
+- **`apps/partners/src/api/members-routes.ts`** — `getCredentials` / `patchCredentialNote` over `PartnerApi.call` (`partner-members`); `PartnerCredential` matches Edge `CredentialView`; 404 → `not_found`.
+- **Work screen `credentials`** — open / load (A0 GET) / save note (A0 PATCH); trim client-side; length > 40 → `credentials.noteTooLong` without a round-trip; empty/blank clears; notice `credential-note-saved`; revoked rows filtered out when present.
+- **Home entry** — section after PIN (`data-testid="open-credentials"`); no facility select.
+- **Fake partner server** — GET/PATCH credentials for the session user; OPTIONS allow-methods include PATCH; note ≤40 / unknown id → 400 / 404.
+- **i18n** EN + fr-CA key parity; Vitest `work.test.ts` covers open → load → save + PATCH log.
+
+### 67.2 Decisions and departures
+
+- **List + note only** — revoke (A2) and second-credential add stay Edge-only / later UI; matches §65.2 "No PWA" closure as the display-metadata half.
+- **No facility** — credentials are person-scoped, not facility-scoped (unlike stock / attest).
+- **Reload after save** — PATCH then GET so the list matches the wire; `lastSavedId` records which row was written.
+
+### 67.3 Not built, honestly
+
+- IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 67.4 Verification
+
+Branch: `cursor/p5-credential-note-ui-8ffd` (base after #106 / `6246993`). Recorded when CI is green on the PR tip.
+
+- `@golfraven/partners` unit tests (incl. credentials screen) + typecheck; i18n EN/FR parity; no Edge / migration change.
 

@@ -19,6 +19,7 @@ import type {
   TrailProgramme,
 } from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
+import type { PartnerCredential } from "../api/members-routes";
 import type {
   AttestKind,
   AttestResult,
@@ -70,7 +71,8 @@ export type Notice =
         | "sponsorship-approved"
         | "review-resolved"
         | "offer-redeem-ok"
-        | "settlement-exported";
+        | "settlement-exported"
+        | "credential-note-saved";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -224,6 +226,12 @@ export type WorkView =
       readonly busy: boolean;
       /** Signed URL held only for display; never logged (AT(17)). */
       readonly export: SettlementExport | null;
+    }
+  | {
+      readonly kind: "credentials";
+      readonly busy: boolean;
+      readonly rows: readonly PartnerCredential[] | null;
+      readonly lastSavedId: string | null;
     };
 
 export type AppState =

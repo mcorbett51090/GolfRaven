@@ -162,6 +162,13 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
         h("p", { class: "muted" }, t("home.pin.hint")),
         h("div", { class: "actions" }, h("button", { type: "button", disabled: busy, "data-testid": "pin-setup-open", onclick: () => void controller.openPinSetup() }, t("home.pin.button"))),
       ),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("home.credentials.title")),
+        h("p", { class: "muted" }, t("home.credentials.hint")),
+        h("div", { class: "actions" }, h("button", { type: "button", disabled: busy, "data-testid": "open-credentials", onclick: () => controller.openCredentials() }, t("home.credentials.button"))),
+      ),
       needsSecondFactor
         ? h(
             "section",
