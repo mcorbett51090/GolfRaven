@@ -2131,10 +2131,13 @@ guard disabled (the LOW test then dies with the uncaught `TypeError`, failing th
   contention exists only between requests for the *same* reward or device; the offer lock is held for milliseconds. The
   later advisory-lock waits still cannot add to the budget: no vendor call happens after one is taken. Probe (Deno): 6
   parallel activations on one offer, each with a 2.4 s write, finish together in well under the 14 s a serialised queue would take (asserted < 7 s) with one write each.
-- **F7. The held-review queue has no Edge Function yet.** `app.resolve_held_offer_code` / `resolve_held_entitlement` exist
-  (service_role only, `p_resolved_by` must be an admin, audited) for P5.1a; the caller must authenticate the admin.
-  Voiding a held code by *any* path (not only `resolve_held_offer_code`) now releases its reservation, because the
-  release lives in the `offer_code_reservation_sync` trigger (H3), not in the resolver.
+- **F7. The held-review queue Edge Function is built (P5.1a S4, migration `0057`, design §27).** `app.resolve_held_offer_code` /
+  `resolve_held_entitlement` remain executable by `service_role` and (from 0057) by `private_definer` for the A3 partner
+  wrappers; **no edge role holds EXECUTE on them**. The partner lane reaches them only through
+  `private.partner_resolve_held_*_for_partner` (class A3, admin only; Edge `partner-review` `POST resolve/offer-code` and
+  `POST resolve/entitlement`). The queue and SLA reads are `partner_held_queue_for_partner` / `partner_review_sla_for_partner`
+  (class A0, admin only). Voiding a held code by *any* path (not only `resolve_held_offer_code`) still releases its
+  reservation, because the release lives in the `offer_code_reservation_sync` trigger (H3), not in the resolver.
 - **F8. Per-device rate limit is actor-scoped (accepted).** `hitRateLimitForActor` prefixes the actor's uid (as for evidence),
   so the 20/device/day bucket bounds one account's use of a device, not several accounts' use of it. Multi-account
   detection is the bits' job (and the Android substitute's), not the limiter's.
@@ -3980,3 +3983,7 @@ Nothing from before the last edit is counted; each line is a command run on the 
 - `pnpm -r typecheck` exit 0; `deno check --frozen` and `deno cache --frozen` over every Edge entrypoint exit 0 and `supabase/tests/deno.lock` unchanged; `tools/db/check-migrations-immutable.sh --base origin/main`: all 45 existing migrations byte-identical, `0046` added.
 - **Mutation proofs** (world-readable `/tmp` copies, deleted afterwards; an unmutated control passing; a search of the repository for the mutation marker prints nothing): database 40 mutants of 0046, **40 of 40 killed**; Edge, mobile and recorder 55 mutants, **55 of 55 killed**; round 2 (proof lifecycle, qualification read-back, future bound, pepper epoch) 29 more database mutants, **28 killed, 1 equivalent**. Detail in `docs/security/partner-auth-design.md`, "As built: S2a".
 - The harness-owner defects found on the way (and the restricted-mode `CREATE TRIGGER` EXECUTE grant) are written up in `docs/security/partner-auth-design.md`, "As built: S2a".
+
+## Offline code verify-and-record: built (P5.1a S3, migration `0056_partner_attest_redeem.sql`)
+
+The prose is `docs/security/partner-auth-design.md`, section 26. What the money path needs from it: **"What P5 must do", step 3 is built as written.** `private.partner_offline_attest_for_partner(facility, kind, handle, code)` (class A1, a partner binding, `edge_partner` only) takes the handle and the six digits, derives each candidate device's seed with `private.offline_seed_derive` (still executable by nobody), computes the HMAC-SHA-256 / 600 s HOTP in SQL (`private.hotp`), compares as a keyed double HMAC with every candidate evaluated, records the match with 0045's atomic `INSERT ... ON CONFLICT DO NOTHING`, and returns only `(status, attestation id, held)`: **no seed, no expected code, no device, no step**. 0045's recorder stays owner-only (0047) and 0056 asserts at apply time that no edge role can execute it. Step 2's counters are built as numbered there (5 failures per staff an hour; per target 10 an hour and 30 a day across all staff; the 5 most recent devices of the last 90 days), as **statuses that commit**, not a RAISE. Step 5's purchase is written `pending` with `cosignal.awaiting` for the code's step window (the S2a seam), `offline = true`, `method = staff_scan`, one row per eligible trail, plus a `pending` credit; a staff scan writes no play. The same-device rule (A2-21) and the cold-start cap are in the same writer. **Not built**: the offline offer-redemption rules of step 5 (the PIN and name check, the 24-hour `unconfirmed` mark) and the budget settlement they need: `partner-offers-redeem` is the next slice's, and `kind = offer_redemption` is refused (22023) until it lands. Mutation proofs were not run for this slice.

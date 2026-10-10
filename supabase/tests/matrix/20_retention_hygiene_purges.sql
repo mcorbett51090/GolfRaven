@@ -42,10 +42,10 @@ SELECT is((SELECT p.prorettype::regtype::text FROM pg_proc p WHERE p.oid = 'priv
 SELECT is((SELECT p.prorettype::regtype::text FROM pg_proc p WHERE p.oid = 'private.purge_consumed_nonce()'::regprocedure), 'bigint', 'structure: purge_consumed_nonce still returns bigint');
 -- the ONE new grant: edge_system holds EXECUTE on exactly two functions in schema private beyond what the inventory said before 0040 (the rest is the
 -- inventory gate's job; this is the by-name statement of it)
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname = 'private' AND p.proname LIKE 'purge\_%' AND has_function_privilege('edge_system', p.oid, 'EXECUTE')),
-  ARRAY['purge_consumed_nonce', 'purge_fix_coords', 'purge_install_link_tombstones', 'purge_rate_limit_buckets', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'],
-  'privileges: edge_system can run exactly the six purges (the four retention classes and the two hygiene purges), nothing else named purge_*');
+  ARRAY['purge_consumed_nonce', 'purge_fix_coords', 'purge_install_link_tombstones', 'purge_partner_challenges', 'purge_partner_credentials', 'purge_partner_enrolment_tokens', 'purge_partner_invites', 'purge_partner_sessions', 'purge_partner_sign_in_failures', 'purge_rate_limit_buckets', 'purge_signin_email_proofs', 'purge_signin_revocation_queue'],
+  'privileges: edge_system can run exactly the twelve purges (the four retention classes, the two hygiene purges of 0040 and the six partner purges of 0054), nothing else named purge_*');
 
 -- ----------------------------------------------------------------------------
 -- 2. Real calls by role: refused for edge_actor (unbound, user-bound, delegate-bound), anon, authenticated; allowed for edge_system and service_role

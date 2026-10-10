@@ -223,6 +223,19 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         async pinChange(): Promise<never> {
           throw new Error("fake partner server: the PIN flows are not implemented (S7b)");
         },
+        // S1.4 TOTP surface: fail closed. The S7 PIN/TOTP screens will implement these in this fake.
+        async totpEnrol(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
+        async totpConfirm(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
+        async totpVerify(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
+        async totpReset(): Promise<never> {
+          throw new Error("fake partner server: the TOTP flows are not implemented (S7)");
+        },
         async otpTarget() {
           return null; // no mailbox: the email proof cannot start
         },
@@ -242,6 +255,46 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       if (!sessions.has(hash) || state.revokedSessions.has(hash)) throw new PartnerSessionRefused();
       state.reauthHits += 1;
       return state.reauthHits > state.reauthLimit ? { ok: false, retryAfterSeconds: 1800 } : { ok: true, retryAfterSeconds: 0 };
+    },
+    // S1.5 invite/member surface: fail closed. The S7 invite and member screens will implement these in this fake.
+    withInviteMint() {
+      return Promise.reject(new Error("fake partner server: invite mint is not implemented (S7)"));
+    },
+    withInvites() {
+      return Promise.reject(new Error("fake partner server: invites are not implemented (S7)"));
+    },
+    withMembers() {
+      return Promise.reject(new Error("fake partner server: members are not implemented (S7)"));
+    },
+    withAttest() {
+      return Promise.reject(new Error("fake partner server: attest is not implemented (S7b)"));
+    },
+    withReview() {
+      return Promise.reject(new Error("fake partner server: review is not implemented (S7d)"));
+    },
+    withStock() {
+      return Promise.reject(new Error("fake partner server: stock is not implemented (S7c)"));
+    },
+    withEntitlements() {
+      return Promise.reject(new Error("fake partner server: entitlements are not implemented (S7c)"));
+    },
+    withProgramme() {
+      return Promise.reject(new Error("fake partner server: programme is not implemented (S7d)"));
+    },
+    withOffersAdmin() {
+      return Promise.reject(new Error("fake partner server: offers-admin is not implemented (S7d)"));
+    },
+    withSponsorships() {
+      return Promise.reject(new Error("fake partner server: sponsorships are not implemented (S7d)"));
+    },
+    withOffersRedeem() {
+      return Promise.reject(new Error("fake partner server: offers-redeem is not implemented (P5.1b)"));
+    },
+    withSettlementExport() {
+      return Promise.reject(new Error("fake partner server: settlement-export is not implemented (P5.1b)"));
+    },
+    async hitSystemRateLimit() {
+      return { ok: true, retryAfterSeconds: 0 };
     },
   };
 

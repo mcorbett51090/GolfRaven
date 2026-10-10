@@ -71,12 +71,19 @@ ROLLBACK;
 -- ----------------------------------------------------------------------------
 -- 1. What the definers may do on the tables they do not own: column-narrow, and nothing for any edge or client role
 -- ----------------------------------------------------------------------------
-SELECT is(has_column_privilege('private_definer', 'app.facility_programme', 'pin_epoch', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'participation', 'UPDATE')
-          AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'qr_mode', 'UPDATE'), true, 'private_definer may UPDATE facility_programme.pin_epoch and no other column');
+-- S6 (0059) widens facility_programme UPDATE to the programme columns; pin_epoch stays (0046 rotate path). The identity columns stay immutable.
+SELECT is(has_column_privilege('private_definer', 'app.facility_programme', 'pin_epoch', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.facility_programme', 'participation', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.facility_programme', 'qr_mode', 'UPDATE')
+          AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'trail_id', 'UPDATE')
+          AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'facility_id', 'UPDATE'), true,
+  'private_definer may UPDATE facility_programme.pin_epoch (0046) and the programme columns (0059), never the identity columns');
 SELECT is(has_column_privilege('private_definer', 'app.catalog_facility', 'tz', 'SELECT') AND has_column_privilege('private_definer', 'app.catalog_facility', 'id', 'SELECT')
           AND NOT has_column_privilege('private_definer', 'app.catalog_facility', 'name', 'SELECT'), true, 'private_definer may read catalog_facility (id, tz) and nothing else of it');
+-- S6 (0059) grants full SELECT on trail_programme for programme writers (fees included); 0046's column-narrow SELECT alone is no longer the shape.
 SELECT is(has_column_privilege('private_definer', 'app.trail_programme', 'status', 'SELECT') AND has_column_privilege('private_definer', 'app.trail_programme', 'marker_source', 'SELECT')
-          AND NOT has_column_privilege('private_definer', 'app.trail_programme', 'fee_amount', 'SELECT'), true, 'private_definer may read trail_programme (trail_id, status, marker_source) and not its fees');
+          AND has_column_privilege('private_definer', 'app.trail_programme', 'fee_amount', 'SELECT'), true,
+  'private_definer may read trail_programme including fees (0059 programme writers; full SELECT)');
 SELECT is(has_column_privilege('private_definer', 'app.course_qr_token', 'used_at', 'UPDATE') AND has_column_privilege('private_definer', 'app.course_qr_token', 'used_by_user', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'nonce_hash', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'issued_at', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'facility_id', 'UPDATE') AND NOT has_table_privilege('private_definer', 'app.course_qr_token', 'INSERT'), true,

@@ -10,7 +10,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(162);
+SELECT plan(163);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -179,16 +179,21 @@ SELECT is(has_function_privilege('private_definer', 'private.partner_reauth_chec
 SELECT is(has_function_privilege('edge_partner', 'private.actor_uid()'::regprocedure, 'EXECUTE') OR has_function_privilege('edge_partner', 'private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure, 'EXECUTE')
           OR EXISTS (SELECT 1 FROM pg_proc p WHERE p.proname = 'bind_actor' AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')), false,
   'PA-13b: edge_partner cannot execute actor_uid(), bind_actor or the authorization seam itself');
-SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_pin_verifier'), ('partner_reauth_verifier'), ('private_definer')) r(n)
+SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_pin_verifier'), ('partner_reauth_verifier')) r(n)
            WHERE has_any_column_privilege(r.n, 'app.partner_sign_in_failure', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, 'app.partner_sign_in_failure', 'DELETE,TRUNCATE,TRIGGER')), 0,
-  'the failure counter: no client role, no edge role and no other owner role (private_definer included) holds any privilege on it');
+  'the failure counter: no client role, no edge role and no other owner role holds any privilege on it');
+SELECT is((has_column_privilege('private_definer', 'app.partner_sign_in_failure', 'updated_at', 'SELECT'), has_column_privilege('private_definer', 'app.partner_sign_in_failure', 'cooldown_until', 'SELECT'),
+           has_table_privilege('private_definer', 'app.partner_sign_in_failure', 'DELETE'), has_any_column_privilege('private_definer', 'app.partner_sign_in_failure', 'INSERT,UPDATE'),
+           has_column_privilege('private_definer', 'app.partner_sign_in_failure', 'failed_count', 'SELECT'))::text,
+  '(t,t,t,f,f)', '0054: private_definer holds only what the purge needs on the failure counter: SELECT of (credential_id, cooldown_until, updated_at) and DELETE, nothing it could count or reset with');
 SELECT is((SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'app.partner_sign_in_failure'::regclass), true, 'the failure counter has ENABLE and FORCE ROW LEVEL SECURITY');
 SELECT is((SELECT array_agg(pol.polname::text || ':' || pol.polcmd::text ORDER BY pol.polname) FROM pg_policy pol WHERE pol.polrelid = 'app.partner_sign_in_failure'::regclass AND pol.polname NOT LIKE 'zz27%'),
-  ARRAY['psi_insert_partner_sign_in_failure:a', 'psi_read_partner_sign_in_failure:r', 'psi_update_partner_sign_in_failure:w'],
-  'the failure counter carries exactly the three issuer policies');
+  ARRAY['pd_purge_partner_sign_in_failure:d', 'pd_purge_partner_sign_in_failure_r:r', 'psi_insert_partner_sign_in_failure:a', 'psi_read_partner_sign_in_failure:r', 'psi_update_partner_sign_in_failure:w'],
+  'the failure counter carries exactly the three issuer policies and the two floor-bound purge policies of 0054');
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid = 'app.partner_sign_in_failure'::regclass AND pol.polname NOT LIKE 'zz27%'
+           AND pol.polname NOT LIKE 'pd\_purge\_partner\_sign\_in\_failure%'
            AND (pol.polroles <> ARRAY['partner_session_issuer'::regrole::oid] OR coalesce(pg_get_expr(pol.polqual, pol.polrelid), '') ~* 'current_setting|pg_settings' OR coalesce(pg_get_expr(pol.polwithcheck, pol.polrelid), '') ~* 'current_setting|pg_settings')), 0,
-  'the OR rule: every policy on the new table is TO partner_session_issuer alone and reads no settable GUC (nothing here can be planted)');
+  'the OR rule: every policy on the new table but the purge pair is TO partner_session_issuer alone and reads no settable GUC (nothing here can be planted); the purge pair is floor-bound and closed under a partner binding (matrix 32)');
 -- the registry is readable by service_role only (RLS): the restricted harness role is not a superuser, so the cell reads it as service_role, as matrix 26 does
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('partner_rp_config_read', 'partner_credential_lookup', 'partner_sign_in_failure_record', 'partner_reauth_credential_read', 'partner_reauth_check',
@@ -220,9 +225,12 @@ ROLLBACK TO SAVEPOINT user_bound;
 SAVEPOINT op_aal1;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
-SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_options_for_partner()$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', '14 (a) / PA-20: the reauth issuer is class A0: an aal 1 OPERATOR session is refused');
-SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_credential_for_partner('\x00112233445566778899aabbccddeeff'::bytea)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', '14 (a): the reauth credential read is class A0: an aal 1 OPERATOR session is refused');
-SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_for_partner('\x00112233445566778899aabbccddeeff'::bytea, '\x00'::bytea, 1, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea)$$, '42501', 'partner_authorize: the session''s assurance level is below the member''s required level', '14 (a): the reauth verification is class A0: an aal 1 OPERATOR session is refused');
+-- S1.4 (0053): reauth is A0_ENROL. An aal 1 operator with NO confirmed TOTP may call it (PA-28); matrix 31 proves the post-confirm refusal.
+SELECT lives_ok($$SELECT * FROM private.partner_session_reauth_options_for_partner()$$, '14 (a) / PA-28: the reauth issuer is A0_ENROL: an aal 1 OPERATOR with no confirmed TOTP may call it');
+SELECT lives_ok($$SELECT * FROM private.partner_session_reauth_credential_for_partner('\x00112233445566778899aabbccddeeff'::bytea)$$, '14 (a) / PA-28: the reauth credential read is A0_ENROL: an aal 1 OPERATOR with no confirmed TOTP may call it');
+SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_for_partner('\x00112233445566778899aabbccddeeff'::bytea, '\x00'::bytea, 1, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea, '\x00'::bytea)$$, '22023',
+  'partner_reauth_check: a session, a credential id, a 32-byte nonce, an expiry, a MAC, the authenticator data, the client data and a signature are required',
+  '14 (a) / PA-28: the reauth verification is A0_ENROL: authorize passes; malformed args raise 22023 (not the aal gate)');
 SELECT is((SELECT private.partner_whoami_for_partner() ->> 'requiredAal'), '2', '4.1: ... while GET session (PEEK) still answers an aal 1 operator, and reports the assurance it needs');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, '4.1: ... and lock (SESSION) still works at aal 1');
 SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, '4.1: ... and sign-out (SESSION) still works at aal 1');
@@ -303,7 +311,7 @@ SELECT is((SELECT (private.partner_whoami_for_partner() -> 'stepUp' ->> 'reauthU
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'lock: runs');
 RESET ROLE;
 SELECT is((SELECT (pin_grant_until IS NULL AND reauth_until IS NULL AND otp_proof_until IS NULL) FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'lock: the PIN grant, the reauth window and the OTP proof are cleared');
-SELECT ok((SELECT mfa_until IS NOT NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock: mfa_until is NOT cleared here (S1.4 owns that column and adds its clearer: nothing sets it before S1.4); the seam is stated in 0049');
+SELECT ok((SELECT mfa_until IS NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock: mfa_until IS cleared (S1.4 partner_totp_mfa_clear via the totp-verifier-owned clearer)');
 SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'lock: the session stays LIVE');
 ROLLBACK TO SAVEPOINT lock1;
 SAVEPOINT lock2;

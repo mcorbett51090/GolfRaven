@@ -252,12 +252,18 @@ describe("the migration", () => {
     const hits = readdirSync(migrations).filter((n) =>
       /CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+app\.(activate_|resolve_held_)/i.test(stripComments(readFileSync(join(migrations, n), "utf8"))),
     );
-    expect(hits).toEqual(["0027_rewards_activation.sql"]);
-    const text = readFileSync(join(migrations, "0027_rewards_activation.sql"), "utf8").replace(/^\s*--.*$/gm, "");
-    // Exactly ONE SECURITY DEFINER function, and it is the vault reader (N4): no app.* function is one.
-    const definers = [...text.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)\s*\([^$]*?LANGUAGE\s+\w+\s+SECURITY\s+DEFINER/gis)].map((m) => m[1]);
-    expect(definers).toEqual(["private.account_pseudonyms"]);
-    expect(text).not.toMatch(/DISABLE ROW LEVEL SECURITY|NO FORCE ROW LEVEL SECURITY/i);
+    // 0027 defines them; 0061 (AT(10) issuance staff gate) replaces activate_offer_code and resolve_held_offer_code as invoker-rights.
+    expect(hits).toEqual(["0027_rewards_activation.sql", "0061_at10_issuance_staff_gate.sql"]);
+    for (const file of hits) {
+      const text = readFileSync(join(migrations, file), "utf8").replace(/^\s*--.*$/gm, "");
+      // No app.* activation / resolve_held function is SECURITY DEFINER (N4). 0027's only definer is the vault reader.
+      const appDefiners = [...text.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(app\.[\w]+)\s*\([^$]*?LANGUAGE\s+\w+\s+SECURITY\s+DEFINER/gis)].map((m) => m[1]);
+      expect(appDefiners, file).toEqual([]);
+      expect(text).not.toMatch(/DISABLE ROW LEVEL SECURITY|NO FORCE ROW LEVEL SECURITY/i);
+    }
+    const text27 = readFileSync(join(migrations, "0027_rewards_activation.sql"), "utf8").replace(/^\s*--.*$/gm, "");
+    const definers27 = [...text27.matchAll(/CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+([\w.]+)\s*\([^$]*?LANGUAGE\s+\w+\s+SECURITY\s+DEFINER/gis)].map((m) => m[1]);
+    expect(definers27).toEqual(["private.account_pseudonyms"]);
   });
 
   it("no migration turns an activation / reservation function into SECURITY DEFINER by ALTER FUNCTION either", () => {

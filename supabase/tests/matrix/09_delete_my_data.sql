@@ -156,8 +156,8 @@ SELECT is(
 SELECT is(
   (SELECT array_agg(DISTINCT table_name::text ORDER BY table_name::text) FROM private.pii_retention_policy
    WHERE schema_name = 'app' AND action IN ('delete_row', 'set_null') AND NOT has_any_column_privilege('service_role', format('app.%I', table_name), 'SELECT')),
-  ARRAY['partner_auth_challenge', 'partner_credential', 'partner_enrolment_token', 'partner_pin', 'partner_session'],
-  'the catalog-driven pass below skips EXACTLY the five partner-auth tables service_role holds no privilege on (an explicit list: any other table dropping out fails here)'
+  ARRAY['partner_auth_challenge', 'partner_credential', 'partner_enrolment_token', 'partner_pin', 'partner_session', 'partner_totp'],
+  'the catalog-driven pass below skips EXACTLY the six partner-auth tables service_role holds no privilege on (an explicit list: any other table dropping out fails here)'
 );
 
 -- Generic, catalog-driven pass: every `delete_row` / `set_null` policy row

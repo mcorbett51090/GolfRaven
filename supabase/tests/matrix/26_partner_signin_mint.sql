@@ -128,11 +128,11 @@ SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authentic
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter')) r(n)
            WHERE has_function_privilege(r.n, 'private.partner_challenge_issue_sign_in()'::regprocedure, 'EXECUTE')), ARRAY['edge_partner_minter'],
   'PA-8: ... and ONLY edge_partner_minter can issue a sign-in challenge');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private', 'public') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
-  'PA-8: the minter can execute NOTHING ELSE in app, api or private but the three minter-lane definers of 0049 (S1.2: the credential lookup, the failure counter and the relying-party read; the pgTAP and extension functions of public aside)');
+             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+  'PA-8: the minter can execute NOTHING ELSE in app, api or private but the three minter-lane definers of 0049 (S1.2: the credential lookup, the failure counter and the relying-party read) and the five of 0054 (S1.5: matrix 32 proves them); the pgTAP and extension functions of public aside');
 SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
@@ -595,11 +595,12 @@ SELECT is((SELECT array_agg(role_name ORDER BY policy_name) FROM private.definer
                                                                                                                          'psi_insert_partner_auth_challenge', 'psi_read_partner_auth_challenge')),
           ARRAY['private_definer', 'private_definer', 'partner_session_issuer', 'partner_session_issuer', 'partner_session_issuer', 'partner_session_issuer'], 'and each names the role it is for');
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name LIKE 'partner\_sig\_%' OR function_name IN ('partner_cbor_head', 'partner_cose_parse', 'partner_challenge_core', 'partner_challenge_issue_sign_in', 'partner_challenge_verify',
-                                                                                                                              'partner_mint_alarm_write', 'partner_session_mint')), 27, 'every function of 0048 has a function_inventory row (27)');
+                                                                                                                              'partner_mint_alarm_write', 'partner_session_mint')), 29, 'every function of 0048 has a function_inventory row (27, plus the two 8-argument overloads 0054 adds of partner_challenge_core / _verify)');
 SELECT is((SELECT count(*)::int FROM private.partner_owner_privilege WHERE role_name = 'partner_session_issuer' AND (object_name LIKE '%partner_credential' AND column_name IN ('public_key', 'alg', 'sign_count', 'last_used_at'))), 5, 'the issuer''s new column privileges on partner_credential are in the owner-privilege registry');
-SELECT is((SELECT array_agg(o.privilege || ':' || o.object_name ORDER BY o.object_name) FROM private.partner_owner_privilege o WHERE o.role_name = 'partner_session_issuer' AND o.object_kind = 'function'),
+SELECT is((SELECT array_agg(o.privilege || ':' || o.object_name ORDER BY o.object_name) FROM private.partner_owner_privilege o WHERE o.role_name = 'partner_session_issuer' AND o.object_kind = 'function'
+             AND o.object_name IN ('private.partner_binding_kind()', 'private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea)', 'private.partner_mint_alarm_write(text,uuid,jsonb)', 'private.partner_session_policy(uuid)', 'private.partner_sig_verify(smallint,bytea,bytea,bytea)')),
           ARRAY['EXECUTE:private.partner_binding_kind()', 'EXECUTE:private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea)', 'EXECUTE:private.partner_mint_alarm_write(text,uuid,jsonb)', 'EXECUTE:private.partner_session_policy(uuid)', 'EXECUTE:private.partner_sig_verify(smallint,bytea,bytea,bytea)'],
-          'and the issuer''s function privileges are exactly those five');
+          'and the issuer''s function privileges of 0048 are still exactly those five (0054 adds its own, listed in matrix 32)');
 SELECT tests.clear_actor();
 -- the alarm writer is refused under any binding (a partner- or user-bound definer cannot use it as a noise lever)
 SAVEPOINT sp_alarm;

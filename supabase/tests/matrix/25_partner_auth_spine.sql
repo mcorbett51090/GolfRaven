@@ -92,15 +92,31 @@ SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c
 SELECT is((SELECT count(*)::int FROM pg_namespace n CROSS JOIN (VALUES ('edge_partner'), ('edge_partner_minter')) r(n)
            WHERE (n.nspname NOT LIKE 'pg\_temp%' AND has_schema_privilege(r.n, n.oid, 'CREATE')) OR (n.nspname <> 'private' AND n.nspname NOT IN ('public', 'tests', 'information_schema') AND n.nspname NOT LIKE 'pg\_%' AND has_schema_privilege(r.n, n.oid, 'USAGE'))), 0,
   'PA-1: and no CREATE anywhere (the always-open TEMP schema aside), and USAGE on no schema but private (plus the PUBLIC-open public, tests, pg_catalog and information_schema): in particular NONE on app');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
-          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_binding', 'partner_binding_kind', 'partner_pin_change_for_partner', 'partner_pin_params_for_partner', 'partner_pin_set_for_partner',
-                'partner_pin_verify_for_partner', 'partner_session_lock_for_partner', 'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner',
-                'partner_session_reauth_for_partner', 'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_whoami_for_partner', 'zz24_authz_for_partner'],
-  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
-          ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
-  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2), and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
+          ARRAY['bind_partner_session', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_attest_for_partner', 'partner_binding', 'partner_binding_kind',
+                'partner_credential_list_for_partner', 'partner_credential_options_for_partner', 'partner_credential_register_for_partner', 'partner_credential_revoke_for_partner',
+                'partner_entitlement_queue_for_partner', 'partner_entitlement_redeem_for_partner', 'partner_entitlement_voucher_for_partner',
+                'partner_facility_programme_list_for_partner', 'partner_facility_programme_upsert_for_partner',
+                'partner_handover_mint_for_partner',
+                'partner_held_queue_for_partner',
+                'partner_invite_accept_for_partner', 'partner_invite_create_for_partner', 'partner_invite_list_for_partner', 'partner_invite_revoke_for_partner',
+                'partner_member_recover_for_partner', 'partner_member_revoke_for_partner',
+                'partner_offer_approve_for_partner', 'partner_offer_end_for_partner', 'partner_offer_upsert_for_partner', 'partner_offers_list_for_partner',
+                'partner_offers_queue_for_partner', 'partner_offers_redeem_for_partner',
+                'partner_offline_attest_for_partner', 'partner_operator_rollup_for_partner', 'partner_org_sessions_revoke_for_partner', 'partner_pin_change_for_partner',
+                'partner_pin_params_for_partner', 'partner_pin_reset_for_partner', 'partner_pin_set_for_partner', 'partner_pin_verify_for_partner',
+                'partner_resolve_held_entitlement_for_partner', 'partner_resolve_held_offer_code_for_partner', 'partner_review_sla_for_partner',
+                'partner_session_lock_for_partner',
+                'partner_session_otp_proof_for_partner', 'partner_session_otp_target_for_partner', 'partner_session_reauth_credential_for_partner', 'partner_session_reauth_for_partner',
+                'partner_session_reauth_options_for_partner', 'partner_session_revoke_for_partner', 'partner_settlement_export_for_partner', 'partner_shift_log_for_partner',
+                'partner_sponsor_rollup_for_partner', 'partner_sponsorship_approve_for_partner', 'partner_sponsorship_upsert_for_partner', 'partner_sponsorships_list_for_partner',
+                'partner_staff_activity_for_partner', 'partner_stock_move_for_partner', 'partner_stock_read_for_partner', 'partner_totp_confirm_for_partner', 'partner_totp_enrol_for_partner',
+                'partner_totp_reset_for_partner', 'partner_totp_verify_for_partner', 'partner_trail_programme_read_for_partner', 'partner_trail_programme_upsert_for_partner', 'partner_whoami_for_partner', 'zz24_authz_for_partner'],
+  'PA-1: edge_partner can EXECUTE exactly the binder, the two read-only binding helpers (4.3), the rate-limit twin, the seven _for_partner definers of 0049 (S1.2), the six of 0052 (S1.3), the five of 0053 (S1.4), the twelve of 0054 (S1.5), the four of 0056 (S3), the four of 0057 (S4), the six of 0058 (S5), the thirteen of 0059 (S6), the three of 0060 (P5.1b), and this file''s own planted definer, and no other function (it has no bind_actor and no actor_uid)');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')),
+          ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+  'PA-1: edge_partner_minter can EXECUTE exactly the two mint functions of 0048 (S1.1b) and the three minter-lane definers of 0049 (S1.2) and the five of 0054 (S1.5), and no other function (26_partner_signin_mint.sql PA-8 proves them one by one)');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.partner_authorize(text, text, app.partner_role[], text)'::regprocedure,
              'private.partner_session_guard()'::regprocedure, 'private.partner_member_role_invariant()'::regprocedure, 'private.partner_scope_invariant()'::regprocedure)
            AND (SELECT count(*) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter'),
@@ -572,13 +588,13 @@ SELECT is(private.zz24_authz_for_partner(NULL, NULL, NULL, 'SESSION'), '00000000
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az1;
 
--- PA-4b: A3 FAILS CLOSED, for every actor, admin included, until S1.4 (no interim relaxation). A2 was enabled by S1.3 (0052): without its prerequisites (a passkey assertion at most 5 minutes old and a PIN grant at most 30 s
--- old; the enabled-class cells are in 28_partner_pin_step_up.sql) it still refuses every actor, so the A2 cells below keep their 42501 and now name the prerequisite.
+-- PA-4b: A2 and A3 are ENABLED (S1.3 / S1.4). Without their prerequisites they still refuse every actor: A2 needs reauth + PIN (or PIN-less A3); A3 needs aal 2 and a fresh mfa_until. The enabled-class happy paths are in
+-- 28_partner_pin_step_up.sql (A2) and 31_partner_totp_aal2.sql (A3).
 SAVEPOINT az4b;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A2')$$, '42501', 'partner_authorize: a passkey assertion in the last 5 minutes is required', 'PA-4b (S1.3: A2 is ENABLED): the ADMIN (aal 2) with no reauth and no PIN grant is refused class A2');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3')$$, '42501', 'partner_authorize: class A3 is not enabled (fails closed until its prerequisite exists)', 'PA-4b: ... and class A3');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-4b (S1.4: A3 is ENABLED): ... and class A3 without mfa_until');
 SELECT is(private.zz24_authz_for_partner(NULL, NULL, ARRAY['operator'], 'A0'), '00000000-0000-0000-0000-4000000000d0'::uuid, 'PA-4b control: the same admin session passes class A0 (so the A2 / A3 refusals are the class prerequisite, not the session)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b;
@@ -586,14 +602,14 @@ SAVEPOINT az4b2;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_mx');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A2')$$, '42501', NULL, 'PA-4b: the MANAGER at the facility, with no reauth and no PIN grant, is refused class A2 as well');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', NULL, 'PA-4b: ... and A3');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['manager'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-4b: ... and A3 (aal1 manager lacks aal2 + mfa)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b2;
 SAVEPOINT az4b3;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A2')$$, '42501', NULL, 'PA-4b: staff with no reauth and no PIN grant is refused A2');
-SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_y', NULL, ARRAY['staff'], 'A3')$$, '42501', NULL, 'PA-4b: ... and A3 (the refusal comes BEFORE the scope check: the same answer in or out of scope)');
+SELECT throws_ok($$SELECT private.zz24_authz_for_partner('fac_x', NULL, ARRAY['staff'], 'A3')$$, '42501', 'partner_authorize: aal 2 and a TOTP verified in the last 5 minutes are required', 'PA-4b: ... and A3 in scope without aal2 + mfa_until');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT az4b3;
 
@@ -1107,7 +1123,9 @@ SELECT is((SELECT array_agg(pol.polname::text ORDER BY pol.polname::text) FROM p
           ARRAY['pd_delete_partner_session_user_id', 'pd_delete_partner_session_user_id_r'],
   'PA-4c: the ONLY policies on partner_session that read a GUC are the delete_my_data DELETE / SELECT pair (the registry pass requires them); no UPDATE or INSERT policy does, for any role');
 SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polrelid IN ('app.partner_member'::regclass, 'app.partner_scope'::regclass, 'app.admin_user'::regclass)
-           AND pol.polname ~ '^(pst|psi|psf|ppv|ptv|prv)_(update|insert|lock)' ), 0, 'R3-M1: no lock policy of any role exists on partner_member, partner_scope or admin_user');
+           AND pol.polname ~ '^(pst|psi|psf|ppv|ptv|prv)_(update|insert|lock)'
+             AND pol.polname NOT IN ('psi_insert_partner_member', 'psi_update_partner_member')), 0,
+  'R3-M1: no lock policy of any role exists on partner_member, partner_scope or admin_user (the two accept-activation policies of 0054 are not lock policies: they admit a row only while an accepted invite exists, matrix 32 PA-4c (iii))');
 ROLLBACK TO SAVEPOINT pa4c_ii;
 
 -- (iii) the delete_my_data WINDOW is closed under a partner binding: the DELETE / SELECT / set-null pairs on the four tables this migration creates carry
@@ -1325,7 +1343,7 @@ SET LOCAL ROLE service_role;
 SELECT private.export_my_data('00000000-0000-0000-0000-1000000000a1'::uuid)::text AS exp_json \gset
 RESET ROLE;
 SELECT is((SELECT jsonb_array_length(:'exp_json'::jsonb -> 'partner_credential')), 3, 'PA-1b: export_my_data carries the account''s partner credential block');
-SELECT is((SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys((:'exp_json'::jsonb -> 'partner_credential') -> 0) k),
+SELECT is((SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys((:'exp_json'::jsonb -> 'partner_credential') -> 0) k),
           ARRAY['aaguid', 'alg', 'backup_eligible', 'backup_state', 'created_at', 'id', 'label', 'last_used_at', 'note', 'revoke_reason', 'revoked_at', 'transports', 'user_id'],
   'PA-1b: ... metadata only: never public_key, credential_id or sign_count');
 SELECT is(:'exp_json' ~ 'token_hash|mint_signature|nonce_hash|public_key', false, 'PA-1b: and no session, token, challenge or key artefact appears anywhere in the export');

@@ -38,6 +38,16 @@ export async function sha256Hex(text: string): Promise<string> {
   return toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))));
 }
 
+/** The invite token (6.1): `gr_inv_` + 43 base64url characters (32 random bytes), carried in the link's fragment and never sent as a bearer. */
+export const PARTNER_INVITE_PREFIX = "gr_inv_";
+/** The enrolment token (recovery 6.5, admin 6.4): `gr_enr_` + 43 base64url characters, handed by a manager or an admin to the person it belongs to. */
+export const PARTNER_ENROLMENT_PREFIX = "gr_enr_";
+/** The hand-over token (S5): `gr_ho_` + 43 base64url characters (32 random bytes), shown to the player once, typed or scanned by staff within 15 minutes; only its SHA-256 reaches the database. */
+export const PARTNER_HANDOVER_PREFIX = "gr_ho_";
+export const PARTNER_HANDOVER_TOKEN_RE = /^gr_ho_[A-Za-z0-9_-]{43}$/;
+export const PARTNER_INVITE_TOKEN_RE = /^gr_inv_[A-Za-z0-9_-]{43}$/;
+export const PARTNER_ENROLMENT_TOKEN_RE = /^gr_enr_[A-Za-z0-9_-]{43}$/;
+
 export interface NewSessionToken {
   /** The raw token the client receives, once. */
   readonly token: string;
@@ -45,9 +55,25 @@ export interface NewSessionToken {
   readonly hash: string;
 }
 
-export async function newPartnerSessionToken(): Promise<NewSessionToken> {
-  const token = PARTNER_SESSION_PREFIX + toB64u(crypto.getRandomValues(new Uint8Array(32)));
+async function newOpaqueToken(prefix: string): Promise<NewSessionToken> {
+  const token = prefix + toB64u(crypto.getRandomValues(new Uint8Array(32)));
   return { token, hash: await sha256Hex(token) };
+}
+
+export function newPartnerSessionToken(): Promise<NewSessionToken> {
+  return newOpaqueToken(PARTNER_SESSION_PREFIX);
+}
+
+export function newPartnerInviteToken(): Promise<NewSessionToken> {
+  return newOpaqueToken(PARTNER_INVITE_PREFIX);
+}
+
+export function newPartnerEnrolmentToken(): Promise<NewSessionToken> {
+  return newOpaqueToken(PARTNER_ENROLMENT_PREFIX);
+}
+
+export function newPartnerHandoverToken(): Promise<NewSessionToken> {
+  return newOpaqueToken(PARTNER_HANDOVER_PREFIX);
 }
 
 /** The token of an `Authorization: Bearer gr_ps_...` header, or null for anything else (a Supabase JWT, another scheme, a malformed token, no header). Never throws, never inspects another shape of token. */

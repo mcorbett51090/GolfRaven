@@ -729,7 +729,7 @@ Each slice is one or more PRs, each independently gateable and each with an "as 
 - PA-4: **serialisation binds**: with an action transaction open, a member revoke and a **scope DELETE** issued from a second connection each **wait** (seen in `pg_locks`) and complete only after the action commits; a revoke issued while the revoker already holds the session lock makes the action wait and then see the revoke. Staff at A acting at B is `403`; a revoked member's next call is `403` on a live session; **reactivation, a membership DELETE then re-INSERT, an org-delete cascade and an `admin_user` delete then insert do not revive old sessions**; deleting the scope row refuses the next call (AT 1, authentication half).
 - PA-4c: **the OR rule and the planted GUC.** (i) With **all** existing `private_definer` policies and grants installed (the `0016:255` and `0016:341` pair included), an UPDATE of the bound user's `partner_member` row under a partner binding, `SET revoked_at = NULL, role = 'manager', invited_by = NULL` in particular, is refused or affects 0 rows. (ii) **As `edge_partner`, plant every GUC the repository uses** (the retired `app.partner.authority_touch`, `app.delete_my_data.target_user_id`, `app.offline_code.target_device_id`, the sign-in proof purge window and the fix-coordinate purge window), then call **each partner definer that writes `partner_session`** (the eight writers above) against **another user's session**: expect **0 rows** every time. (iii) Re-run (i) and (ii) **on every policy S1.5 adds** on `partner_member`, `partner_scope`, `partner_session`, `admin_user` or `partner_credential`; a failing planted-GUC case is a gate failure.
 - PA-4d: **the guard trigger (R4-L1), one cell per row of its table.** Each of `user_id`, `credential_id`, `token_hash`, `created_at`, each `mint_*` column, `mint_kind` and `enrolment_until` cannot be changed by a partner-bound definer on its own session (including `SET user_id = <other>, aal = 2`, which the author showed succeeds under the bare policy); `expires_at` cannot increase; `revoked_at` cannot go back to NULL; `aal` 2 and `mfa_until` are refused without a same-transaction TOTP verification and accepted with one; `pin_grant_until` is refused without a same-transaction correct PIN verification, refused above now + 60 s, and clearing is accepted; `reauth_until` is refused without a same-transaction `reauth` challenge row for this session; `otp_proof_until` is refused without a fresh GoTrue session for this user; `last_seen_at` cannot decrease.
-- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included. **(As built: S1.3 enabled A2, so the cell now reads "A3 is refused for every actor, admin included, and A2 is refused without its prerequisites": `25_partner_auth_spine.sql` PA-4b and `28_partner_pin_step_up.sql` section 5. A3 stays fail-closed until S1.4.)**
+- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included. **(As built: S1.3 enabled A2; S1.4 enabled A3. The cell now reads that A2 and A3 are refused without their prerequisites, not that the classes themselves are closed: `25_partner_auth_spine.sql` PA-4b, `28_partner_pin_step_up.sql` section 5, and `31_partner_totp_aal2.sql`.)**
 - PA-5: a facility org with a second scope row, or a non-facility scope, is refused by the trigger; a `sponsor` role in a facility org, or `staff` in an operator org, is refused.
 - PA-6: every view and table in 5.5 answers "denied" to `authenticated` for every actor, including `staff@X` with a valid JWT; `api.offer` and `api.my_offers()` return only live offers with NULL budget and eligibility columns **to a scoped member too**; a draft offer is invisible to a scoped member through every PostgREST path.
 - PA-7: the same signed challenge presented to 12 concurrent mints succeeds once (primary-key refusal); an expired, wrong-purpose, wrong-binding or tampered-HMAC challenge is refused; the HMAC encoding is pinned by a vector computed outside the database (as 0045's derivation is); `session/options` called 10,000 times leaves the `partner_auth_challenge` row count unchanged.
@@ -1812,3 +1812,379 @@ Gate counts, round 2:
 - DB harness, both modes: 41 files / 4164 pgTAP, Deno 349 passed / 0 failed.
 - gitleaks clean.
 - Mutants: 21 of 22 valid killed; 1 equivalent survivor.
+
+## 21. As built: S1.4
+
+### 21.1 What was built
+
+The partner (staff) **operator/admin TOTP factor**: `aal` 2, the five-minute MFA window, and class **A3** enabled.
+
+- **migration `0053_partner_totp_aal2.sql`** (all `CREATE` plus `CREATE OR REPLACE` of `partner_authorize`, `partner_session_lock_for_partner`, and the otp-proof / reauth / `GET pin` wrappers reclassed to `A0_ENROL`; 0001–0052 untouched):
+  - **`private.hotp`** (RFC 4226 over `public.hmac`, IMMUTABLE) and **`private.partner_totp_seed_derive`** (Vault secret `partner_totp_key`, fixed-width label `golfraven/partner-totp/v1` ‖ 0x00 ‖ user id ‖ `int4send(seed_version)`; the 0045 / 0052 derive shape). The seed is **derived, never stored**.
+  - **`app.partner_totp`**: one row per person (`user_id` PK), `seed_version`, enrolment / confirm state, `last_step` (replay), lockout counters. FORCE RLS; every privilege revoked from PUBLIC, `anon`, `authenticated` and `service_role`; **no Edge or client grant**. Written only by definers owned by **`partner_totp_verifier`** (R5-L1: the only role that may write `aal` / `mfa_until`).
+  - **Verifier-owned cores**: `partner_totp_attempt` / `verify_apply` / `enrol_apply` / `confirm_apply` / `mfa_clear` / `reset_apply`. Every counter outcome is a **returned status**, never a RAISE (0020). **`verify_apply` is the only code that sets `aal = 2` and `mfa_until = now + 5 min`.**
+  - **`partner_authorize`**: classes **`A0_MFA`** (always reachable at `aal` 1 so an operator/admin can step up) and **`A0_ENROL`** (reachable at `aal` 1 **only while** the person has no confirmed TOTP — PA-20 / PA-28); **A3 enabled** (`aal` 2 and `mfa_until > now()`); A1 / A2 accept A3 as the substitute for a PIN-less elevated member (6.3).
+  - **`_for_partner` family**: `totp` enrol / confirm / verify / reset; `partner_admin_enrolment_issue_for_partner` (A3); lock clears `mfa_until` through `partner_totp_mfa_clear`; otp-proof, reauth and `GET pin` reclassed to `A0_ENROL`.
+  - **Admin bootstrap (M4):** `private.partner_admin_bootstrap_token` (EXECUTE for nobody: ops SQL session as owner after inserting `admin_user`) and the A3 admin-issue wrapper.
+  - **`otp_proof` spend on TOTP enrol/confirm** (19.5 / MEDIUM-1 shape): each wrapper clears `otp_proof_until` in the same transaction on the `ok` outcome only.
+- **Edge**, `_shared/partner/`: **`totp-contract.ts`** (HOTP-SHA-1, base32 seed, otpauth URI; Web Crypto only); `ports.ts`, `session-shape.ts` and `session-handler.ts` carry the three routes. The Edge builds the otpauth URI from the seed bytea + params the database returns once; it never sees the Vault key.
+- **Routes** on `partner-session` (all POST; a dead session is the one 401 before any work):
+
+| Route | Class | Body | Answers |
+|---|---|---|---|
+| `POST totp/enrol` | A0_ENROL | `{}` | 200 `{ seed` (unpadded base32), `seedVersion`, `otpauthUrl`, `issuer`, `period`, `digits`, `algo` `}`; 409 `totp_already_confirmed`; 403 without enrolment window or email proof; 503 when Vault key missing |
+| `POST totp/confirm` | A0_ENROL | `{ code }` (exactly 6 digits) | 200 `{ confirmed: true }`; 403 `totp_wrong` / `totp_locked` (+ `Retry-After`); 409 `totp_not_set` / `totp_already_confirmed` / `totp_wrong_session` |
+| `POST step-up/totp` | A0_MFA | `{ code }` (exactly 6 digits) | 200 `{ mfaUntil, aal: 2 }`; 403 `totp_wrong` / `totp_locked`; 429 `totp_backoff`; 409 `totp_not_set` / `totp_unconfirmed` |
+
+  Every body is length-and-encoding only; unknown keys are 400 before any database work. Refusals the database returns **commit** (failure counters and lockout persist).
+- **pgTAP** `supabase/tests/matrix/31_partner_totp_aal2.sql` (plan 84): PA-20, PA-24, PA-28 against an independent seed / HOTP oracle.
+
+### 21.2 Brief item, fix, test
+
+| ID | Fix | Test |
+|---|---|---|
+| **PA-20** (HOTP, aal, A3) | SQL `private.hotp` = RFC 4226; `verify_apply` sets aal 2 + `mfa_until`; A0_MFA always / A0_ENROL while unconfirmed; A3 needs aal2 + fresh MFA; PIN-less A1/A2 substitution | matrix 31 (RFC / independent oracle, replay, ±1 step, lockout as status, aal 1 refusals, A3 cells); unit `partner-totp-vectors.test.ts` (RFC 6238 Appendix B SHA-1 → 6-digit truncation) |
+| **PA-24** (enrol / confirm / reset) | enrol refused once confirmed; first enrol needs enrolment or OTP proof; unconfirmed re-enrol bumps seed; confirm same session only; reset admin-only lite | matrix 31; unit `partner-totp-handler.test.ts` (enrol body, already_confirmed 409, confirm session statuses) |
+| **PA-28** (aal 1 enrol window) | A0_ENROL at aal 1 only with no confirmed TOTP; after confirm the same calls refuse at aal 1 | matrix 31 |
+| **HOTP RFC vector** | TypeScript `hotpSha1` matches node:crypto reference and the six Appendix B counters | `partner-totp-vectors.test.ts` |
+| **Lock clears `mfa_until`** | `partner_session_lock_for_partner` calls `partner_totp_mfa_clear` (verifier-owned) | matrix 31 (and the migration grants assertion) |
+| **`otp_proof` spend on enrol/confirm** | wrappers clear `otp_proof_until` on `ok` only (same transaction) | matrix 31 |
+| **Edge routes** | strict bodies, status→HTTP map, COMMIT on every status, otpauth assembly, Origin refusal | `partner-totp-handler.test.ts` |
+
+### 21.3 Departures from sections 4 to 6, and why
+
+- **D1. TOTP reset reach is admin-only lite (intentional).** Section 6.4's full higher-role reach rule (which admin may reset which operator/admin, and alerts) is **S1.5**. This slice's `partner_totp_reset_for_partner` is class A3, **admin-only**, target must be a different operator or admin; sessions of the target are revoked. The Edge **port** exists; no public `members/{id}/totp-reset` route is wired on `partner-session` yet (21.4).
+- **D2. The Edge assembles otpauth; the database returns seed + params.** Section 6.4's QR is a client concern. The migration returns `seed` bytea once plus issuer / period / digits / algo; `totp-contract.ts` builds the URI. No departure of substance.
+- **No other intentional departures** from §4.1 (aal gates / the aal 1 enrol exception), §5.1 (`partner_totp` derived seed) or §6.3–6.4 (HOTP, confirm-in-enrolling-session, A3, admin bootstrap) for what this slice built.
+
+### 21.4 Seams left for later slices
+
+- **S1.5, full reach / reset alerts.** Replace the admin-lite reset with the design's higher-role reach; alert on reset (and related membership events).
+- **PA-29, last-membership TOTP delete.** Revoking the last active membership of a user in `admin_user` must delete their PIN but **not** their TOTP; for a non-admin both go. Not built here.
+- **Edge public `members/{id}/totp-reset` route.** The database wrapper and the session port exist; the handler has no public path yet.
+- **PWA TOTP screens (S7).** Enrol QR, confirm, and step-up prompt; `apps/partners` still shows aal below required on the home and keeps screens closed — no TOTP UI in S7a.
+- **Fixture regen** if check / allow-list snapshots need a fresh catalog pass after merge (same pattern as 0050 / 0052).
+- **Operator steps at deploy:** provision Vault secret `partner_totp_key` (at least 32 random bytes; without it every TOTP route answers 503) and keep it in the secrets backup; first admin via `partner_admin_bootstrap_token` after `admin_user` insert.
+
+### 21.5 Verification run for this slice
+
+**Honest limit:** the full DB harness (`tools/db/test.sh`, both modes) and matrix 31 were **not** run end-to-end in this documentation pass. Matrix 31 (`plan(84)`) and migration 0053 are on the branch; do not treat pgTAP counts as observed here.
+
+What **did** pass in this environment (Node 24, vitest against the supabase unit config):
+
+| Suite | Result |
+|---|---|
+| `partner-totp-handler.test.ts` | pass (with `partner-totp-vectors`) |
+| `partner-totp-vectors.test.ts` | pass (RFC 6238 Appendix B SHA-1 vectors + otpauth assembly) |
+| **Combined** | **2 files, 22 tests, all pass** |
+
+A later harness / Deno integration run should record file and test counts here the way 19.7 and 18.7 do; until then only the unit figures above are claimed.
+
+## 22. As built: S1.5 (database half)
+
+### 22.1 What was built
+
+**Migration `0054_partner_invites_enrolment.sql`** and **matrix `32_partner_invites_enrolment.sql`** (plan 483). 0001-0053 are untouched. The Edge handlers (`partner-invites`, `partner-members`, `enrolments/*`, `credentials`) and the PWA are **not** part of this slice's database half; the seams are in 22.4.
+
+- **Register challenge (5.1).** `partner_challenge_core` / `partner_challenge_verify` gain an 8-argument overload (`ref_kind` 1 byte, `ref_id` 16 bytes, `accepted_at_us` `int8send`, for purpose 2; refs refused for any other purpose). The 5-argument signatures are untouched. The only producer of a register challenge is `partner_challenge_issue_register` (EXECUTE for `partner_session_issuer` alone), called inside the accept definers after every check passed.
+- **Reach rule (6.5).** `partner_reach_covers(actor, target)` is conditions (1) to (5) exactly; `partner_reach_covers_org(actor, target, org)` is the same rule for one membership (the member revoke). Neither is executable by any edge role. Registered policies call them: `pst_revoke_partner_member` (the toucher's `UPDATE revoked_at` ONLY, keyed on the binding and the per-membership rule), `ppv_*_partner_pin_reach` (PIN reset), `pd_*_partner_enrolment_token_recover`, `pd_read_partner_credential_bound`.
+- **Minter lane** (`edge_partner_minter`, unbound; owned by `partner_session_issuer`): `partner_invite_email_for_token`, `partner_invite_accept`, `partner_enrolment_token_email_for_token`, `partner_enrolment_token_accept`, `partner_credential_register_first`. Every attempt / mismatch outcome is a **status** (PA-14); the order is 6.1's. `register_first` makes the R4-L2 checks from raw bytes (the attestation object is parsed in SQL; `partner_cose_parse` parses the key), refuses an active credential and, for an invite, any other-org membership, records one registration per acceptance, mints the first session (`mint_kind register`, no signature, `enrolment_until` now + 15 min) and evicts beyond three live sessions with `partner_sessions_evict_oldest` (a REVOKE).
+- **Partner lane** (`edge_partner`): invite create / list / revoke / branch-E accept; member revoke / recover; PIN reset; org revoke-all (with "every credential created after T"); credential options / register (second) / list / revoke; and `partner_totp_reset_for_partner` under the full reach rule.
+- **Last membership (PA-29).** An `AFTER UPDATE OF revoked_at` / `AFTER DELETE` trigger deletes the PIN and, unless the person is an admin, the TOTP. The rule is also in the delete policies, derived from data (no binding, no setting).
+- **Purges (9).** Six `purge_partner_*` definers, the 0050 shape (`= ANY (ARRAY(SELECT key ... LIMIT 5000))`), each floor repeated in a policy closed under a partner binding, EXECUTE for `edge_system`.
+- **Immutability guards.** `BEFORE UPDATE` triggers on `partner_invite` and `partner_enrolment_token` (an acceptance, a consumption and a revocation are final; the token and expiry never move; attempts never fall; one registration per acceptance). Permissive policies are OR-ed, and an UPDATE passes when the OLD row matches any policy's USING and the NEW row any policy's WITH CHECK; the matrix proved a policy-only design let an accepted invite be rewritten.
+
+### 22.2 Departures from sections 4 to 6, and why
+
+- **The accept definers are owned by `partner_session_issuer`, not `private_definer`.** Matrix 25 M1 (a S1.1a gate finding) says `private_definer` sees no invite without a binding, and an unbound minter transaction has no binding. Owning them as the issuer (like the 0048 mint and the 0049 minter-lane definers) keeps M1 and puts the writes under role-specific `psi_*` policies. The issuer therefore gained registered privileges on the invite, token and membership tables (columns only), the COSE parser, the register challenge verifier / issuer, the audit writer and the eviction (all in `partner_owner_privilege` and its fixture). `auth` stays unreachable for it: `partner_auth_identity` (a `private_definer` helper) reads the email, the confirmed flag, the GoTrue session's freshness and the admin flag; `private_definer` gained `SELECT (email_confirmed_at)` on `auth.users`.
+- **Membership activation is the issuer's, and only against an accepted invite.** `psi_insert_partner_member` / `psi_update_partner_member` admit a row only when an invite accepted by that user for that org and role (same inviter) within the last two minutes exists. A bound `private_definer` still cannot touch a membership row (PA-4c (i)); matrix 25's "no lock policy on `partner_member`" cell now names these two policies as the only exceptions.
+- **The member revoke is the toucher's** (`UPDATE (revoked_at)` ONLY, so a revoke cannot move a role or an org), keyed on the binding and the reach rule.
+- **Adding a second credential uses the reauth-purpose challenge** (purpose 3, bound to the bound session id), because 5.1's register challenge carries `ref_kind` 1 or 2 only. A challenge issued for one session cannot be used from another.
+- **`partner_pin_reset_apply`** (owned by `partner_pin_verifier`, policies keyed on the reach rule) also resets the PIN of the person's own row on a branch-E reactivation.
+- **Two S1.4 defects were fixed here** (found by the matrix): `partner_admin_bootstrap_token` and `partner_admin_enrolment_issue_for_partner` could never insert (`INSERT ... RETURNING` met no SELECT policy for the new row, and `expires_at = clock_timestamp() + 24 h` violated `expires_at <= created_at + 24 h` against the transaction-start `created_at`). Same signatures, owners and grants; a SELECT policy and explicit `created_at` replace them.
+- **Matrix 30 / 20 / 25 / 26 / 27 / 28 / 31** cells that pinned exact lists (the purge set, the `edge_partner` and minter EXECUTE sets, the policies on `partner_pin` and the failure counter, the issuer's function privileges, the `A0` wrappers, the reset message) were updated for the new objects; none was weakened.
+
+### 22.3 Not built here, honestly
+
+- **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
+- **Eviction beyond three live sessions runs at `register_first` only.** The sign-in mint (0048) still does not evict; that is the 0048 seam, unchanged.
+- **The out-of-band notice of a credential add** (open item U1) and **the operator alert on a TOTP reset** are `audit_log` rows only.
+- The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
+
+### 22.4 Seams left for the Edge half
+
+`partner-invites`: `POST invites` (`partner_invite_create_for_partner`), `GET invites`, `DELETE invites/{id}`, `POST invites/accept/start` (`partner_invite_email_for_token`), `accept/verify` (`partner_invite_accept`, then close the GoTrue session AFTER it returns), `POST invites/accept` (branch E). `partner-members`: `members/{id}/revoke` (`partner_member_revoke_for_partner(target, org)`), `recover`, `pin-reset`, `totp-reset`, `orgs/{id}/sessions/revoke-all`, `credentials` (options / register / list / revoke). `enrolments/accept/*` (`partner_enrolment_token_*`), `POST credentials` in enrolment mode (`partner_credential_register_first`; the Edge passes the challenge from `accept/verify`, the attestation object and client data as raw bytes, the credential id and the COSE key). `retention-purge` gains six steps. Every status above is committed by the handler.
+
+## 23. As built: S1.5 (Edge half)
+
+### 23.1 What was built
+
+The two Edge Functions and the shared modules behind them; **no migration** (0054 is untouched). `privileged.ts` stays the one database site.
+
+- **`partner-invites`** (`_shared/partner/invites-handler.ts`): `POST invites`, `GET invites`, `DELETE invites/{id}`, `POST invites/accept/start`, `.../accept/verify`, `POST invites/accept` (branch E), `POST enrolments/accept/start`, `.../accept/verify`, and `POST credentials` in enrolment mode (the first credential and the first session).
+- **`partner-members`** (`_shared/partner/members-handler.ts`): `POST members/{id}/revoke | recover | pin-reset | totp-reset`, `POST orgs/{id}/sessions/revoke-all`, `POST admin/enrolments`, `GET | POST credentials`, `POST credentials/options`, `DELETE credentials/{id}`. Every route is a session route.
+- **Shared**: `handler-kit.ts` (route table with `{id}` uuid segments, the one port-error map, the registration-refusal map), `invites-shape.ts`, `members-shape.ts`, `registration-shape.ts` (strict bodies, canonical base64url, unknown keys refused), `token.ts` (`gr_inv_` and `gr_enr_` tokens beside `gr_ps_`), `ports.ts` (`PartnerInviteMintTx`, `PartnerInvitesTx`, `PartnerMembersTx`, `RegistrationVerifier`, `PartnerInvalidArgument`), `webauthn-port.ts` (`registrationVerifier` over the S0 wrapper's `verifyRegistration` / `registrationOptions`).
+- **`privileged.ts`**: every new method is a `select private.*(...)` in 0054's argument order. The minter transaction and the bound transaction carry more methods, not more kinds: `withPartnerMint` and `withPartnerSession` remain the only callers of their kinds (the `privileged-mint-scope` allow-list is unchanged). `retentionPurgeSteps` gains the six `purge_partner_*` steps.
+- `supabase/config.toml` (`verify_jwt = false` for both), the three CI function lists, and the unit suites that enumerate partner functions.
+
+### 23.2 Decisions and departures
+
+- **The invite OTP may create the account** (`shouldCreateUser: true`, `partnerInviteEmailOtp`). 6.1 branch N is for a person with no account, and `partner_auth_identity` needs an `auth.users` row, so the plain proof sender (`shouldCreateUser: false`) cannot reach them. The address sent to is always the invite row's, never a client's, so a token holder cannot make an account for an address of their choosing. Enrolment tokens use `partnerEmailOtp` (the person exists).
+- **Pre-authentication buckets are `edge_system` buckets** (design 8), through a new `PartnerDb.hitSystemRateLimit` over the existing `hitSystemRateLimit`: 3 sends and 10 code attempts per token an hour, and 3 invites a day per invitee address (a hash). A bucket is hit only for a token that EXISTS, so made-up tokens cannot grow the table. A wrong emailed code never reaches the database, so the 10-attempt counter in 0054 does not see it; the verify bucket is what bounds code guessing beyond GoTrue's own limits.
+- **`accept/verify` answers one 403** for an unknown or dead token, a wrong code, a limited token, a GoTrue session without an id and every refusal of the definer; only `existing_member_sign_in` and `recover_required` (reachable by the owner of the mailbox alone) are 409. `accept/start` answers one constant body, including when the mailer fails.
+- **`POST credentials` lives in both functions**: enrolment mode (no bearer, minter lane) in `partner-invites`, second credential (session, A2 + reauth) in `partner-members`.
+- **The relying party for a second credential is read through the minter** (`withMint(rpConfig)`), because `edge_partner` cannot execute `partner_rp_config_read`; the ceremony is verified with no session transaction open, and only then does the A2 definer run, so its 30-second PIN grant is not spent waiting on the wrapper.
+- **`PartnerInvalidArgument`** (22023) maps to 422: an action on oneself or a time in the future is not a 500.
+- **`credentials/options` reads the person** (`credentialSubject`: the session's user id for the WebAuthn user handle, and the address for the authenticator's label), because the definer returns neither.
+
+### 23.3 Not built, honestly
+
+- `PATCH credentials/{id}` (the display note): 0054 has no definer for it.
+- The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
+- Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
+- The PWA screens and `apps/partners` client; the out-of-band notice of a credential add (U1) is still an `audit_log` row.
+- `gr_enr_` is not on `getActorFromRequest`'s refusal list (it is never a bearer); add it if a bearer use ever appears.
+
+## 26. As built: S3 (attest; the offers-redeem half is a documented seam)
+
+Numbering: **migration `0056`, matrix `34`, this section 26.** S2b (the parallel slice, branch `cursor/p5-s2b-course-qr-staff-8ffd`) claims `0055`, matrix `33` and section 25, and S7 claims section 24; this slice takes the next free number of each so the branches merge without a rename. Nothing from 0001-0054 is edited.
+
+### 26.1 What was built
+
+**Migration `0056_partner_attest_redeem.sql`** (database half) and **matrix `34_partner_attest_redeem.sql`** (112 cells; both harness modes), then the Edge function **`partner-attest`**.
+
+- **`private.partner_attest_for_partner(facility, kind, token)`**, class **A1**, roles staff and manager. The ONLINE path. The token is the player's own `checkin_token.jti` (the existing `checkin-token` endpoint issues it: server-graded, 15 minutes, challenge-bound). **The player is the owner of the token and is never named by the caller.** One attestation per token (an advisory lock on the jti, then the 0017 tombstone), a returned `replayed` for the second. `kind` is `presence` or `marker_purchase`.
+- **`private.partner_offline_attest_for_partner(facility, kind, handle, code)`**, class **A1**. The money doc's **verify-and-record definer** (step 3, X9): the handle and the six typed digits go in; every candidate (the player's **5 most recently seen devices of the last 90 days**, steps -1, 0, +1: 15 codes a guess) is derived with `private.offline_seed_derive` (executable by nobody), computed with `private.hotp` (SHA-256, 600 s, 6 digits) and compared as a **double HMAC under a per-call random key**, **every candidate evaluated, no early exit**; the match is recorded with 0045's atomic `INSERT ... ON CONFLICT DO NOTHING` on `app.offline_code_step`. **It returns only `(o_status, o_attestation_id, o_held)`: never a seed, an expected code, a device or a step** (a matrix cell pins the result type; a unit test and the Deno suite scan the response). 0045's recorder stays owner-only (0047), and 0056 asserts at apply time that no edge role can execute it.
+- **Failure counters (money doc step 2), written before a verdict can leak and committed**: 5 per staff member an hour, 10 per target player an hour and 30 a day across all staff (`rate_limit_bucket`, under advisory locks taken staff-then-target, so parallel guesses are counted, not raced). Every failed verification counts: malformed code or handle, unknown handle, wrong code, a replayed step. They are **statuses, never a RAISE** (the 0020 lesson); `supabase/tests/integration/partner-attest.deno.test.ts` reads them back from a second connection after a real commit.
+- **Self-attest (AT(16) part one)**: `22023 self_attestation_refused`, per **account** (6.5), on both paths; the Edge maps it to 422. The `attestation` CHECK and 0045's recorder compare accounts too.
+- **Same-device rule (plan A2-21)**: if a device of the staff member shares an install link, an App Attest key id or a DeviceCheck token hash with the player's device, the attest **completes**, the purchase and credit go to `held_review` (no co-signal window), a `same_device_attest` `fraud_signal` opens for the player, and the staff member's `staff_activity.anomalies` records it.
+- **Cold-start cap**: a member whose earliest active membership is under 7 days old may write 30 attestations in any rolling 24 hours (`cold_start_cap`, a status, 429).
+- **`partner_shift_log_for_partner(facility)`** (A0, staff or manager) and **`partner_staff_activity_for_partner(facility, days)`** (A0, manager or operator; **staff cannot**, plan line 843). These replace `api.staff_shift_log` and `api.staff_activity` now that D12 (0047) revoked the PostgREST path. The shift log returns the old view's rows (the facility's, newest first, 90 days) and **a subset of its columns** (id, facility, time, kind, player handle snapshot, staff handle): the keyed player pseudonym the old view's `SELECT *` carried is not returned.
+- **Writes** (`private.partner_attest_write`, EXECUTE for nobody but its owner): `app.attestation` (both pseudonyms through `private.account_pseudonyms`), `attestation_shift_log`, `staff_activity` (upsert, the facility-local day), and for `marker_purchase` one `purchase_evidence` (`method staff_scan`, `offline` true on the offline path) plus one `marker_credit` per eligible trail (accepted programme row on a `pilot` or `live` `any_purchase` trail). **A purchase is `pending` with `cosignal.awaiting = {from, to, until}`** exactly as the S2a seam paragraph says (online: now -10 min to now +20 min; offline: the code's step start -10 min to +20 min; `until` 7 days), so `marker_cosignal_attach_for_actor` completes it unchanged. A staff scan writes no `play` (AT(4) holds). The App Store review account is never written for (the writer calls `private.is_demo_account`, as 0051 requires of every minter).
+- **Binding-keyed policies (S1.1a LOW-3)**: 22 `private_definer` policies, all keyed on `private.partner_binding_kind() = 'partner'` plus `private.partner_bound_staff_at(facility)` / `_manager_at` / `_any()` (new predicates in the 14(c) reader list, the partner twins of 0045's `offline_code_bound_staff()`); **none reads a GUC**. They replace the windows 0047 8c closed: `offline_code_step` (insert, select, prune), and add the rows the writer needs (attestation, shift log, staff_activity, profile, checkin_token, device, facility, trail programme, staff_scan purchase and credit, fraud signal, the attestation nonce tombstone). Each is in `definer_policy_allowlist` and `supabase/tests/fixtures/definer_policy_exprs.txt`. A lesson recorded: `INSERT ... ON CONFLICT DO NOTHING` is checked against the SELECT policies too (the new row must be one the role may see), hence `pd_partner_offline_step_select`.
+
+**Edge** (`supabase/functions/partner-attest/`, `_shared/partner/attest-handler.ts`, `attest-shape.ts`, `ports.ts` `PartnerAttestTx` / `PartnerDb.withAttest`, `privileged.ts` `buildPartnerAttestTx`). Routes (all session routes, `verify_jwt = false`):
+
+| Route | Class | Body or query | Answers |
+|---|---|---|---|
+| `POST attest` | A1 | `{facilityId, kind, token}` | 201 `{attestationId, held}`; 409 `replayed`; 422 `token_invalid` (unknown, expired, another facility, the review account: one answer), `no_programme`, 422 for a self-attest; 429 `cold_start_cap`; 403 no scope or no PIN grant |
+| `POST attest/offline` | A1 | `{facilityId, kind, handle, code}` | 201; 409 `replayed` (AT(13)); 422 `verification_failed` (one answer for every way the code can be wrong); 429 after the counters; the same refusals |
+| `GET shift-log` | A0 | `?facilityId=` | 200 `{entries}` |
+| `GET staff-activity` | A0 | `?facilityId=&days=` (1-90, default 7) | 200 `{activity}` |
+
+The order is the members handler's (Origin, preflight, route and method, bearer, strict body or query, the per-member bucket `partner-attest:member` at 240 an hour `[inference]`, then the work). Every returned status commits; a 42501 and a 22023 throw and roll back. Entrypoint enumerations updated: `config.toml`, the three CI function lists, `partner-modules.test.ts`, `review-account-gate.test.ts`, the Deno and partners fakes.
+
+### 26.2 Decisions and departures, and why
+
+- **The online "token" is `checkin_token.jti`.** The build plan (not in this repository) names a staff-scanned player token without a definition here, and no player endpoint issues one. Reusing the existing check-in token costs the player lane nothing, and it is already server-graded and challenge-bound. A shoulder-surfed jti lets a staff member attest a player only for a facility the token allows; it cannot be used to read or spend anything of the player's. If the plan's attest token is a different object, `partner_attest_for_partner`'s token lookup is the one seam to change.
+- **AT numbering.** The AT(n) list is the build plan's and is not in this repository. The mapping used here, so the cells can be re-pointed: AT(1) staff at X cannot attest at Y (and an operator cannot); AT(2) the online token path; AT(12) the offline code verified in the database, window and secrecy; AT(13) a replayed code step is 409; AT(15) the same-device rule and the cold-start cap; AT(16) part one self-attest. Each cell's message carries its AT number.
+- **No `app.evidence` `staff_presence` row is written.** The money doc says "write the evidence"; the scoring union that would read a staff-created evidence row for a player's play is not wired to attestations, and an evidence row needs a matcher `input_hash`, a `local_date` and a course. The durable record is the `attestation` row (already exported to its subject, 0022) plus, for a marker purchase, the pending purchase. `cosignal_ok` stays `false` until a player fix arrives; nothing sets it yet.
+- **The cold-start numbers (7 days, 30 a day) and the 240 an hour bucket are `[inference]`**: the plan's 8.3 is not in the repository. They are one literal each (`partner_attest_write`; `ATTEST_PER_MEMBER_PER_HOUR`).
+- **Handles only on the offline path.** The staff member types the player's handle (money doc step 1); the database resolves it. An unknown handle, a review-account handle and a player with no recent device are the same status as a wrong code, and the handle lookup cannot be used to enumerate (the staff counter counts it).
+- **The staff counter is read under a lock and written on failure** rather than reserved and released (the 0035 pair): the lock serialises one staff member's verifications, which is what makes "5 an hour" exact, and the definer knows the outcome itself, so no release is needed.
+
+### 26.3 Not built, honestly
+
+- **`partner-offers-redeem` and the offer-redemption attestation kind.** Redeeming an `offer_code` moves `offer.budget_reserved` into `budget_used` (0027's header: "a redeemed code's reservation was consumed into budget_used"), which is the settlement P5.1b owns, and it trips the 0017 play guards (`pd_offer_code_guard_read`, a GUC window closed under a partner binding by 0047 8c). It needs its own binding-keyed guard policies and the settlement accounting; shipping a redeem that skips either would be the half-built route this slice was told not to leave. `kind = offer_redemption` is therefore refused (22023) by both attest definers, and the offline-code redemption rules (needs the step-up PIN and the profile-card name check; `fraud_signal` / `unconfirmed` mark after 24 hours with no co-signal) are the same slice's. **Seam**: a `partner_offers_redeem_for_partner(facility, offer_code, ...)` A1 definer in the next migration, calling `partner_attest_write` with kind `offer_redemption` (the writer already takes the kind; the 0056 policy CHECK on `attestation.kind` must widen), plus `pd_*` guard-read policies keyed on the binding.
+- **Special-marker hand-over** (`special_marker_handover`): S5.
+- **The `staff_presence` evidence projection and `cosignal_ok`** (26.2).
+- **A two-connection script in the style of `tools/db/test-partner-serialisation.sh`** for the attest race: the 4-way parallel verification is proved in the Deno suite instead.
+- **No mutation pass was run for this slice.**
+- **Merge notes**: `0055` / matrix `33` / section 25 belong to S2b; both slices edit `privileged.ts`, `ports.ts`, `ci.yml`, the entrypoint enumerations and the `partner_kind_readers.txt` / `definer_policy_exprs.txt` fixtures, so the merge is a textual (not semantic) conflict in those lists. The lists in matrices 10, 25 and 28 pin exact `edge_partner` and class-A0 sets and will need both slices' names.
+
+### 26.4 Verification run for this slice
+
+Run in this environment (PostgreSQL 16, Deno 2.5.2 from the CI-pinned release):
+
+- `HARNESS_MODE=restricted tools/db/test.sh`: pgTAP **Files=54, Tests=5177, PASS** (baseline before this slice: 53 / 5065); the Deno integration suite **382 passed, 0 failed** (six of them are `partner-attest.deno.test.ts`: the online and offline paths through the real handler and `privileged.ts`, the failure counters read from a second connection after a real commit, four staff verifying one code at once recording it once); the replay, money-path, sign-in-proof, partner-serialisation and review-account checks pass. Deno 2.5.2 was installed from the CI-pinned release for this run.
+- `HARNESS_MODE=superuser tools/db/test.sh`, run on the final tree: pgTAP **Files=54, Tests=5177, PASS**, Deno **382 passed, 0 failed**, inventory OK, lint clean.
+- `tools/db/verify-function-inventory.mjs`: OK (checks 1-15, including check 14 clauses (a) to (e) and the 14 (a) behavioural-cell rule for the four new functions); `service-role-lint` clean; `tools/db/check-migrations-immutable.sh --base edc5020`: all 54 existing migrations byte-identical.
+- vitest (`supabase/tests/unit`): the new `partner-attest-handler.test.ts` (shapes, route order, the status map, commit-versus-rollback, no seed or code in any response) and the updated enumerations pass; the files that fail in this environment fail for reasons outside this slice (`mint-siwa-client-secret` and `rules-vendor-freshness` need a build or network; `review-account-minters` failed on a first draft of the writer and is fixed here by the demo-account refusal). `apps/partners` typechecks (the fake `PartnerDb` gained `withAttest`).
+
+## 27. As built: S4 (held-review queue and resolve; receipts upload is a documented seam)
+
+Numbering: **migration `0057`, matrix `35`, this section 27.** S2b claims `0055` / matrix `33` / section 25; S3 claims `0056` / matrix `34` / section 26; S7 claims section 24. This slice takes the next free number of each so the branches merge without a rename. Nothing from 0001-0056 is edited.
+
+### 27.1 What was built
+
+**Migration `0057_partner_review_queue.sql`** (database half) and **matrix `35_partner_review_queue.sql`** (44 cells; both harness modes), then the Edge function **`partner-review`**.
+
+- **`private.partner_resolve_held_offer_code_for_partner(code_id, approve)`** and **`private.partner_resolve_held_entitlement_for_partner(entitlement_id, approve)`**, class **A3**, **ADMIN only** (an operator with a fresh TOTP window still cannot). They wrap `app.resolve_held_*` (0027, E20) so the Edge never reaches those functions: `edge_partner` (and every other edge role) still has no EXECUTE on them. The bound admin is `p_resolved_by`. Outcomes are **status rows** (`ok | not_found | not_held | budget_short` for offer codes; no `budget_short` for entitlements), so an expected refusal commits; only a missing authority (`42501`) or a malformed argument (`22023`) raises. Apply helpers (`partner_resolve_held_*_apply`, EXECUTE for nobody but their owner) translate the SQLSTATEs of `resolve_held_*` (`P0002`, `55000`, `23514`) so the `_for_partner` bodies stay free of `EXCEPTION` blocks (check 14).
+- **`private.partner_held_queue_for_partner()`**, class **A0**, ADMIN only. The open `held_review` offer codes and entitlements plus open `review_item` rows, with an SLA-breach flag (held / open longer than **48 hours**; `[inference]`: the plan's §9.2 SLA number is not in the repository). No plaintext code, no DeviceCheck hash, no ledger row. Newest-breach-first, capped at 500.
+- **`private.partner_review_sla_for_partner()`**, class **A0**, ADMIN only. Counts of open held rewards and open review items, and of those past the SLA (the portal / ops alert surface).
+- **Binding-keyed policies (S1.1a LOW-3)**: `private.partner_bound_admin()` (EXECUTE for nobody but the owner; in the 14(c) reader list) and **11** `private_definer` policies on `offer_code`, `entitlement`, `offer`, `device_reward_ledger`, `review_item` and `profile`, all keyed on that predicate — **none reads a GUC**. Each is in `definer_policy_allowlist` and `supabase/tests/fixtures/definer_policy_exprs.txt`. `GRANT EXECUTE` on `app.resolve_held_*` to `private_definer` only; apply-time asserts no edge role can execute them.
+
+**Edge** (`supabase/functions/partner-review/`, `_shared/partner/review-handler.ts`, `review-shape.ts`, `ports.ts` `PartnerReviewTx` / `PartnerDb.withReview`, `privileged.ts` `buildPartnerReviewTx`). Routes (all session routes, `verify_jwt = false`):
+
+| Route | Class | Body | Answers |
+|---|---|---|---|
+| `GET queue` | A0 | (none) | 200 `{items}`; 403 not admin |
+| `GET sla` | A0 | (none) | 200 counts + `slaHours: 48`; 403 not admin |
+| `POST resolve/offer-code` | A3 | `{id, approve}` | 200 `{state}`; 404 `not_found`; 409 `not_held`; 422 `budget_short`; 403 no A3 / not admin |
+| `POST resolve/entitlement` | A3 | `{id, approve}` | 200 `{state}`; 404 / 409 as above |
+
+The order is the members handler's (Origin, preflight, route and method, bearer, strict body on POST, the per-member bucket `partner-review:member` at 120 an hour `[inference]`, then the work). Entrypoint enumerations updated: `config.toml`, the three CI function lists, `partner-modules.test.ts`, `review-account-gate.test.ts`, the Deno and partners fakes. Matrices 10, 25 and 28 pin the four new `edge_partner` names and the two new class-A0 names.
+
+### 27.2 Decisions and departures, and why
+
+- **A3 wrappers around `app.resolve_held_*`, not a rewrite.** 0027's state machine, budget reservation, audit and ledger writes stay; S4 only makes them reachable under a partner binding with an admin and a fresh TOTP window (E20 / F7). Status translation lives in apply helpers so check 14 stays clean.
+- **Admin only, not operator.** The money doc and 0027 already require `p_resolved_by` to be an admin; the wrappers re-check `private.is_admin` after `partner_authorize` with an operator role array (the same shape as `partner_admin_enrolment_issue_for_partner`).
+- **48 h SLA is `[inference]`.** One literal in each of the queue and SLA definers; change both together if the plan's number lands.
+- **Queue GETs take no query string.** The list is global for the admin (held rewards are not facility-scoped today); facility filtering stays a portal concern until a filter is specified.
+
+### 27.3 Not built, honestly
+
+- **Player-lane `POST /v1/receipts` upload** (EXIF strip, size and type gates, perceptual hash). That path is the player's evidence intake, not the partner review queue; it needs its own Edge function and the existing `receipt_fingerprint` / purchase-evidence writers. **Seam**: a player-lane receipts function calling the existing intake definers; S4's queue already lists holds those writers create.
+- **Resolving a held PLAY** (`resolve_held_*` moves the reward row, not the play). Clearing a `fraud_signal`. The contract-reviewer staffing trigger of `roles-table.md`.
+- **Partners PWA review screens** (S7d). This slice is the Edge + database half the portal will call.
+- **No mutation pass was run for this slice.**
+- **Merge notes**: S2b edits the same enumeration files (`privileged.ts`, `ports.ts`, `ci.yml`, `partner_kind_readers.txt`, `definer_policy_exprs.txt`, matrices 10/25/28). The lists here include S3's names and S4's; merging S2b is a textual (not semantic) conflict in those lists.
+
+### 27.4 Verification run for this slice
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 35's **44/44** cells; all other pgTAP matrices; partner serialisation and review-account tool checks; Deno integration **382/382** (every `PartnerDb` fake implements `withReview`; PA-13b includes the four 0057 wrappers). `definer_policy_exprs.txt` matches live `pg_get_expr` for the eleven review policies (INSERT on `review_item` uses the catalog's AND-chain form). Vitest `partner-review-handler` + `partner-attest-handler` (60) and `apps/partners` typecheck pass locally. Remaining: CI on PR #68.
+
+## 28. As built: S5 (hand-over and stock)
+
+Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055` / matrix `33` / section 25; S3–S4 claim 0056–0057 / 34–35 / 26–27. Nothing from 0001–0057 is edited.
+
+### 28.1 What was built
+
+**Migration `0058_partner_handover_stock.sql`** and **matrix `36_partner_stock_handover.sql`** (65 cells), then Edge functions **`stock-admin`** and **`partner-entitlements`**.
+
+- **Stock (A0/A1, staff or manager):** `partner_stock_read_for_partner`, `partner_stock_move_for_partner` (delivered / transfer_in / transfer_out / count_adjustment / damaged; never `redeemed` / `voucher_redeemed`), `partner_stock_availability_refresh` (owner-only). Statuses `ok | no_stock_row | short | over_cap`.
+- **Collect queue (A0):** `partner_entitlement_queue_for_partner` — redeemable of trails the facility stocks, and vouchered owed here; player by handle only.
+- **Hand-over token:** `app.partner_handover_token` (hash only, FORCE RLS, no edge grants); `partner_handover_mint_for_partner` (A1) stores SHA-256 of an Edge-generated `gr_ho_…` token for 15 minutes.
+- **Redeem (A1, AT(8)/AT(21)):** `partner_entitlement_redeem_for_partner` — `staff_scan` (check-in jti) or `hand_over_token` (hash); `offline_code` is 22023. Stock `FOR UPDATE`; `out_of_stock` changes nothing (voucher separately). Movement `redeemed` or `voucher_redeemed`; one `special_marker_handover` attestation (`token_jti` = `smh:<credential ref>` so it does not collide with the entitlement_redeem nonce). Self-redeem 22023.
+- **Voucher (A1):** `partner_entitlement_voucher_for_partner` — redeemable → vouchered at this facility.
+- **Binding-keyed policies:** 17 `private_definer` policies on stock, movement, availability, entitlement, play guard read, hand-over token, `consumed_nonce` (`entitlement_redeem`), and attestation (`special_marker_handover`). No GUC windows.
+
+**Edge**
+
+| Function | Routes |
+|---|---|
+| `stock-admin` | `GET stock`, `POST stock/move` |
+| `partner-entitlements` | `GET collect`, `POST handover/mint` (plaintext once), `POST redeem`, `POST voucher` |
+
+`out_of_stock` and `replayed` → 409; cold-start → 429; expected refusals → 422; missing scope/PIN → 403.
+
+### 28.2 Decisions and departures
+
+- **Attestation jti is `smh:` + credential ref**, not the entitlement id: the 0017 tombstone and the staff_scan `entitlement_redeem` nonce must not share a primary key, and a later redeem of a reset row must not collide.
+- **Status gates read entitlements without `FOR UPDATE` first:** `SELECT FOR UPDATE` also applies UPDATE RLS, which only opens redeemable/vouchered rows, so a re-redeem of a redeemed row would otherwise look like `not_found`.
+- **Race for the last unit** is proved twice: in matrix 36 by sequential redeems at `on_hand = 1` (CHECK + row lock), and with real concurrency by `tools/db/test-partner-stock-concurrency.sh` (run by `tools/db/test.sh`): two real `edge_gateway` sessions are parked on the contested row (seen waiting in `pg_locks`) and released together, six rounds each giving exactly one `ok` and one `out_of_stock`, `on_hand` 0, the loser's entitlement and hand-over token untouched; the same entitlement redeemed twice at once (one `ok`, one refusal, one unit); and a play-backed entitlement redeemed and COMMITTED (the deferred 0017 guard re-reads the play at a real commit through `pd_partner_handover_play_guard_read`). Removing `FOR UPDATE` from the redeem's stock read makes the script fail (the CHECK is the backstop that turns the lost race into an error rather than a negative stock).
+
+- **The hand-over token is the Edge's.** `POST handover/mint` generates 32 random bytes (`gr_ho_` + 43 base64url characters), hands the port only the SHA-256 and returns the plaintext once in the 201 body. `POST redeem` with `method: "hand_over_token"` takes the plaintext as `credential` and hashes it before the port; a bare SHA-256 or a uuid is a 400 for that method, so the hash is never a credential a client can present.
+- **Status map (Edge).** Every returned status commits. mint and redeem `ok` 201, voucher `ok` 200, stock move `ok` 200; `not_found` / `no_facility` 404; `not_redeemable`, `wrong_facility`, `token_invalid`, `wrong_player`, `no_stock_row`, `short`, `over_cap`, `token_exists` 422; `replayed` and `out_of_stock` 409 (`out_of_stock` is a state conflict that changed nothing: the caller vouchers next); `cold_start_cap` 429; 42501 403; 22023 (self-redeem, malformed) 422 and a rollback. `token_invalid` and `wrong_player` are one code on the wire (`token_invalid`), as in `partner-attest`.
+- **Per-member bucket** (`stock-admin:member`, `partner-entitlements:member`, 240 an hour each), taken in its own transaction before the request transaction opens.
+
+### 28.3 Not built, honestly
+
+- **`offline_code` redemption** and **offers-redeem** (P5.1b).
+- **Partners PWA hand-over/stock screens (S7c).**
+- **Creating a stock row** from the partner lane (catalog/ops owns rows).
+- **Paired transfer** (transfer_out here + transfer_in there are two moves).
+- Merge notes: S2b still edits the same enumeration files; lists here include S3–S5 names.
+
+### 28.4 Verification run for this slice
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 36's **65/65** cells; all other pgTAP matrices (**5286** tests PASS); partner serialisation; **partner stock concurrency** (`test-partner-stock-concurrency.sh`: six last-unit rounds, same-entitlement race, play guard at a real commit); review-account tool checks; Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest stock + entitlements handler suites (status map, hash-only hand-over token, strict shapes, bucket order). CI on PR #69 tip `b433f81`: all three checks green.
+
+## 30. As built: S6 (programme and sponsors)
+
+Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055` / matrix `33` / section 25; S3–S5 claim 0056–0058 / 34–36 / 26–28; **§29 is reserved for S7c UI.** Nothing from 0001–0058 is edited.
+
+### 30.1 What was built
+
+**Migration `0059_partner_programme_sponsors.sql`** (database half) and **matrix `37_partner_programme_sponsors.sql`** (58 cells; both harness modes when green), then Edge functions **`programme-config`**, **`offers-admin`**, and **`sponsorships-admin`**.
+
+- **`private.partner_bound_operator_at_trail(trail)`** — policy predicate (EXECUTE for nobody but the owner; in the 14(c) reader list). True when this transaction carries a partner binding whose member is an operator of the trail (or admin via `has_trail_scope`).
+- **Programme (A0/A3, operator of the trail):** `partner_trail_programme_read_for_partner`, `partner_facility_programme_list_for_partner`, `partner_trail_programme_upsert_for_partner` (`web_player_flow` true → `22023`; statuses `ok | not_found`), `partner_facility_programme_upsert_for_partner` (statuses `ok | no_trail`; never writes `pin_epoch`).
+- **Offers (A0/A3):** `partner_offers_list_for_partner` (full budget / eligibility columns, every status); `partner_offer_upsert_for_partner` (draft create/edit; `ok | not_found | not_draft | bad_funder`); `partner_offer_approve_for_partner` (**admin only**, draft → live); `partner_offer_end_for_partner` (operator of the trail or admin, live → ended).
+- **Sponsorships (A0/A3, AT(20)):** `partner_sponsorships_list_for_partner`; `partner_sponsorship_upsert_for_partner` (draft; sponsor_org must be `kind = sponsor`); `partner_sponsorship_approve_for_partner` (draft → live; when scope is `special_marker` or `both`, every `facility_programme` with `holds_special_marker` must have `special_marker_stock.on_hand >= 1` or the status is `stock_short` and nothing changes).
+- **Rollups (A0):** `partner_operator_rollup_for_partner`, `partner_sponsor_rollup_for_partner` (scope via the sponsorship's trail).
+- **Binding-keyed policies:** 14 `private_definer` policies (`pd_partner_programme_*`) on `trail_programme`, `facility_programme`, `offer`, `sponsorship`, `operator_rollup`, `sponsor_rollup`, and `special_marker_stock`. **None reads a GUC.** Existing `pd_marker_scan_*`, `pd_partner_attest_*`, `pd_partner_review_*`, and `pd_read_sponsorship` stay.
+
+| Function | Routes |
+|---|---|
+| `programme-config` | `GET programme`, `POST programme/trail`, `POST programme/facility`, `GET rollups/operator`, `GET rollups/sponsor` |
+| `offers-admin` | `GET offers`, `POST offers`, `POST offers/approve`, `POST offers/end` |
+| `sponsorships-admin` | `GET sponsorships`, `POST sponsorships`, `POST sponsorships/approve` |
+
+Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOffersAdmin`, `PartnerSponsorshipsTx` / `withSponsorships` (merged into `withPartnerSession` like `withStock`). Upsert eligibility is checked with the Edge-local AT(14) schema gate in `offer-eligibility.ts` (closed money-mode aggregate names; `packages/rules` remains the full SSOT outside Edge) **before** the database. Status map: `ok` → 200; `not_found` / `no_trail` / `not_draft` / `not_live` / `bad_funder` / `bad_sponsor` / `stock_short` / `invalid_eligibility` → 422; `42501` → 403; `22023` → 422. Per-member buckets (`programme-config:member`, `offers-admin:member`, `sponsorships-admin:member`, 240 an hour each).
+
+### 30.2 Decisions and departures, and why
+
+- **Offer approve means draft → live in one step** (no separate `approved` stop). Keeps the portal machine simple; `approved` remains a legal enum value for other writers.
+- **Admin-only offer approve** mirrors S4's held-review resolve (`partner_authorize` with an operator role array, then `is_admin` or `42501`).
+- **AT(20) is a status, not a raise** — `stock_short` commits so the Edge can map it to 422 without rolling back an unrelated write in the same request transaction.
+- **Column grants exclude `pin_epoch`** on facility_programme programme writers; the 0046 epoch rotation path stays the only partner write of that column.
+- **Edge half built** — three functions, `verify_jwt = false`, handlers pure (PA-11). Settlement remains P5.1b.
+
+### 30.3 Not built, honestly
+
+- **Settlement-export AT(17)** and **offers-redeem** — moved to **§32 (P5.1b)**; not part of the S6 tip.
+- **Rollups-refresh writer** (rows are read-only here; ops/catalog still seed them).
+- **Issuance staff gate AT(10)** (deferred; see §32.3).
+- **S7d / S7c UI** (portal screens; §29 reserved for S7c).
+- **No mutation pass** was run for this slice.
+
+### 30.4 Verification
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on tip `5782bd8`: matrix 37's **58/58** cells; all other pgTAP matrices (**5344** tests PASS across 57 files, including updated 10 / 24 / 25 / 28 inventory and grant cells); Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest programme / offers / sponsorships handler suites plus related PartnerDb fakes (**96** focused cells; broader partner handler run **268**). `definer_policy_exprs.txt` holds the fourteen `pd_partner_programme_*` policies. CI on PR #71 tip `e2b11ac`: all three checks green.
+
+## 32. As built: P5.1b (offers-redeem + settlement-export + exports-purge)
+
+Numbering: **migration `0060`, matrix `38`, this section 32.** S6 claims `0059` / matrix `37` / section 30; **§31 is reserved.** Nothing from 0001–0059 is edited.
+
+### 32.1 What was built
+
+**Migration `0060_partner_offers_settlement.sql`** (database half) and **matrix `38_partner_offers_settlement.sql`**, then Edge functions **`partner-offers-redeem`**, **`settlement-export`**, and **`exports-purge`**.
+
+- **Binding-keyed policies** (never a GUC): offer_code select/update (issued→redeemed), offer budget select/update, play guard read via `offer_code.play_id`, attestation insert `kind=offer_redemption`, consumed_nonce for `offer_redemption`, settlement SELECT of redeemed codes on a trail the bound operator runs (or admin).
+- **`GRANT EXECUTE` on `app.consume_offer_budget` TO `private_definer`**; `GRANT UPDATE (budget_used)` on `app.offer`.
+- **`private.partner_offers_redeem_for_partner`** (A1, staff/manager): status-before-`FOR UPDATE` (0058 ordering); method `staff_scan` (player check-in jti); `offline_code` refused with `22023`. Statuses: `ok | not_found | not_issued | expired | wrong_facility | token_invalid | wrong_player | replayed | no_facility | cold_start_cap | budget_short`. Apply helper consumes budget, writes `offer_redemption` attestation via `partner_attest_write`, updates the code.
+- **`private.partner_offers_queue_for_partner`** (A0): issued codes at the facility with player handle.
+- **`private.partner_settlement_export_for_partner`** (A3, operator-at-trail or admin): lines with `facility_id`, `month`, `funder`, `sponsorship_id`, `redemptions`, `offline_count`, `unconfirmed_count`, `face_value_total`. Statuses `ok | empty`.
+
+| Function | Routes |
+|---|---|
+| `partner-offers-redeem` | `GET queue`, `POST redeem` |
+| `settlement-export` | `POST export` → CSV under `exports/`, signed URL (7 days) |
+| `exports-purge` | `POST` (system lane, service-role bearer): delete `exports/` objects older than 7 days |
+
+Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx` / `withSettlementExport` (merged into `withPartnerSession`), `ExportsStoragePort` / `exportsStorage` (service-role `createSignedUrl` + purge). Status map: redeem `ok` → 201; settlement `ok` → 200 with `{ path, signedUrl, expiresAt, lines }`; `empty` → 404; `42501` → 403; `22023` → 422. Per-member buckets (`partner-offers-redeem:member` 240/h, `settlement-export:member` 60/h). System bucket `exports-purge` 12/h.
+
+### 32.2 Decisions and departures, and why
+
+- **Budget before attest** in the apply helper — avoids an orphan `offer_redemption` attestation if `consume_offer_budget` raises `check_violation` (`budget_short`).
+- **`offline_code` out of this slice** — Edge shape and database both refuse with 22023 / 400; the offline PIN + profile-card path stays a later seam.
+- **Settlement CSV always includes `sponsorship_id`** (empty when null) so AT(20) attribution is visible on every line.
+- **`exports-purge` is the AT(17) lifecycle** when native Storage lifecycle is unavailable in the harness; signed URL expiry matches the 7-day retention.
+
+### 32.3 Not built, honestly
+
+- **`offline_code` offer redeem** (PIN step-up + profile-card name check; `fraud_signal` / `unconfirmed` after 24 h).
+- **Rollups-refresh writer** (still out of scope; S6 seam).
+- **S7 UI** (portal screens).
+- **No mutation pass** was run for this slice.
+
+### 32.4 Verification
+
+Branch: `cursor/p5-1b-offers-settlement-8ffd` (base S6 `ea27b80`).
+
+- **Matrix 38** (`38_partner_offers_settlement.sql`): 32/32 PASS — foreign facility 403, A1 without PIN, happy redeem + budget consume, self-redeem 22023, A3 without TOTP refused, planted GUC, settlement line carries `sponsorship_id` for sponsor funder, export redemptions/`face_value_total` match planted redeem.
+- **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): **86/86** PASS.
+- **`HARNESS_MODE=restricted tools/db/test.sh`**: **Files=58, Tests=5376, Result: PASS**; Deno integration **382 passed | 0 failed** (Deno 2.5.2 as CI pins); `verify-function-inventory: OK` (nine `pd_partner_offers_*` allow-list rows in `definer_policy_exprs.txt`); `service-role-lint: clean`. Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary. Settlement policy uses `offer_code.facility_id` (bare `facility_id` deparsed as a tautology).
+- Claims in-slice (0060 tip): **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions).
+- **CI on PR #73 tip `5f03f03`:** all three checks green (after PartnerDb stubs + 0061 review-account / rewards-isolation gates).
+
+### 32.5 AT(10) issuance staff gate (0061)
+
+Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited.
+
+**Built:** `private.facility_has_active_staff(facility)` (EXISTS non-revoked staff/manager with `partner_scope.facility_id`); `app.activate_offer_code` CREATE OR REPLACE holds an **earned** activate with `hold_detail.heldFor = no_active_staff` when the facility has no active staff (already-issued re-activate is not gated); `app.resolve_held_offer_code` refuses an approve that would **issue** with `23514` / partner status `no_active_staff` (return-to-earned is not gated). Both rewrites call `private.is_demo_account` (review-account ratchet).
+
+**Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
+
+**Verification:** on this branch, `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38. CI green with §32.4 tip.

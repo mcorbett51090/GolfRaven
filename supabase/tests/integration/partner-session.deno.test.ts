@@ -154,8 +154,21 @@ Deno.test("PA-10: OPTIONS never opens a database connection (a counting database
   let calls = 0;
   const counting: PartnerDb = {
     withMint: (op) => (calls++, partnerDb.withMint(op)),
+    withInviteMint: (op) => (calls++, partnerDb.withInviteMint(op)),
     withSession: (h, op) => (calls++, partnerDb.withSession(h, op)),
+    withInvites: (h, op) => (calls++, partnerDb.withInvites(h, op)),
+    withMembers: (h, op) => (calls++, partnerDb.withMembers(h, op)),
+    withAttest: (h, op) => (calls++, partnerDb.withAttest(h, op)),
+    withReview: (h, op) => (calls++, partnerDb.withReview(h, op)),
+    withStock: (h, op) => (calls++, partnerDb.withStock(h, op)),
+    withEntitlements: (h, op) => (calls++, partnerDb.withEntitlements(h, op)),
+    withProgramme: (h, op) => (calls++, partnerDb.withProgramme(h, op)),
+    withOffersAdmin: (h, op) => (calls++, partnerDb.withOffersAdmin(h, op)),
+    withSponsorships: (h, op) => (calls++, partnerDb.withSponsorships(h, op)),
+    withOffersRedeem: (h, op) => (calls++, partnerDb.withOffersRedeem(h, op)),
+    withSettlementExport: (h, op) => (calls++, partnerDb.withSettlementExport(h, op)),
     hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
+    hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
   };
   const deps = baseDeps({ db: counting });
   for (const method of ["GET", "POST", "PATCH", "DELETE"]) {
@@ -209,7 +222,24 @@ Deno.test("PA-10: loadPartnerCorsOrigin reads GR_PARTNER_ORIGIN: unset is null, 
 
 Deno.test("PA-11: a Supabase JWT sent to the partner function is 401 on every session route (and nothing opens a transaction)", DT, async () => {
   let calls = 0;
-  const counting: PartnerDb = { withMint: (op) => (calls++, partnerDb.withMint(op)), withSession: (h, op) => (calls++, partnerDb.withSession(h, op)), hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)) };
+  const counting: PartnerDb = {
+    withMint: (op) => (calls++, partnerDb.withMint(op)),
+    withInviteMint: (op) => (calls++, partnerDb.withInviteMint(op)),
+    withSession: (h, op) => (calls++, partnerDb.withSession(h, op)),
+    withInvites: (h, op) => (calls++, partnerDb.withInvites(h, op)),
+    withMembers: (h, op) => (calls++, partnerDb.withMembers(h, op)),
+    withAttest: (h, op) => (calls++, partnerDb.withAttest(h, op)),
+    withReview: (h, op) => (calls++, partnerDb.withReview(h, op)),
+    withStock: (h, op) => (calls++, partnerDb.withStock(h, op)),
+    withEntitlements: (h, op) => (calls++, partnerDb.withEntitlements(h, op)),
+    withProgramme: (h, op) => (calls++, partnerDb.withProgramme(h, op)),
+    withOffersAdmin: (h, op) => (calls++, partnerDb.withOffersAdmin(h, op)),
+    withSponsorships: (h, op) => (calls++, partnerDb.withSponsorships(h, op)),
+    withOffersRedeem: (h, op) => (calls++, partnerDb.withOffersRedeem(h, op)),
+    withSettlementExport: (h, op) => (calls++, partnerDb.withSettlementExport(h, op)),
+    hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
+    hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
+  };
   // built at run time (a literal token-shaped string trips the secret scanner)
   const b64u = (v: string) => btoa(v).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
   const jwt = [b64u(JSON.stringify({ alg: "HS256", typ: "JWT" })), b64u(JSON.stringify({ sub: "test-subject", role: "authenticated" })), b64u("not-a-real-signature")].join(".");
@@ -412,14 +442,15 @@ Deno.test("section 8: an assertion under a credential id nobody holds is the uni
 // 4.1: an aal 1 operator session; reauth (PA-27); the member rate limit
 // =============================================================================================================================================================
 
-Deno.test("4.1: an aal 1 OPERATOR session can GET session (reporting the aal it needs), lock and sign out; reauth is refused (class A0 needs the required aal)", DT, async () => {
+Deno.test("4.1 / PA-28: an aal 1 OPERATOR with no confirmed TOTP can GET session, lock, sign out, and reauth/options (A0_ENROL); normal A0 stays refused", DT, async () => {
   const auth = await enrol(OPERATOR);
   const token = await signIn(auth);
   const who = await call("GET", "session", { headers: bearer(token) });
   assertEquals(who.status, 200);
   const info = (await who.json()).data as { requiredAal: number; aal: number };
   assertEquals([info.aal, info.requiredAal], [1, 2]);
-  assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 403);
+  // S1.4: reauth is A0_ENROL — reachable at aal 1 only while TOTP is unconfirmed (matrix 31 proves the post-confirm refusal).
+  assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 200);
   assertEquals((await call("POST", "lock", { headers: bearer(token), body: {} })).status, 200);
   assertEquals((await call("POST", "sign-out", { headers: bearer(token), body: {} })).status, 200);
 });
@@ -544,7 +575,7 @@ Deno.test("PA-13b: inside a real partner transaction the role is edge_partner an
   );
   assertEquals(
     names[0]!.n,
-    "bind_partner_session,hit_partner_rate_limit,partner_binding,partner_binding_kind,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_whoami_for_partner",
+    "bind_partner_session,hit_partner_rate_limit,partner_admin_enrolment_issue_for_partner,partner_attest_for_partner,partner_binding,partner_binding_kind,partner_credential_list_for_partner,partner_credential_options_for_partner,partner_credential_register_for_partner,partner_credential_revoke_for_partner,partner_entitlement_queue_for_partner,partner_entitlement_redeem_for_partner,partner_entitlement_voucher_for_partner,partner_facility_programme_list_for_partner,partner_facility_programme_upsert_for_partner,partner_handover_mint_for_partner,partner_held_queue_for_partner,partner_invite_accept_for_partner,partner_invite_create_for_partner,partner_invite_list_for_partner,partner_invite_revoke_for_partner,partner_member_recover_for_partner,partner_member_revoke_for_partner,partner_offer_approve_for_partner,partner_offer_end_for_partner,partner_offer_upsert_for_partner,partner_offers_list_for_partner,partner_offers_queue_for_partner,partner_offers_redeem_for_partner,partner_offline_attest_for_partner,partner_operator_rollup_for_partner,partner_org_sessions_revoke_for_partner,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_reset_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_resolve_held_entitlement_for_partner,partner_resolve_held_offer_code_for_partner,partner_review_sla_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_settlement_export_for_partner,partner_shift_log_for_partner,partner_sponsor_rollup_for_partner,partner_sponsorship_approve_for_partner,partner_sponsorship_upsert_for_partner,partner_sponsorships_list_for_partner,partner_staff_activity_for_partner,partner_stock_move_for_partner,partner_stock_read_for_partner,partner_totp_confirm_for_partner,partner_totp_enrol_for_partner,partner_totp_reset_for_partner,partner_totp_verify_for_partner,partner_trail_programme_read_for_partner,partner_trail_programme_upsert_for_partner,partner_whoami_for_partner",
   );
 });
 
