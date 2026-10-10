@@ -73,7 +73,7 @@ BEGIN
     RETURN;
   END IF;
 
-  -- No EXCEPTION / regex-$ / backslash in a _for_partner body (check 14 a0/a2).
+  -- Validate matched id without EXCEPTION or regex (check 14).
   v_matched_ref := NULL;
   v_matched_id := NULL;
   v_matched_text := NULL;
