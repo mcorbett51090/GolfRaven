@@ -329,6 +329,7 @@ export const en = {
   "admin.noTrailRow": "Save the trail programme before a facility programme.",
   "admin.invalidEligibility": "Eligibility failed validation.",
   "admin.notHeld": "This reward is not awaiting review.",
+  "admin.notOpen": "This review item is not open.",
   "admin.notFound": "That record was not found.",
   "admin.failed": "That change could not be applied.",
 
@@ -411,6 +412,8 @@ export const en = {
   "review.load": "Refresh queue and SLA",
   "review.sla": "Held codes {codes}, entitlements {ents}, open items {open}. SLA breaches: rewards {breachR}, items {breachI} ({hours} h).",
   "review.row": "{kind} · {handle} · SLA breached {breached}",
+  "review.noHandle": "(no handle)",
+  "review.readonly": "No resolve action on this item.",
   "review.approve": "Approve",
   "review.reject": "Reject",
   "review.lastState": "Resolved to {state}.",

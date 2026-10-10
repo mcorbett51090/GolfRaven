@@ -28,6 +28,7 @@ import {
   postOfferEnd,
   postResolveEntitlement,
   postResolveOfferCode,
+  postResolveReceiptCrossUser,
   postSettlementExport,
   postSponsorship,
   postSponsorshipApprove,
@@ -61,6 +62,7 @@ export interface AdminScreens {
   loadReview(): Promise<void>;
   resolveOfferCode(id: string, approve: boolean): Promise<void>;
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
+  resolveReceiptCrossUser(id: string, approve: boolean): Promise<void>;
   loadOperatorRollups(): Promise<void>;
   loadSponsorRollups(): Promise<void>;
   exportSettlement(month?: string): Promise<void>;
@@ -423,6 +425,19 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
       const grant = s.grant;
       await runA3(grant, "review", async () => {
         const { state } = await postResolveEntitlement(api, id.toLowerCase(), approve);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "review") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state }, notice: { kind: "review-resolved" } });
+        }
+      });
+    },
+
+    async resolveReceiptCrossUser(id, approve) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "review" || !UUID_RE.test(id)) return;
+      const grant = s.grant;
+      await runA3(grant, "review", async () => {
+        const { state } = await postResolveReceiptCrossUser(api, id.toLowerCase(), approve);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "review") {
           host.set({ ...cur, busy: null, work: { ...cur.work, items: null, lastState: state }, notice: { kind: "review-resolved" } });

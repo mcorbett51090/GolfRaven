@@ -126,6 +126,7 @@ export interface AppController extends StepUp {
   loadReview(): Promise<void>;
   resolveOfferCode(id: string, approve: boolean): Promise<void>;
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
+  resolveReceiptCrossUser(id: string, approve: boolean): Promise<void>;
   loadOperatorRollups(): Promise<void>;
   loadSponsorRollups(): Promise<void>;
   exportSettlement(month?: string): Promise<void>;
@@ -395,6 +396,7 @@ export function createController(deps: ControllerDeps): AppController {
     loadReview: () => admin.loadReview(),
     resolveOfferCode: (id, approve) => admin.resolveOfferCode(id, approve),
     resolveEntitlement: (id, approve) => admin.resolveEntitlement(id, approve),
+    resolveReceiptCrossUser: (id, approve) => admin.resolveReceiptCrossUser(id, approve),
     loadOperatorRollups: () => admin.loadOperatorRollups(),
     loadSponsorRollups: () => admin.loadSponsorRollups(),
     exportSettlement: (month) => admin.exportSettlement(month),

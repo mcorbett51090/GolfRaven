@@ -115,6 +115,7 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "no_trail") return { key: "admin.noTrailRow" };
     if (code === "invalid_eligibility") return { key: "admin.invalidEligibility" };
     if (code === "not_held") return { key: "admin.notHeld" };
+    if (code === "not_open") return { key: "admin.notOpen" };
     if (code === "not_found") return { key: "admin.notFound" };
     if (kind === "unprocessable") return { key: "admin.failed" };
   }
