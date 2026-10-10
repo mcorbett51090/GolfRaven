@@ -4,21 +4,29 @@
 -- still issues. Already-issued re-activate is not gated. Approve that would issue is refused
 -- (app.resolve_held_offer_code 23514; partner apply status no_active_staff).
 --
--- HOW THIS FILE RUNS. One transaction, rolled back at the end. Activate / direct resolve cells
--- run as service_role. The partner apply status cell binds admin with A3 (the 35 pattern).
+-- HOW THIS FILE RUNS. One transaction, rolled back at the end. Fixture / partner session writes
+-- use CURRENT_USER policies (the 35 pattern). Activate and direct resolve run as service_role
+-- (EXECUTE surface). Partner apply status cell binds admin with A3.
 
 \set QUIET 1
 BEGIN;
 SELECT plan(14);
 
-GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, private_definer, service_role TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.offer, app.offer_code, app.partner_org, app.partner_member, app.partner_scope TO CURRENT_USER;
+GRANT SELECT, INSERT ON app.catalog_id_ledger, app.catalog_facility TO CURRENT_USER;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
 ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
 CREATE POLICY zz39_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz39_sess ON app.partner_session FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
-
-SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+CREATE POLICY zz39_of ON app.offer FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_oc ON app.offer_code FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_po ON app.partner_org FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_pm ON app.partner_member FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_ps ON app.partner_scope FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_cil ON app.catalog_id_ledger FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz39_cf ON app.catalog_facility FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 
 CREATE FUNCTION pg_temp.th(p_label text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$
   SELECT md5('s39:' || p_label) || md5('s39b:' || p_label)
@@ -56,6 +64,15 @@ BEGIN
   SELECT * INTO r FROM private.partner_resolve_held_offer_code_for_partner(p_id, p_approve);
   EXECUTE 'RESET ROLE';
   RETURN r.o_status || '|' || coalesce(r.o_state, '');
+END
+$f$;
+CREATE FUNCTION pg_temp.as_sr(p_sql text) RETURNS text LANGUAGE plpgsql AS $f$
+DECLARE v text;
+BEGIN
+  EXECUTE 'SET LOCAL ROLE service_role';
+  EXECUTE p_sql INTO v;
+  EXECUTE 'RESET ROLE';
+  RETURN v;
 END
 $f$;
 
@@ -108,8 +125,9 @@ SELECT pg_temp.mk_session('ad', '00000000-0000-0000-0000-4000000000d0', :'c_ad')
 SELECT pg_temp.th('ad') AS th_ad \gset
 
 -- ----------------------------------------------------------------------------
--- 1. Helper + grants
+-- 1. Helper + grants (as service_role: EXECUTE surface of the helper)
 -- ----------------------------------------------------------------------------
+SET LOCAL ROLE service_role;
 SELECT ok(private.facility_has_active_staff('fac_x'), 'fac_x has active staff/manager');
 SELECT ok(NOT private.facility_has_active_staff('fac_z'), 'fac_z has no active staff/manager (revoked only)');
 SELECT ok(has_function_privilege('service_role', 'private.facility_has_active_staff(text)'::regprocedure, 'EXECUTE'), 'service_role EXECUTEs facility_has_active_staff');
@@ -164,8 +182,9 @@ SELECT is(
   (SELECT state::text FROM app.offer_code WHERE id = '71000000-0000-0000-0000-0000000000f4'),
   'held_review',
   'AT(10): refused approve leaves the code held');
+RESET ROLE;
 
--- Partner A3 path: bind admin once, then status-map via for_partner (apply needs binding-keyed RLS).
+-- Partner A3 path: bind admin once, then status-map via for_partner.
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
