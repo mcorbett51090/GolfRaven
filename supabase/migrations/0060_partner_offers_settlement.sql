@@ -84,7 +84,8 @@ CREATE POLICY pd_partner_offers_settlement_code_select ON app.offer_code FOR SEL
     private.partner_bound_admin()
     OR EXISTS (
       SELECT 1 FROM app.facility_programme fp
-      WHERE fp.facility_id = facility_id AND private.partner_bound_operator_at_trail(fp.trail_id)
+      -- qualify the outer column: bare facility_id deparses as fp.facility_id (tautology)
+      WHERE fp.facility_id = offer_code.facility_id AND private.partner_bound_operator_at_trail(fp.trail_id)
     )
   ));
 
