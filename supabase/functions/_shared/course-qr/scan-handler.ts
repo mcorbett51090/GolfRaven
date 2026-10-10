@@ -311,5 +311,27 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     cosignal: counted === null ? null : { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId },
   });
   if (recorded.status !== "accepted") throw mapRecordRefusal(recorded.status);
+
+  // 6. Plan §8.3 / P5 §62: static-PIN daily cap is a SIGNAL, not a block. After an accepted
+  // printed-QR scan, count facility-wide credited static_pin credits for the purchase's local
+  // date; at or above 25 write one fraud_signal (idempotent via open unique index — covers a
+  // multi-trail jump that skips exactly 25). Failures here must not fail the scan or change
+  // the HTTP response.
+  if (body.qr.variant === "static_pin" && recorded.localDate !== null) {
+    try {
+      const n = await repo.markerScan.staticPinCreditCount(facilityId, recorded.localDate);
+      if (n >= 25) {
+        await repo.fraudSignal.insert("course_qr_static_pin_cap", {
+          facilityId,
+          localDate: recorded.localDate,
+          count: n,
+        });
+      }
+    } catch {
+      // Cap alert is best-effort: never fail or change the accepted scan.
+      // Player-lane modules must not console.* (marker-scan-entrypoint pin).
+    }
+  }
+
   return { kind: "ok", status: 201, body: toResponse(facilityId, recorded.localDate, counted, recorded.purchases) };
 }
