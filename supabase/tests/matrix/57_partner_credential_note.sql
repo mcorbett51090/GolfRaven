@@ -30,18 +30,18 @@ CREATE FUNCTION pg_temp.mk_session(p_label text, p_uid uuid, p_cred uuid, p_aal 
           convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'))
   RETURNING id
 $f$;
-CREATE FUNCTION pg_temp.note(p_th text, p_id uuid, p_note text) RETURNS text LANGUAGE plpgsql AS $f$
+-- Caller must already have bound the session (same pattern as matrices 53 / 55).
+CREATE FUNCTION pg_temp.note(p_id uuid, p_note text) RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE r text;
 BEGIN
   EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(p_th);
   SELECT o_status INTO r FROM private.partner_credential_note_for_partner(p_id, p_note);
   EXECUTE 'RESET ROLE';
   RETURN r;
 END
 $f$;
 GRANT EXECUTE ON FUNCTION pg_temp.th(text), pg_temp.mk_cred(text, uuid), pg_temp.mk_session(text, uuid, uuid, int),
-  pg_temp.note(text, uuid, text) TO PUBLIC;
+  pg_temp.note(uuid, text) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
 -- 1. Structure / EXECUTE / inventory / policy
@@ -85,29 +85,30 @@ SELECT is(
 -- ----------------------------------------------------------------------------
 -- 2. Behaviour: set / clear / not_found / overlong / unbound
 -- ----------------------------------------------------------------------------
-SELECT pg_temp.th('stf') AS th_stf, pg_temp.th('mgr') AS th_mgr \gset
+SELECT pg_temp.th('stf') AS th_stf \gset
 SELECT pg_temp.mk_cred('stf', '00000000-0000-0000-0000-1000000000a1') AS c_stf \gset
 SELECT pg_temp.mk_cred('mgr', '00000000-0000-0000-0000-2000000000b1') AS c_mgr \gset
 SELECT pg_temp.mk_session('stf', '00000000-0000-0000-0000-1000000000a1', :'c_stf') AS s_stf \gset
-SELECT pg_temp.mk_session('mgr', '00000000-0000-0000-0000-2000000000b1', :'c_mgr') AS s_mgr \gset
 
-SELECT is(pg_temp.note(:'th_stf', :'c_stf'::uuid, 'front desk'), 'ok', 'staff sets note on own credential');
+SAVEPOINT set_note;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_stf');
+RESET ROLE;
+SELECT is(pg_temp.note(:'c_stf'::uuid, 'front desk'), 'ok', 'staff sets note on own credential');
 SELECT is((SELECT note FROM app.partner_credential WHERE id = :'c_stf'::uuid), 'front desk', '... and the row holds it');
-
-SELECT is(pg_temp.note(:'th_stf', :'c_stf'::uuid, '   '), 'ok', 'whitespace clears the note');
+SELECT is(pg_temp.note(:'c_stf'::uuid, '   '), 'ok', 'whitespace clears the note');
 SELECT is((SELECT note FROM app.partner_credential WHERE id = :'c_stf'::uuid), NULL, '... to NULL');
-
-SELECT is(pg_temp.note(:'th_stf', :'c_mgr'::uuid, 'nope'), 'not_found',
+SELECT is(pg_temp.note(:'c_mgr'::uuid, 'nope'), 'not_found',
   'another person''s credential is not_found (own-only; reach does not apply)');
-SELECT is(pg_temp.note(:'th_stf', 'ffffffff-0000-0000-0000-000000000000'::uuid, 'x'), 'not_found',
+SELECT is(pg_temp.note('ffffffff-0000-0000-0000-000000000000'::uuid, 'x'), 'not_found',
   'unknown id is the same not_found');
-
 SELECT throws_ok(
-  format($t$SELECT pg_temp.note(%L, %L::uuid, %L)$t$, :'th_stf', :'c_stf', repeat('a', 41)),
+  format($t$SELECT pg_temp.note(%L::uuid, %L)$t$, :'c_stf', repeat('a', 41)),
   '22023',
   NULL,
   'over 40 characters raises 22023'
 );
+ROLLBACK TO SAVEPOINT set_note;
 
 SELECT throws_ok(
   $$SELECT o_status FROM private.partner_credential_note_for_partner('00000000-0000-0000-0000-1000000000a1', 'x')$$,
