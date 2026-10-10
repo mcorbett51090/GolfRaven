@@ -2177,13 +2177,14 @@ Branch: `cursor/p5-1b-offers-settlement-8ffd` (base S6 `ea27b80`).
 - **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): **86/86** PASS.
 - **`HARNESS_MODE=restricted tools/db/test.sh`**: **Files=58, Tests=5376, Result: PASS**; Deno integration **382 passed | 0 failed** (Deno 2.5.2 as CI pins); `verify-function-inventory: OK` (nine `pd_partner_offers_*` allow-list rows in `definer_policy_exprs.txt`); `service-role-lint: clean`. Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary. Settlement policy uses `offer_code.facility_id` (bare `facility_id` deparsed as a tautology).
 - Claims in-slice (0060 tip): **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions).
+- **CI on PR #73 tip `5f03f03`:** all three checks green (after PartnerDb stubs + 0061 review-account / rewards-isolation gates).
 
 ### 32.5 AT(10) issuance staff gate (0061)
 
 Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited.
 
-**Built:** `private.facility_has_active_staff(facility)` (EXISTS non-revoked staff/manager with `partner_scope.facility_id`); `app.activate_offer_code` CREATE OR REPLACE holds an **earned** activate with `hold_detail.heldFor = no_active_staff` when the facility has no active staff (already-issued re-activate is not gated); `app.resolve_held_offer_code` refuses an approve that would **issue** with `23514` / partner status `no_active_staff` (return-to-earned is not gated).
+**Built:** `private.facility_has_active_staff(facility)` (EXISTS non-revoked staff/manager with `partner_scope.facility_id`); `app.activate_offer_code` CREATE OR REPLACE holds an **earned** activate with `hold_detail.heldFor = no_active_staff` when the facility has no active staff (already-issued re-activate is not gated); `app.resolve_held_offer_code` refuses an approve that would **issue** with `23514` / partner status `no_active_staff` (return-to-earned is not gated). Both rewrites call `private.is_demo_account` (review-account ratchet).
 
 **Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
 
-**Verification (branch `cursor/p5-1b-at10-issuance-staff-b55f`):** `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38.
+**Verification:** on this branch, `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38. CI green with §32.4 tip.
