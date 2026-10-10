@@ -1411,7 +1411,7 @@ The partner (staff) auth **Edge core**: the first Edge Function a staff member's
 
 ### 18.5 Alert-only buckets (IP and global)
 
-Section 8's IP and global buckets are **alert-only**: they must never refuse a request (a refusal keyed on an address is a denial-of-service lever against a shared office NAT), so they only produce a signal. The sink for such a signal is `app.partner_auth_alarm`, whose `kind` values 0048 fixed by a CHECK; a new kind is a migration change in a file that is frozen for this slice, and the Edge cannot write the table at all (no privilege; no partner-bound writer). They are therefore **not built**, and nothing in this slice pretends otherwise. The failure counter (D1) is the only bound on failed verifications, and the member-keyed reauth bucket the only rate limit that refuses. Follow-up for S1.5: add the alarm kinds, then a minter-lane writer.
+Section 8's IP and global buckets are **alert-only**: they must never refuse a request (a refusal keyed on an address is a denial-of-service lever against a shared office NAT), so they only produce a signal. **Built in §68** (`0081`): kinds `rate_options_ip` / `rate_options_global` / `rate_verify_ip`, minter-lane `partner_rate_alarm_raise`, Edge soft-caps that never 429. The failure counter (D1) remains the only hard bound on failed verifications among pre-auth paths; the member-keyed reauth bucket is the authenticated refuse path.
 
 ### 18.6 Mutation pass
 
