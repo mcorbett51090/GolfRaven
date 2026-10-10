@@ -48,12 +48,15 @@ CREATE POLICY pd_receipt_review_insert ON app.review_item FOR INSERT TO private_
     )
   );
 
+-- Cross-user demotion matches app.dedupe_receipt_fingerprint: never touch void/valid
+-- (a later collision must not un-accept an already-valid purchase). Own rows still update
+-- for same-user void (status → void + void_reason).
 CREATE POLICY pd_receipt_pe_cross_user_update ON app.purchase_evidence FOR UPDATE TO private_definer
   USING (
     private.actor_uid() IS NOT NULL
     AND (
       user_id = private.actor_uid()
-      OR (user_id IS DISTINCT FROM private.actor_uid() AND status IN ('pending', 'valid', 'held_review'))
+      OR (user_id IS DISTINCT FROM private.actor_uid() AND status NOT IN ('void', 'valid'))
     )
   )
   WITH CHECK (

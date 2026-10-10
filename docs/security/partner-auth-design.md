@@ -2582,17 +2582,19 @@ Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-au
 
 - **`private.receipt_intake_for_actor`**: bound player only; eligible trails = accepted `facility_programme` + `trail_programme` pilot/live + `marker_source = any_purchase` (same gate as course-QR scan, without `qr_mode`). One `purchase_evidence` (`method=receipt`, `ref_id` = Storage path) + `marker_credit` pending per trail; cosignal `awaiting` for the facility-local day + 7-day deadline. Calls **`app.dedupe_receipt_fingerprint` once** on the first purchase id (`phash` is per upload). Statuses: `ok | duplicate | review | no_facility | no_programme | review_account | bad_args`. `o_dedupe`: `clean | same_user | cross_user`. Same-user duplicate voids every purchase from the upload (`void_reason=duplicate`); cross-user leaves both pending and opens `review_item` + `fraud_signal` via dedupe.
 - **Policies / grants**: `pd_receipt_*` on `receipt_fingerprint`, `fraud_signal`, `review_item`, cross-user `purchase_evidence` demotion, `marker_credit` detach; `GRANT EXECUTE` on dedupe to **`private_definer` only** (not `edge_actor`).
-- **Edge**: multipart `facilityId`, `file`, optional `localDate`, optional `receiptNumberOcr`. **5 MB** max file (`0012_storage.sql` / build plan line 865; matrix TODO “6 MB” is stale — this slice uses 5 MB). MIME sniff: JPEG/PNG/HEIC only; PDF/SVG → 415. EXIF strip: JPEG APP1 removed; PNG `eXIf` chunk removed. **aHash** (8×8) hex for JPEG/PNG after decode; **HEIC** uses SHA-256 of content as `phash` (exact-dupe only until a decoder exists). Storage path `receipts/<uid>/<objectId>.<ext>` via service-role `receiptsStorage` (no client Storage policies). Rate limit **`receipts:member` 60/hour** before `withOwnership`.
+- **Edge**: multipart `facilityId`, `file`, optional `localDate`, optional `receiptNumberOcr`. **5 MB** max file (`0012_storage.sql` / build plan line 865; matrix TODO “6 MB” is stale — this slice uses 5 MB). Body read uses a **running stream cap** (same discipline as `readCappedJsonBody`); Content-Length is a fast-reject only. MIME sniff: JPEG/PNG/HEIC only; PDF/SVG → 415; corrupt decode → 415. EXIF strip: JPEG APP1 removed; PNG `eXIf` chunk removed. **aHash** (8×8) hex for JPEG/PNG after decode; **HEIC** uses SHA-256 of content as `phash` (exact-dupe only until a decoder exists). Storage path `receipts/<uid>/<objectId>.<ext>` via service-role `receiptsStorage` (no client Storage policies); **compensating `removeObject`** when intake refuses after upload. Rate limit **`receipts:member` 60/hour** before `withOwnership`.
 
 ### 40.2 Decisions and departures
 
 - **Dedupe once per upload**, not per trail — `phash` identifies the image; sibling trail rows follow the first purchase outcome (same-user void loops the rest).
 - **HEIC phash = sha256(content)** — documented departure from perceptual match until a HEIC decoder ships.
 - **5 MB not 6 MB** — `storage.buckets.file_size_limit` and Edge cap align with `0012_storage.sql` (build plan line 865), not the matrix TODO line.
+- **Cross-user UPDATE policy** excludes `void`/`valid` in `USING` so a future caller cannot demote an already-accepted purchase (mirrors `dedupe_receipt_fingerprint`).
 
 ### 40.3 Not built, honestly
 
-- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, 90-day image purge, rollups-refresh, HEIC aHash.
+- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, 90-day image purge, rollups-refresh, HEIC aHash / HEIC metadata strip.
+- JPEG ancillary markers beyond APP1 (e.g. APP13/COM) are not stripped; residual metadata risk is accepted until a re-encode path exists.
 
 ### 40.4 Verification
 

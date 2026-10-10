@@ -3748,6 +3748,11 @@ export const receiptsStorage = {
     const { error } = await client.storage.from("receipts").upload(path, body, { contentType, upsert: false });
     if (error) throw new Error(`receiptsStorage.putObject: upload failed: ${error.message}`);
   },
+  async removeObject(path: string): Promise<void> {
+    const client = adminClient();
+    const { error } = await client.storage.from("receipts").remove([path]);
+    if (error) throw new Error(`receiptsStorage.removeObject: remove failed: ${error.message}`);
+  },
 };
 
 // ============================================================================

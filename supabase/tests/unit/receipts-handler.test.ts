@@ -20,7 +20,10 @@ describe("handleReceiptUpload", () => {
       "00000000-0000-0000-0000-00000000000a",
       repo,
       {
-        storage: { putObject: async (path) => { uploads.push(path); } },
+        storage: {
+          putObject: async (path) => { uploads.push(path); },
+          removeObject: async () => {},
+        },
         newObjectId: () => "11111111-1111-1111-1111-111111111111",
       },
     );
@@ -36,7 +39,7 @@ describe("handleReceiptUpload", () => {
         { facilityId: "fac_x", fileBytes: Uint8Array.from([0x25, 0x50, 0x44, 0x46]), fileName: "x.pdf", localDate: null, receiptNumberOcr: null },
         "00000000-0000-0000-0000-00000000000a",
         repo,
-        { storage: { putObject: async () => {} }, newObjectId: () => crypto.randomUUID() },
+        { storage: { putObject: async () => {}, removeObject: async () => {} }, newObjectId: () => crypto.randomUUID() },
       ),
     ).rejects.toMatchObject({ status: 415 });
   });
@@ -45,8 +48,9 @@ describe("handleReceiptUpload", () => {
     expect(RECEIPTS_MAX_BYTES).toBe(5 * 1024 * 1024);
   });
 
-  it("maps review_account to 403", async () => {
+  it("maps review_account to 403 and removes the uploaded object", async () => {
     const repo = makeFakeRepo();
+    const removed: string[] = [];
     repo.receipts.intake = async () => ({
       status: "review_account",
       localDate: null,
@@ -58,8 +62,15 @@ describe("handleReceiptUpload", () => {
         { facilityId: "fac_x", fileBytes: TINY_JPEG, fileName: "r.jpg", localDate: null, receiptNumberOcr: null },
         "00000000-0000-0000-0000-00000000000a",
         repo,
-        { storage: { putObject: async () => {} }, newObjectId: () => crypto.randomUUID() },
+        {
+          storage: {
+            putObject: async () => {},
+            removeObject: async (path) => { removed.push(path); },
+          },
+          newObjectId: () => "22222222-2222-2222-2222-222222222222",
+        },
       ),
     ).rejects.toBeInstanceOf(HttpError);
+    expect(removed[0]).toContain("22222222-2222-2222-2222-222222222222.jpg");
   });
 });

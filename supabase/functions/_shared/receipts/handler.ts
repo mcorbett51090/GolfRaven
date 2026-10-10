@@ -45,6 +45,14 @@ function mapStatus(result: ReceiptIntakeResult): { status: number; body: Receipt
   }
 }
 
+async function removeQuietly(storage: ReceiptsStoragePort, path: string): Promise<void> {
+  try {
+    await storage.removeObject(path);
+  } catch {
+    // Best-effort orphan cleanup; Storage purge is a documented follow-up (§40.3).
+  }
+}
+
 export async function handleReceiptUpload(
   parsed: ParsedReceiptUpload,
   actorUid: string,
@@ -56,7 +64,14 @@ export async function handleReceiptUpload(
     throw Errors.unsupportedMediaType("receipt image must be JPEG, PNG, or HEIC");
   }
 
-  const { stripped, phash } = prepareReceiptImage(parsed.fileBytes, kind);
+  let stripped: Uint8Array;
+  let phash: string;
+  try {
+    ({ stripped, phash } = prepareReceiptImage(parsed.fileBytes, kind));
+  } catch {
+    throw Errors.unsupportedMediaType("receipt image could not be decoded");
+  }
+
   const objectId = deps.newObjectId();
   const ext = extensionForKind(kind);
   const storageObject = `receipts/${actorUid}/${objectId}.${ext}`;
@@ -64,18 +79,27 @@ export async function handleReceiptUpload(
 
   await deps.storage.putObject(storageObject, stripped, contentType);
 
-  const intake = await repo.receipts.intake({
-    facilityId: parsed.facilityId,
-    storageObject,
-    phash,
-    localDate: parsed.localDate,
-    receiptNumberOcr: parsed.receiptNumberOcr,
-  });
+  let intake: ReceiptIntakeResult;
+  try {
+    intake = await repo.receipts.intake({
+      facilityId: parsed.facilityId,
+      storageObject,
+      phash,
+      localDate: parsed.localDate,
+      receiptNumberOcr: parsed.receiptNumberOcr,
+    });
+  } catch (err) {
+    await removeQuietly(deps.storage, storageObject);
+    throw err;
+  }
 
-  return mapStatus(intake);
-}
-
-export function receiptUploadHttpError(err: unknown): HttpError {
-  if (err instanceof HttpError) return err;
-  throw err;
+  try {
+    return mapStatus(intake);
+  } catch (err) {
+    // Expected refusals (404/422/403) leave no purchase rows — drop the object.
+    if (err instanceof HttpError && err.status >= 400 && err.status < 500 && err.status !== 201) {
+      await removeQuietly(deps.storage, storageObject);
+    }
+    throw err;
+  }
 }

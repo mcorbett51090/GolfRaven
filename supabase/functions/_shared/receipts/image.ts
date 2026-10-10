@@ -16,15 +16,14 @@ function startsWith(bytes: Uint8Array, sig: number[]): boolean {
 }
 
 function isHeic(bytes: Uint8Array): boolean {
+  // ISO BMFF: size(4) + 'ftyp'(4) + major_brand(4). Size may be any 32-bit value;
+  // only require the ftyp fourcc at offset 4 and a HEIF/HEIC-family brand.
   if (bytes.length < 12) return false;
-  if (!startsWith(bytes, [0x00, 0x00, 0x00])) return false;
-  for (let off = 4; off <= 8; off += 4) {
-    if (bytes[off] === HEIC_FTYP[0] && bytes[off + 1] === HEIC_FTYP[1] && bytes[off + 2] === HEIC_FTYP[2] && bytes[off + 3] === HEIC_FTYP[3]) {
-      const brand = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!);
-      return brand.startsWith("heic") || brand.startsWith("heix") || brand.startsWith("mif1");
-    }
+  if (!(bytes[4] === HEIC_FTYP[0] && bytes[5] === HEIC_FTYP[1] && bytes[6] === HEIC_FTYP[2] && bytes[7] === HEIC_FTYP[3])) {
+    return false;
   }
-  return false;
+  const brand = String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!);
+  return brand === "heic" || brand === "heix" || brand === "hevc" || brand === "hevx" || brand === "mif1" || brand === "msf1";
 }
 
 export function sniffReceiptImageKind(bytes: Uint8Array): ReceiptImageKind | null {
