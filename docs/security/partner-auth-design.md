@@ -2702,8 +2702,9 @@ Numbering: **this section 43.** No migration. Closes the player-app half of §40
 
 ### 43.4 Verification
 
-Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Tip `381df29` CI green on PR #83 (all three checks).
 
 - Vitest: `receipts-wire.test.ts` (FormData wire, 201 shapes, refusal map, flag off / no callers); flag count in `rewards-activation.test.ts`.
-- Typecheck includes `uploadReceipt` on `ApiClient`.
+- Typecheck includes `uploadReceipt` on `ApiClient` (`HttpFetch` body `string | FormData`; airplane fetch mock FormData-safe).
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
 
