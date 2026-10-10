@@ -2636,10 +2636,11 @@ Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §3
 
 ### 41.4 Verification
 
-Branch: `cursor/p5-rollups-refresh-8ffd` (base main after #80). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-rollups-refresh-8ffd` (base main after #80). Tip `3b84b48` CI green on PR #81 (all three checks) before squash-merge as `62309d0`.
 
 - Restricted harness: **PASS** (matrix 43 + inventory check 15 + PA-4c plant of `app.edge.rollups_refresh`; tip `45445db`).
 - Matrix **43**: EXECUTE matrix, sub-threshold remove of seeded completions, happy write at cohort 10, remove after revoke drops cohort, `edge_actor` / `edge_partner` 42501.
-- Vitest: `rollups-refresh-handler.test.ts` (auth order, empty body, month shape, 429/500).
+- Vitest: `rollups-refresh-handler.test.ts` (auth order, empty body, month shape, 429/500); `review-account-gate` lists `rollups-refresh` as system lane.
 - `deno check` / `deno cache --frozen` lists include `rollups-refresh/index.ts`; service-role-lint clean.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
 
