@@ -783,6 +783,21 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         const facilityId = url.searchParams.get("facilityId") ?? "";
         return ok(200, { facilityId, pin: "4242", localDate: "2026-10-09", validUntil: new Date(Date.now() + 86_400_000).toISOString(), pinEpoch: workState.pinEpoch });
       }
+      if (route === "alarms" && req.method === "GET") {
+        const facilityId = url.searchParams.get("facilityId") ?? "";
+        return ok(200, {
+          facilityId,
+          alarms: [{
+            id: "a1000000-0000-0000-0000-000000000099",
+            facilityId,
+            localDate: "2026-10-08",
+            pinEpochBefore: workState.pinEpoch - 1 > 0 ? workState.pinEpoch - 1 : 0,
+            pinEpochAfter: workState.pinEpoch,
+            failures: 30,
+            raisedAt: "2026-10-08T15:00:00.000Z",
+          }],
+        });
+      }
       if (route === "pin/rotate" && req.method === "POST") {
         // A2: need reauth window and a PIN grant
         if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");

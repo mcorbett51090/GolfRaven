@@ -975,6 +975,17 @@ export type CoursePinShowResult =
   | { readonly status: "no_facility" }
   | { readonly status: "no_programme" };
 
+/** GET course-qr/alarms (course_pin_alarm_list_for_partner, class A0): wrong-PIN rotation alarms for a facility (newest first, ≤100). */
+export interface CoursePinAlarmRow {
+  readonly id: string;
+  readonly facilityId: string;
+  readonly localDate: string;
+  readonly pinEpochBefore: number;
+  readonly pinEpochAfter: number;
+  readonly failures: number;
+  readonly raisedAt: string;
+}
+
 /** POST course-qr/pin/rotate (course_pin_rotate_for_partner, class A2). */
 export type CoursePinRotateResult = { readonly status: "ok"; readonly pinEpoch: number } | { readonly status: "no_programme" };
 
@@ -1022,6 +1033,7 @@ export type CourseQrPrintReadResult =
 /** One transaction as `edge_partner`, bound to the presented session. Every method is a `_for_partner` definer that begins with `partner_authorize`; the facility scope is the database's. */
 export interface CourseQrTx {
   pinShow(facilityId: string): Promise<CoursePinShowResult>;
+  pinAlarmList(facilityId: string): Promise<readonly CoursePinAlarmRow[]>;
   pinRotate(facilityId: string): Promise<CoursePinRotateResult>;
   mint(facilityId: string, nonceHash: string): Promise<CourseQrMintResult>;
   refresh(facilityId: string, nonceHash: string): Promise<CourseQrRefreshResult>;

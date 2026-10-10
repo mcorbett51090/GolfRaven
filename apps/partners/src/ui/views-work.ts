@@ -145,6 +145,28 @@ export function workView(state: SignedInState, controller: AppController, locale
       h(
         "section",
         {},
+        h("h2", {}, t("courseQr.alarms.title")),
+        h("p", { class: "muted" }, t("courseQr.alarms.hint")),
+        work.alarms !== null
+          ? work.alarms.length === 0
+            ? h("p", { "data-testid": "course-alarms-empty" }, t("courseQr.alarms.empty"))
+            : h(
+                "ul",
+                { "data-testid": "course-alarms" },
+                ...work.alarms.map((a) =>
+                  h("li", {}, t("courseQr.alarms.row", { date: a.localDate, before: a.pinEpochBefore, after: a.pinEpochAfter, failures: a.failures, at: a.raisedAt })),
+                ),
+              )
+          : null,
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", disabled: busy, "data-testid": "course-alarms-load", onclick: () => void controller.loadCoursePinAlarms() }, t("courseQr.alarms.load")),
+        ),
+      ),
+      h(
+        "section",
+        {},
         h("h2", {}, t("courseQr.sale.title")),
         work.sale !== null
           ? h(

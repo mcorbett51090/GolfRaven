@@ -6,6 +6,7 @@
 //
 // ROUTES (relative to the function; `GET pin` is `/course-qr/pin`):
 //   GET  pin?facilityId=             today's PIN: private.course_pin_derive for the facility-local date and the epoch live now, through the database ONLY (nothing here derives a PIN) (class A0)
+//   GET  alarms?facilityId=          wrong-PIN rotation alarms for the facility (class A0, manager / operator)
 //   POST pin/rotate    { facilityId } "Rotate PIN": pin_epoch + 1 (class A2: a PIN in the last 30 s and a passkey in the last 5 minutes)
 //   POST tokens        { facilityId } "Marker sold": mint a rotating token (class A1: CONSUMES the single-use PIN grant), 60 a member an hour
 //   POST tokens/refresh { facilityId, nonceHash }  the sale screen's 30 s heartbeat for a token THIS person's own mint created (class A0_KEEPALIVE: it never advances last_seen_at, creates no token and no authority)
@@ -54,6 +55,7 @@ export interface CourseQrDeps {
 
 const ROUTES: readonly RouteSpec[] = [
   { name: "pin", path: "pin", methods: ["GET"], session: true },
+  { name: "alarms", path: "alarms", methods: ["GET"], session: true },
   { name: "pin-rotate", path: "pin/rotate", methods: ["POST"], session: true },
   { name: "tokens", path: "tokens", methods: ["POST"], session: true },
   { name: "tokens-refresh", path: "tokens/refresh", methods: ["POST"], session: true },
@@ -96,6 +98,8 @@ export async function handleCourseQrRequest(req: Request, deps: CourseQrDeps): P
         switch (matched.spec.name) {
           case "pin":
             return await handlePin(req, deps, decision, tokenHash);
+          case "alarms":
+            return await handleAlarms(req, deps, decision, tokenHash);
           case "pin-rotate":
             return await handleRotate(req, deps, decision, tokenHash);
           case "tokens":
@@ -121,6 +125,24 @@ async function handlePin(req: Request, deps: CourseQrDeps, decision: Decision, t
   if (r.status === "no_facility") return partnerError(decision, 404, "not_found", "not found");
   if (r.status === "no_programme") return partnerError(decision, 409, "no_programme", "this facility has no active printed-QR programme");
   return partnerOk(decision, 200, { facilityId: parsed.value.facilityId, pin: r.dailyPin, localDate: r.localDate, validUntil: r.validUntil, pinEpoch: r.pinEpoch });
+}
+
+async function handleAlarms(req: Request, deps: CourseQrDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseFacilityQuery(new URL(req.url));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const alarms = await deps.db.withCourseQr(tokenHash, (s) => s.pinAlarmList(parsed.value.facilityId));
+  return partnerOk(decision, 200, {
+    facilityId: parsed.value.facilityId,
+    alarms: alarms.map((a) => ({
+      id: a.id,
+      facilityId: a.facilityId,
+      localDate: a.localDate,
+      pinEpochBefore: a.pinEpochBefore,
+      pinEpochAfter: a.pinEpochAfter,
+      failures: a.failures,
+      raisedAt: a.raisedAt,
+    })),
+  });
 }
 
 async function handleRotate(req: Request, deps: CourseQrDeps, decision: Decision, tokenHash: string): Promise<Response> {

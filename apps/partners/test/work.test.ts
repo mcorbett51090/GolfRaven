@@ -111,6 +111,27 @@ describe("S7b course-QR screen", () => {
     const mintBody = s.w.server.log.filter((r) => r.path.endsWith("/course-qr/tokens")).map((r) => r.body);
     expect(mintBody.some((b) => b.includes(PIN))).toBe(false);
   });
+
+  it("loads wrong-PIN rotation alarms (A0) for the open facility", async () => {
+    const s = await setup();
+    s.controller.openCourseQr(FACILITY);
+    await s.controller.loadCoursePinAlarms();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("course-qr");
+      if (w?.kind === "course-qr") {
+        expect(w.alarms).toHaveLength(1);
+        expect(w.alarms?.[0]).toMatchObject({
+          facilityId: FACILITY,
+          localDate: "2026-10-08",
+          failures: 30,
+          raisedAt: "2026-10-08T15:00:00.000Z",
+        });
+      }
+    }
+    const gets = s.w.server.log.filter((r) => r.method === "GET" && r.path.includes("/course-qr/alarms"));
+    expect(gets).toHaveLength(1);
+  });
 });
 
 describe("S7c stock screen", () => {

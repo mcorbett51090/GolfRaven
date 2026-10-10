@@ -84,6 +84,7 @@ export interface AppController extends StepUp {
   loadShiftLog(): Promise<void>;
   loadStaffActivity(days: number): Promise<void>;
   loadCoursePin(): Promise<void>;
+  loadCoursePinAlarms(): Promise<void>;
   rotatePin(): Promise<void>;
   mintToken(): Promise<void>;
   refreshSale(): Promise<void>;
@@ -355,6 +356,7 @@ export function createController(deps: ControllerDeps): AppController {
     loadShiftLog: () => work.loadShiftLog(),
     loadStaffActivity: (days) => work.loadStaffActivity(days),
     loadCoursePin: () => work.loadCoursePin(),
+    loadCoursePinAlarms: () => work.loadCoursePinAlarms(),
     rotatePin: () => work.rotatePin(),
     mintToken: () => work.mintToken(),
     refreshSale: () => work.refreshSale(),
