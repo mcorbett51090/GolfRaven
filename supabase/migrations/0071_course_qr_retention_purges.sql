@@ -169,9 +169,9 @@ BEGIN
 END
 $$;
 
-RESET ROLE;
-REVOKE CREATE ON SCHEMA private FROM private_definer;
-
+-- Grants and comments inside the bracket (the owner makes them) — same as 0040.
+-- Under H2 approximation the migrating role is NOSUPERUSER; COMMENT/REVOKE/GRANT
+-- after RESET ROLE would fail with "must be owner of function".
 REVOKE EXECUTE ON FUNCTION
   private.purge_course_qr_tokens(),
   private.purge_course_pin_alarms(),
@@ -187,6 +187,10 @@ COMMENT ON FUNCTION private.purge_course_pin_alarms() IS
   '0071 (§57). edge_system. Deletes course_pin_alarm rows whose raised_at is more than 90 days past, at most 5000 per call; returns the count. Floor repeated in pd_purge_course_pin_alarm[_r].';
 COMMENT ON FUNCTION private.purge_abandoned_pending_purchases() IS
   '0071 (§57). edge_system. Deletes pending purchase_evidence rows whose cosignal.awaiting.until has passed (and their pending marker_credit rows), at most 5000 purchases per call; returns the purchase count. Method-agnostic. Floor repeated in pd_purge_abandoned_pending_purchase[_r] / pd_purge_abandoned_pending_credit[_r].';
+
+RESET ROLE;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
+
 COMMENT ON TABLE app.course_pin_alarm IS
   '0046/0071. One row each time the facility-wide wrong-PIN alarm (30 failures at one facility on one facility-local date, plan §9.2) rotated that facility''s PIN (pin_epoch + 1). Operator-facing: the portal (S2b / P5.1b) reads it. Holds no user id and no PIN, so it is not a personal table. Written only by private.course_pin_attempt_for_actor. Retention: private.purge_course_pin_alarms (raised_at older than 90 days).';
 
