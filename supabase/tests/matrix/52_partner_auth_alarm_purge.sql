@@ -58,19 +58,21 @@ ROLLBACK;
 -- 2. purge / keep / idempotent
 -- ----------------------------------------------------------------------------
 BEGIN;
-GRANT SELECT, INSERT, DELETE ON app.partner_auth_alarm TO CURRENT_USER;
-CREATE POLICY zz52_alarm ON app.partner_auth_alarm FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket, raised_at) VALUES
   ('signature_invalid', 'a1000000-0000-0000-0000-000000000052', 'a1000000-0000-0000-0000-000000000052', 1, now() - interval '200 days'),
   ('counter_regression', 'a1000000-0000-0000-0000-000000000052', 'a1000000-0000-0000-0000-000000000052', 2, now() - interval '100 days'),
   ('signature_invalid', 'a1000000-0000-0000-0000-000000000052', 'a1000000-0000-0000-0000-000000000052', 3, now() - interval '10 days'),
   ('counter_regression', 'b2000000-0000-0000-0000-000000000052', 'b2000000-0000-0000-0000-000000000052', 4, now() - interval '5 days');
+RESET ROLE;
 GRANT edge_system TO CURRENT_USER WITH INHERIT FALSE, SET TRUE;
 SELECT is(pg_temp.purge_as('edge_system', 'purge_partner_auth_alarms')::int, 2,
   'purge_partner_auth_alarms deletes alarms raised more than 90 days ago');
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM app.partner_auth_alarm
            WHERE credential_id IN ('a1000000-0000-0000-0000-000000000052', 'b2000000-0000-0000-0000-000000000052')),
   2, '... and keeps the two younger than 90 days');
+RESET ROLE;
 SELECT is(pg_temp.purge_as('edge_system', 'purge_partner_auth_alarms')::int, 0,
   'a second alarm purge is idempotent');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.proname = 'purge_partner_auth_alarms' AND p.prosrc ~ 'interval ''90 days'''), 1,
