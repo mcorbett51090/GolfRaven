@@ -6,6 +6,7 @@
 // ROUTES (relative to the function; `GET queue` is `/partner-review/queue`):
 //   GET  queue                         class A0 (admin): the open held_review rewards and open review_items, with an SLA-breach flag
 //   GET  sla                           class A0 (admin): counts for the ops alert surface (48 h SLA, [inference])
+//   GET  auth-alarms                   class A0 (admin): partner_auth_alarm rows (newest first, ≤100; 0075)
 //   GET  preview/receipt-cross-user    class A0 (admin): `?id=<reviewUuid>` — short-lived signed URLs for subject (+ matched) receipt images (0070)
 //   POST resolve/offer-code            class A3 (admin): `{ id, approve }` — wraps app.resolve_held_offer_code (E20)
 //   POST resolve/entitlement           class A3 (admin): `{ id, approve }` — wraps app.resolve_held_entitlement
@@ -20,7 +21,7 @@ import type { ReceiptsStoragePort } from "../receipts/ports.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import { bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
-import type { HeldQueueRow, PartnerDb, ResolveHeldResult, ReviewSlaSummary } from "./ports.ts";
+import type { HeldQueueRow, PartnerAuthAlarmRow, PartnerDb, ResolveHeldResult, ReviewSlaSummary } from "./ports.ts";
 import { parsePreviewQuery, parseResolveBody } from "./review-shape.ts";
 
 export const PARTNER_REVIEW_FUNCTION = "partner-review";
@@ -40,6 +41,7 @@ export interface PartnerReviewDeps {
 const ROUTES: readonly RouteSpec[] = [
   { name: "queue", path: "queue", methods: ["GET"], session: true },
   { name: "sla", path: "sla", methods: ["GET"], session: true },
+  { name: "auth-alarms", path: "auth-alarms", methods: ["GET"], session: true },
   { name: "preview-receipt-cross-user", path: "preview/receipt-cross-user", methods: ["GET"], session: true },
   { name: "resolve-offer-code", path: "resolve/offer-code", methods: ["POST"], session: true },
   { name: "resolve-entitlement", path: "resolve/entitlement", methods: ["POST"], session: true },
@@ -67,6 +69,8 @@ export async function handlePartnerReviewRequest(req: Request, deps: PartnerRevi
             return await handleQueue(deps, decision, tokenHash);
           case "sla":
             return await handleSla(deps, decision, tokenHash);
+          case "auth-alarms":
+            return await handleAuthAlarms(deps, decision, tokenHash);
           case "preview-receipt-cross-user":
             return await handlePreviewReceiptCrossUser(req, deps, decision, tokenHash);
           case "resolve-offer-code":
@@ -147,6 +151,24 @@ async function handleSla(deps: PartnerReviewDeps, decision: Decision, tokenHash:
   if (limited !== null) return limited;
   const summary = await deps.db.withReview(tokenHash, (s) => s.reviewSla());
   return partnerOk(decision, 200, slaBody(summary));
+}
+
+function authAlarmBody(r: PartnerAuthAlarmRow): Record<string, unknown> {
+  return {
+    id: r.id,
+    kind: r.kind,
+    credentialId: r.credentialId,
+    minuteBucket: r.minuteBucket,
+    detail: r.detail,
+    raisedAt: r.raisedAt,
+  };
+}
+
+async function handleAuthAlarms(deps: PartnerReviewDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const limited = await memberLimit(deps, decision, tokenHash);
+  if (limited !== null) return limited;
+  const rows = await deps.db.withReview(tokenHash, (s) => s.authAlarmList());
+  return partnerOk(decision, 200, { alarms: rows.map(authAlarmBody) });
 }
 
 async function handlePreviewReceiptCrossUser(req: Request, deps: PartnerReviewDeps, decision: Decision, tokenHash: string): Promise<Response> {

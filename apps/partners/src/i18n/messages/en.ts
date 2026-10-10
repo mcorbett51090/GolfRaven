@@ -425,6 +425,11 @@ export const en = {
   "review.previewSubject": "Subject receipt",
   "review.previewMatched": "Matched receipt",
   "review.lastState": "Resolved to {state}.",
+  "review.authAlarms.title": "Partner sign-in alarms",
+  "review.authAlarms.hint": "Each row is a sign-in the database refused after the Edge had already passed the assertion.",
+  "review.authAlarms.load": "Show sign-in alarms",
+  "review.authAlarms.empty": "No partner sign-in alarms recorded.",
+  "review.authAlarms.row": "{kind} · credential {credential} · {at}",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",

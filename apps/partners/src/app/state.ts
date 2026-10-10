@@ -9,6 +9,7 @@ import type {
   FacilityProgramme,
   OfferAdmin,
   OperatorRollup,
+  PartnerAuthAlarm,
   ReceiptCrossUserPreview,
   ReviewQueueItem,
   ReviewSla,
@@ -201,6 +202,7 @@ export type WorkView =
       readonly busy: boolean;
       readonly items: readonly ReviewQueueItem[] | null;
       readonly sla: ReviewSla | null;
+      readonly authAlarms: readonly PartnerAuthAlarm[] | null;
       readonly lastState: string | null;
       /** Signed preview URLs by review id; never log (AT(17) / §51). */
       readonly previews: Readonly<Record<string, ReceiptCrossUserPreview>>;

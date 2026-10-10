@@ -1285,6 +1285,18 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           slaHours: 48,
         });
       }
+      if (route === "auth-alarms" && req.method === "GET") {
+        return ok(200, {
+          alarms: [{
+            id: "a5300000-0000-0000-0000-000000000099",
+            kind: "signature_invalid",
+            credentialId: "a5300000-0000-0000-0000-000000000001",
+            minuteBucket: 1000,
+            detail: { src: "fake" },
+            raisedAt: "2026-01-01T12:00:00.000Z",
+          }],
+        });
+      }
       if (route === "preview/receipt-cross-user" && req.method === "GET") {
         const id = url.searchParams.get("id");
         if (id === null || id === "") return err(400, "bad_request");

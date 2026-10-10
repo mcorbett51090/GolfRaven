@@ -426,6 +426,11 @@ export const frCA: Record<MessageKey, string> = {
   "review.previewSubject": "Reçu sujet",
   "review.previewMatched": "Reçu correspondant",
   "review.lastState": "Résolu en {state}.",
+  "review.authAlarms.title": "Alarmes de connexion partenaire",
+  "review.authAlarms.hint": "Chaque ligne est une connexion refusée par la base après que la couche Edge ait déjà accepté l'assertion.",
+  "review.authAlarms.load": "Afficher les alarmes de connexion",
+  "review.authAlarms.empty": "Aucune alarme de connexion partenaire enregistrée.",
+  "review.authAlarms.row": "{kind} · justificatif {credential} · {at}",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",

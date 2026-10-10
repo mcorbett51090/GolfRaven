@@ -416,10 +416,32 @@ export function adminView(state: SignedInState, controller: AppController, local
             }),
           )
         : null,
+      h("h2", {}, t("review.authAlarms.title")),
+      h("p", { class: "muted" }, t("review.authAlarms.hint")),
+      work.authAlarms !== null
+        ? work.authAlarms.length === 0
+          ? h("p", { "data-testid": "review-auth-alarms-empty" }, t("review.authAlarms.empty"))
+          : h(
+              "ul",
+              { "data-testid": "review-auth-alarms" },
+              ...work.authAlarms.map((a) =>
+                h(
+                  "li",
+                  {},
+                  t("review.authAlarms.row", {
+                    kind: a.kind,
+                    credential: a.credentialId.slice(0, 8),
+                    at: a.raisedAt,
+                  }),
+                ),
+              ),
+            )
+        : null,
       h(
         "div",
         { class: "actions" },
         h("button", { type: "button", disabled: busy, "data-testid": "review-load", onclick: () => void controller.loadReview() }, t("review.load")),
+        h("button", { type: "button", disabled: busy, "data-testid": "review-auth-alarms-load", onclick: () => void controller.loadAuthAlarms() }, t("review.authAlarms.load")),
         back(controller, locale, busy),
       ),
       busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
