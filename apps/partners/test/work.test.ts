@@ -217,4 +217,45 @@ describe("S7 offer-redeem screen", () => {
     });
     expect(posts[0]!.body).not.toMatch(/7391|derived|pin/i);
   });
+
+  it("offline redeem verifies handle + code + nameConfirmed after PIN", async () => {
+    const s = await setup();
+    s.controller.openOfferRedeem(FACILITY);
+    s.controller.setOfferRedeemMode("offline");
+    s.controller.selectOfferCode(OFFER_CODE);
+    const pending = s.controller.submitOfferRedeemOffline(OFFER_CODE, "Player_One", "123456", true);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for offline offer redeem");
+    s.controller.submitPin(PIN);
+    await pending;
+    expect(home(s.controller).notice).toEqual({ kind: "offer-redeem-ok" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("offer-redeem");
+      if (w?.kind === "offer-redeem") {
+        expect(w.lastRedeem?.attestationId).toBe("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+        expect(w.selectedOfferCodeId).toBe("");
+      }
+    }
+    const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-offers-redeem/redeem/offline"));
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]!.body)).toEqual({
+      facilityId: FACILITY,
+      offerCodeId: OFFER_CODE,
+      handle: "player_one",
+      code: "123456",
+      nameConfirmed: true,
+    });
+    expect(posts[0]!.body).not.toMatch(/7391|derived|pin/i);
+  });
+
+  it("offline redeem refuses when nameConfirmed is false before calling the server", async () => {
+    const s = await setup();
+    s.controller.openOfferRedeem(FACILITY);
+    s.controller.setOfferRedeemMode("offline");
+    await s.controller.submitOfferRedeemOffline(OFFER_CODE, "player_one", "123456", false);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "offerRedeem.nameUnconfirmed" } });
+    expect(home(s.controller).panel).toBeNull();
+    const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.includes("/partner-offers-redeem/"));
+    expect(posts).toHaveLength(0);
+  });
 });

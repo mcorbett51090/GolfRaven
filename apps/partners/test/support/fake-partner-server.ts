@@ -911,6 +911,24 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         if (body.offerCodeId === "budget-short") return err(422, "budget_short");
         return ok(201, { attestationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" });
       }
+      if (route === "redeem/offline" && req.method === "POST") {
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as {
+          facilityId?: string;
+          offerCodeId?: string;
+          handle?: string;
+          code?: string;
+          nameConfirmed?: boolean;
+        };
+        if (typeof body.facilityId !== "string" || typeof body.offerCodeId !== "string") return err(400, "bad_request");
+        if (typeof body.handle !== "string" || typeof body.code !== "string") return err(400, "bad_request");
+        if (body.nameConfirmed !== true) return err(422, "name_unconfirmed");
+        if (!/^[a-z0-9_]{3,20}$/.test(body.handle) || !/^[0-9]{6}$/.test(body.code)) return err(400, "bad_request");
+        if (body.code === "000000") return err(422, "verification_failed");
+        if (body.code === "999999") return err(409, "replayed");
+        return ok(201, { attestationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" });
+      }
       return err(404, "not_found");
     }
 

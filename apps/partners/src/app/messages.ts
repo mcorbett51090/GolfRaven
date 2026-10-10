@@ -100,6 +100,8 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "budget_short") return { key: "offerRedeem.budgetShort" };
     if (code === "cold_start_cap") return { key: "offerRedeem.coldStart" };
     if (code === "not_found") return { key: "offerRedeem.notFound" };
+    if (code === "name_unconfirmed") return { key: "offerRedeem.nameUnconfirmed" };
+    if (code === "verification_failed") return { key: "offerRedeem.verifyFailed" };
     if (kind === "conflict") return { key: "offerRedeem.replayed" };
     if (kind === "unprocessable") return { key: "offerRedeem.failed" };
   }

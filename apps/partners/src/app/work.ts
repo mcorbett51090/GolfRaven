@@ -23,6 +23,7 @@ import {
   postHandoverMint,
   postMintToken,
   postOfferRedeem,
+  postOfferRedeemOffline,
   postOfflineAttest,
   postOnlineAttest,
   postPrintedQr,
@@ -33,6 +34,7 @@ import {
   postVoucher,
   STOCK_MOVE_KINDS,
   type AttestKind,
+  type OfferRedeemMode,
   type RedeemMethod,
   type StockMoveKind,
 } from "../api/work-routes";
@@ -73,7 +75,9 @@ export interface WorkScreens {
   submitVoucher(entitlementId: string): Promise<void>;
   loadOffersQueue(): Promise<void>;
   selectOfferCode(offerCodeId: string): void;
+  setOfferRedeemMode(mode: OfferRedeemMode): void;
   submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
+  submitOfferRedeemOffline(offerCodeId: string, handle: string, code: string, nameConfirmed: boolean): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -215,7 +219,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
         return;
       }
-      withWork(s, { kind: "offer-redeem", facilityId: id, busy: false, queue: null, selectedOfferCodeId: "", lastRedeem: null }, null);
+      withWork(s, { kind: "offer-redeem", facilityId: id, busy: false, queue: null, selectedOfferCodeId: "", mode: "staff_scan", lastRedeem: null }, null);
     },
 
     closeWork() {
@@ -573,9 +577,15 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       withWork(s, { ...s.work, selectedOfferCodeId: offerCodeId.toLowerCase() });
     },
 
+    setOfferRedeemMode(mode) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, mode });
+    },
+
     async submitOfferRedeem(offerCodeId, credential) {
       const s = signedIn(host);
-      if (s === null || s.work?.kind !== "offer-redeem") return;
+      if (s === null || s.work?.kind !== "offer-redeem" || s.work.mode !== "staff_scan") return;
       if (!UUID_RE.test(offerCodeId)) {
         host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.codeInvalid" } } });
         return;
@@ -593,6 +603,38 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         grant,
         "offer-redeem",
         () => postOfferRedeem(api, { facilityId, offerCodeId: id, method: "staff_scan", credential: wireCred }),
+        (cur, lastRedeem) => {
+          const work = cur.work?.kind === "offer-redeem"
+            ? { ...cur.work, busy: false, lastRedeem, queue: null, selectedOfferCodeId: "" }
+            : cur.work;
+          return { ...cur, busy: null, work, notice: { kind: "offer-redeem-ok" } };
+        },
+      );
+    },
+
+    async submitOfferRedeemOffline(offerCodeId, handle, code, nameConfirmed) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.work.mode !== "offline") return;
+      if (!UUID_RE.test(offerCodeId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.codeInvalid" } } });
+        return;
+      }
+      const h = handle.trim().toLowerCase();
+      if (!HANDLE_RE.test(h) || !CODE_RE.test(code)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.offlineInvalid" } } });
+        return;
+      }
+      if (nameConfirmed !== true) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.nameUnconfirmed" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = offerCodeId.toLowerCase();
+      await runA1(
+        grant,
+        "offer-redeem",
+        () => postOfferRedeemOffline(api, { facilityId, offerCodeId: id, handle: h, code, nameConfirmed: true }),
         (cur, lastRedeem) => {
           const work = cur.work?.kind === "offer-redeem"
             ? { ...cur.work, busy: false, lastRedeem, queue: null, selectedOfferCodeId: "" }

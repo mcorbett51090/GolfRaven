@@ -25,6 +25,7 @@ import type {
   HandoverMinted,
   MintedToken,
   OfferQueueRow,
+  OfferRedeemMode,
   OfferRedeemResult,
   PrintedQr,
   RedeemMethod,
@@ -167,6 +168,8 @@ export type WorkView =
       readonly queue: readonly OfferQueueRow[] | null;
       /** Offer code id chosen from the queue (or typed); cleared after a successful redeem. */
       readonly selectedOfferCodeId: string;
+      /** staff_scan = check-in jti on POST redeem; offline = handle + code + nameConfirmed on POST redeem/offline. */
+      readonly mode: OfferRedeemMode;
       readonly lastRedeem: OfferRedeemResult | null;
     }
   | {
