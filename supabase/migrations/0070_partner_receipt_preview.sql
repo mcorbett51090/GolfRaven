@@ -37,6 +37,7 @@ DECLARE
   v_subject_ref text;
   v_matched_id uuid;
   v_matched_ref text;
+  v_matched_text text;
 BEGIN
   v_uid := private.partner_authorize(NULL, NULL, ARRAY['operator']::app.partner_role[], 'A0');
   IF NOT private.is_admin(v_uid) THEN
@@ -72,14 +73,22 @@ BEGIN
     RETURN;
   END IF;
 
-  -- No EXCEPTION block in a _for_partner function (check 14 a2). Validate the uuid text first.
+  -- No EXCEPTION / regex-$ / backslash in a _for_partner body (check 14 a0/a2).
   v_matched_ref := NULL;
   v_matched_id := NULL;
-  IF v_detail IS NOT NULL
-     AND pg_catalog.nullif(pg_catalog.btrim(coalesce(v_detail ->> 'matched_purchase_evidence_id', '')), '') IS NOT NULL
-     AND (v_detail ->> 'matched_purchase_evidence_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+  v_matched_text := NULL;
+  IF v_detail IS NOT NULL THEN
+    v_matched_text := pg_catalog.btrim(coalesce(v_detail ->> 'matched_purchase_evidence_id', ''));
+  END IF;
+  IF v_matched_text IS NOT NULL
+     AND pg_catalog.length(v_matched_text) = 36
+     AND pg_catalog.substr(v_matched_text, 9, 1) = '-'
+     AND pg_catalog.substr(v_matched_text, 14, 1) = '-'
+     AND pg_catalog.substr(v_matched_text, 19, 1) = '-'
+     AND pg_catalog.substr(v_matched_text, 24, 1) = '-'
+     AND pg_catalog.translate(v_matched_text, '0123456789abcdefABCDEF-', '') = ''
   THEN
-    v_matched_id := (v_detail ->> 'matched_purchase_evidence_id')::uuid;
+    v_matched_id := v_matched_text::uuid;
   END IF;
   IF v_matched_id IS NOT NULL THEN
     SELECT pe.ref_id INTO v_matched_ref
