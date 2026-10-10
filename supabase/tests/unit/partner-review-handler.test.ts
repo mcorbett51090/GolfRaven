@@ -41,6 +41,7 @@ interface FakeReview {
   sla: ReviewSlaSummary;
   resolveOc: ResolveHeldResult;
   resolveEnt: ResolveHeldResult;
+  resolveXu: ResolveHeldResult;
   throwOn?: "session" | "authority" | "invalid";
 }
 
@@ -59,6 +60,7 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
     },
     resolveOc: overrides.resolveOc ?? { status: "ok", state: "issued" },
     resolveEnt: overrides.resolveEnt ?? { status: "ok", state: "redeemable" },
+    resolveXu: overrides.resolveXu ?? { status: "ok", state: "approved" },
     throwOn: overrides.throwOn,
     db: null as unknown as PartnerDb,
   };
@@ -78,6 +80,10 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
     async resolveHeldEntitlement(id, approve) {
       calls.push(`resolveEnt:${id}:${approve}`);
       return state.resolveEnt;
+    },
+    async resolveReceiptCrossUserMatch(id, approve) {
+      calls.push(`resolveXu:${id}:${approve}`);
+      return state.resolveXu;
     },
   };
   state.db = {
@@ -229,6 +235,17 @@ describe("handlePartnerReviewRequest", () => {
     expect((await call(ok, "POST", "resolve/entitlement", { id, approve: true })).status).toBe(200);
     const held = makeFake({ resolveEnt: { status: "not_held", state: null } });
     expect((await call(held, "POST", "resolve/entitlement", { id, approve: false })).status).toBe(409);
+  });
+
+  it("POST resolve/receipt-cross-user maps approve and not_open", async () => {
+    const id = "91000000-0000-0000-0000-000000004701";
+    const ok = makeFake({ resolveXu: { status: "ok", state: "approved" } });
+    const res = await call(ok, "POST", "resolve/receipt-cross-user", { id, approve: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ data: { state: "approved" } });
+    expect(ok.calls).toContain(`resolveXu:${id}:true`);
+    const closed = makeFake({ resolveXu: { status: "not_open", state: null } });
+    expect((await call(closed, "POST", "resolve/receipt-cross-user", { id, approve: false })).status).toBe(409);
   });
 
   it("maps PartnerAuthorityRefused to 403 and PartnerSessionRefused to 401", async () => {

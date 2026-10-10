@@ -4328,7 +4328,7 @@ function buildPartnerAttestTx(trx: TxSql): PartnerAttestTx {
 }
 
 /** The review definers of 0057 (S4). Every status is a returned row, so a refusal COMMITS. */
-const RESOLVE_HELD_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_held", "budget_short"]);
+const RESOLVE_HELD_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_held", "budget_short", "not_open"]);
 const QUEUE_KINDS: ReadonlySet<string> = new Set(["offer_code", "entitlement", "review_item"]);
 function resolveHeldOf(r: Record<string, unknown> | undefined, fn: string): ResolveHeldResult {
   if (typeof r?.o_status !== "string" || !RESOLVE_HELD_STATUSES.has(r.o_status)) throw new Error(`${fn} returned no usable status`);
@@ -4384,6 +4384,10 @@ function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
     async resolveHeldEntitlement(entitlementId: string, approve: boolean): Promise<ResolveHeldResult> {
       const rows = await trx`select o_status, o_state from private.partner_resolve_held_entitlement_for_partner(${entitlementId}::uuid, ${approve}::boolean)`;
       return resolveHeldOf(rows[0], "partner_resolve_held_entitlement_for_partner");
+    },
+    async resolveReceiptCrossUserMatch(reviewId: string, approve: boolean): Promise<ResolveHeldResult> {
+      const rows = await trx`select o_status, o_state from private.partner_resolve_receipt_cross_user_match_for_partner(${reviewId}::uuid, ${approve}::boolean)`;
+      return resolveHeldOf(rows[0], "partner_resolve_receipt_cross_user_match_for_partner");
     },
   };
 }

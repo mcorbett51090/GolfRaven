@@ -2811,11 +2811,39 @@ Numbering: **migration `0068`, matrix `46`, this section 47.** Closes the money 
 
 ### 47.3 Not built, honestly
 
-- OCR, perceptual aHash, picker UI, partner resolve of `receipt_cross_user_match`.
+- OCR, perceptual aHash, picker UI, partner resolve of `receipt_cross_user_match` (→ §48).
 
 ### 47.4 Verification
 
-Branch: `cursor/p5-receipt-cosignal-approve-8ffd` (base main after #86 / `524ac87`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-cosignal-approve-8ffd` (base main after #86 / `524ac87`). Tip CI green on PR #87 (all three checks); squash-merged as `54ba939`.
 
 - pgTAP matrix 46: clean promote, unattestable holds, open cross-user blocks.
+
+## 48. As built: partner resolve of receipt_cross_user_match (0069)
+
+Numbering: **migration `0069`, matrix `47`, this section 48.** Closes the money-path §5 grief gate left open by §47: an admin with A3 approves or rejects an open `receipt_cross_user_match` review item.
+
+### 48.1 What was built
+
+- **`private.partner_resolve_receipt_cross_user_match_for_partner(review_id, approve)`** (class **A3**, **ADMIN only**) + apply helper. Statuses: `ok | not_found | not_open`.
+- **Approve**: close item (`status=approved`), INSERT subject `receipt_fingerprint` (cross-user intake never wrote one), clear the open fraud signal; if the purchase is already `valid`, promote `receipt_green_fee` with `coSignalFix` from the attached cosignal.
+- **Reject**: close item (`status=rejected`), void the subject's upload set with `void_reason='reviewer'`, detach non-terminal credits, void pending `receipt_green_fee` summary, clear fraud signal. Matched earlier purchase untouched.
+- **Edge**: `POST /partner-review/resolve/receipt-cross-user` `{ id, approve }` (same shape as held-reward resolve).
+- **Policies**: eleven `pd_partner_receipt_*` rows keyed on `partner_bound_admin()` (no GUC).
+
+### 48.2 Decisions and departures
+
+- **`not_open`, not `not_held`** — review items are not reward holds; the wire maps both to HTTP 409.
+- **Fingerprint on approve** — required so §47 promote's fingerprint join can succeed after a late cosignal or resolve-time promote.
+- **No PWA button in this slice** — queue already lists the items; the portal branch is a follow-on UI seam.
+
+### 48.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, picker UI, partners PWA resolve affordance for `review_item` rows.
+
+### 48.4 Verification
+
+Branch: `cursor/p5-receipt-cross-user-resolve-8ffd` (base main after #87 / `54ba939`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 47; Vitest partner-review route map; PA-13b EXECUTE list includes the new wrapper.
 
