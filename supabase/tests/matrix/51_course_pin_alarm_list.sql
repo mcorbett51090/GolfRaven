@@ -75,12 +75,15 @@ SELECT is(
   1,
   'structure: SECURITY DEFINER / private_definer / search_path='''''
 );
+-- function_inventory is FORCE RLS; only service_role can SELECT (restricted harness).
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(
   (SELECT count(*)::int FROM private.function_inventory
    WHERE function_name = 'course_pin_alarm_list_for_partner' AND expected_edge_partner AND NOT expected_edge_system),
   1,
   'inventory: one edge_partner row'
 );
+SELECT tests.clear_actor();
 SELECT is(
   (SELECT count(*)::int FROM pg_policy pol WHERE pol.polname = 'pd_course_pin_alarm_partner_select'),
   1,
