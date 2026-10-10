@@ -100,12 +100,21 @@ INSERT INTO app.partner_org (id, kind, name)
 VALUES ('10000000-0000-0000-0000-000000000040', 'sponsor', 'Sponsor 40');
 INSERT INTO app.sponsorship (id, sponsor_org_id, trail_id, category, scope, attribution_name, starts_on, ends_on, status)
 VALUES ('40000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000040', 'trl_t', 'other', 'offers', 'Sponsor 40', current_date, current_date + 90, 'live');
+-- issued code for happy-path offline redeem (player_b)
 INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, sponsorship_id, budget_cap, budget_reserved, face_value, valid_from, valid_to, status)
 VALUES ('68000000-0000-0000-0000-000000000040', 'trl_t', 'fac_x', '{}'::jsonb, 'sponsor', '40000000-0000-0000-0000-000000000001',
         500, 10, 10, current_date, current_date + 30, 'live');
 INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, reserved_amount, expires_at, activated_at)
 VALUES ('78000000-0000-0000-0000-000000000040', '68000000-0000-0000-0000-000000000040',
         '00000000-0000-0000-0000-00000000000b', 'fac_x', 'issued', 10, now() + interval '7 days', now());
+-- planted already-offline-redeemed overdue code for settlement cells (separate offer: UNIQUE(user_id, offer_id); bind order: settlement before lasting staff bind)
+INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, sponsorship_id, budget_cap, budget_reserved, budget_used, face_value, valid_from, valid_to, status)
+VALUES ('68000000-0000-0000-0000-000000000041', 'trl_t', 'fac_x', '{}'::jsonb, 'sponsor', '40000000-0000-0000-0000-000000000001',
+        500, 0, 10, 10, current_date, current_date + 30, 'live');
+INSERT INTO app.offer_code (id, offer_id, user_id, facility_id, state, reserved_amount, expires_at, activated_at, redeemed_at, redeemed_by_staff, redeemed_offline, offline_confirm_by)
+VALUES ('78000000-0000-0000-0000-000000000041', '68000000-0000-0000-0000-000000000041',
+        '00000000-0000-0000-0000-00000000000b', 'fac_x', 'redeemed', 0, now() + interval '7 days', now(), now(),
+        '00000000-0000-0000-0000-1000000000a1', true, now() - interval '1 minute');
 
 SET LOCAL ROLE service_role;
 INSERT INTO app.device (id, user_id, platform, last_seen) VALUES
@@ -149,6 +158,32 @@ SELECT throws_ok($$SELECT * FROM private.partner_offers_redeem_offline_for_partn
 RESET ROLE;
 ROLLBACK TO SAVEPOINT no_pin;
 
+-- ----------------------------------------------------------------------------
+-- 3. Settlement first (bind operator in a savepoint; planted overdue offline redeem; before lasting staff bind)
+-- ----------------------------------------------------------------------------
+SAVEPOINT sett_unc;
+SELECT pg_temp.seed_step('op', '{"mfa_s": 240, "aal": 2}'::jsonb);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_op');
+SELECT is((SELECT o_status || '|' || o_offline_count::text || '|' || o_unconfirmed_count::text
+           FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date)
+           WHERE o_status = 'ok' LIMIT 1),
+  'ok|1|1', 'settlement: offline_count and unconfirmed_count are 1 when confirm deadline passed');
+SELECT is((SELECT count(*)::int FROM app.fraud_signal f WHERE f.kind = 'offer_offline_unconfirmed'
+             AND f.user_id = '00000000-0000-0000-0000-00000000000b'
+             AND f.detail ->> 'offer_code_id' = '78000000-0000-0000-0000-000000000041'), 1,
+  'settlement inserts fraud_signal offer_offline_unconfirmed once');
+SELECT is((SELECT o_unconfirmed_count::text FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date)
+           WHERE o_status = 'ok' LIMIT 1), '1', 'second settlement export still reports unconfirmed_count 1');
+SELECT is((SELECT count(*)::int FROM app.fraud_signal f WHERE f.kind = 'offer_offline_unconfirmed'
+             AND f.detail ->> 'offer_code_id' = '78000000-0000-0000-0000-000000000041'), 1,
+  'fraud_signal is not duplicated on a second export');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT sett_unc;
+
+-- ----------------------------------------------------------------------------
+-- 4. Happy offline redeem: bind staff_x once (lasting)
+-- ----------------------------------------------------------------------------
 SELECT pg_temp.seed_step('sx', '{"pin_grant_s": 50}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
@@ -160,9 +195,6 @@ SELECT is(pg_temp.red_off('sx', 'fac_x', '78000000-0000-0000-0000-000000000040',
   'verification_failed|false', 'wrong offline code is verification_failed');
 SELECT is((SELECT state::text FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000040'), 'issued', 'failed attempts leave the code issued');
 
--- ----------------------------------------------------------------------------
--- 3. Happy offline redeem
--- ----------------------------------------------------------------------------
 SELECT is(pg_temp.red_off('sx', 'fac_x', '78000000-0000-0000-0000-000000000040', 'player_b',
   pg_temp.ref_code('00000000-0000-0000-0000-00000000000b', '40000000-0000-0000-0000-00000000d0b1', 1, pg_temp.now_step()), true),
   'ok|true', 'happy offline redeem with current-step code and nameConfirmed');
@@ -181,33 +213,6 @@ SELECT is(pg_temp.red_off('sx', 'fac_x', '78000000-0000-0000-0000-000000000040',
   pg_temp.ref_code('00000000-0000-0000-0000-00000000000b', '40000000-0000-0000-0000-00000000d0b1', 1, pg_temp.now_step()), true),
   'replayed|false', 'same step again is replayed');
 SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.offer_redeem_offline') >= 1, true, 'audit row for offline offer redeem');
-
--- ----------------------------------------------------------------------------
--- 4. Settlement: unconfirmed_count + fraud_signal after deadline
--- ----------------------------------------------------------------------------
-UPDATE app.offer_code SET offline_confirm_by = now() - interval '1 minute'
-WHERE id = '78000000-0000-0000-0000-000000000040';
-
-SAVEPOINT sett_unc;
-SELECT pg_temp.seed_step('op', '{"mfa_s": 240, "aal": 2}'::jsonb);
-SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_op');
-SELECT is((SELECT o_status || '|' || o_offline_count::text || '|' || o_unconfirmed_count::text
-           FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date)
-           WHERE o_status = 'ok' LIMIT 1),
-  'ok|1|1', 'settlement: offline_count and unconfirmed_count are 1 when confirm deadline passed');
-SELECT is((SELECT count(*)::int FROM app.fraud_signal f WHERE f.kind = 'offer_offline_unconfirmed'
-             AND f.user_id = '00000000-0000-0000-0000-00000000000b'
-             AND f.detail ->> 'offer_code_id' = '78000000-0000-0000-0000-000000000040'), 1,
-  'settlement inserts fraud_signal offer_offline_unconfirmed once');
--- second export does not double-insert
-SELECT is((SELECT o_unconfirmed_count::text FROM private.partner_settlement_export_for_partner('trl_t', date_trunc('month', now())::date)
-           WHERE o_status = 'ok' LIMIT 1), '1', 'second settlement export still reports unconfirmed_count 1');
-SELECT is((SELECT count(*)::int FROM app.fraud_signal f WHERE f.kind = 'offer_offline_unconfirmed'
-             AND f.detail ->> 'offer_code_id' = '78000000-0000-0000-0000-000000000040'), 1,
-  'fraud_signal is not duplicated on a second export');
-RESET ROLE;
-ROLLBACK TO SAVEPOINT sett_unc;
 
 SELECT * FROM finish();
 ROLLBACK;
