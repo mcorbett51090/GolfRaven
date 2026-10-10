@@ -2324,9 +2324,9 @@ Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx`
 
 ### 32.3 Not built, honestly
 
-- **`offline_code` offer redeem** (PIN step-up + profile-card name check; `fraud_signal` / `unconfirmed` after 24 h).
+- **`offline_code` offer redeem** — **built in §35** (migration `0062`, matrix `40`).
 - **Rollups-refresh writer** (still out of scope; S6 seam).
-- **S7 UI** (portal screens).
+- **S7 UI** (portal screens for staff_scan landed in §33; offline redeem form is still a seam — see §35.3).
 - **No mutation pass** was run for this slice.
 
 ### 32.4 Verification
@@ -2371,7 +2371,7 @@ Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (progr
 ### 33.3 Not built, honestly
 
 - Camera scan for check-in tokens.
-- Offline offer redeem (`offline_code` remains refused by Edge and UI).
+- Offline offer redeem UI (`offline_code` Edge path is §35; the partners form is still a seam).
 - `exports-purge` UI (system lane).
 - Merging with P5.1b will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
 
@@ -2409,4 +2409,42 @@ Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4
 
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).
+
+## 35. As built: offline_code offer redeem (0062)
+
+Numbering: **migration `0062`, matrix `40`, this section 35.** P5.1b (0060 / matrix 38 / §32) left `offline_code` as a seam; AT(10) issuance (0061 / matrix 39 / §32.5) and S7 UI (§33–§34) took intermediate numbers. Nothing from 0001–0061 is edited.
+
+### 35.1 What was built
+
+**Migration `0062_partner_offers_offline_redeem.sql`** and **matrix `40_partner_offers_offline_redeem.sql`**, then Edge route **`POST partner-offers-redeem/redeem/offline`**.
+
+- **`app.offer_code.offline_confirm_by`**: set to `now() + 24 h` on an offline redeem; NULL for staff_scan or after a future cosignal clear (clear is still a seam).
+- **`private.partner_offers_redeem_offline_for_partner(facility, offer_code_id, handle, code, name_confirmed)`** (A1, staff/manager): same verify-and-record counters/candidates as S3 offline attest (0056); `name_confirmed` must be true; redeems with `redeemed_offline = true` and sets `offline_confirm_by`. Statuses: `ok | not_found | not_issued | expired | wrong_facility | wrong_player | verification_failed | replayed | rate_limited | name_unconfirmed | no_facility | cold_start_cap | budget_short`.
+- **`private.partner_offers_redeem_apply_offline`**: owner-only apply tail (consume, attest with `ofr-off:` jti prefix, nonce, code update).
+- **`CREATE OR REPLACE private.partner_settlement_export_for_partner`**: `unconfirmed_count` uses overdue `offline_confirm_by`; inserts `fraud_signal` kind `offer_offline_unconfirmed` once per overdue code.
+- **Fraud INSERT policy** widens to allow `offer_offline_unconfirmed` under a partner binding.
+- **Edge**: `parseOfferRedeemOfflineBody` / `POST redeem/offline`; port `redeemOfferOffline`; privileged calls the new definer. Online `POST redeem` remains staff_scan only (0060 still refuses `offline_code` with 22023).
+
+### 35.2 Decisions and departures, and why
+
+- **Separate route and definer** (not a method on `partner_offers_redeem_for_partner`) — offline needs handle + six digits + `nameConfirmed`; keeping staff_scan's wire shape closed avoids a polymorphic body and matches the attest online/offline split.
+- **`nameConfirmed` is boolean true on the wire** — Edge refuses anything else with 400; the database also returns `name_unconfirmed` if false (defence in depth for a non-Edge caller).
+- **Settlement marks overdue once** — `NOT EXISTS` on `fraud_signal.detail.offer_code_id` so a second export does not duplicate the signal; `unconfirmed_count` still reads the deadline column every time.
+- **Cosignal clear of `offline_confirm_by`** is deliberately out of this slice (player-lane attach against the recorded `offline_code_step`).
+
+### 35.3 Not built, honestly
+
+- **Partners PWA offline redeem form** (staff still use staff_scan UI from §33).
+- **Player-lane cosignal that clears `offline_confirm_by`**.
+- **Rollups-refresh writer** (S6 seam).
+- **No mutation pass** was run for this slice.
+
+### 35.4 Verification
+
+Branch: `cursor/p5-offline-offer-redeem-8ffd` (base main after #74).
+
+- **Matrix 40**: foreign facility 403, A1 without PIN, `name_unconfirmed`, wrong code, happy offline redeem + `offline_confirm_by`, replay, settlement `unconfirmed_count` + one `offer_offline_unconfirmed` fraud_signal.
+- **Edge vitest** (`partner-offers-redeem-handler`): online + offline shapes and status map.
+- Spine PA-1 expect list includes `partner_offers_redeem_offline_for_partner`.
+- Restricted harness / CI recorded when green on the PR tip.
 

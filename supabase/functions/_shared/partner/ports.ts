@@ -704,7 +704,7 @@ export interface VoucherResult {
   readonly voucherIssuedAt: string | null;
 }
 
-/** What `partner_offers_redeem_for_partner` answers (0060). Method of this slice is staff_scan only; offline_code is 22023. */
+/** What `partner_offers_redeem_for_partner` answers (0060). Online method is staff_scan; offline is a separate route (0062). */
 export type OfferRedeemMethod = "staff_scan";
 export const OFFER_REDEEM_METHODS: readonly OfferRedeemMethod[] = ["staff_scan"];
 export type OfferRedeemStatus =
@@ -718,7 +718,10 @@ export type OfferRedeemStatus =
   | "replayed"
   | "no_facility"
   | "cold_start_cap"
-  | "budget_short";
+  | "budget_short"
+  | "name_unconfirmed"
+  | "verification_failed"
+  | "rate_limited";
 export interface OfferRedeemResult {
   readonly status: OfferRedeemStatus;
   readonly attestationId: string | null;
@@ -741,6 +744,14 @@ export interface PartnerOffersRedeemTx {
   offersQueue(facilityId: string): Promise<OfferQueueRow[]>;
   /** POST redeem (class A1): `credential` is a check-in jti (staff_scan). */
   redeemOffer(facilityId: string, offerCodeId: string, method: OfferRedeemMethod, credential: string): Promise<OfferRedeemResult>;
+  /** POST redeem/offline (class A1, 0062): handle + six digits + nameConfirmed; verified in the database. */
+  redeemOfferOffline(
+    facilityId: string,
+    offerCodeId: string,
+    handle: string,
+    code: string,
+    nameConfirmed: boolean,
+  ): Promise<OfferRedeemResult>;
 }
 
 /** One settlement line from `partner_settlement_export_for_partner` (0060). */

@@ -1,7 +1,7 @@
 // supabase/tests/unit/partner-offers-redeem-handler.test.ts
 //
-// The `partner-offers-redeem` handler and its strict shapes (docs/security/partner-auth-design.md 12, 32; P5.1b, the Edge half of 0060), against an in-memory `PartnerDb`.
-// Database cells: matrix 38.
+// The `partner-offers-redeem` handler and its strict shapes (docs/security/partner-auth-design.md 12, 32, 35; P5.1b + 0062 offline), against an in-memory `PartnerDb`.
+// Database cells: matrix 38 (staff_scan) and matrix 40 (offline).
 
 import { describe, expect, it } from "vitest";
 import {
@@ -10,7 +10,11 @@ import {
   OFFERS_REDEEM_PER_MEMBER_PER_HOUR,
   type PartnerOffersRedeemDeps,
 } from "../../functions/_shared/partner/offers-redeem-handler.ts";
-import { parseOfferRedeemBody, parseOffersQueueQuery } from "../../functions/_shared/partner/offers-redeem-shape.ts";
+import {
+  parseOfferRedeemBody,
+  parseOfferRedeemOfflineBody,
+  parseOffersQueueQuery,
+} from "../../functions/_shared/partner/offers-redeem-shape.ts";
 import {
   type OfferQueueRow,
   type OfferRedeemResult,
@@ -26,7 +30,7 @@ const FN = "partner-offers-redeem";
 const CODE = "78000000-0000-0000-0000-000000000001";
 const JTI = "38200000-0000-0000-0000-000000000001";
 
-type Op = "offersQueue" | "redeemOffer";
+type Op = "offersQueue" | "redeemOffer" | "redeemOfferOffline";
 interface World {
   calls: string[];
   committed: boolean[];
@@ -77,6 +81,10 @@ function world(): { w: World; deps: PartnerOffersRedeemDeps } {
       hit("redeemOffer", a);
       return w.redeem;
     },
+    async redeemOfferOffline(...a) {
+      hit("redeemOfferOffline", a);
+      return w.redeem;
+    },
   };
   const reject = () => Promise.reject(new Error("not used"));
   const db: PartnerDb = {
@@ -120,13 +128,49 @@ const call = (deps: PartnerOffersRedeemDeps, method: string, path: string, init:
   handlePartnerOffersRedeemRequest(fnReq(FN, method, path, init), deps);
 
 describe("offers-redeem-shape", () => {
-  it("parseOffersQueueQuery / parseOfferRedeemBody: accept well-formed input; refuse unknown keys and offline_code", () => {
+  it("parseOffersQueueQuery / parseOfferRedeemBody: accept well-formed staff_scan; refuse offline_code on the online body", () => {
     expect(parseOffersQueueQuery(`https://p.test/${FN}/queue?facilityId=fac_x`)).toEqual({ ok: true, value: { facilityId: "fac_x" } });
     expect(parseOffersQueueQuery(`https://p.test/${FN}/queue?facilityId=fac_x&x=1`).ok).toBe(false);
     const ok = parseOfferRedeemBody({ facilityId: "fac_x", offerCodeId: CODE, method: "staff_scan", credential: JTI });
     expect(ok).toEqual({ ok: true, value: { facilityId: "fac_x", offerCodeId: CODE, method: "staff_scan", credential: JTI } });
     expect(parseOfferRedeemBody({ facilityId: "fac_x", offerCodeId: CODE, method: "offline_code", credential: "123456" }).ok).toBe(false);
     expect(parseOfferRedeemBody({ facilityId: "fac_x", offerCodeId: CODE, method: "staff_scan", credential: JTI, extra: 1 }).ok).toBe(false);
+  });
+
+  it("parseOfferRedeemOfflineBody: accept nameConfirmed true; refuse false, unknown keys, bad code", () => {
+    const ok = parseOfferRedeemOfflineBody({
+      facilityId: "fac_x",
+      offerCodeId: CODE,
+      handle: "Player_B",
+      code: "123456",
+      nameConfirmed: true,
+    });
+    expect(ok).toEqual({
+      ok: true,
+      value: { facilityId: "fac_x", offerCodeId: CODE, handle: "player_b", code: "123456", nameConfirmed: true },
+    });
+    expect(parseOfferRedeemOfflineBody({
+      facilityId: "fac_x",
+      offerCodeId: CODE,
+      handle: "player_b",
+      code: "123456",
+      nameConfirmed: false,
+    }).ok).toBe(false);
+    expect(parseOfferRedeemOfflineBody({
+      facilityId: "fac_x",
+      offerCodeId: CODE,
+      handle: "player_b",
+      code: "12345",
+      nameConfirmed: true,
+    }).ok).toBe(false);
+    expect(parseOfferRedeemOfflineBody({
+      facilityId: "fac_x",
+      offerCodeId: CODE,
+      handle: "player_b",
+      code: "123456",
+      nameConfirmed: true,
+      extra: 1,
+    }).ok).toBe(false);
   });
 });
 
@@ -152,6 +196,17 @@ describe("partner-offers-redeem handler", () => {
     expect(w.args[0]).toEqual({ op: "redeemOffer", args: ["fac_x", CODE, "staff_scan", JTI] });
   });
 
+  it("POST redeem/offline happy path calls redeemOfferOffline", async () => {
+    const { w, deps } = world();
+    const res = await call(deps, "POST", "redeem/offline", {
+      headers: auth(),
+      body: { facilityId: "fac_x", offerCodeId: CODE, handle: "player_b", code: "123456", nameConfirmed: true },
+    });
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ data: { attestationId: okRedeem.attestationId } });
+    expect(w.args[0]).toEqual({ op: "redeemOfferOffline", args: ["fac_x", CODE, "player_b", "123456", true] });
+  });
+
   it("maps redeem statuses to HTTP", async () => {
     const cases: Array<[OfferRedeemResult["status"], number, string]> = [
       ["not_found", 404, "not_found"],
@@ -163,14 +218,17 @@ describe("partner-offers-redeem handler", () => {
       ["wrong_player", 422, "token_invalid"],
       ["replayed", 409, "replayed"],
       ["budget_short", 422, "budget_short"],
+      ["name_unconfirmed", 422, "name_unconfirmed"],
+      ["verification_failed", 422, "verification_failed"],
       ["cold_start_cap", 429, "rate_limited"],
+      ["rate_limited", 429, "rate_limited"],
     ];
     for (const [status, http, code] of cases) {
       const { deps, w } = world();
       w.redeem = { status, attestationId: null };
-      const res = await call(deps, "POST", "redeem", {
+      const res = await call(deps, "POST", "redeem/offline", {
         headers: auth(),
-        body: { facilityId: "fac_x", offerCodeId: CODE, method: "staff_scan", credential: JTI },
+        body: { facilityId: "fac_x", offerCodeId: CODE, handle: "player_b", code: "123456", nameConfirmed: true },
       });
       expect(res.status, status).toBe(http);
       expect((await res.json()).error.code, status).toBe(code);
