@@ -350,7 +350,7 @@ CREATE POLICY current_user_edit_function_inventory_0062 ON private.function_inve
 
 INSERT INTO private.function_inventory (
   schema_name, function_name, identity_args,
-  expected_anon, expected_authenticated, expected_service_role, expected_edge_gateway, expected_edge_actor, expected_edge_partner, expected_edge_partner_minter, note
+  expected_anon, expected_authenticated, expected_service_role, expected_edge_actor, expected_edge_system, expected_edge_partner, expected_edge_partner_minter, note
 ) VALUES
   ('private', 'partner_offers_redeem_offline_for_partner', 'p_facility_id text, p_offer_code_id uuid, p_handle text, p_code text, p_name_confirmed boolean', false, false, false, false, false, true, false, '0062: edge_partner only; class A1; offline_code offer redeem'),
   ('private', 'partner_offers_redeem_apply_offline', 'p_staff uuid, p_facility_id text, p_player uuid, p_offer_id uuid, p_offer_code_id uuid, p_jti text, p_amount numeric', false, false, false, false, false, false, false, '0062: owner-only apply helper for offline offer redeem')
