@@ -2535,8 +2535,8 @@ Numbering: **this section 38.** No migration. Closes the §37.3 dual-await follo
 
 ### 38.4 Verification
 
-Branch: `cursor/p5-offline-confirm-order-8ffd` (base main after #77).
+Branch: `cursor/p5-offline-confirm-order-8ffd` (base main after #77). Tip `6a3525e` CI green on PR #78 (all three checks) before merge.
 
-- Focused vitest cells for call order and dual path.
-- Restricted harness / CI recorded when green on the PR tip.
+- Focused vitest (`marker-scan-handler`): 47/47, including confirm-before-attach order and dual pending-purchase + confirm path.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
 
