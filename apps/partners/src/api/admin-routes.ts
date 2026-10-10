@@ -419,6 +419,31 @@ export async function postResolveReceiptCrossUser(api: PartnerApi, id: string, a
   return { state: data["state"] };
 }
 
+/** Opaque label + short-lived signed URL for a receipt image. Never log `signedUrl`. */
+export interface ReceiptPreviewImage {
+  readonly label: "subject" | "matched";
+  readonly signedUrl: string;
+}
+
+/** §51: preview images for an open `receipt_cross_user_match` (A0 admin). Never log signed URLs. */
+export interface ReceiptCrossUserPreview {
+  readonly images: readonly ReceiptPreviewImage[];
+  readonly expiresAt: string;
+}
+
+/** §51: short-lived signed URLs for subject (+ matched) receipt images on an open review item. */
+export async function getReceiptCrossUserPreview(api: PartnerApi, id: string): Promise<ReceiptCrossUserPreview> {
+  const data = await api.call("GET", "partner-review", "preview/receipt-cross-user", undefined, { id });
+  if (!isObject(data) || !Array.isArray(data["images"]) || !isString(data["expiresAt"])) malformed();
+  const images: ReceiptPreviewImage[] = [];
+  for (const raw of data["images"]) {
+    if (!isObject(raw) || (raw["label"] !== "subject" && raw["label"] !== "matched") || !isString(raw["signedUrl"])) malformed();
+    images.push({ label: raw["label"], signedUrl: raw["signedUrl"] });
+  }
+  if (images.length === 0) malformed();
+  return { images, expiresAt: data["expiresAt"] };
+}
+
 export interface SettlementLine {
   readonly facilityId: string;
   readonly month: string;

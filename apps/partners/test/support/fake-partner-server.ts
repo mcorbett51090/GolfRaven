@@ -1270,6 +1270,26 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           slaHours: 48,
         });
       }
+      if (route === "preview/receipt-cross-user" && req.method === "GET") {
+        const id = url.searchParams.get("id");
+        if (id === null || id === "") return err(400, "bad_request");
+        if (!adminState.receiptCrossUserOpen) return err(409, "not_open");
+        if (id !== "91000000-0000-0000-0000-000000009101") return err(404, "not_found");
+        const expiresAt = new Date(Date.now() + 180_000).toISOString();
+        return ok(200, {
+          images: [
+            {
+              label: "subject",
+              signedUrl: `https://abc123.example.test/storage/v1/object/sign/receipts/subj.jpg?token=fake-preview-token-not-for-logs`,
+            },
+            {
+              label: "matched",
+              signedUrl: `https://abc123.example.test/storage/v1/object/sign/receipts/match.jpg?token=fake-preview-token-not-for-logs`,
+            },
+          ],
+          expiresAt,
+        });
+      }
       if ((route === "resolve/offer-code" || route === "resolve/entitlement") && req.method === "POST") {
         const refused = needA3(session);
         if (refused !== null) return refused;

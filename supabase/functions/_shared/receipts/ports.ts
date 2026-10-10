@@ -36,6 +36,8 @@ export interface ReceiptsStoragePort {
   putObject(path: string, body: Uint8Array, contentType: string): Promise<void>;
   /** Best-effort delete when intake refuses after upload (orphan compensation). */
   removeObject(path: string): Promise<void>;
+  /** Short-lived signed URL for a private `receipts` object (partner review preview). Never log the URL. */
+  createSignedUrl(path: string, expiresInSeconds: number): Promise<{ readonly signedUrl: string; readonly expiresAt: string }>;
   /** System-lane retention: delete objects with created_at older than the cutoff (epoch ms). */
   purgeOlderThan(olderThanMs: number): Promise<number>;
 }

@@ -9,6 +9,7 @@ import type {
   FacilityProgramme,
   OfferAdmin,
   OperatorRollup,
+  ReceiptCrossUserPreview,
   ReviewQueueItem,
   ReviewSla,
   SettlementExport,
@@ -199,6 +200,8 @@ export type WorkView =
       readonly items: readonly ReviewQueueItem[] | null;
       readonly sla: ReviewSla | null;
       readonly lastState: string | null;
+      /** Signed preview URLs by review id; never log (AT(17) / §51). */
+      readonly previews: Readonly<Record<string, ReceiptCrossUserPreview>>;
     }
   | {
       readonly kind: "rollups";

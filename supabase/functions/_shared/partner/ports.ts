@@ -424,12 +424,24 @@ export interface ReviewSlaSummary {
   readonly slaHours: number;
 }
 
+/** What `partner_receipt_cross_user_preview_for_partner` answers (0070). Storage paths stay on the Edge; the wire returns opaque labels + signed URLs only. */
+export type ReceiptCrossUserPreviewStatus = "ok" | "not_found" | "not_open" | "no_image";
+export interface ReceiptCrossUserPreviewRefs {
+  readonly status: ReceiptCrossUserPreviewStatus;
+  /** Subject purchase_evidence.ref_id when status is ok; never sent to the client as a path. */
+  readonly subjectRef: string | null;
+  /** Matched purchase_evidence.ref_id from detail when present and a receipt; never sent to the client as a path. */
+  readonly matchedRef: string | null;
+}
+
 /** One transaction as `edge_partner` for the `partner-review` routes. Every method is a `_for_partner` definer that begins with `partner_authorize` (class A3 for resolve, A0 for the reads); ADMIN only. */
 export interface PartnerReviewTx {
   /** GET queue (class A0, admin). */
   heldQueue(): Promise<HeldQueueRow[]>;
   /** GET sla (class A0, admin). */
   reviewSla(): Promise<ReviewSlaSummary>;
+  /** GET preview/receipt-cross-user (class A0, admin; 0070): storage ref_ids for an open receipt_cross_user_match. */
+  receiptCrossUserPreview(reviewId: string): Promise<ReceiptCrossUserPreviewRefs>;
   /** POST resolve/offer-code (class A3, admin). */
   resolveHeldOfferCode(codeId: string, approve: boolean): Promise<ResolveHeldResult>;
   /** POST resolve/entitlement (class A3, admin). */

@@ -128,6 +128,8 @@ import {
   type PartnerOffersRedeemTx,
   type PartnerProgrammeTx,
   type PartnerReviewTx,
+  type ReceiptCrossUserPreviewRefs,
+  type ReceiptCrossUserPreviewStatus,
   type PartnerSettlementExportTx,
   type PartnerSponsorshipsTx,
   type PartnerStockTx,
@@ -3793,7 +3795,7 @@ function buildReceiptsRepo(trx: TxSql): Repo["receipts"] {
   };
 }
 
-/** Service-role Storage for the private `receipts` bucket (0012_storage.sql): upload, orphan remove, 90-day purge. */
+/** Service-role Storage for the private `receipts` bucket (0012_storage.sql): upload, orphan remove, signed preview URLs, 90-day purge. */
 export const receiptsStorage = {
   async putObject(path: string, body: Uint8Array, contentType: string): Promise<void> {
     const client = adminClient();
@@ -3804,6 +3806,13 @@ export const receiptsStorage = {
     const client = adminClient();
     const { error } = await client.storage.from("receipts").remove([path]);
     if (error) throw new Error(`receiptsStorage.removeObject: remove failed: ${error.message}`);
+  },
+  async createSignedUrl(path: string, expiresInSeconds: number): Promise<{ readonly signedUrl: string; readonly expiresAt: string }> {
+    const client = adminClient();
+    const { data, error } = await client.storage.from("receipts").createSignedUrl(path, expiresInSeconds);
+    if (error || !data?.signedUrl) throw new Error(`receiptsStorage.createSignedUrl: createSignedUrl failed: ${error?.message ?? "no url"}`);
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+    return { signedUrl: data.signedUrl, expiresAt };
   },
   async purgeOlderThan(olderThanMs: number): Promise<number> {
     const client = adminClient();
@@ -4375,6 +4384,22 @@ function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
         slaBreachedRewards: Number(r.o_sla_breached_rewards),
         slaBreachedReviewItems: Number(r.o_sla_breached_review_items),
         slaHours: Number(r.o_sla_hours),
+      };
+    },
+    async receiptCrossUserPreview(reviewId: string): Promise<ReceiptCrossUserPreviewRefs> {
+      const rows = await trx`
+        select o_status, o_subject_ref, o_matched_ref
+        from private.partner_receipt_cross_user_preview_for_partner(${reviewId}::uuid)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string") throw new Error("partner_receipt_cross_user_preview_for_partner returned no usable status");
+      const status = r.o_status as ReceiptCrossUserPreviewStatus;
+      if (status !== "ok" && status !== "not_found" && status !== "not_open" && status !== "no_image") {
+        throw new Error("partner_receipt_cross_user_preview_for_partner returned an unknown status");
+      }
+      return {
+        status,
+        subjectRef: textOrNull(r.o_subject_ref),
+        matchedRef: textOrNull(r.o_matched_ref),
       };
     },
     async resolveHeldOfferCode(codeId: string, approve: boolean): Promise<ResolveHeldResult> {

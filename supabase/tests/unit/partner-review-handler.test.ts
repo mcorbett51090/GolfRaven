@@ -1,11 +1,11 @@
 // supabase/tests/unit/partner-review-handler.test.ts
 //
-// The `partner-review` handler and its strict shapes (docs/security/partner-auth-design.md 27; slice S4, the Edge half of 0057), against an in-memory `PartnerDb`. What is the DATABASE's (admin gate, A3,
-// resolve state machine, SLA): supabase/tests/matrix/35_partner_review_queue.sql.
+// The `partner-review` handler and its strict shapes (docs/security/partner-auth-design.md 27, 51; slice S4 / §51, the Edge half of 0057 / 0070), against an in-memory `PartnerDb`. What is the DATABASE's (admin gate, A3,
+// resolve state machine, SLA, preview refs): supabase/tests/matrix/35_partner_review_queue.sql and 48_partner_receipt_preview.sql.
 
 import { describe, expect, it } from "vitest";
-import { handlePartnerReviewRequest, REVIEW_BUCKET } from "../../functions/_shared/partner/review-handler.ts";
-import { parseResolveBody } from "../../functions/_shared/partner/review-shape.ts";
+import { handlePartnerReviewRequest, RECEIPT_PREVIEW_SIGNED_URL_SECONDS, REVIEW_BUCKET } from "../../functions/_shared/partner/review-handler.ts";
+import { parsePreviewQuery, parseResolveBody } from "../../functions/_shared/partner/review-shape.ts";
 import {
   PartnerAuthorityRefused,
   PartnerInvalidArgument,
@@ -13,6 +13,7 @@ import {
   type HeldQueueRow,
   type PartnerDb,
   type PartnerReviewTx,
+  type ReceiptCrossUserPreviewRefs,
   type ResolveHeldResult,
   type ReviewSlaSummary,
 } from "../../functions/_shared/partner/ports.ts";
@@ -36,9 +37,12 @@ function jsonResponse(status: number, body: unknown): void {
 
 interface FakeReview {
   readonly db: PartnerDb;
+  readonly storage: { createSignedUrl: (path: string, expiresInSeconds: number) => Promise<{ signedUrl: string; expiresAt: string }> };
   readonly calls: string[];
+  readonly signedPaths: string[];
   queue: HeldQueueRow[];
   sla: ReviewSlaSummary;
+  preview: ReceiptCrossUserPreviewRefs;
   resolveOc: ResolveHeldResult;
   resolveEnt: ResolveHeldResult;
   resolveXu: ResolveHeldResult;
@@ -47,8 +51,10 @@ interface FakeReview {
 
 function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
   const calls: string[] = [];
+  const signedPaths: string[] = [];
   const state: FakeReview = {
     calls,
+    signedPaths,
     queue: overrides.queue ?? [],
     sla: overrides.sla ?? {
       heldOfferCodes: 0,
@@ -58,11 +64,22 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
       slaBreachedReviewItems: 0,
       slaHours: 48,
     },
+    preview: overrides.preview ?? { status: "ok", subjectRef: "receipts/u/a.jpg", matchedRef: "receipts/v/b.jpg" },
     resolveOc: overrides.resolveOc ?? { status: "ok", state: "issued" },
     resolveEnt: overrides.resolveEnt ?? { status: "ok", state: "redeemable" },
     resolveXu: overrides.resolveXu ?? { status: "ok", state: "approved" },
     throwOn: overrides.throwOn,
     db: null as unknown as PartnerDb,
+    storage: {
+      async createSignedUrl(path, expiresInSeconds) {
+        signedPaths.push(`${path}:${expiresInSeconds}`);
+        calls.push(`createSignedUrl:${path}`);
+        return {
+          signedUrl: `https://storage.example.test/sign/${encodeURIComponent(path)}?token=fake-preview-token-not-for-logs`,
+          expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString(),
+        };
+      },
+    },
   };
   const tx: PartnerReviewTx = {
     async heldQueue() {
@@ -72,6 +89,10 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
     async reviewSla() {
       calls.push("reviewSla");
       return state.sla;
+    },
+    async receiptCrossUserPreview(id) {
+      calls.push(`preview:${id}`);
+      return state.preview;
     },
     async resolveHeldOfferCode(id, approve) {
       calls.push(`resolveOc:${id}:${approve}`);
@@ -127,6 +148,7 @@ async function call(fake: FakeReview, method: string, path: string, body?: unkno
   }
   return await handlePartnerReviewRequest(new Request(`https://project.example.test/functions/v1/${FN}/${path}`, init), {
     db: fake.db,
+    storage: fake.storage,
     allowedOrigin: ORIGIN,
   });
 }
@@ -143,12 +165,24 @@ describe("parseResolveBody", () => {
   });
 });
 
+describe("parsePreviewQuery", () => {
+  it("accepts exactly ?id=<uuid>", () => {
+    const r = parsePreviewQuery("https://x.test/preview/receipt-cross-user?id=91000000-0000-0000-0000-000000004701");
+    expect(r).toEqual({ ok: true, value: { id: "91000000-0000-0000-0000-000000004701" } });
+  });
+  it("refuses missing id, bad uuid, and unknown keys", () => {
+    expect(parsePreviewQuery("https://x.test/preview/receipt-cross-user").ok).toBe(false);
+    expect(parsePreviewQuery("https://x.test/preview/receipt-cross-user?id=nope").ok).toBe(false);
+    expect(parsePreviewQuery("https://x.test/preview/receipt-cross-user?id=91000000-0000-0000-0000-000000004701&x=1").ok).toBe(false);
+  });
+});
+
 describe("handlePartnerReviewRequest", () => {
   it("refuses a foreign Origin before routing", async () => {
     const fake = makeFake();
     const res = await handlePartnerReviewRequest(
       new Request(`https://project.example.test/functions/v1/${FN}/queue`, { method: "GET", headers: { origin: "https://evil.test", authorization: `Bearer ${TOKEN}` } }),
-      { db: fake.db, allowedOrigin: ORIGIN },
+      { db: fake.db, storage: fake.storage, allowedOrigin: ORIGIN },
     );
     expect(res.status).toBe(403);
     expect(fake.calls).toEqual([]);
@@ -158,7 +192,7 @@ describe("handlePartnerReviewRequest", () => {
     const fake = makeFake();
     const res = await handlePartnerReviewRequest(
       new Request(`https://project.example.test/functions/v1/${FN}/queue`, { method: "OPTIONS", headers: { origin: ORIGIN } }),
-      { db: fake.db, allowedOrigin: ORIGIN },
+      { db: fake.db, storage: fake.storage, allowedOrigin: ORIGIN },
     );
     expect(res.status).toBe(204);
     expect(fake.calls).toEqual([]);
@@ -169,6 +203,7 @@ describe("handlePartnerReviewRequest", () => {
     expect((await call(fake, "GET", "nope")).status).toBe(404);
     const res = await handlePartnerReviewRequest(new Request(`https://project.example.test/functions/v1/${FN}/queue`, { method: "GET", headers: { origin: ORIGIN } }), {
       db: fake.db,
+      storage: fake.storage,
       allowedOrigin: ORIGIN,
     });
     expect(res.status).toBe(401);
@@ -211,6 +246,34 @@ describe("handlePartnerReviewRequest", () => {
     expect(await res.json()).toEqual({
       data: { heldOfferCodes: 2, heldEntitlements: 1, openReviewItems: 3, slaBreachedRewards: 1, slaBreachedReviewItems: 0, slaHours: 48 },
     });
+  });
+
+  it("GET preview/receipt-cross-user returns opaque labels and signed URLs (never storage paths)", async () => {
+    const id = "91000000-0000-0000-0000-000000004701";
+    const fake = makeFake({
+      preview: { status: "ok", subjectRef: "receipts/uid-a/subj.jpg", matchedRef: "receipts/uid-b/match.jpg" },
+    });
+    const res = await call(fake, "GET", `preview/receipt-cross-user?id=${id}`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { images: Array<{ label: string; signedUrl: string }>; expiresAt: string } };
+    expect(body.data.images.map((i) => i.label)).toEqual(["subject", "matched"]);
+    expect(body.data.images.every((i) => i.signedUrl.includes("token="))).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("receipts/uid");
+    expect(fake.signedPaths).toEqual([
+      `receipts/uid-a/subj.jpg:${RECEIPT_PREVIEW_SIGNED_URL_SECONDS}`,
+      `receipts/uid-b/match.jpg:${RECEIPT_PREVIEW_SIGNED_URL_SECONDS}`,
+    ]);
+    expect(fake.calls).toContain(`preview:${id}`);
+  });
+
+  it("GET preview/receipt-cross-user maps not_open and no_image", async () => {
+    const id = "91000000-0000-0000-0000-000000004701";
+    const closed = makeFake({ preview: { status: "not_open", subjectRef: null, matchedRef: null } });
+    expect((await call(closed, "GET", `preview/receipt-cross-user?id=${id}`)).status).toBe(409);
+    const empty = makeFake({ preview: { status: "no_image", subjectRef: null, matchedRef: null } });
+    const res = await call(empty, "GET", `preview/receipt-cross-user?id=${id}`);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe("no_image");
   });
 
   it("POST resolve/offer-code maps statuses", async () => {
@@ -264,7 +327,7 @@ describe("handlePartnerReviewRequest", () => {
         headers,
         body: JSON.stringify({ id: "70000000-0000-0000-0000-000000003501", approve: true }),
       }),
-      { db: fake.db, allowedOrigin: ORIGIN },
+      { db: fake.db, storage: fake.storage, allowedOrigin: ORIGIN },
     );
     expect(res.status).toBe(415);
     expect(fake.calls).toEqual([]);
