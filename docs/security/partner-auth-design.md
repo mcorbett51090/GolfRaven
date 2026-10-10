@@ -2496,20 +2496,47 @@ Numbering: **migration `0063`, matrix `41`, this section 37.** Clears the §35 s
 ### 37.2 Decisions and departures
 
 - **Step on the code, not only on `offline_code_step`** — step rows prune after ~3 steps; the 24 h confirm window needs the step on `offer_code`.
-- **Confirm does not consume the fix** — it only clears deadlines; `cosignal_used` still means a `purchase_evidence` row already referenced the evidence id. Intake order is attach first, then confirm on `no_pending_purchase` (dual pending-purchase + offline-awaiting on one fix remains a rare follow-up).
+- **Confirm does not consume the fix** — it only clears deadlines; `cosignal_used` still means a `purchase_evidence` row already referenced the evidence id. Intake order on this tip was attach first, then confirm on `no_pending_purchase`; **§38** flips to confirm-before-attach so a dual pending-purchase + offline-awaiting fix clears both.
 - **No `partner_audit_write` from the actor lane** — that helper requires a partner binding and `^partner\.` action; marker attach also leaves no audit row.
 
 ### 37.3 Not built, honestly
 
 - Rollups-refresh writer (S6 seam).
 - Receipts upload / EXIF / phash player lane.
-- Confirm-before-attach when both a pending marker purchase and an offline offer await the same fix.
+- Confirm-before-attach when both a pending marker purchase and an offline offer await the same fix — **built in §38**.
 
 ### 37.4 Verification
 
-Branch: `cursor/p5-offline-confirm-cosignal-8ffd` (base main after #76). Tip squash-merged when CI green as `96d2027` (#77).
+Branch: `cursor/p5-offline-confirm-cosignal-8ffd` (base main after #76). Tip squash-merged to main as `d51435c` (#77).
 
 - **Matrix 41**: inventory/EXECUTE, offline redeem writes `offline_step` (partner bind isolated in SAVEPOINT), happy clear of the planted awaiting code, other player's code untouched, `none_awaiting` / `cosignal_invalid` / `cosignal_used`.
 - **Edge vitest** (`marker-scan-handler`): intake with confirm override → 200 credited, empty purchases.
 - CI green on PR #77 tip before merge (all three checks). Matrix 24 tip fixes on the same branch: NZ wrong-zone PIN non-vacuous when Chicago≡Auckland date; NIT same-day dedupe when `t0-2h` straddles Chicago midnight.
+
+## 38. As built: confirm-before-attach on cosignal intake
+
+Numbering: **this section 38.** No migration. Closes the §37.3 dual-await follow-up: when the same fix can both complete a pending marker purchase and clear an offline offer, confirm must run first.
+
+### 38.1 What was built
+
+- **Edge** (`scan-handler` co-signal intake): call `confirmOfferOffline` **before** `attachCosignal`. Attach still returns the purchase list when a pending row exists; when attach is `no_pending_purchase` and confirm was `confirmed`, answer 200 with empty purchases (unchanged credited outcome).
+- **Vitest**: call order `confirmOfferOffline` → `attachCosignal`; dual path (pending purchase + confirm override) still credits purchases.
+
+### 38.2 Decisions and departures
+
+- **Confirm first is required, not optional** — `marker_cosignal_check` returns `cosignal_used` once any `purchase_evidence` row references the evidence id; attach writes that reference, so confirm-after-attach can never clear an offline offer on the same fix.
+- **Confirm still does not consume the fix** — attach proceeds afterward for a pending marker purchase.
+
+### 38.3 Not built, honestly
+
+- Rollups-refresh writer (S6 seam).
+- Receipts upload / EXIF / phash player lane.
+- Camera scan for check-in tokens (§33 seam).
+
+### 38.4 Verification
+
+Branch: `cursor/p5-offline-confirm-order-8ffd` (base main after #77). Tip `6a3525e` CI green on PR #78 (all three checks) before merge.
+
+- Focused vitest (`marker-scan-handler`): 47/47, including confirm-before-attach order and dual pending-purchase + confirm path.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
 
