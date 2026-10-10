@@ -83,7 +83,7 @@ import { handleEvidenceBatchIntake, MAX_BATCH_ITEMS_PER_REQUEST } from "../../..
 import { computeInputHash, handleEvidenceIntake, localDateInTz, planEvidenceRateLimitChecks } from "../../../supabase/functions/_shared/evidence/handler.ts";
 import { deriveSourceRef } from "../../../supabase/functions/_shared/evidence/source-ref.ts";
 import { canonicalStringify, MANIFEST_DOMAIN } from "../../../supabase/functions/_shared/catalog/manifest-artifact.ts";
-import { Errors, errorResponse, handleRequest, MAX_BODY_BYTES, okResponse } from "../../../supabase/functions/_shared/http.ts";
+import { Errors, errorResponse, handleRequest, HttpError, MAX_BODY_BYTES, okResponse } from "../../../supabase/functions/_shared/http.ts";
 import { boundBodyBytes, canonicalJson, computeRequestBinding, toBase64Url, toHex } from "../../../supabase/functions/_shared/rewards/binding.ts";
 import { computeAttestKeyBinding, attestKeyChallengeString } from "../../../supabase/functions/_shared/rewards/app-attest-registration.ts";
 import { computeIosActivationBinding, iosActivationChallengeString } from "../../../supabase/functions/_shared/rewards/string-binding.ts";
@@ -93,10 +93,26 @@ import { MARKER_SCAN_BUCKET, MARKER_SCAN_PER_USER_DAY, MARKER_SCAN_WINDOW_SECOND
 import { markerScanState } from "../../../supabase/tests/unit/fake-marker-scan-repo.ts";
 import { mintPrintedQrSig, mintRotatingToken, type TestSigningKey } from "../../../supabase/tests/unit/course-qr-test-keys.ts";
 import { FAC as MARKER_FAC, fixAt as markerFixAt, seedRotating as markerSeedRotating, seedToken as markerSeedToken, world as markerWorld, type World as MarkerWorld } from "../../../supabase/tests/unit/marker-scan-world.ts";
+import { handleReceiptUpload } from "../../../supabase/functions/_shared/receipts/handler.ts";
+import { parseReceiptMultipart, RECEIPTS_MAX_BYTES } from "../../../supabase/functions/_shared/receipts/request-shape.ts";
+import type { ReceiptIntakeResult } from "../../../supabase/functions/_shared/receipts/ports.ts";
 
 const FIXTURE = fileURLToPath(new URL("../test/fixtures/edge-contract.json", import.meta.url));
-const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_", "offlineseed_", "activate_", "checkin_", "markerscan_"];
+const OWNED_PREFIXES = ["challenge_", "token_", "evidence_", "batch_", "attestkey_", "offlineseed_", "activate_", "checkin_", "markerscan_", "receipts_"];
 const UID = "user-a";
+/** Stable ids for receipts_* recording (P5 §56). */
+const RECEIPT_OBJECT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const RECEIPT_PURCHASE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const RECEIPT_CREDIT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const RECEIPTS_BUCKET = "receipts:member";
+const RECEIPTS_PER_HOUR = 60;
+const RECEIPTS_WINDOW_SECONDS = 3600;
+const TINY_JPEG = Uint8Array.from([
+  0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0a, 0x0c, 0x14, 0x0d, 0x0c, 0x0b, 0x0b, 0x0c, 0x19, 0x12, 0x13, 0x0f, 0x14, 0x1d, 0x1a, 0x1f, 0x1e, 0x1d, 0x1a, 0x1c,
+  0x1c, 0x20, 0x24, 0x2e, 0x27, 0x20, 0x22, 0x2c, 0x23, 0x1c, 0x1c, 0x28, 0x37, 0x29, 0x2c, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1f, 0x27, 0x39, 0x3d, 0x38, 0x32, 0x3c, 0x2e, 0x33, 0x34, 0x32, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01,
+  0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0xc4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00, 0x7b, 0xbf, 0xff, 0xd9,
+]);
 /** The account the offline-seed entries are recorded for: the seed derivation names the account by UUID (as every real account id is). */
 const OFFLINE_UID = "11111111-aaaa-4aaa-8aaa-111111111111";
 const CURRENT = "20260520-a000001";
@@ -304,6 +320,66 @@ async function markerScanEndpoint(w: MarkerWorld, body: unknown, uid: string = U
     for (const [k, v] of snap.pinFailures) ms.pinFailures.set(k, v);
   }
   return toEntry(res, body);
+}
+
+/**
+ * receipts/index.ts, replicated: rate limit, multipart parse, then `handleReceiptUpload` over the
+ * in-memory repo + a no-op Storage port. Request metadata is the logical multipart fields (not raw FormData).
+ */
+async function receiptsEndpoint(
+  state: FakeState,
+  fields: { facilityId: string; fileBytes: Uint8Array; fileName: string; localDate?: string; receiptNumberOcr?: string },
+  intake?: ReceiptIntakeResult,
+): Promise<Entry> {
+  hoisted.current.state = state;
+  const form = new FormData();
+  form.append("facilityId", fields.facilityId);
+  if (fields.localDate !== undefined) form.append("localDate", fields.localDate);
+  if (fields.receiptNumberOcr !== undefined) form.append("receiptNumberOcr", fields.receiptNumberOcr);
+  form.append("file", new Blob([fields.fileBytes], { type: "application/octet-stream" }), fields.fileName);
+  // Oversize refusals must not embed megabytes of hex in the fixture; length alone proves the cap.
+  const request = {
+    facilityId: fields.facilityId,
+    fileName: fields.fileName,
+    ...(fields.fileBytes.byteLength > RECEIPTS_MAX_BYTES
+      ? { fileBytesLength: fields.fileBytes.byteLength }
+      : { fileBytesHex: Buffer.from(fields.fileBytes).toString("hex") }),
+    ...(fields.localDate !== undefined ? { localDate: fields.localDate } : {}),
+    ...(fields.receiptNumberOcr !== undefined ? { receiptNumberOcr: fields.receiptNumberOcr } : {}),
+  };
+  const res = await handleRequest(async () => {
+    const limit = await fakeHitRateLimitForActor(state, UID, RECEIPTS_BUCKET, RECEIPTS_WINDOW_SECONDS, RECEIPTS_PER_HOUR);
+    if (!limit.ok) return Errors.tooManyRequests("receipts rate limit exceeded", limit.retryAfterSeconds).toResponse();
+    const parsed = await parseReceiptMultipart(form);
+    if (!parsed.ok) {
+      const oversize = parsed.issues.some((i) => i.message.includes("exceeds"));
+      if (oversize) throw new HttpError(413, "payload_too_large", `receipt file exceeds ${RECEIPTS_MAX_BYTES} bytes`);
+      throw Errors.badRequest("invalid receipt upload", { issues: parsed.issues });
+    }
+    const repo = makeFakeRepo(state, UID);
+    if (intake !== undefined) repo.receipts.intake = async () => intake;
+    const outcome = await handleReceiptUpload(parsed.value, UID, repo, {
+      storage: {
+        putObject: async () => undefined,
+        removeObject: async () => undefined,
+        createSignedUrl: async () => ({ signedUrl: "https://example.test/r", expiresAt: "2030-01-02T00:00:00.000Z" }),
+        purgeOlderThan: async () => 0,
+      },
+      newObjectId: () => RECEIPT_OBJECT_ID,
+    });
+    return okResponse(outcome.status, outcome.body, { "cache-control": "no-store" });
+  });
+  return toEntry(res, request);
+}
+
+function receiptOkIntake(over: Partial<ReceiptIntakeResult> = {}): ReceiptIntakeResult {
+  return {
+    status: "ok",
+    localDate: "2030-01-02",
+    dedupe: "clean",
+    purchases: [{ purchaseId: RECEIPT_PURCHASE_ID, trailId: "trl_t", purchaseStatus: "pending", creditId: RECEIPT_CREDIT_ID, creditStatus: "pending" }],
+    ...over,
+  };
 }
 
 /** Two FIXED Ed25519 verification keys (rotating-token and printed-QR) from obviously fake seeds, so the recorded tokens are byte-stable. */
@@ -976,6 +1052,44 @@ async function record(): Promise<{ responses: Record<string, Entry>; vectors: Re
     }
   }
 
+  // ---------------- receipts (P5 §56) ----------------
+  {
+    const jpeg = { facilityId: "fac_x", fileBytes: TINY_JPEG, fileName: "r.jpg", localDate: "2030-01-02", receiptNumberOcr: "ABC-1" };
+    r.receipts_201_ok = await receiptsEndpoint(makeFakeState(), jpeg, receiptOkIntake());
+    r.receipts_201_duplicate = await receiptsEndpoint(
+      makeFakeState(),
+      jpeg,
+      receiptOkIntake({ status: "duplicate", dedupe: "same_user", purchases: [] }),
+    );
+    r.receipts_201_review = await receiptsEndpoint(
+      makeFakeState(),
+      jpeg,
+      receiptOkIntake({ status: "review", dedupe: "cross_user" }),
+    );
+    r.receipts_415_unsupported_media = await receiptsEndpoint(makeFakeState(), {
+      facilityId: "fac_x",
+      fileBytes: Uint8Array.from([0x25, 0x50, 0x44, 0x46]),
+      fileName: "x.pdf",
+    });
+    r.receipts_413_payload_too_large = await receiptsEndpoint(makeFakeState(), {
+      facilityId: "fac_x",
+      fileBytes: new Uint8Array(RECEIPTS_MAX_BYTES + 1),
+      fileName: "big.jpg",
+    });
+    r.receipts_422_no_programme = await receiptsEndpoint(makeFakeState(), jpeg, receiptOkIntake({ status: "no_programme", localDate: null, dedupe: null, purchases: [] }));
+    r.receipts_404_not_found = await receiptsEndpoint(makeFakeState(), jpeg, receiptOkIntake({ status: "no_facility", localDate: null, dedupe: null, purchases: [] }));
+    r.receipts_403_forbidden = await receiptsEndpoint(makeFakeState(), jpeg, receiptOkIntake({ status: "review_account", localDate: null, dedupe: null, purchases: [] }));
+    r.receipts_400_bad_request = await receiptsEndpoint(makeFakeState(), { facilityId: "", fileBytes: TINY_JPEG, fileName: "r.jpg" });
+    {
+      const state = makeFakeState();
+      let last: Entry | null = null;
+      for (let i = 0; i <= RECEIPTS_PER_HOUR; i += 1) {
+        last = await receiptsEndpoint(state, { facilityId: "fac_x", fileBytes: TINY_JPEG, fileName: "r.jpg" }, receiptOkIntake());
+      }
+      r.receipts_429_rate_limited = last!;
+    }
+  }
+
   // ---------------- vectors ----------------
   const samples: Record<string, Record<string, unknown>> = {
     checkin: checkin("fixV1", { checkinTokenJti: "jti_1" }) as Record<string, unknown>,
@@ -1065,6 +1179,8 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
         "Entries starting checkin_ and `vectors.checkinWindow` / `vectors.localDate` were recorded by the same script (P4.2c) from the REAL evidence, checkin-challenge and checkin-token handlers: the request the check-in screen builds (device-shaped fix, facility-local date from the fix's own time), and how the server's challenge window (`issued_at <= capturedAt <= expires_at`) treats a prefetched challenge, a live challenge taken before the fix and a live challenge taken after it. `consumed` flags are read from the server fake's token row after the real handler ran; `localDate` samples are the server's own `localDateInTz`.",
       _provenance_p5s2a:
         "Entries starting markerscan_ were recorded by the same script (P5.1a S2a) from the REAL marker-scan handler (handleMarkerScan, parseMarkerScanBody, the 20-a-day limit, the envelope) over the server's in-memory marker-scan repo (supabase/tests/unit/fake-marker-scan-repo.ts), with two FIXED Ed25519 verification keys from obviously fake seeds, so the recorded rotating token and printed-QR signature are byte-stable. The database's own checks (the 120 s rule, single use, the PIN derivation and counters) are proven by the pgTAP matrix 24_* and the Deno integration suite, not here; as for checkin-token, the rollback of a thrown refusal is emulated. Each entry carries the request that produced it.",
+      _provenance_p5s56:
+        "Entries starting receipts_ were recorded by the same script (P5 §56) from the REAL receipts handler (parseReceiptMultipart, handleReceiptUpload, the 60/hour member limit, the envelope) over the server's in-memory fake repo with a no-op Storage port and a FIXED object id. Intake outcomes (ok / duplicate / review / no_programme / no_facility / review_account) are scripted on the fake; image sniff / EXIF strip / size cap are the real code. Each entry's `request` is the logical multipart fields (facilityId, fileName, fileBytesHex or fileBytesLength for oversize, optional localDate / receiptNumberOcr), not raw FormData.",
       responses: { ...kept, ...responses },
       vectors: JSON.parse(JSON.stringify(vectors)),
     };
@@ -1121,6 +1237,13 @@ describe("record the evidence-lane edge contract from the real handlers", () => 
     expect([ms("markerscan_409_fix_already_used").body, ms("markerscan_409_qr_used").body, ms("markerscan_409_qr_used_retry").body].map((b) => JSON.parse(b).error.code)).toEqual(["fix_already_used", "qr_used", "qr_used"]);
     expect([ms("markerscan_422_invalid_pin").status, ms("markerscan_429_pin_locked").status, ms("markerscan_422_qr_expired").status, ms("markerscan_422_invalid_qr_forged").status, ms("markerscan_422_no_pending_purchase").status, ms("markerscan_422_not_a_cosignal").status, ms("markerscan_422_fix_out_of_window").status, ms("markerscan_422_programme_inactive").status, ms("markerscan_422_invalid_cosignal").status]).toEqual([422, 429, 422, 422, 422, 422, 422, 422, 422]);
     expect([ms("markerscan_400_unknown_key").status, ms("markerscan_400_fix_without_device").status, ms("markerscan_503_pin_unavailable").status, ms("markerscan_429_rate_limited").status]).toEqual([400, 400, 503, 429]);
+    // P5 §56: receipts multipart
+    const rc = (k: string) => responses[k]!;
+    expect([rc("receipts_201_ok").status, rc("receipts_201_duplicate").status, rc("receipts_201_review").status]).toEqual([201, 201, 201]);
+    expect(JSON.parse(rc("receipts_201_ok").body).data).toMatchObject({ status: "ok", dedupe: "clean" });
+    expect(JSON.parse(rc("receipts_201_duplicate").body).data).toMatchObject({ status: "duplicate", dedupe: "same_user" });
+    expect(JSON.parse(rc("receipts_201_review").body).data).toMatchObject({ status: "review", dedupe: "cross_user" });
+    expect([rc("receipts_415_unsupported_media").status, rc("receipts_413_payload_too_large").status, rc("receipts_422_no_programme").status, rc("receipts_404_not_found").status, rc("receipts_403_forbidden").status, rc("receipts_400_bad_request").status, rc("receipts_429_rate_limited").status]).toEqual([415, 413, 422, 404, 403, 400, 429]);
     void errorResponse;
   });
 });
