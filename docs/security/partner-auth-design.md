@@ -2714,7 +2714,7 @@ Numbering: **this section 44.** No migration. Closes the §4.6 / score-play trus
 
 ### 44.1 What was built
 
-- **`Repo#purchases.listValidAround(facilityId, aroundLocalDate)`**: distinct `(facilityId, localDate)` of the bound actor's own rows with `status = 'valid'` whose `local_date` is within ±7 days (`CORROBORATION_WINDOW_DAYS`). SELECT under existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`); no new policy/grant.
+- **`Repo#purchases.listValidAround(facilityId, aroundLocalDate)`**: distinct `(facilityId, localDate)` of the bound actor's own rows with `status = 'valid'` whose `local_date` is within ±7 days (`CORROBORATION_WINDOW_DAYS`). Window SQL uses `make_interval(days => $n::int)` (not `date ± $n`) because postgres.js binds JS numbers as float8. SELECT under existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`); no new policy/grant.
 - **`evidence/handler.ts`**: both scoring sites (single-item intake and `finalizeScoringForKey`) load purchases and pass them on `scorePlay` context when non-empty.
 - Fake repo + Vitest cells prove the join runs and filters void/out-of-window/other-user rows.
 

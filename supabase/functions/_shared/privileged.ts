@@ -3735,15 +3735,16 @@ const PURCHASE_CORROBORATION_WINDOW_DAYS = 7;
 function buildPurchasesRepo(trx: TxSql, uid: string): Repo["purchases"] {
   return {
     async listValidAround(facilityId, aroundLocalDate) {
-      // date ± int is days in Postgres. Policy: pd_marker_scan_purchase_select (user_id = actor_uid).
+      // make_interval(+ ::int cast): postgres.js binds JS numbers as float8, so `date - $n` is not `date - integer`.
+      // Policy: pd_marker_scan_purchase_select (user_id = actor_uid).
       const rows = await trx`
         select distinct facility_id, local_date
         from app.purchase_evidence
         where user_id = ${uid}
           and facility_id = ${facilityId}
           and status = 'valid'
-          and local_date between (${aroundLocalDate}::date - ${PURCHASE_CORROBORATION_WINDOW_DAYS})
-                            and (${aroundLocalDate}::date + ${PURCHASE_CORROBORATION_WINDOW_DAYS})
+          and local_date between (${aroundLocalDate}::date - make_interval(days => ${PURCHASE_CORROBORATION_WINDOW_DAYS}::int))::date
+                            and (${aroundLocalDate}::date + make_interval(days => ${PURCHASE_CORROBORATION_WINDOW_DAYS}::int))::date
         order by local_date asc
         limit 64`;
       return rows.map((r) => ({
