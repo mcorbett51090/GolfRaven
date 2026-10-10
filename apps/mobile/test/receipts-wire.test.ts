@@ -37,14 +37,15 @@ type ReceiptRecordedRequest = {
   receiptNumberOcr?: string;
 };
 
-function hexToBytes(hex: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(hex, "hex"));
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
+  const buf = Buffer.from(hex, "hex");
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
 function reqFromRecorded(name: string): ReceiptUploadRequest {
   const r = recordedRequest<ReceiptRecordedRequest>(name);
   // Oversize entries store length only; rebuild a same-sized buffer so FormData carries that length.
-  const bytes = r.fileBytesHex !== undefined ? hexToBytes(r.fileBytesHex) : new Uint8Array(r.fileBytesLength ?? 0);
+  const bytes: Uint8Array<ArrayBuffer> = r.fileBytesHex !== undefined ? hexToBytes(r.fileBytesHex) : new Uint8Array(r.fileBytesLength ?? 0);
   return {
     facilityId: r.facilityId,
     file: new Blob([bytes], { type: "image/jpeg" }),
