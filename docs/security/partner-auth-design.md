@@ -3299,11 +3299,36 @@ Numbering: **migration `0079`, matrix `57`, this section 65.** Closes the 0054 l
 
 ### 65.3 Not built, honestly
 
-- Admin keep=2; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Admin keep=2 → §66; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 65.4 Verification
 
-Branch: `cursor/p5-credential-note-patch-8ffd` (base main after #104 / `6bb5cff`). Recorded when CI is green on the PR tip.
+Squash-merged as `34b8b74` (#105). Branch: `cursor/p5-credential-note-patch-8ffd` (base main after #104 / `6bb5cff`).
 
-- pgTAP matrix 57 (+ 10 / 25 / 28 / 32); Vitest partner-members-handler PATCH; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0078`.
+- pgTAP matrix 57 (+ 10 / 25 / 28 / 32); Vitest partner-members-handler PATCH; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0078`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 66. As built: Admin concurrent session keep = 2
+
+Numbering: **migration `0080`, matrix `58`, this section 66.** Closes the §4.1 table leftover left open by §64.2 / §65.3: Admin concurrent = 2; staff / manager / operator stay 3. Both mint paths (`partner_session_mint` and `partner_credential_register_first`) use the same keep.
+
+### 66.1 What was built
+
+- **`private.partner_session_policy`** — OUT column `concurrent` (admin → 2, else → 3); idle / absolute / required_aal unchanged.
+- **`partner_session_mint` / `partner_credential_register_first`** — `PERFORM partner_sessions_evict_oldest(uid, v_pol.concurrent)` after the session INSERT.
+- **pgTAP matrix 58** — policy OUT shape; admin 3→2; staff still 3.
+
+### 66.2 Decisions and departures
+
+- **Policy column, not a parallel helper** — §64.2's preferred shape; no new EXECUTE surface / `partner_owner_privilege` row (issuer already holds EXECUTE on the policy).
+- **DROP + CREATE** — PostgreSQL cannot change a function's return type in place; grants re-applied to `partner_session_issuer`.
+
+### 66.3 Not built, honestly
+
+- IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 66.4 Verification
+
+Branch: `cursor/p5-admin-session-keep-8ffd` (base main after #105 / `34b8b74`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 58 (+ 56 regression); `verify-function-inventory`; migrations immutable for `0001`–`0079`.
 
