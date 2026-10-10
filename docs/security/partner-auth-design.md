@@ -2165,7 +2165,6 @@ Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx`
 ### 32.3 Not built, honestly
 
 - **`offline_code` offer redeem** (PIN step-up + profile-card name check; `fraud_signal` / `unconfirmed` after 24 h).
-- **Issuance staff gate AT(10)** — not on today's activate path; export ↔ redemption reconcile half is covered by settlement lines matching planted redemptions (matrix 38).
 - **Rollups-refresh writer** (still out of scope; S6 seam).
 - **S7 UI** (portal screens).
 - **No mutation pass** was run for this slice.
@@ -2177,4 +2176,12 @@ Branch: `cursor/p5-1b-offers-settlement-8ffd` (base S6 `ea27b80`).
 - **Matrix 38** (`38_partner_offers_settlement.sql`): 32/32 PASS — foreign facility 403, A1 without PIN, happy redeem + budget consume, self-redeem 22023, A3 without TOTP refused, planted GUC, settlement line carries `sponsorship_id` for sponsor funder, export redemptions/`face_value_total` match planted redeem.
 - **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): **86/86** PASS.
 - **`HARNESS_MODE=restricted tools/db/test.sh`**: **Files=58, Tests=5376, Result: PASS**; Deno integration **382 passed | 0 failed** (Deno 2.5.2 as CI pins); `verify-function-inventory: OK` (nine `pd_partner_offers_*` allow-list rows in `definer_policy_exprs.txt`); `service-role-lint: clean`. Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary. Settlement policy uses `offer_code.facility_id` (bare `facility_id` deparsed as a tautology).
-- Claims in-slice: **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions); issuance staff gate deferred (§32.3).
+- Claims in-slice (0060 tip): **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions).
+
+### 32.5 AT(10) issuance staff gate (0061)
+
+Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited.
+
+**Built:** `private.facility_has_active_staff(facility)` (EXISTS non-revoked staff/manager with `partner_scope.facility_id`); `app.activate_offer_code` CREATE OR REPLACE holds an **earned** activate with `hold_detail.heldFor = no_active_staff` when the facility has no active staff (already-issued re-activate is not gated); `app.resolve_held_offer_code` refuses an approve that would **issue** with `23514` / partner status `no_active_staff` (return-to-earned is not gated).
+
+**Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
