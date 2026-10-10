@@ -45,26 +45,35 @@ describe("the location prompt is shown only from a button", () => {
     expect(adapter.match(/requestForegroundPermissionsAsync/g)).toHaveLength(1);
   });
 
-  it("`.requestPermission(` is CALLED in exactly one place, `ensureForegroundLocation`, which only the two button flows call", () => {
+  it("`.requestPermission(` is CALLED in exactly one place, `ensureForegroundLocation`, which only the button flows call", () => {
     expect(where(/\.requestPermission\(/)).toEqual(["src/checkin/permission.ts"]);
-    expect(where(/\bensureForegroundLocation\b/)).toEqual(["src/checkin/flow.ts", "src/checkin/permission.ts", "src/marker/capture.ts"]);
+    expect(where(/\bensureForegroundLocation\b/)).toEqual([
+      "src/checkin/flow.ts",
+      "src/checkin/permission.ts",
+      "src/marker/capture.ts",
+      "src/marker/scan.ts",
+    ]);
     expect(where(/\brunCheckIn\b/)).toEqual(["src/checkin/flow.ts", "src/runtime/services.ts"]);
     expect(where(/\bcaptureMarkerCoSignal\b/)).toEqual(["src/marker/capture.ts", "src/runtime/services.ts"]);
+    expect(where(/\bscanMarkerFromLink\b/)).toEqual(["src/marker/scan.ts", "src/runtime/services.ts"]);
   });
 
-  it("the screens call the services from the button handler only: `onCheckInPress` / `onMarkerPress` appear only as the button's `onPress`", () => {
+  it("the screens call the services from the button handler only: `onCheckInPress` / `onMarkerPress` / `onScanPress`", () => {
     expect(where(/services\.checkin\(/)).toEqual(["src/screens/CheckInCard.tsx"]);
     expect(where(/services\.markerCosignal\(/)).toEqual(["src/screens/MarkerCard.tsx"]);
+    expect(where(/services\.markerScanFromLink\(/)).toEqual(["src/screens/MarkerCard.tsx"]);
     const card = read("src/screens/CheckInCard.tsx");
     expect(card.match(/onCheckInPress/g)).toHaveLength(2); // the definition and the one onPress
     expect(card).toMatch(/onPress=\{\(\) => void onCheckInPress\(\)\}/);
     const marker = read("src/screens/MarkerCard.tsx");
     expect(marker.match(/onMarkerPress/g)).toHaveLength(2);
     expect(marker).toMatch(/onPress=\{\(\) => void onMarkerPress\(\)\}/);
+    expect(marker.match(/onScanPress/g)).toHaveLength(2);
+    expect(marker).toMatch(/onPress=\{\(\) => void onScanPress\(\)\}/);
   });
 
   it("no effect (useEffect / useLayoutEffect / useFocusEffect / useCallback-in-effect) anywhere in the app mentions the check-in, the marker capture or the permission", () => {
-    const bad = /checkin\(|markerCosignal\(|runCheckIn|captureMarkerCoSignal|requestPermission|ensureForegroundLocation|CheckInCard|MarkerCard/;
+    const bad = /checkin\(|markerCosignal\(|markerScanFromLink\(|runCheckIn|captureMarkerCoSignal|scanMarkerFromLink|requestPermission|ensureForegroundLocation|CheckInCard|MarkerCard/;
     for (const f of all) {
       const text = strip(readFileSync(f, "utf8"));
       for (const hook of ["useEffect(", "useLayoutEffect(", "useFocusEffect("]) {
@@ -78,13 +87,13 @@ describe("the location prompt is shown only from a button", () => {
     expect(services).toMatch(/createExpoLocationPort\(Platform\.OS\)/);
     expect(services).not.toMatch(/location\.(permission|requestPermission|servicesEnabled|currentFix)/);
     const provider = read("src/runtime/AppProvider.tsx");
-    expect(provider).not.toMatch(/location|requestPermission|checkin\(|markerCosignal\(/);
+    expect(provider).not.toMatch(/location|requestPermission|checkin\(|markerCosignal\(|markerScanFromLink\(/);
     expect(read("app/_layout.tsx")).not.toMatch(/location|requestPermission|checkin|marker/i);
   });
 
   it("the course page and the facility page do not call the services either: they only render the cards behind the switches", () => {
     expect(read("app/course/[id].tsx")).not.toMatch(/requestPermission|services\.|\.checkin\(/);
-    expect(read("app/facility/[id].tsx")).not.toMatch(/requestPermission|services\.|markerCosignal\(/);
+    expect(read("app/facility/[id].tsx")).not.toMatch(/requestPermission|services\.|markerCosignal\(|markerScanFromLink\(/);
   });
 });
 

@@ -2948,11 +2948,38 @@ Numbering: **this section 52.** No migration. Closes the orphaned `marker_cosign
 
 ### 52.3 Not built, honestly
 
-- In-app QR scanner, Q2 PIN UI for online scan+credit, `associatedDomains` / App Links hosting, flipping `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED`, OCR / aHash / receipts flag flip.
+- In-app QR scanner, Q2 PIN UI for online scan+credit (→ §53), `associatedDomains` / App Links hosting, flipping `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED`, OCR / aHash / receipts flag flip.
 
 ### 52.4 Verification
 
-Branch: `cursor/p5-marker-cosignal-sender-8ffd` (base main after #91 / `770815b`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-marker-cosignal-sender-8ffd` (base main after #91 / `770815b`). Tip CI green on PR #92 (all three checks); squash-merged as `a0fa173`.
 
 - Mobile Vitest: marker-link, marker-send, marker-capture, marker-scan-wire; typecheck.
+
+## 53. As built: mobile paste + PIN shop-QR scan
+
+Numbering: **this section 53.** No migration. Closes the online scan half left open by §52.3: paste a `/q/m` or `/q/f` link (optional 4-digit PIN for printed QR), capture a presence fix, redeem a challenge, POST `marker-scan` with `qr` + `fix` + `jti`. Still no CAMERA; flags stay false.
+
+### 53.1 What was built
+
+- **`marker/scan.ts`**: `scanMarkerFromLink` — parse link, slug check for printed QR, location + live/prefetched challenge, redeem, `scanMarker` with `qr`.
+- **`MarkerCard`**: paste link + PIN fields and "Submit shop QR" beside the offline capture button (same flag gate).
+- **i18n**: en + fr-CA copy for paste/PIN outcomes.
+- **Tests**: `marker-scan.test.ts`; wire/capture pins allow `marker/scan.ts` as a `scanMarker` caller.
+
+### 53.2 Decisions and departures
+
+- **Paste-first, no CAMERA** — OS camera → open URL / paste; `CAMERA` stays blocked.
+- **Slug check client-side** for printed QR before the location prompt; server still binds kid/sig to facility id.
+- **Flag stays false** — same location privacy / field-test gate as capture.
+
+### 53.3 Not built, honestly
+
+- In-app barcode scanner, `associatedDomains` / App Links hosting, flipping either UI flag, OCR / aHash / receipts flag flip.
+
+### 53.4 Verification
+
+Branch: `cursor/p5-marker-scan-paste-8ffd` (base main after #92 / `a0fa173`). Recorded when CI is green on the PR tip.
+
+- Mobile Vitest: marker-scan + existing marker suites; i18n parity; typecheck.
 
