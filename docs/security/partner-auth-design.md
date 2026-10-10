@@ -2702,9 +2702,36 @@ Numbering: **this section 43.** No migration. Closes the player-app half of §40
 
 ### 43.4 Verification
 
-Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Tip `381df29` CI green on PR #83 (all three checks).
+Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Tip `381df29` CI green on PR #83 (all three checks) before squash-merge as `25e7090`.
 
 - Vitest: `receipts-wire.test.ts` (FormData wire, 201 shapes, refusal map, flag off / no callers); flag count in `rewards-activation.test.ts`.
 - Typecheck includes `uploadReceipt` on `ApiClient` (`HttpFetch` body `string | FormData`; airplane fetch mock FormData-safe).
 - CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 44. As built: purchase corroboration into scorePlay
+
+Numbering: **this section 44.** No migration. Closes the §4.6 / score-play trust-table seam: `ctx.purchases` is joined from `app.purchase_evidence` before every live `scorePlay` call.
+
+### 44.1 What was built
+
+- **`Repo#purchases.listValidAround(facilityId, aroundLocalDate)`**: distinct `(facilityId, localDate)` of the bound actor's own rows with `status = 'valid'` whose `local_date` is within ±7 days (`CORROBORATION_WINDOW_DAYS`). SELECT under existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`); no new policy/grant.
+- **`evidence/handler.ts`**: both scoring sites (single-item intake and `finalizeScoringForKey`) load purchases and pass them on `scorePlay` context when non-empty.
+- Fake repo + Vitest cells prove the join runs and filters void/out-of-window/other-user rows.
+
+### 44.2 Decisions and departures
+
+- **Edge-only** — no migration; RLS already allows the actor's purchase SELECT for marker-scan.
+- **`valid` only** — matches packages/rules §4.6 (`PurchaseCorroboration` doc); pending/held_review/void never corroborate.
+- **Omit empty `purchases`** — same as before when none qualify (parser treats the field as optional).
+
+### 44.3 Not built, honestly
+
+- `receipt_green_fee` evidence writer (still `REJECTED_SOURCES` at `POST evidence`), OCR, perceptual aHash, HEIC metadata strip, picker UI.
+
+### 44.4 Verification
+
+Branch: `cursor/p5-purchase-corroboration-8ffd` (base main after #83). Recorded when CI is green on the PR tip.
+
+- Vitest: `evidence-handler.test.ts` purchase-corroboration cells; fake `listValidAround` window/status filters.
+- `deno check` / typecheck: `Repo.purchases` on the real privileged builder.
 

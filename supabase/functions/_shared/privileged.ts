@@ -1504,6 +1504,7 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     offlineCode: buildOfflineCodeRepo(trx),
     markerScan: buildMarkerScanRepo(trx),
     receipts: buildReceiptsRepo(trx),
+    purchases: buildPurchasesRepo(trx, uid),
 
     device: {
       async findOwn(deviceId: string) {
@@ -3727,6 +3728,31 @@ const RECEIPT_INTAKE_STATUSES = new Set<ReceiptIntakeStatus>([
   "review_account",
   "bad_args",
 ]);
+
+/** Matches packages/rules `CORROBORATION_WINDOW_DAYS` (vendored score-play.js). Kept local so privileged.ts does not import the scoring vendor. */
+const PURCHASE_CORROBORATION_WINDOW_DAYS = 7;
+
+function buildPurchasesRepo(trx: TxSql, uid: string): Repo["purchases"] {
+  return {
+    async listValidAround(facilityId, aroundLocalDate) {
+      // date ± int is days in Postgres. Policy: pd_marker_scan_purchase_select (user_id = actor_uid).
+      const rows = await trx`
+        select distinct facility_id, local_date
+        from app.purchase_evidence
+        where user_id = ${uid}
+          and facility_id = ${facilityId}
+          and status = 'valid'
+          and local_date between (${aroundLocalDate}::date - ${PURCHASE_CORROBORATION_WINDOW_DAYS})
+                            and (${aroundLocalDate}::date + ${PURCHASE_CORROBORATION_WINDOW_DAYS})
+        order by local_date asc
+        limit 64`;
+      return rows.map((r) => ({
+        facilityId: String(r.facility_id),
+        localDate: r.local_date instanceof Date ? r.local_date.toISOString().slice(0, 10) : String(r.local_date).slice(0, 10),
+      }));
+    },
+  };
+}
 
 function buildReceiptsRepo(trx: TxSql): Repo["receipts"] {
   return {
