@@ -26,6 +26,9 @@
 
 import type { AttestKeyRepo, RewardsRepo } from "./rewards/types.ts";
 import type { SigninRepo } from "./signin/types.ts";
+import type { ReceiptIntakeInput, ReceiptIntakeResult, ReceiptIntakeStatus } from "./receipts/ports.ts";
+
+export type { ReceiptIntakeInput, ReceiptIntakeResult, ReceiptIntakeStatus, ReceiptDedupe, ReceiptPurchaseRow } from "./receipts/ports.ts";
 
 export type ActorRole = "authenticated" | "staff" | "manager" | "operator" | "admin";
 
@@ -632,6 +635,11 @@ export interface Repo {
     attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult>;
     /** 0063: clears `offline_confirm_by` on the bound player's own redeemed_offline offer codes at this facility whose offline_step window holds the fix. */
     confirmOfferOffline(input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult>;
+  };
+
+  /** 0064: player-lane receipt upload (`receipt_intake_for_actor`). */
+  receipts: {
+    intake(input: ReceiptIntakeInput): Promise<ReceiptIntakeResult>;
   };
 }
 

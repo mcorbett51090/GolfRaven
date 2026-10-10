@@ -2135,7 +2135,7 @@ The order is the members handler's (Origin, preflight, route and method, bearer,
 
 ### 27.3 Not built, honestly
 
-- **Player-lane `POST /v1/receipts` upload** (EXIF strip, size and type gates, perceptual hash). That path is the player's evidence intake, not the partner review queue; it needs its own Edge function and the existing `receipt_fingerprint` / purchase-evidence writers. **Seam**: a player-lane receipts function calling the existing intake definers; S4's queue already lists holds those writers create.
+- **Player-lane `POST /v1/receipts` upload** — **built in §40** (migration `0064`, matrix `42`).
 - **Resolving a held PLAY** (`resolve_held_*` moves the reward row, not the play). Clearing a `fraud_signal`. The contract-reviewer staffing trigger of `roles-table.md`.
 - **Partners PWA review screens** (S7d). This slice is the Edge + database half the portal will call.
 - **No mutation pass was run for this slice.**
@@ -2571,4 +2571,34 @@ Branch: `cursor/p5-camera-scan-8ffd` (base main after #78).
 - `pnpm --filter @golfraven/partners typecheck`: clean.
 - `pnpm --filter @golfraven/partners test:unit`: **22 files, 944 tests, all pass** (adds camera-scan normalize / unsupported / denied / happy / timeout / abort).
 - Restricted harness / CI recorded when green on the PR tip.
+
+## 40. As built: player-lane receipt upload (0064)
+
+Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-auth-design §27.3: Storage object + `receipt_intake_for_actor` + `app.dedupe_receipt_fingerprint` on the first purchase of an upload. Nothing from 0001–0063 is edited.
+
+### 40.1 What was built
+
+**Migration `0064_player_receipts_upload.sql`** and **matrix `42_player_receipts_upload.sql`**, then Edge function **`receipts`** (`POST /v1/receipts`).
+
+- **`private.receipt_intake_for_actor`**: bound player only; eligible trails = accepted `facility_programme` + `trail_programme` pilot/live + `marker_source = any_purchase` (same gate as course-QR scan, without `qr_mode`). One `purchase_evidence` (`method=receipt`, `ref_id` = Storage path) + `marker_credit` pending per trail; cosignal `awaiting` for the facility-local day + 7-day deadline. Calls **`app.dedupe_receipt_fingerprint` once** on the first purchase id (`phash` is per upload). Statuses: `ok | duplicate | review | no_facility | no_programme | review_account | bad_args`. `o_dedupe`: `clean | same_user | cross_user`. Same-user duplicate voids every purchase from the upload (`void_reason=duplicate`); cross-user leaves both pending and opens `review_item` + `fraud_signal` via dedupe.
+- **Policies / grants**: `pd_receipt_*` on `receipt_fingerprint`, `fraud_signal`, `review_item`, cross-user `purchase_evidence` demotion, `marker_credit` detach; `GRANT EXECUTE` on dedupe to **`private_definer` only** (not `edge_actor`).
+- **Edge**: multipart `facilityId`, `file`, optional `localDate`, optional `receiptNumberOcr`. **5 MB** max file (`0012_storage.sql` / build plan line 865; matrix TODO “6 MB” is stale — this slice uses 5 MB). MIME sniff: JPEG/PNG/HEIC only; PDF/SVG → 415. EXIF strip: JPEG APP1 removed; PNG `eXIf` chunk removed. **aHash** (8×8) hex for JPEG/PNG after decode; **HEIC** uses SHA-256 of content as `phash` (exact-dupe only until a decoder exists). Storage path `receipts/<uid>/<objectId>.<ext>` via service-role `receiptsStorage` (no client Storage policies). Rate limit **`receipts:member` 60/hour** before `withOwnership`.
+
+### 40.2 Decisions and departures
+
+- **Dedupe once per upload**, not per trail — `phash` identifies the image; sibling trail rows follow the first purchase outcome (same-user void loops the rest).
+- **HEIC phash = sha256(content)** — documented departure from perceptual match until a HEIC decoder ships.
+- **5 MB not 6 MB** — `storage.buckets.file_size_limit` and Edge cap align with `0012_storage.sql` (build plan line 865), not the matrix TODO line.
+
+### 40.3 Not built, honestly
+
+- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, 90-day image purge, rollups-refresh, HEIC aHash.
+
+### 40.4 Verification
+
+Branch: `cursor/p5-receipts-upload-8ffd`.
+
+- Matrix **42**: EXECUTE/grant cells, happy intake, same-user duplicate, cross-user `review_item`, `review_account`, `no_facility`, `bad_args`, no `edge_actor` on raw dedupe.
+- Vitest: `receipts-image.test.ts` (EXIF strip, MIME reject, aHash stability, size constant), `receipts-handler.test.ts` (status map, Storage path).
+- `deno check` includes `receipts/index.ts` in CI function lists.
 

@@ -89,11 +89,14 @@ SELECT is(has_column_privilege('private_definer', 'app.course_qr_token', 'used_a
           AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'facility_id', 'UPDATE') AND NOT has_table_privilege('private_definer', 'app.course_qr_token', 'INSERT'), true,
   'private_definer may only mark a token used: UPDATE(used_by_user, used_at); it cannot issue (INSERT) or edit one (S2b issues)');
 SELECT is(has_column_privilege('private_definer', 'app.purchase_evidence', 'status', 'UPDATE') AND has_column_privilege('private_definer', 'app.purchase_evidence', 'cosignal', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.purchase_evidence', 'void_reason', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'user_id', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'facility_id', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'local_date', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'method', 'UPDATE'), true,
-  'private_definer may UPDATE purchase_evidence (status, cosignal) only');
-SELECT is(has_column_privilege('private_definer', 'app.marker_credit', 'status', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.marker_credit', 'user_id', 'UPDATE')
-          AND NOT has_column_privilege('private_definer', 'app.marker_credit', 'purchase_evidence_id', 'UPDATE'), true, 'private_definer may UPDATE marker_credit.status only');
+  'private_definer may UPDATE purchase_evidence (status, cosignal, void_reason) only');
+SELECT is(has_column_privilege('private_definer', 'app.marker_credit', 'status', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.marker_credit', 'purchase_evidence_id', 'UPDATE')
+          AND NOT has_column_privilege('private_definer', 'app.marker_credit', 'user_id', 'UPDATE'), true,
+  'private_definer may UPDATE marker_credit (status, purchase_evidence_id detach) only');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge_actor'), ('edge_system')) r(n)
            WHERE has_table_privilege(r.n, 'app.purchase_evidence', 'INSERT,UPDATE,DELETE') OR has_table_privilege(r.n, 'app.marker_credit', 'INSERT,UPDATE,DELETE')
               OR has_any_column_privilege(r.n, 'app.purchase_evidence', 'INSERT,UPDATE') OR has_any_column_privilege(r.n, 'app.marker_credit', 'INSERT,UPDATE')
