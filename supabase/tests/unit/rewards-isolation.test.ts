@@ -54,7 +54,7 @@ const VERIFICATION_ONLY = ["attestation-evidence.ts", "binding.ts", "string-bind
 const BIT_NAMES = /query_two_bits|update_two_bits|queryTwoBits|updateTwoBits|readBits|setBit0|deviceRecall|api\.devicecheck|devicecheck-client/i;
 const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 
-const EARNING_SIDE = ["_shared/evidence", "_shared/scoring", "_shared/checkin", "_shared/catalog", "_shared/me", "evidence", "evidence-batch", "checkin-challenge", "checkin-token", "me-delete", "me-export", "me-push-token", "me-offline-seed", "_shared/offline-code", "marker-scan", "_shared/course-qr"];
+const EARNING_SIDE = ["_shared/evidence", "_shared/scoring", "_shared/checkin", "_shared/catalog", "_shared/me", "evidence", "evidence-batch", "checkin-challenge", "checkin-token", "me-delete", "me-export", "me-push-token", "me-offline-seed", "_shared/offline-code", "marker-scan", "_shared/course-qr", "receipts", "_shared/receipts"];
 
 describe("the earning side never reads a persistent device bit", () => {
   const earningFiles = EARNING_SIDE.flatMap((d) => {

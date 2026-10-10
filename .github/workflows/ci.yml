@@ -400,6 +400,7 @@ jobs:
             supabase/functions/me-push-token/index.ts \
             supabase/functions/me-offline-seed/index.ts \
             supabase/functions/marker-scan/index.ts \
+            supabase/functions/receipts/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
@@ -473,6 +474,7 @@ jobs:
             supabase/functions/me-push-token/index.ts \
             supabase/functions/me-offline-seed/index.ts \
             supabase/functions/marker-scan/index.ts \
+            supabase/functions/receipts/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \
@@ -566,6 +568,7 @@ jobs:
             supabase/functions/me-push-token/index.ts \
             supabase/functions/me-offline-seed/index.ts \
             supabase/functions/marker-scan/index.ts \
+            supabase/functions/receipts/index.ts \
             supabase/functions/me-signin-methods/index.ts \
             supabase/functions/signin-revocation-drain/index.ts \
             supabase/functions/retention-purge/index.ts \

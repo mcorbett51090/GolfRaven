@@ -547,6 +547,23 @@ export function makeFakeRepo(state: FakeState, actorUid: string): Repo {
     // P5.1a S2a: the course-QR player lane (supabase/tests/unit/fake-marker-scan-repo.ts).
     markerScan: makeFakeMarkerScanRepo(state, uid),
 
+    receipts: {
+      async intake(input) {
+        return {
+          status: "ok" as const,
+          localDate: input.localDate ?? "2030-01-02",
+          dedupe: "clean" as const,
+          purchases: [{
+            purchaseId: crypto.randomUUID(),
+            trailId: "trl_t",
+            purchaseStatus: "pending",
+            creditId: crypto.randomUUID(),
+            creditStatus: "pending",
+          }],
+        };
+      },
+    },
+
     device: {
       async findOwn(deviceId: string) {
         const row = state.devices.get(deviceId);

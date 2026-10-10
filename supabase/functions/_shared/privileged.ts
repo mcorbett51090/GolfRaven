@@ -237,6 +237,8 @@ import type {
   MarkerScanRecordResult,
   MarkerScanRefusal,
   PinAttemptResult,
+  ReceiptIntakeResult,
+  ReceiptIntakeStatus,
 } from "./types.ts";
 // Type-only: erased at runtime, so this does NOT make ABSOLUTE_ROW_CAP a
 // second source of truth — it re-reads the SAME constant score-play.ts
@@ -1501,6 +1503,7 @@ function buildRepo(trx: TxSql, actor: Actor): Repo {
     // P4.2b-3a: the offline staff code (migration 0045) — implemented in the delimited "Offline staff code" section at the END of this file (one seam here).
     offlineCode: buildOfflineCodeRepo(trx),
     markerScan: buildMarkerScanRepo(trx),
+    receipts: buildReceiptsRepo(trx),
 
     device: {
       async findOwn(deviceId: string) {
@@ -3683,6 +3686,74 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
     },
   };
 }
+
+const RECEIPT_INTAKE_STATUSES = new Set<ReceiptIntakeStatus>([
+  "ok",
+  "duplicate",
+  "review",
+  "no_facility",
+  "no_programme",
+  "review_account",
+  "bad_args",
+]);
+
+function buildReceiptsRepo(trx: TxSql): Repo["receipts"] {
+  return {
+    async intake(input): Promise<ReceiptIntakeResult> {
+      let rows;
+      try {
+        rows = await trx`
+          select o_status, o_local_date, o_purchase_id::text as o_purchase_id, o_trail_id, o_purchase_status,
+                 o_credit_id::text as o_credit_id, o_credit_status, o_dedupe
+          from private.receipt_intake_for_actor(
+            ${input.facilityId}::text,
+            ${input.phash}::text,
+            ${input.storageObject}::text,
+            ${input.localDate}::date,
+            ${input.receiptNumberOcr}::text
+          )`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      if (!rows.length) throw new Error("receipts.intake: private.receipt_intake_for_actor returned no rows");
+      const status = String(rows[0]!.o_status);
+      if (!RECEIPT_INTAKE_STATUSES.has(status as ReceiptIntakeStatus)) {
+        throw new Error("receipts.intake: private.receipt_intake_for_actor returned an unexpected status");
+      }
+      const localDate = rows[0]!.o_local_date instanceof Date
+        ? rows[0]!.o_local_date.toISOString().slice(0, 10)
+        : rows[0]!.o_local_date != null
+          ? String(rows[0]!.o_local_date).slice(0, 10)
+          : null;
+      const dedupeRaw = rows[0]!.o_dedupe;
+      const dedupe = dedupeRaw == null ? null : String(dedupeRaw) as ReceiptIntakeResult["dedupe"];
+      const purchases = rows
+        .filter((r) => r.o_purchase_id != null)
+        .map((r) => ({
+          purchaseId: String(r.o_purchase_id),
+          trailId: String(r.o_trail_id),
+          purchaseStatus: String(r.o_purchase_status),
+          creditId: String(r.o_credit_id),
+          creditStatus: String(r.o_credit_status),
+        }));
+      return { status: status as ReceiptIntakeStatus, localDate, dedupe, purchases };
+    },
+  };
+}
+
+/** Service-role Storage upload for the private `receipts` bucket (0012_storage.sql). */
+export const receiptsStorage = {
+  async putObject(path: string, body: Uint8Array, contentType: string): Promise<void> {
+    const client = adminClient();
+    const { error } = await client.storage.from("receipts").upload(path, body, { contentType, upsert: false });
+    if (error) throw new Error(`receiptsStorage.putObject: upload failed: ${error.message}`);
+  },
+  async removeObject(path: string): Promise<void> {
+    const client = adminClient();
+    const { error } = await client.storage.from("receipts").remove([path]);
+    if (error) throw new Error(`receiptsStorage.removeObject: remove failed: ${error.message}`);
+  },
+};
 
 // ============================================================================
 // PARTNER LANE (S1.2): docs/security/partner-auth-design.md 4.2 / 4.4 / 4.5 / 8. BEGIN
