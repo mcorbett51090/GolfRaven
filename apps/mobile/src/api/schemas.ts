@@ -16,6 +16,7 @@
  *  - `POST /checkin-token`             -> `{ jti, expiresAt, attestationGrade }` (201)   `_shared/checkin/token-handler.ts`
  *  - `POST /evidence`, `/evidence-batch` -> mapped to an outbox `ServerAnswer`, not validated here: `evidence-answer.ts`
  *  - `POST /me-offline-seed`           -> `{ seed, stepSeconds, digits, algorithm, seedVersion, issuedAt }`  `_shared/me/offline-seed-handler.ts` (P4.2b-3b)
+ *  - `POST /receipts`                  -> `{ status, localDate, dedupe, purchases }`       `_shared/receipts/handler.ts` (P5 §43)
  *  - `POST /rewards-activate/{id}`     -> `{ id, kind, state, held, replay }`              `_shared/rewards/activate-handler.ts` (P4.2b-3b)
  *
  * A response that does not match is `bad_response`, never a partial success. Unknown EXTRA keys are ignored (zod's default "strip"): the
@@ -133,6 +134,24 @@ export const markerScanResultSchema = z.object({
         trailId: z.string().min(1).max(128),
         status: z.enum(["valid", "pending", "held_review"]),
         credit: z.object({ id: z.string().min(1).max(128).nullable(), status: z.enum(["credited", "pending", "held_review", "void"]) }),
+      }),
+    )
+    .max(64),
+});
+
+/** `POST /receipts` -> intake body (`_shared/receipts/handler.ts` `mapStatus`): 201 for ok/duplicate/review. Closed `status` / `dedupe`; purchase status strings stay open (server vocabulary). */
+export const receiptUploadResultSchema = z.object({
+  status: z.enum(["ok", "duplicate", "review"]),
+  localDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  dedupe: z.enum(["clean", "same_user", "cross_user"]).nullable(),
+  purchases: z
+    .array(
+      z.object({
+        purchaseId: z.string().min(1).max(128),
+        trailId: z.string().min(1).max(128),
+        purchaseStatus: z.string().min(1).max(64),
+        creditId: z.string().min(1).max(128),
+        creditStatus: z.string().min(1).max(64),
       }),
     )
     .max(64),

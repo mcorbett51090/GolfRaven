@@ -219,6 +219,43 @@ export interface MarkerScanApi {
   scanMarker(req: MarkerScanRequest, credentials: EvidenceCredentials): Promise<MarkerScanResult>;
 }
 
+/** React Native's FormData file part (`uri` + `name` + `type`). Not a DOM Blob; the HTTP client appends it as-is for `expo/fetch`. */
+export interface ReceiptUploadUriFile {
+  uri: string;
+  name: string;
+  type: string;
+}
+
+/** `POST receipts` multipart fields (`parseReceiptMultipart`, `_shared/receipts/request-shape.ts`): `facilityId` + `file` required; `localDate` / `receiptNumberOcr` optional. */
+export interface ReceiptUploadRequest {
+  facilityId: string;
+  /** JPEG/PNG/HEIC as Blob/File (Node/web), or a React Native `{ uri, name, type }` part. */
+  file: Blob | File | ReceiptUploadUriFile;
+  /** Filename when `file` is a nameless Blob (a `File`'s own name wins; RN uri parts carry `name`). */
+  fileName?: string;
+  localDate?: string;
+  receiptNumberOcr?: string;
+}
+
+/** `POST receipts` answer (`handleReceiptUpload` / `mapStatus`): 201 for `ok` / `duplicate` / `review`. No secret and no Storage path is returned. */
+export interface ReceiptUploadResult {
+  status: "ok" | "duplicate" | "review";
+  localDate: string | null;
+  dedupe: "clean" | "same_user" | "cross_user" | null;
+  purchases: {
+    purchaseId: string;
+    trailId: string;
+    purchaseStatus: string;
+    creditId: string;
+    creditStatus: string;
+  }[];
+}
+
+/** Player-lane receipt image upload (P5 §40 / §43). The bearer is `credentials.accessToken` (the owner's); NOT retried here (a repeat may create another fingerprint / review path). Behind `RECEIPTS_UPLOAD_UI_ENABLED`, which stays false: nothing in the app calls it yet. Refusals the UI must tell apart: 404 `not_found`, 415 unsupported media, 413 payload too large, 422 `no_programme` / `bad_args`, 403 review account, 429 with Retry-After. */
+export interface ReceiptsApi {
+  uploadReceipt(req: ReceiptUploadRequest, credentials: EvidenceCredentials): Promise<ReceiptUploadResult>;
+}
+
 /** The server's `RewardKind` (`_shared/rewards/types.ts`): an offer code, or an `entitlement` (the special marker; the table's own `kind` column calls it `special_marker`, the activation answer says `entitlement`). */
 export type RewardKind = "offer_code" | "entitlement";
 
@@ -270,7 +307,7 @@ export interface RewardsApi {
   listEarnedRewards(): Promise<EarnedReward[]>;
 }
 
-export interface ApiClient extends EvidenceSubmitter, CheckinApi, OfflineCodeApi, MarkerScanApi, RewardsApi {
+export interface ApiClient extends EvidenceSubmitter, CheckinApi, OfflineCodeApi, MarkerScanApi, ReceiptsApi, RewardsApi {
   /** Server policy constants the app must not hard-code (`MIN_AGE`, §7.8). `[no server endpoint exists yet: the real client answers the
    * compiled default (16) — see `http-client.ts`]` */
   getPolicy(): Promise<{ minAge: number }>;

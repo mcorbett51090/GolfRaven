@@ -16,6 +16,7 @@
  * | `redeemCheckinChallenge`| `POST { challengeId, nonce, hardwareSupportsAttestation, attestation? }` (`attest/redeemer.ts` builds it) | `checkin-token` |
  * | `provisionOfflineSeed`  | `POST { deviceId, rotate? }` (strict; the answer carries a SECRET seed, never logged)  | `me-offline-seed`  |
  * | `scanMarker`            | `POST { facilityId, qr?, deviceId?, fix?, jti? }` (strict; a scan, or a co-signal intake with only the fix; 201 / 200) | `marker-scan` |
+ * | `uploadReceipt`         | `POST multipart { facilityId, file, localDate?, receiptNumberOcr? }` (201) | `receipts` |
  * | `activateReward`        | `POST { deviceId, platform, challengeId?, nonce?, installLinkId?, attestation }` (`attest/activator.ts` builds it), the reward id in the PATH | `rewards-activate/<id>` |
  *
  * Auth: `Authorization: Bearer <Supabase access token>` from `getAccessToken()` (the auth service refreshes an expired token itself); a `401`
@@ -27,7 +28,8 @@
  * `unlink` are not: an Apple authorization code is single-use, every OTP proof attempt is counted against 5 per address per hour, and a second
  * unlink is a 404, so a blind repeat could turn one success into a visible failure or burn an attempt. The EVIDENCE and CHECK-IN calls are not retried
  * either, and are made with the OWNER's credentials handed in by the caller (`credentials.accessToken`; the client never fetches or refreshes a token
- * for them): the outbox owns evidence retries (backoff, jitter, `Retry-After`; `source_ref` makes a replay safe) and a challenge is single-use. Each attempt has a 20 s timeout (the
+ * for them): the outbox owns evidence retries (backoff, jitter, `Retry-After`; `source_ref` makes a replay safe) and a challenge is single-use. `uploadReceipt` is not retried
+ * (a blind repeat may open another fingerprint / review path). Each attempt has a 20 s timeout (the
  * server's own request cap is 15 s).
  *
  * `[Request/response shapes are the handlers' own (see `schemas.ts`); the deployed URL layout (`/functions/v1/<name>`) is the Supabase
@@ -56,19 +58,42 @@ import {
   markerScanResultSchema,
   offlineSeedResultSchema,
   pushTokenResultSchema,
+  receiptUploadResultSchema,
   successEnvelopeSchema,
   unlinkResultSchema,
 } from "./schemas";
 import type { z } from "zod";
-import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinRedeemInput, EarnedReward, PlaySummary } from "./types";
+import type { AchievementSummary, ApiClient, CheckinChallengeRequest, CheckinRedeemInput, EarnedReward, PlaySummary, ReceiptUploadRequest, ReceiptUploadUriFile } from "./types";
 
 export { retryAfterSecondsFrom };
 
-/** The part of `fetch` this client uses. `expo/fetch` and the global `fetch` both satisfy it. */
+/** The part of `fetch` this client uses. `expo/fetch` and the global `fetch` both satisfy it. Body is JSON text or `FormData` (multipart; caller must not set Content-Type). */
 export type HttpFetch = (
   url: string,
-  init: { method: string; headers: Record<string, string>; body?: string; redirect: "error"; credentials: "omit"; signal: AbortSignal },
+  init: { method: string; headers: Record<string, string>; body?: string | FormData; redirect: "error"; credentials: "omit"; signal: AbortSignal },
 ) => Promise<Response>;
+
+function isReceiptUriFile(file: ReceiptUploadRequest["file"]): file is ReceiptUploadUriFile {
+  return typeof file === "object" && file !== null && "uri" in file && typeof (file as ReceiptUploadUriFile).uri === "string";
+}
+
+/** Build the multipart body `parseReceiptMultipart` accepts. Does not set Content-Type (fetch supplies the boundary). */
+export function receiptUploadFormData(req: ReceiptUploadRequest): FormData {
+  const form = new FormData();
+  form.append("facilityId", req.facilityId);
+  if (req.localDate !== undefined) form.append("localDate", req.localDate);
+  if (req.receiptNumberOcr !== undefined) form.append("receiptNumberOcr", req.receiptNumberOcr);
+  const file = req.file;
+  if (isReceiptUriFile(file)) {
+    // React Native FormData accepts `{ uri, name, type }` where DOM typings expect Blob.
+    form.append("file", file as unknown as Blob);
+  } else if (typeof File !== "undefined" && file instanceof File) {
+    form.append("file", file, file.name);
+  } else {
+    form.append("file", file as Blob, req.fileName ?? "receipt.jpg");
+  }
+  return form;
+}
 
 export const HTTP_POLICY = {
   timeoutMs: 20_000,
@@ -143,10 +168,15 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
     const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
     try {
       const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: "application/json" };
-      let body: string | undefined;
+      let body: string | FormData | undefined;
       if (spec.body !== undefined) {
-        headers["Content-Type"] = "application/json";
-        body = JSON.stringify(spec.body);
+        if (typeof FormData !== "undefined" && spec.body instanceof FormData) {
+          // Leave Content-Type unset so fetch adds the multipart boundary.
+          body = spec.body;
+        } else {
+          headers["Content-Type"] = "application/json";
+          body = JSON.stringify(spec.body);
+        }
       }
       const res = await opts.fetch(url, { method: spec.method, headers, ...(body !== undefined ? { body } : {}), redirect: "error", credentials: "omit", signal: controller.signal });
       // Read the body inside the timeout: a stalled body must not outlive it.
@@ -382,6 +412,19 @@ export function createHttpApiClient(opts: HttpApiOptions): ApiClient {
         schema: markerScanResultSchema,
         idempotent: false,
         okStatus: [200, 201],
+        accessToken: credentials.accessToken,
+      });
+    },
+
+    /** `POST receipts` (P5 §43): ONE multipart upload as the owner, never retried here (a blind repeat may open another fingerprint / review path). 201 for ok/duplicate/review. */
+    uploadReceipt(req, credentials) {
+      return call({
+        fn: "receipts",
+        method: "POST",
+        body: receiptUploadFormData(req),
+        schema: receiptUploadResultSchema,
+        idempotent: false,
+        okStatus: 201,
         accessToken: credentials.accessToken,
       });
     },
