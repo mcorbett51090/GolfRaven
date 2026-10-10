@@ -11,6 +11,7 @@
 //   POST admin/enrolments                 { userId }                 another admin
 //   POST credentials/options              {}
 //   POST credentials                      { challengeToken, credential }   (registration-shape.ts)
+//   PATCH credentials/{id}                { note }                  display-only; null/"" clears; at most 40 characters
 
 import { parseUuid } from "./invites-shape.ts";
 import { type ParseIssue, type ParseResult, plain, unknownKeys } from "./session-shape.ts";
@@ -51,4 +52,30 @@ export function parseAdminEnrolmentBody(raw: unknown): ParseResult<{ readonly us
   if (userId === null) issues.push({ path: "userId", message: "must be a uuid" });
   if (issues.length > 0 || userId === null) return { ok: false, issues };
   return { ok: true, value: { userId } };
+}
+
+/** `{ note }`: string (trimmed; at most 40) or null/"" to clear. Unknown keys refused. */
+export function parseCredentialNoteBody(raw: unknown): ParseResult<{ readonly note: string | null }> {
+  if (!plain(raw)) return { ok: false, issues: [{ path: "", message: "expected a JSON object" }] };
+  const issues: ParseIssue[] = [];
+  unknownKeys(raw, new Set(["note"]), "", issues);
+  if (!("note" in raw)) {
+    issues.push({ path: "note", message: "required" });
+    return { ok: false, issues };
+  }
+  if (raw.note === null) {
+    if (issues.length > 0) return { ok: false, issues };
+    return { ok: true, value: { note: null } };
+  }
+  if (typeof raw.note !== "string") {
+    issues.push({ path: "note", message: "must be a string or null" });
+    return { ok: false, issues };
+  }
+  const trimmed = raw.note.trim();
+  if (trimmed.length > 40) {
+    issues.push({ path: "note", message: "at most 40 characters" });
+    return { ok: false, issues };
+  }
+  if (issues.length > 0) return { ok: false, issues };
+  return { ok: true, value: { note: trimmed.length === 0 ? null : trimmed } };
 }

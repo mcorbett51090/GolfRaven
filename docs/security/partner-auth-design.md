@@ -1939,7 +1939,7 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 
 ### 23.3 Not built, honestly
 
-- `PATCH credentials/{id}` (the display note): 0054 has no definer for it.
+- `PATCH credentials/{id}` (the display note): closed by §65 / migration `0079`.
 - The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
 - Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
 - The PWA screens and `apps/partners` client; the out-of-band notice of a credential add (U1) is still an `audit_log` row.
@@ -3272,11 +3272,38 @@ Numbering: **migration `0078`, matrix `56`, this section 64.** Closes the 0048 l
 
 ### 64.3 Not built, honestly
 
-- Admin keep=2; credential display-note `PATCH`; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Admin keep=2; credential display-note `PATCH` → §65; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 64.4 Verification
 
-Branch: `cursor/p5-mint-session-evict-8ffd` (base main after #103 / `51dadd8`). Recorded when CI is green on the PR tip.
+Squash-merged as `6bb5cff` (#104). Branch: `cursor/p5-mint-session-evict-8ffd` (base main after #103 / `51dadd8`).
 
-- pgTAP matrix 56; `verify-function-inventory`; migrations immutable for `0001`–`0077`.
+- pgTAP matrix 56; `verify-function-inventory`; migrations immutable for `0001`–`0077`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 65. As built: credential display-note PATCH
+
+Numbering: **migration `0079`, matrix `57`, this section 65.** Closes the 0054 leftover named in §23.3: `PATCH credentials/{id}` for the member-chosen display note (≤40 characters, never used by a security decision). Class A0; own credential only.
+
+### 65.1 What was built
+
+- **`private.partner_credential_note_for_partner(id, note)`** — class A0; statuses `ok` | `not_found` (unknown or not own); blank/NULL clears; `char_length > 40` → 22023.
+- **`GRANT UPDATE (note)`** + policy `pd_update_partner_credential_note` (partner-bound, own `user_id`).
+- **Edge**: `PATCH /partner-members/credentials/{id}` → `credentialNote`; not counted against the credential add/revoke 10/h bucket.
+- **pgTAP matrix 57** + PA-22 allowlist widen in matrix 32; EXECUTE lists (10 / 25 / 28 + Deno).
+
+### 65.2 Decisions and departures
+
+- **Own only** — reach-rule note edits are not in scope (revoke is A2 + reach; note is A0 display metadata).
+- **No PWA** — API seam only; partners credential settings UI remains a later surface.
+- **Clear with null / blank** — matches the column default.
+
+### 65.3 Not built, honestly
+
+- Admin keep=2; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 65.4 Verification
+
+Branch: `cursor/p5-credential-note-patch-8ffd` (base main after #104 / `6bb5cff`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 57 (+ 10 / 25 / 28 / 32); Vitest partner-members-handler PATCH; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0078`.
 

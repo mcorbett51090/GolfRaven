@@ -30,6 +30,7 @@ const ROUTES: Array<[string, string, unknown]> = [
   ["POST", "credentials", { challengeToken: challengeToken(), credential: registrationCredentialJson() }],
   ["GET", "credentials", undefined],
   ["DELETE", `credentials/${CRED_ROW_ID}`, undefined],
+  ["PATCH", `credentials/${CRED_ROW_ID}`, { note: "front desk" }],
 ];
 
 describe("routing, Origin, bearer and body order: every route is a session route", () => {
@@ -71,7 +72,7 @@ describe("routing, Origin, bearer and body order: every route is a session route
     for (const path of ["no-such-route", "members/not-a-uuid/revoke", `members/${TARGET_ID}/nope`, "credentials/not-a-uuid", `orgs/${ORG_ID}/sessions`, `members/${TARGET_ID}/revoke/x`]) {
       expect((await post(f, path)).status, path).toBe(404);
     }
-    for (const [method, path, allow] of [["GET", `members/${TARGET_ID}/revoke`, "POST"], ["PATCH", "credentials", "GET, POST"], ["POST", `credentials/${CRED_ROW_ID}`, "DELETE"], ["GET", "credentials/options", "POST"]] as const) {
+    for (const [method, path, allow] of [["GET", `members/${TARGET_ID}/revoke`, "POST"], ["PATCH", "credentials", "GET, POST"], ["POST", `credentials/${CRED_ROW_ID}`, "DELETE, PATCH"], ["GET", "credentials/options", "POST"]] as const) {
       const res = await call(f, method, path, { headers: authed(), body: method === "POST" ? {} : undefined });
       expect(res.status, `${method} ${path}`).toBe(405);
       expect(res.headers.get("allow")).toBe(allow);
@@ -317,6 +318,29 @@ describe("credentials of a signed-in person", () => {
     expect((await call(limited, "DELETE", `credentials/${CRED_ROW_ID}`, { headers: authed() })).status).toBe(429);
     expect(limited.tx).toEqual([]);
     expect((await call(makeFakes({ authorityRefusedIn: "credentialRevoke" }), "DELETE", `credentials/${CRED_ROW_ID}`, { headers: authed() })).status).toBe(403);
+  });
+
+  it("PATCH credentials/{id}: ok 200 with note; null clears; not_found 404; no credential rate-limit bucket; strict body", async () => {
+    const f = makeFakes();
+    const res = await call(f, "PATCH", `credentials/${CRED_ROW_ID}`, { headers: authed(), body: { note: "  front desk  " } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ data: { note: "front desk" } });
+    expect(f.rec.credentialNote).toEqual([{ id: CRED_ROW_ID, note: "front desk" }]);
+    expect(f.rateLimitHits).toEqual([]);
+    expect(lastTx(f)).toEqual({ kind: "session", committed: true });
+
+    const clear = makeFakes();
+    expect((await call(clear, "PATCH", `credentials/${CRED_ROW_ID}`, { headers: authed(), body: { note: null } })).status).toBe(200);
+    expect(clear.rec.credentialNote).toEqual([{ id: CRED_ROW_ID, note: null }]);
+
+    const miss = makeFakes({ credentialNote: "not_found" });
+    expect((await call(miss, "PATCH", `credentials/${CRED_ROW_ID}`, { headers: authed(), body: { note: "x" } })).status).toBe(404);
+
+    const bad = makeFakes();
+    for (const b of [{}, { note: 1 }, { note: "a".repeat(41) }, { note: "ok", extra: 1 }]) {
+      expect((await call(bad, "PATCH", `credentials/${CRED_ROW_ID}`, { headers: authed(), body: b })).status).toBe(400);
+    }
+    expect(bad.calls).toEqual([]);
   });
 });
 
