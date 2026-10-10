@@ -7,7 +7,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(22);
+SELECT plan(23);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -129,7 +129,7 @@ SELECT ok(has_function_privilege('edge_partner', 'private.partner_offers_redeem_
   'offline redeem is edge_partner');
 SELECT ok(NOT has_function_privilege('edge_actor', 'private.partner_offers_redeem_offline_for_partner(text, uuid, text, text, boolean)'::regprocedure, 'EXECUTE'),
   'edge_actor cannot offline-redeem');
-SELECT ok(NOT has_function_privilege('edge_partner', 'private.partner_offers_redeem_apply_offline(uuid, text, uuid, uuid, uuid, text, numeric)'::regprocedure, 'EXECUTE'),
+SELECT ok(NOT has_function_privilege('edge_partner', 'private.partner_offers_redeem_apply_offline(uuid, text, uuid, uuid, uuid, text, numeric, bigint)'::regprocedure, 'EXECUTE'),
   'apply_offline helper is not edge_partner');
 SELECT ok(EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'app' AND table_name = 'offer_code' AND column_name = 'offline_confirm_by'),
   'offer_code.offline_confirm_by exists');
@@ -205,6 +205,8 @@ SELECT is((SELECT state::text || '|' || redeemed_offline::text FROM app.offer_co
 SELECT ok((SELECT offline_confirm_by IS NOT NULL AND offline_confirm_by > now() + interval '23 hours'
              AND offline_confirm_by < now() + interval '25 hours' FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000040'),
   'offline_confirm_by is about 24 h ahead');
+SELECT is((SELECT offline_step FROM app.offer_code WHERE id = '78000000-0000-0000-0000-000000000040'),
+  pg_temp.now_step(), 'offline redeem records offline_step for the confirm clear');
 SELECT is((SELECT budget_reserved::text || '|' || budget_used::text FROM app.offer WHERE id = '68000000-0000-0000-0000-000000000040'),
   '0.00|10.00', 'budget consumed on offline redeem');
 SELECT is((SELECT count(*)::int FROM app.attestation WHERE kind = 'offer_redemption' AND player_user_id = '00000000-0000-0000-0000-00000000000b'

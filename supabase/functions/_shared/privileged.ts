@@ -231,6 +231,7 @@ import type {
   CourseQrPublicKey,
   MarkerCosignalAttachInput,
   MarkerCosignalAttachResult,
+  OfferOfflineConfirmResult,
   MarkerPurchaseView,
   MarkerScanRecordInput,
   MarkerScanRecordResult,
@@ -3659,6 +3660,26 @@ function buildMarkerScanRepo(trx: TxSql): Repo["markerScan"] {
       if (status === "no_pending_purchase" || status === "cosignal_invalid" || status === "cosignal_used" || status === "review_account") return { status };
       if (status !== "attached") throw new Error("markerScan.attachCosignal: private.marker_cosignal_attach_for_actor returned an unexpected result");
       return { status: "attached", purchases: rows.map(toPurchaseView) };
+    },
+
+    async confirmOfferOffline(input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult> {
+      let rows;
+      try {
+        rows = await trx`
+          select o_result, o_cleared
+          from private.offer_offline_confirm_for_actor(
+            ${input.facilityId}::text, ${input.at.toISOString()}::timestamptz, ${input.cosignal.grade}::text, ${input.cosignal.fixId}::text, ${input.cosignal.evidenceId}::uuid)`;
+      } catch (e) {
+        throw markerScanDbError(e);
+      }
+      const first = rows[0];
+      const status = String(first?.o_result);
+      const cleared = Number(first?.o_cleared ?? 0);
+      if (status === "confirmed") return { status: "confirmed", cleared };
+      if (status === "none_awaiting" || status === "cosignal_invalid" || status === "cosignal_used" || status === "review_account") {
+        return { status, cleared };
+      }
+      throw new Error("markerScan.confirmOfferOffline: private.offer_offline_confirm_for_actor returned an unexpected result");
     },
   };
 }

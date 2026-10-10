@@ -229,8 +229,14 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     if (!qualifies) throw Errors.unprocessable("not_a_cosignal", "this location fix does not qualify as a presence co-signal");
     const counted = await countCoSignal(repo, deps, body, facilityId, tz);
     if (counted === null) throw Errors.conflict("fix_not_consumable", "this location fix could not be counted; capture a new one");
-    const attached = await repo.markerScan.attachCosignal({ facilityId, at, cosignal: { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId } });
-    if (attached.status === "no_pending_purchase") throw Errors.unprocessable("no_pending_purchase", "no pending marker purchase at this facility is waiting for this location fix");
+    const cosignal = { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId };
+    const attached = await repo.markerScan.attachCosignal({ facilityId, at, cosignal });
+    if (attached.status === "no_pending_purchase") {
+      // 0063: the same fix may clear an awaiting offline offer redeem (no pending marker purchase).
+      const confirmed = await repo.markerScan.confirmOfferOffline({ facilityId, at, cosignal });
+      if (confirmed.status === "confirmed") return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, []) };
+      throw Errors.unprocessable("no_pending_purchase", "no pending marker purchase at this facility is waiting for this location fix");
+    }
     if (attached.status !== "attached") throw mapRecordRefusal(attached.status);
     return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, attached.purchases) };
   }

@@ -7,7 +7,7 @@
 //
 // The state also records every call (`calls`), so a test can prove ORDER: e.g. that a wrong PIN never reaches `record`, or that a forged QR never reaches `attemptPin`.
 
-import type { MarkerPurchaseView, MarkerScanRecordInput, MarkerScanRecordResult, MarkerCosignalAttachInput, MarkerCosignalAttachResult, PinAttemptResult, Repo, CourseQrPublicKey } from "../../functions/_shared/types.ts";
+import type { MarkerPurchaseView, MarkerScanRecordInput, MarkerScanRecordResult, MarkerCosignalAttachInput, MarkerCosignalAttachResult, OfferOfflineConfirmResult, PinAttemptResult, Repo, CourseQrPublicKey } from "../../functions/_shared/types.ts";
 import { HttpError } from "../../functions/_shared/http.ts";
 import type { FakeState } from "./fake-repo.ts";
 
@@ -64,6 +64,8 @@ export interface FakeMarkerScanState {
   /** Force the database's answer (e.g. `cosignal_invalid`) for the next `record` / `attachCosignal`. */
   recordOverride: MarkerScanRecordResult | null;
   attachOverride: MarkerCosignalAttachResult | null;
+  /** Force the next `confirmOfferOffline` answer (0063). Default: `none_awaiting`. */
+  confirmOverride: OfferOfflineConfirmResult | null;
 }
 
 const states = new WeakMap<FakeState, FakeMarkerScanState>();
@@ -71,7 +73,7 @@ const states = new WeakMap<FakeState, FakeMarkerScanState>();
 export function markerScanState(state: FakeState): FakeMarkerScanState {
   let s = states.get(state);
   if (!s) {
-    s = { keys: new Map(), tokens: new Map(), facilityQr: new Map(), pins: new Map(), programme: new Map(), qrMode: new Map(), pinFailures: new Map(), purchases: [], calls: [], pinOverride: null, pepperProvisioned: true, attemptAts: [], recordInputs: [], recordOverride: null, attachOverride: null };
+    s = { keys: new Map(), tokens: new Map(), facilityQr: new Map(), pins: new Map(), programme: new Map(), qrMode: new Map(), pinFailures: new Map(), purchases: [], calls: [], pinOverride: null, pepperProvisioned: true, attemptAts: [], recordInputs: [], recordOverride: null, attachOverride: null, confirmOverride: null };
     states.set(state, s);
   }
   return s;
@@ -180,6 +182,12 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
         p.awaiting = null;
       }
       return { status: "attached", purchases: group.map(view) };
+    },
+
+    async confirmOfferOffline(_input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult> {
+      m.calls.push("confirmOfferOffline");
+      if (m.confirmOverride) return m.confirmOverride;
+      return { status: "none_awaiting", cleared: 0 };
     },
   };
 }

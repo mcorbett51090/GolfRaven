@@ -317,6 +317,16 @@ describe("the player's co-signal intake (no QR)", () => {
     expect(await thrown(handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps))).toMatchObject({ status: 422, code: "no_pending_purchase" });
   });
 
+  it("0063: no pending purchase but confirmOfferOffline clears an offline offer → 200 credited with empty purchases", async () => {
+    const w = await world();
+    w.ms.attachOverride = { status: "no_pending_purchase" };
+    w.ms.confirmOverride = { status: "confirmed", cleared: 1 };
+    const out = ok(await handleMarkerScan(body({ deviceId: FAKE_DEVICE_ID, fix: fixAt(w), jti: seedToken(w) }), w.repo, deps));
+    expect(out.status).toBe(200);
+    expect(out.body).toMatchObject({ outcome: "credited", localDate: null, cosignal: "counted", purchases: [] });
+    expect(w.ms.calls.filter((c) => c === "attachCosignal" || c === "confirmOfferOffline")).toEqual(["attachCosignal", "confirmOfferOffline"]);
+  });
+
   it("a fix that is not a co-signal completes nothing: 422 not_a_cosignal", async () => {
     const w = await world();
     const t = await seedRotating(w);
