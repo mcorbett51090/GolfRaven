@@ -66,16 +66,6 @@ BEGIN
   RETURN r.o_status || '|' || coalesce(r.o_state, '');
 END
 $f$;
-CREATE FUNCTION pg_temp.as_sr(p_sql text) RETURNS text LANGUAGE plpgsql AS $f$
-DECLARE v text;
-BEGIN
-  EXECUTE 'SET LOCAL ROLE service_role';
-  EXECUTE p_sql INTO v;
-  EXECUTE 'RESET ROLE';
-  RETURN v;
-END
-$f$;
-
 -- ----------------------------------------------------------------------------
 -- 0. Setup: facility with no active staff (org + scope, only a revoked member)
 -- ----------------------------------------------------------------------------
