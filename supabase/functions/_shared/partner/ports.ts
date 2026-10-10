@@ -423,6 +423,15 @@ export interface ReviewSlaSummary {
   readonly slaBreachedReviewItems: number;
   readonly slaHours: number;
 }
+/** GET partner-review/auth-alarms (partner_auth_alarm_list_for_partner, class A0, admin): sign-in alarms after the Edge passed (newest first, ≤100). */
+export interface PartnerAuthAlarmRow {
+  readonly id: string;
+  readonly kind: string;
+  readonly credentialId: string;
+  readonly minuteBucket: number;
+  readonly detail: unknown;
+  readonly raisedAt: string;
+}
 
 /** What `partner_receipt_cross_user_preview_for_partner` answers (0070). Storage paths stay on the Edge; the wire returns opaque labels + signed URLs only. */
 export type ReceiptCrossUserPreviewStatus = "ok" | "not_found" | "not_open" | "no_image";
@@ -440,6 +449,8 @@ export interface PartnerReviewTx {
   heldQueue(): Promise<HeldQueueRow[]>;
   /** GET sla (class A0, admin). */
   reviewSla(): Promise<ReviewSlaSummary>;
+  /** GET auth-alarms (class A0, admin; 0075): partner_auth_alarm rows (newest first, ≤100). */
+  authAlarmList(): Promise<readonly PartnerAuthAlarmRow[]>;
   /** GET preview/receipt-cross-user (class A0, admin; 0070): storage ref_ids for an open receipt_cross_user_match. */
   receiptCrossUserPreview(reviewId: string): Promise<ReceiptCrossUserPreviewRefs>;
   /** POST resolve/offer-code (class A3, admin). */

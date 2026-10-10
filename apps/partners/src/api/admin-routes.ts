@@ -164,6 +164,16 @@ export interface ReviewSla {
   readonly slaHours: number;
 }
 
+/** GET partner-review/auth-alarms (0075 / §61): partner_auth_alarm rows for admins. */
+export interface PartnerAuthAlarm {
+  readonly id: string;
+  readonly kind: string;
+  readonly credentialId: string;
+  readonly minuteBucket: number;
+  readonly detail: unknown;
+  readonly raisedAt: string;
+}
+
 export interface OperatorRollup {
   readonly trailId: string;
   readonly month: string;
@@ -398,6 +408,25 @@ export async function getReviewSla(api: PartnerApi): Promise<ReviewSla> {
     slaBreachedReviewItems: data["slaBreachedReviewItems"],
     slaHours: data["slaHours"],
   };
+}
+
+export async function getAuthAlarms(api: PartnerApi): Promise<readonly PartnerAuthAlarm[]> {
+  const data = await api.call("GET", "partner-review", "auth-alarms");
+  if (!isObject(data) || !Array.isArray(data["alarms"])) malformed();
+  return data["alarms"].map((a) => {
+    if (
+      !isObject(a) || !isString(a["id"]) || !isString(a["kind"]) || !isString(a["credentialId"]) ||
+      !isNum(a["minuteBucket"]) || !isString(a["raisedAt"])
+    ) malformed();
+    return {
+      id: a["id"],
+      kind: a["kind"],
+      credentialId: a["credentialId"],
+      minuteBucket: a["minuteBucket"],
+      detail: a["detail"] ?? null,
+      raisedAt: a["raisedAt"],
+    };
+  });
 }
 
 export async function postResolveOfferCode(api: PartnerApi, id: string, approve: boolean): Promise<{ state: string }> {

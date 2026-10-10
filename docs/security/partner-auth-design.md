@@ -3166,11 +3166,38 @@ Numbering: **migration `0074`, matrix `52`, this section 60.** Closes the retent
 
 ### 60.3 Not built, honestly
 
-- Pepper-rotation tooling, plan §8.3 cap alert, OCR / aHash / UI flag flips / CAMERA. Partner-auth-alarm operator UI (portal read) remains a later seam if wanted.
+- Pepper-rotation tooling, plan §8.3 cap alert, OCR / aHash / UI flag flips / CAMERA. Partner-auth-alarm operator UI (portal read) → §61.
 
 ### 60.4 Verification
 
-Branch: `cursor/p5-partner-auth-alarm-purge-8ffd` (base main after #99 / `fefa6ff`). Recorded when CI is green on the PR tip.
+Squash-merged as `2bc01b2` (#100). Branch: `cursor/p5-partner-auth-alarm-purge-8ffd` (base main after #99 / `fefa6ff`).
 
-- pgTAP matrices 20 / 30 / 52; Deno retention-purge step order; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0073`.
+- pgTAP matrices 20 / 30 / 52; Deno retention-purge step order; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0073`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 61. As built: partner_auth_alarm list (partners portal)
+
+Numbering: **migration `0075`, matrix `53`, this section 61.** Closes the operator-facing half of `app.partner_auth_alarm` left open by 0048 / §60.3: a class-A0, **admin-only** list of sign-in alarms the database raised after the Edge had already passed the assertion (`signature_invalid` / `counter_regression`) on the Review screen.
+
+### 61.1 What was built
+
+- **`private.partner_auth_alarm_list_for_partner()`** — class A0, ADMIN only (same gate as `partner_held_queue_for_partner`: authorize as operator then `is_admin`); returns row columns (including `detail`), newest first, at most 100.
+- **SELECT policy** `pd_partner_auth_alarm_partner_select` keyed on `partner_bound_admin` (InitPlan form). 0048's unbound mint-writer policies and 0074's purge companions stay as before. `GRANT SELECT (detail)` (id / kind / credential_id / minute_bucket / raised_at already granted by 0048 / 0074).
+- **Edge**: `GET /partner-review/auth-alarms` → `PartnerReviewTx.authAlarmList` → the new definer; EXECUTE allowlists (matrices 10 / 25 / 28 + Deno PA-13b) name it.
+- **Partners PWA**: Review (admin) screen section with load button, empty / list states (kind + short credential id + raised_at), en + fr-CA copy; fake-server route + Vitest cell.
+
+### 61.2 Decisions and departures
+
+- **Admin only, not manager/operator** — unlike `course_pin_alarm_list_for_partner` (§59), which is facility-scoped manager/operator; auth alarms are global and carry credential ids, so they follow the held-queue admin gate.
+- **Reuse `partner-review`** — no new Edge function; alarms sit next to the held-review queue on the same admin screen.
+- **Column grant for `detail` only** — the other SELECT columns were already granted for the mint writer / purge path.
+
+### 61.3 Not built, honestly
+
+- Pepper-rotation tooling, plan §8.3 cap alert, OCR / aHash / UI flag flips / CAMERA.
+
+### 61.4 Verification
+
+Branch: `cursor/p5-partner-auth-alarm-ui-8ffd` (base main after #100 / `2bc01b2`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 53 (+ 10 / 25 / 28 EXECUTE lists); Vitest partner-review-handler GET auth-alarms + partners admin authAlarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0074`.
 

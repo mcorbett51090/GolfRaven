@@ -252,6 +252,29 @@ describe("S7d review screen", () => {
     expect(logBlob).not.toMatch(/fake-preview-token|signedUrl/i);
   });
 
+  it("loads partner sign-in alarms (A0) on the review screen", async () => {
+    const s = await setup(adminWhoami);
+    s.controller.openReview();
+    await s.controller.loadAuthAlarms();
+    await until(() => {
+      const w = home(s.controller).work;
+      return w?.kind === "review" && w.authAlarms !== null;
+    }, "auth alarms never loaded");
+    {
+      const w = home(s.controller).work;
+      if (w?.kind === "review") {
+        expect(w.authAlarms).toHaveLength(1);
+        expect(w.authAlarms?.[0]).toMatchObject({
+          kind: "signature_invalid",
+          credentialId: "a5300000-0000-0000-0000-000000000001",
+          raisedAt: "2026-01-01T12:00:00.000Z",
+        });
+      }
+    }
+    const gets = s.w.server.log.filter((r) => r.method === "GET" && r.path.includes("/partner-review/auth-alarms"));
+    expect(gets).toHaveLength(1);
+  });
+
   it("staff without isAdmin cannot open review", async () => {
     const s = await setup(operatorWhoami);
     s.controller.openReview();

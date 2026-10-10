@@ -11,6 +11,7 @@ import {
   PartnerInvalidArgument,
   PartnerSessionRefused,
   type HeldQueueRow,
+  type PartnerAuthAlarmRow,
   type PartnerDb,
   type PartnerReviewTx,
   type ReceiptCrossUserPreviewRefs,
@@ -42,6 +43,7 @@ interface FakeReview {
   readonly signedPaths: string[];
   queue: HeldQueueRow[];
   sla: ReviewSlaSummary;
+  authAlarms: readonly PartnerAuthAlarmRow[];
   preview: ReceiptCrossUserPreviewRefs;
   resolveOc: ResolveHeldResult;
   resolveEnt: ResolveHeldResult;
@@ -64,6 +66,7 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
       slaBreachedReviewItems: 0,
       slaHours: 48,
     },
+    authAlarms: overrides.authAlarms ?? [],
     preview: overrides.preview ?? { status: "ok", subjectRef: "receipts/u/a.jpg", matchedRef: "receipts/v/b.jpg" },
     resolveOc: overrides.resolveOc ?? { status: "ok", state: "issued" },
     resolveEnt: overrides.resolveEnt ?? { status: "ok", state: "redeemable" },
@@ -89,6 +92,10 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
     async reviewSla() {
       calls.push("reviewSla");
       return state.sla;
+    },
+    async authAlarmList() {
+      calls.push("authAlarmList");
+      return state.authAlarms;
     },
     async receiptCrossUserPreview(id) {
       calls.push(`preview:${id}`);
@@ -246,6 +253,34 @@ describe("handlePartnerReviewRequest", () => {
     expect(await res.json()).toEqual({
       data: { heldOfferCodes: 2, heldEntitlements: 1, openReviewItems: 3, slaBreachedRewards: 1, slaBreachedReviewItems: 0, slaHours: 48 },
     });
+  });
+
+  it("GET auth-alarms returns partner_auth_alarm rows from the database", async () => {
+    const fake = makeFake({
+      authAlarms: [{
+        id: "a5300000-0000-0000-0000-000000000099",
+        kind: "signature_invalid",
+        credentialId: "a5300000-0000-0000-0000-000000000001",
+        minuteBucket: 1000,
+        detail: { src: "test" },
+        raisedAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+    const res = await call(fake, "GET", "auth-alarms");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      data: {
+        alarms: [{
+          id: "a5300000-0000-0000-0000-000000000099",
+          kind: "signature_invalid",
+          credentialId: "a5300000-0000-0000-0000-000000000001",
+          minuteBucket: 1000,
+          detail: { src: "test" },
+          raisedAt: "2026-01-01T00:00:00.000Z",
+        }],
+      },
+    });
+    expect(fake.calls).toContain("authAlarmList");
   });
 
   it("GET preview/receipt-cross-user returns opaque labels and signed URLs (never storage paths)", async () => {

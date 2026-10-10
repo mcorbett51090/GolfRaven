@@ -125,6 +125,7 @@ import {
   type OfferRedeemMethod,
   type OfferRedeemResult,
   type OfferRedeemStatus,
+  type PartnerAuthAlarmRow,
   type PartnerOffersAdminTx,
   type PartnerOffersRedeemTx,
   type PartnerProgrammeTx,
@@ -4402,6 +4403,29 @@ function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
         slaBreachedReviewItems: Number(r.o_sla_breached_review_items),
         slaHours: Number(r.o_sla_hours),
       };
+    },
+    async authAlarmList(): Promise<readonly PartnerAuthAlarmRow[]> {
+      const rows = await trx`
+        select o_id::text as o_id, o_kind, o_credential_id::text as o_credential_id,
+               o_minute_bucket::bigint as o_minute_bucket, o_detail, o_raised_at
+        from private.partner_auth_alarm_list_for_partner()`;
+      return rows.map((r) => {
+        const raisedAt = isoOrNull(r.o_raised_at);
+        if (
+          typeof r.o_id !== "string" || typeof r.o_kind !== "string" || typeof r.o_credential_id !== "string" ||
+          raisedAt === null
+        ) {
+          throw new Error("partner_auth_alarm_list_for_partner returned a malformed row");
+        }
+        return {
+          id: r.o_id,
+          kind: r.o_kind,
+          credentialId: r.o_credential_id,
+          minuteBucket: Number(r.o_minute_bucket),
+          detail: r.o_detail ?? null,
+          raisedAt,
+        };
+      });
     },
     async receiptCrossUserPreview(reviewId: string): Promise<ReceiptCrossUserPreviewRefs> {
       const rows = await trx`

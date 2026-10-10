@@ -1,7 +1,8 @@
 // supabase/functions/_shared/partner/review-shape.ts
 //
-// Strict, hand-rolled validation of the CLIENT-SUBMITTED wire shapes of `partner-review` (docs/security/partner-auth-design.md 27; slice S4, the Edge half of migration 0057), in the style of
+// Strict, hand-rolled validation of the CLIENT-SUBMITTED wire shapes of `partner-review` (docs/security/partner-auth-design.md 27; slice S4, the Edge half of migration 0057 / 0075), in the style of
 // attest-shape.ts / members-shape.ts. Pure: no environment, no database, no clock.
+// GET auth-alarms has no client-submitted shape (empty query); validation is route-only.
 
 export type ShapeOk<T> = { readonly ok: true; readonly value: T };
 export type ShapeFail = { readonly ok: false; readonly issues: readonly string[] };

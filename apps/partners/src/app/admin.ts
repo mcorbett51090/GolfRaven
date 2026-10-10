@@ -15,6 +15,7 @@ import type {
   TrailProgrammeUpsert,
 } from "../api/admin-routes";
 import {
+  getAuthAlarms,
   getOffers,
   getOperatorRollups,
   getProgramme,
@@ -61,6 +62,7 @@ export interface AdminScreens {
   saveSponsorship(body: SponsorshipUpsert): Promise<void>;
   approveSponsorship(id: string): Promise<void>;
   loadReview(): Promise<void>;
+  loadAuthAlarms(): Promise<void>;
   loadReceiptCrossUserPreview(id: string): Promise<void>;
   resolveOfferCode(id: string, approve: boolean): Promise<void>;
   resolveEntitlement(id: string, approve: boolean): Promise<void>;
@@ -214,7 +216,7 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
     openReview() {
       const s = signedIn(host);
       if (s === null || s.busy !== null || s.panel !== null || !canOpenReview(s.session)) return;
-      withWork(host, s, { kind: "review", busy: false, items: null, sla: null, lastState: null, previews: {} }, null);
+      withWork(host, s, { kind: "review", busy: false, items: null, sla: null, authAlarms: null, lastState: null, previews: {} }, null);
     },
 
     openRollups(trailId) {
@@ -419,6 +421,17 @@ export function createAdminScreens(deps: AdminDeps): AdminScreens {
         }
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "review") host.set({ ...cur, busy: null, work: { ...cur.work, items, sla, previews } });
+      });
+    },
+
+    async loadAuthAlarms() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "review") return;
+      const grant = s.grant;
+      await runA0(grant, "review", async () => {
+        const authAlarms = await getAuthAlarms(api);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "review") host.set({ ...cur, busy: null, work: { ...cur.work, authAlarms } });
       });
     },
 
