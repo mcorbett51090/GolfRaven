@@ -23,7 +23,7 @@ import type {
 } from "../api/admin-routes";
 import type { PartnerApi, SessionEndReason } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
-import type { AttestKind, RedeemMethod, StockMoveKind } from "../api/work-routes";
+import type { AttestKind, OfferRedeemMode, RedeemMethod, StockMoveKind } from "../api/work-routes";
 import type { SessionGrant } from "../api/types";
 import { pinSetupMode } from "../auth/pin-setup";
 import { signInWithPasskey } from "../auth/sign-in";
@@ -99,7 +99,9 @@ export interface AppController extends StepUp {
   submitVoucher(entitlementId: string): Promise<void>;
   loadOffersQueue(): Promise<void>;
   selectOfferCode(offerCodeId: string): void;
+  setOfferRedeemMode(mode: OfferRedeemMode): void;
   submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
+  submitOfferRedeemOffline(offerCodeId: string, handle: string, code: string, nameConfirmed: boolean): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -366,7 +368,10 @@ export function createController(deps: ControllerDeps): AppController {
     submitVoucher: (entitlementId) => work.submitVoucher(entitlementId),
     loadOffersQueue: () => work.loadOffersQueue(),
     selectOfferCode: (offerCodeId) => work.selectOfferCode(offerCodeId),
+    setOfferRedeemMode: (mode) => work.setOfferRedeemMode(mode),
     submitOfferRedeem: (offerCodeId, credential) => work.submitOfferRedeem(offerCodeId, credential),
+    submitOfferRedeemOffline: (offerCodeId, handle, code, nameConfirmed) =>
+      work.submitOfferRedeemOffline(offerCodeId, handle, code, nameConfirmed),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

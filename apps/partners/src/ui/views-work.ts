@@ -233,13 +233,78 @@ export function workView(state: SignedInState, controller: AppController, locale
   }
 
   if (work.kind === "offer-redeem") {
+    const scan = work.mode === "staff_scan";
+    const codeField = h(
+      "label",
+      { class: "field" },
+      h("span", {}, t("offerRedeem.code")),
+      h("input", {
+        name: "offerCodeId",
+        type: "text",
+        value: work.selectedOfferCodeId,
+        autocomplete: "off",
+        spellcheck: "false",
+        required: true,
+        "data-testid": "offer-redeem-code",
+        disabled: busy,
+      }),
+    );
+    const form = scan
+      ? h(
+          "form",
+          {
+            "data-testid": "offer-redeem-form",
+            onsubmit: (e: SubmitEvent) => {
+              e.preventDefault();
+              const fd = new FormData(e.target as HTMLFormElement);
+              void controller.submitOfferRedeem(String(fd.get("offerCodeId") ?? ""), String(fd.get("credential") ?? ""));
+            },
+          },
+          codeField,
+          h("label", { class: "field" }, h("span", {}, t("offerRedeem.credential")), h("input", { name: "credential", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "offer-redeem-credential", disabled: busy })),
+          h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-submit" }, t("offerRedeem.submit"))),
+        )
+      : h(
+          "form",
+          {
+            "data-testid": "offer-redeem-offline-form",
+            onsubmit: (e: SubmitEvent) => {
+              e.preventDefault();
+              const fd = new FormData(e.target as HTMLFormElement);
+              void controller.submitOfferRedeemOffline(
+                String(fd.get("offerCodeId") ?? ""),
+                String(fd.get("handle") ?? ""),
+                String(fd.get("code") ?? ""),
+                fd.get("nameConfirmed") === "on",
+              );
+            },
+          },
+          codeField,
+          h("label", { class: "field" }, h("span", {}, t("offerRedeem.handle")), h("input", { name: "handle", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "offer-redeem-handle", disabled: busy })),
+          h("label", { class: "field" }, h("span", {}, t("offerRedeem.offlineCode")), h("input", { name: "code", type: "text", inputmode: "numeric", autocomplete: "one-time-code", maxlength: 6, required: true, "data-testid": "offer-redeem-offline-code", disabled: busy })),
+          h(
+            "label",
+            { class: "field checkbox" },
+            h("input", { name: "nameConfirmed", type: "checkbox", required: true, "data-testid": "offer-redeem-name-confirmed", disabled: busy }),
+            h("span", {}, t("offerRedeem.nameConfirmed")),
+          ),
+          h("p", { class: "muted" }, t("offerRedeem.nameConfirmed.hint")),
+          h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-offline-submit" }, t("offerRedeem.offline.submit"))),
+        );
+
     return h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "offer-redeem" },
       h("h1", { tabindex: "-1", "data-testid": "heading" }, t("offerRedeem.title")),
       noticeElement(state.notice, locale),
       facilitySelect(state, controller, locale),
-      h("p", { class: "muted" }, t("offerRedeem.hint")),
+      h("p", { class: "muted" }, scan ? t("offerRedeem.hint") : t("offerRedeem.hint.offline")),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", ...(scan ? { class: "primary" } : {}), disabled: busy, "data-testid": "offer-redeem-mode-scan", onclick: () => controller.setOfferRedeemMode("staff_scan") }, t("offerRedeem.mode.scan")),
+        h("button", { type: "button", ...(!scan ? { class: "primary" } : {}), disabled: busy, "data-testid": "offer-redeem-mode-offline", onclick: () => controller.setOfferRedeemMode("offline") }, t("offerRedeem.mode.offline")),
+      ),
       work.queue !== null
         ? h(
             "ul",
@@ -271,34 +336,7 @@ export function workView(state: SignedInState, controller: AppController, locale
             ),
           )
         : null,
-      h(
-        "form",
-        {
-          "data-testid": "offer-redeem-form",
-          onsubmit: (e: SubmitEvent) => {
-            e.preventDefault();
-            const fd = new FormData(e.target as HTMLFormElement);
-            void controller.submitOfferRedeem(String(fd.get("offerCodeId") ?? ""), String(fd.get("credential") ?? ""));
-          },
-        },
-        h(
-          "label",
-          { class: "field" },
-          h("span", {}, t("offerRedeem.code")),
-          h("input", {
-            name: "offerCodeId",
-            type: "text",
-            value: work.selectedOfferCodeId,
-            autocomplete: "off",
-            spellcheck: "false",
-            required: true,
-            "data-testid": "offer-redeem-code",
-            disabled: busy,
-          }),
-        ),
-        h("label", { class: "field" }, h("span", {}, t("offerRedeem.credential")), h("input", { name: "credential", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "offer-redeem-credential", disabled: busy })),
-        h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-submit" }, t("offerRedeem.submit"))),
-      ),
+      form,
       work.lastRedeem !== null
         ? h("p", { role: "status", "data-testid": "offer-redeem-result" }, t("offerRedeem.result", { id: work.lastRedeem.attestationId }))
         : null,

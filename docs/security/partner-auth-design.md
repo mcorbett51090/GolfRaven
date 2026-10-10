@@ -2326,7 +2326,7 @@ Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx`
 
 - **`offline_code` offer redeem** — **built in §35** (migration `0062`, matrix `40`).
 - **Rollups-refresh writer** (still out of scope; S6 seam).
-- **S7 UI** (portal screens for staff_scan landed in §33; offline redeem form is still a seam — see §35.3).
+- **S7 UI** (portal screens for staff_scan landed in §33; offline redeem form in §36).
 - **No mutation pass** was run for this slice.
 
 ### 32.4 Verification
@@ -2371,7 +2371,7 @@ Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (progr
 ### 33.3 Not built, honestly
 
 - Camera scan for check-in tokens.
-- Offline offer redeem UI (`offline_code` Edge path is §35; the partners form is still a seam).
+- Offline offer redeem UI — **built in §36** (`offline_code` Edge path is §35).
 - `exports-purge` UI (system lane).
 - Merging with P5.1b will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
 
@@ -2434,7 +2434,7 @@ Numbering: **migration `0062`, matrix `40`, this section 35.** P5.1b (0060 / mat
 
 ### 35.3 Not built, honestly
 
-- **Partners PWA offline redeem form** (staff still use staff_scan UI from §33).
+- **Partners PWA offline redeem form** — **built in §36**.
 - **Player-lane cosignal that clears `offline_confirm_by`**.
 - **Rollups-refresh writer** (S6 seam).
 - **No mutation pass** was run for this slice.
@@ -2447,4 +2447,36 @@ Branch: `cursor/p5-offline-offer-redeem-8ffd` (base main after #74).
 - **Edge vitest** (`partner-offers-redeem-handler`): online + offline shapes and status map.
 - Spine PA-1 expect list includes `partner_offers_redeem_offline_for_partner`.
 - Restricted harness / CI recorded when green on the PR tip.
+
+## 36. As built: partners offline offer redeem UI
+
+Numbering: **this section 36.** Edge/DB offline redeem landed in §35 (0062 / matrix 40 / #75). This slice is **partners PWA only**: no migration, no Edge change. The page calls `POST partner-offers-redeem/redeem/offline` by name.
+
+### 36.1 What was built
+
+- **Typed route.** `work-routes.ts`: `postOfferRedeemOffline` → `POST partner-offers-redeem/redeem/offline` with `{ facilityId, offerCodeId, handle, code, nameConfirmed }`; response still `{ attestationId }`.
+- **Offer-redeem screen mode.** `WorkView` kind `offer-redeem` gains `mode: "staff_scan" | "offline"`. Mode toggle on the screen (same pattern as attest online/offline). Staff-scan form unchanged; offline form collects handle, six digits, and a required `nameConfirmed` checkbox.
+- **A1 path.** `submitOfferRedeemOffline` validates handle/code/`nameConfirmed === true` client-side, then `requirePin("A1")` and the offline POST in the same turn. PIN digits never appear in the request body.
+- **Errors and i18n.** Closed codes `name_unconfirmed` and `verification_failed` map to catalogue keys; EN + FR-CA strings for mode, offline fields, and those errors.
+- **Fake partner server** answers `redeem/offline` in-memory (PIN grant; refuses `nameConfirmed !== true`; maps a planted bad code to `verification_failed`).
+
+### 36.2 Decisions and departures
+
+- **Separate submit path** (not a method switch on `submitOfferRedeem`) — mirrors Edge's separate route and keeps the staff_scan body closed.
+- **`nameConfirmed` must be the boolean `true` on the wire** — checkbox → `fd.get("nameConfirmed") === "on"` → client refuses false before PIN; Edge also refuses anything other than `true`.
+- Hint copy switches with mode so staff are told to confirm the profile-card name before typing the offline code.
+
+### 36.3 Not built, honestly
+
+- Camera scan for check-in tokens (still a seam from §33).
+- Player-lane cosignal that clears `offline_confirm_by` (§35 seam).
+- Rollups-refresh writer (S6 seam).
+
+### 36.4 Verification run for this slice
+
+Branch: `cursor/p5-offline-offer-ui-8ffd` (base main after #75).
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 930 tests, all pass** (adds offline offer-redeem A1 PIN + body cell — handle lower-cased, `nameConfirmed: true`, no PIN digits — and a client-side name-unconfirmed refusal that never hits the server).
+- CI recorded when green on the PR tip.
 

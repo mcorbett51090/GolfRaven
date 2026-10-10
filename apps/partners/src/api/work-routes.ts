@@ -300,8 +300,11 @@ export async function postVoucher(api: PartnerApi, facilityId: string, entitleme
   return { voucherIssuedAt: data["voucherIssuedAt"] };
 }
 
-/** Offer redeem is staff_scan only on this slice (P5.1b / design 32); offline_code is refused by Edge. */
+/** Online offer redeem is staff_scan (P5.1b / design 32). Offline uses a separate route (0062 / design 35). */
 export type OfferRedeemMethod = "staff_scan";
+
+/** Shop-floor mode on the offer-redeem screen: staff_scan (check-in jti) or offline (handle + six digits + nameConfirmed). */
+export type OfferRedeemMode = "staff_scan" | "offline";
 
 export interface OfferQueueRow {
   readonly offerCodeId: string;
@@ -339,6 +342,15 @@ export async function postOfferRedeem(
   input: { facilityId: string; offerCodeId: string; method: OfferRedeemMethod; credential: string },
 ): Promise<OfferRedeemResult> {
   const data = await api.call("POST", "partner-offers-redeem", "redeem", input);
+  if (!isObject(data) || !isString(data["attestationId"])) malformed();
+  return { attestationId: data["attestationId"] };
+}
+
+export async function postOfferRedeemOffline(
+  api: PartnerApi,
+  input: { facilityId: string; offerCodeId: string; handle: string; code: string; nameConfirmed: boolean },
+): Promise<OfferRedeemResult> {
+  const data = await api.call("POST", "partner-offers-redeem", "redeem/offline", input);
   if (!isObject(data) || !isString(data["attestationId"])) malformed();
   return { attestationId: data["attestationId"] };
 }
