@@ -966,7 +966,7 @@ A purchase with no qualifying fix yet is `pending` with `purchase_evidence.cosig
 3. **The PIN is derived for the date, epoch and pepper in effect at the scan's instant (the fix's capture time when the fix qualifies as a co-signal, else now); the failure counters run on the facility-local date of the attempt.** An offline scan is uploaded days later, so its PIN is that day's, under the epoch that was live then. Counting by the fix's date would hand a client a fresh five tries for each of the last seven dates it could claim. The printed-QR `ref_id` is `pin:<facility>:<local date>` with **no epoch** (a rotation must not allow a second same-day purchase by the same player); the earlier text that put the epoch in it is superseded.
 4. **A qualifying fix on a purchase becomes a facility-level `foreground_checkin` evidence row, and that row IS presence-qualifying and money-eligible** (CORRECTED at the S2a re-gate; an earlier draft of this item said the opposite, and an earlier design paragraph said the marker-scan fix was no better than the evidence endpoint's check-in). The two differ in one thing the scorer reads. The **evidence endpoint's** facility-level check-in (`evidence/handler.ts`, around line 829) does no geometry match, so its fix does not satisfy `isQualityCoSignalFix` (a polygon geometry kind, a `play-verified` tier, inside the buffer) and is never a presence fact. **`marker-scan`** derives its fix with `matchFacilityFix` (`privileged.ts`, around line 726), a geometry match against the facility's play-verified polygon, so the row it writes **does** satisfy it: it is `foreground_checkin` with weight 0.3, it counts as the presence fact (`presence_signal`), and with a hard round (a sensor round of 0.85, say) on the same facility-local date it makes `money` true. That is what plan §9.2 sanctions (a purchase's fix is presence at the facility), and it is true for a round on **any** course of the facility, because the row carries no course anchor. It is by design (the fix is the fix), it means a purchase-time fix can lift a later same-day play's corroboration, and the purchase itself still never scores a play. Pinned by `packages/rules/test/marker-scan-presence.test.ts` (a marker-scan fix plus a Garmin round on another course of the same facility and date gives `money`; the same round alone does not; a fix on another date, at another facility, or with no geometry match gives nothing), so a change to the scorer that stopped honouring it fails a test instead of silently starving purchases.
 5. **No per-facility daily cap on purchases is built, and nothing blocks one.** The caps are the 20 scans a user a day and the PIN caps; the rest of the abuse model is the credit rule (one credit per player per shop). Plan §8.3's cap (25 static-PIN course-QR credits per facility per day) is a **signal and an alert, not a block**, and is named for S2b below (departure 13).
-6. **No purge or retention** for `course_qr_token`, `course_pin_alarm` or abandoned `pending` rows yet (a follow-up: S2b reads the alarm, and `pending` rows past their 7-day deadline stay `pending` forever today; they can no longer be completed, which is harmless but untidy).
+6. **No purge or retention** for `course_qr_token`, `course_pin_alarm` or abandoned `pending` rows at S2a ship (closed later by §57 / migration `0071`: tokens 7 days past `expires_at`, alarms 90 days past `raised_at`, pending purchases past `cosignal.awaiting.until`).
 7. **`no_pending_purchase` is 422**, not 409: it is not a state conflict the client can retry into. A repeat of an already-counted fix is the 409 (`fix_already_used`).
 8. **A facility on two trails gives two purchase rows and two credits** (one per eligible trail) from one scan; `outcome` is the worst of them.
 9. **The request also carries `deviceId` and `jti`** (the plan's `{facilityId, fix, jti}` shape was extended): the check-in token is bound to the device that redeemed it, and the Edge has to prove the fix is the one the token was issued for.
@@ -3058,11 +3058,40 @@ Numbering: **this section 56.** No migration. Closes the deferred §43.2 / §55.
 
 ### 56.3 Not built, honestly
 
-- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, course-QR abandoned-pending purge, CAMERA.
+- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, course-QR abandoned-pending purge (→ §57), CAMERA.
 
 ### 56.4 Verification
 
-Branch: `cursor/p5-receipts-edge-contract-8ffd` (base main after #95 / `e0ab1d3`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipts-edge-contract-8ffd` (base main after #95 / `e0ab1d3`). Tip CI green on PR #96 (all three checks); squash-merged as `257b187`.
 
 - Recorder verify mode; mobile Vitest receipts-wire + api-contract; typecheck.
+
+## 57. As built: course-QR retention purges
+
+Numbering: **migration `0071`, matrix `49`, this section 57.** Closes S2a departure 6 / §56.3: bounded `edge_system` purges for expired `course_qr_token`, aged `course_pin_alarm`, and abandoned pending `purchase_evidence` (past `cosignal.awaiting.until`). Wired into the existing hourly `retention-purge` schedule.
+
+### 57.1 What was built
+
+- **`private.purge_course_qr_tokens()`** — `expires_at < now() - 7 days`, LIMIT 5000 (used and unused).
+- **`private.purge_course_pin_alarms()`** — `raised_at < now() - 90 days`, LIMIT 5000.
+- **`private.purge_abandoned_pending_purchases()`** — `status = 'pending'` and `cosignal.awaiting.until < now()`; deletes linked pending `marker_credit` first, then the purchases; LIMIT 5000; method-agnostic.
+- Policies: DELETE + SELECT companions repeating each floor; closed under a partner binding (0050 InitPlan form). `GRANT DELETE` on `course_pin_alarm` (0016 already covered the other tables).
+- Edge: three new `RetentionStep` names after the partner steps; matrices 20 / 30 / Deno step-order updated (twelve → fifteen).
+
+### 57.2 Decisions and departures
+
+- **Floors `[proposed]`** — token 7 days (match nonce hygiene); alarm 90 days (match invite-class retention); abandoned pending immediately after `until` (already incompletable).
+- **DELETE, not void** — hygiene idiom; no new `void_reason`.
+- **Credits first** — FK is `ON DELETE SET NULL`; explicit delete avoids orphan pending credits.
+- **Reuse `retention-purge`** — no new Edge function.
+
+### 57.3 Not built, honestly
+
+- `course_pin_epoch_log` purge, PIN alarm UI, pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
+
+### 57.4 Verification
+
+Branch: `cursor/p5-course-qr-pending-purge-8ffd` (base main after #96 / `257b187`). Recorded when CI is green on the PR tip.
+
+- pgTAP matrix 49 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0070`.
 
