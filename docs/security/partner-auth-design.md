@@ -2185,3 +2185,5 @@ Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited
 **Built:** `private.facility_has_active_staff(facility)` (EXISTS non-revoked staff/manager with `partner_scope.facility_id`); `app.activate_offer_code` CREATE OR REPLACE holds an **earned** activate with `hold_detail.heldFor = no_active_staff` when the facility has no active staff (already-issued re-activate is not gated); `app.resolve_held_offer_code` refuses an approve that would **issue** with `23514` / partner status `no_active_staff` (return-to-earned is not gated).
 
 **Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
+
+**Verification (branch `cursor/p5-1b-at10-issuance-staff-b55f`):** `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38.
