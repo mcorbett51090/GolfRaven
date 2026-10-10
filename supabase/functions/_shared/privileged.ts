@@ -4544,6 +4544,9 @@ const OFFER_REDEEM_STATUSES: ReadonlySet<string> = new Set([
   "no_facility",
   "cold_start_cap",
   "budget_short",
+  "name_unconfirmed",
+  "verification_failed",
+  "rate_limited",
 ]);
 function buildPartnerOffersRedeemTx(trx: TxSql): PartnerOffersRedeemTx {
   return {
@@ -4566,6 +4569,23 @@ function buildPartnerOffersRedeemTx(trx: TxSql): PartnerOffersRedeemTx {
       const r = rows[0];
       if (typeof r?.o_status !== "string" || !OFFER_REDEEM_STATUSES.has(r.o_status)) {
         throw new Error("partner_offers_redeem_for_partner returned no usable status");
+      }
+      return { status: r.o_status as OfferRedeemStatus, attestationId: textOrNull(r.o_attestation_id) };
+    },
+    async redeemOfferOffline(
+      facilityId: string,
+      offerCodeId: string,
+      handle: string,
+      code: string,
+      nameConfirmed: boolean,
+    ): Promise<OfferRedeemResult> {
+      const rows = await trx`
+        select o_status, o_attestation_id::text as o_attestation_id
+        from private.partner_offers_redeem_offline_for_partner(
+          ${facilityId}::text, ${offerCodeId}::uuid, ${handle}::text, ${code}::text, ${nameConfirmed}::boolean)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !OFFER_REDEEM_STATUSES.has(r.o_status)) {
+        throw new Error("partner_offers_redeem_offline_for_partner returned no usable status");
       }
       return { status: r.o_status as OfferRedeemStatus, attestationId: textOrNull(r.o_attestation_id) };
     },
