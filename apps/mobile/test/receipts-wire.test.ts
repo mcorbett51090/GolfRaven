@@ -132,12 +132,16 @@ describe("api.uploadReceipt multipart wire", () => {
   });
 });
 
-describe("nothing in the app calls uploadReceipt yet", () => {
-  it("RECEIPTS_UPLOAD_UI_ENABLED is false, and no file under src/ outside src/api calls uploadReceipt", () => {
+describe("uploadReceipt API callers outside api/", () => {
+  it("RECEIPTS_UPLOAD_UI_ENABLED is false; only receipts/upload.ts calls api.uploadReceipt", () => {
     expect(RECEIPTS_UPLOAD_UI_ENABLED).toBe(false);
     const root = fileURLToPath(new URL("../src", import.meta.url));
     const walk = (dir: string): string[] => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? walk(join(dir, n)) : n.endsWith(".ts") || n.endsWith(".tsx") ? [join(dir, n)] : []));
-    const callers = walk(root).filter((f) => !f.startsWith(join(root, "api")) && /uploadReceipt/.test(readFileSync(f, "utf8")));
-    expect(callers).toEqual([]);
+    // Match the API method call / property, not `uploadReceiptImage` or the AppServices wrapper name alone.
+    const callers = walk(root)
+      .filter((f) => !f.startsWith(join(root, "api")) && /\.uploadReceipt\s*\(/.test(readFileSync(f, "utf8")))
+      .map((f) => f.slice(root.length + 1))
+      .sort();
+    expect(callers).toEqual(["receipts/upload.ts", "screens/ReceiptUploadCard.tsx"]);
   });
 });

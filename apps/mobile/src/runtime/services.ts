@@ -24,6 +24,8 @@ import { enqueueEvidence, newFixId, type EvidenceEnqueued, type EvidenceInput } 
 import { checkinUiAvailable, markerCosignalUiAvailable, picksFromItems, runCheckIn, type CheckInInput, type CheckInOutcome } from "../checkin";
 import { createExpoLocationPort } from "../checkin/expo-location";
 import { MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, captureMarkerCoSignal, type MarkerCaptureInput, type MarkerCaptureOutcome, type MarkerCosignalStore, heldOpenCount } from "../marker";
+import { receiptsUploadUiAvailable, uploadReceiptImage, type ReceiptUploadInput, type ReceiptUploadOutcome } from "../receipts";
+import { createExpoReceiptPicker } from "../receipts/expo-image-picker";
 import type { AuthService } from "../auth";
 import { createSupabaseAuth } from "../auth/supabase-auth";
 import { createExpoFileSharer } from "../account/expo-share";
@@ -85,6 +87,8 @@ export interface AppServices {
   markerCosignal: (input: MarkerCaptureInput) => Promise<MarkerCaptureOutcome>;
   /** The local marker co-signal records (account deletion wipes the deleted user's). */
   markerStore: MarkerCosignalStore;
+  /** Receipt image upload (P5 §50): pick from the photo library and POST to `receipts`. Refuses while `RECEIPTS_UPLOAD_UI_ENABLED` is false. */
+  uploadReceipt: (input: ReceiptUploadInput) => Promise<ReceiptUploadOutcome>;
   /** The only way a play enters the outbox: builds the payload, consumes one challenge per fix, enqueues for the signed-in user. */
   enqueueEvidence: (input: EvidenceInput) => Promise<EvidenceEnqueued>;
   /** The real client, the unconfigured stand-in (release without server config), or, in a `__DEV__` build with none, the demo mock. */
@@ -307,6 +311,17 @@ export async function createServices(): Promise<AppServices> {
         input,
       ),
     markerStore,
+    uploadReceipt: (input) =>
+      uploadReceiptImage(
+        {
+          enabled: receiptsUploadUiAvailable(),
+          api,
+          picker: createExpoReceiptPicker(),
+          currentUserId,
+          accessTokenFor: (userId) => session.accessTokenFor(userId),
+        },
+        input,
+      ),
     api,
     auth,
     backend: backend.kind,

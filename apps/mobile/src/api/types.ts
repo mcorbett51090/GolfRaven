@@ -251,7 +251,7 @@ export interface ReceiptUploadResult {
   }[];
 }
 
-/** Player-lane receipt image upload (P5 §40 / §43). The bearer is `credentials.accessToken` (the owner's); NOT retried here (a repeat may create another fingerprint / review path). Behind `RECEIPTS_UPLOAD_UI_ENABLED`, which stays false: nothing in the app calls it yet. Refusals the UI must tell apart: 404 `not_found`, 415 unsupported media, 413 payload too large, 422 `no_programme` / `bad_args`, 403 review account, 429 with Retry-After. */
+/** Player-lane receipt image upload (P5 §40 / §43 / §50). The bearer is `credentials.accessToken` (the owner's); NOT retried here (a repeat may create another fingerprint / review path). Behind `RECEIPTS_UPLOAD_UI_ENABLED` (facility card + `receipts/upload.ts`); the flag stays false until store photo-library privacy is signed off. Refusals the UI must tell apart: 404 `not_found`, 415 unsupported media, 413 payload too large, 422 `no_programme` / `bad_args`, 403 review account, 429 with Retry-After. */
 export interface ReceiptsApi {
   uploadReceipt(req: ReceiptUploadRequest, credentials: EvidenceCredentials): Promise<ReceiptUploadResult>;
 }

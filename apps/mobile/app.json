@@ -44,6 +44,14 @@
           "isAndroidForegroundServiceEnabled": false
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "GolfRaven uses your photo library only when you tap “Choose receipt photo”, to upload a green-fee receipt for this facility. It does not access your camera.",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ],
       "react-native-health-connect",
       "expo-apple-authentication",
       [

@@ -2866,11 +2866,37 @@ Numbering: **this section 49.** No migration. Closes the portal half of §48: ap
 
 ### 49.3 Not built, honestly
 
-- OCR pipeline, perceptual aHash, picker UI, image preview in the review queue.
+- OCR pipeline, perceptual aHash, picker UI (→ §50), image preview in the review queue.
 
 ### 49.4 Verification
 
-Branch: `cursor/p5-receipt-cross-user-ui-8ffd` (base main after #88 / `1cbce0c`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-cross-user-ui-8ffd` (base main after #88 / `1cbce0c`). Tip CI green on PR #89 (all three checks); squash-merged as `983c90a`.
 
 - Partners Vitest: review resolve for receipt_cross_user_match; existing offer-code resolve cell still green.
+
+## 50. As built: mobile receipt picker UI (library-only)
+
+Numbering: **this section 50.** No migration. Closes the player-app picker half of §43 behind `RECEIPTS_UPLOAD_UI_ENABLED` (still `false`).
+
+### 50.1 What was built
+
+- **`src/receipts/`**: gate, injectable picker port, `expo-image-picker` adapter (library only), upload service, outcome map + copy.
+- **`ReceiptUploadCard`** on the facility page behind `receiptsUploadUiAvailable()`.
+- **Config**: `expo-image-picker` plugin with `cameraPermission: false`, `microphonePermission: false`, honest `photosPermission` (en + fr-CA locale); CAMERA stays in `blockedPermissions`.
+- **Tests**: `receipts-upload.test.ts`; flag inventory; policy plugin rules; wire test allows the upload service as the sole caller.
+
+### 50.2 Decisions and departures
+
+- **Library only, no camera** — avoids unblocking CAMERA; Android system photo picker on modern APIs needs no storage permission; `READ_EXTERNAL_STORAGE` stays blocked.
+- **Flag stays false** — store photo-library privacy / copy review still open (README).
+
+### 50.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, camera capture, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, partners review image preview.
+
+### 50.4 Verification
+
+Branch: `cursor/p5-receipt-picker-ui-8ffd` (base main after #89 / `983c90a`). Recorded when CI is green on the PR tip.
+
+- Mobile Vitest: receipts-upload + policy + flag inventory; typecheck.
 
