@@ -75,6 +75,9 @@ SELECT is(pg_temp.purge_as('edge_system', 'purge_partner_auth_alarms')::int, 0,
   'a second alarm purge is idempotent');
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.proname = 'purge_partner_auth_alarms' AND p.prosrc ~ 'interval ''90 days'''), 1,
   'alarm purge body carries the 90-day floor');
+SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname = 'pd_purge_partner_auth_alarm'
+             AND pg_get_expr(pol.polqual, pol.polrelid) LIKE '%90 days%'), 1,
+  'DELETE policy repeats the 90-day floor');
 ROLLBACK;
 
 -- ----------------------------------------------------------------------------
