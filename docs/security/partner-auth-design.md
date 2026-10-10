@@ -2839,11 +2839,38 @@ Numbering: **migration `0069`, matrix `47`, this section 48.** Closes the money-
 
 ### 48.3 Not built, honestly
 
-- OCR pipeline, perceptual aHash, picker UI, partners PWA resolve affordance for `review_item` rows.
+- OCR pipeline, perceptual aHash, picker UI, partners PWA resolve affordance for `review_item` rows (→ §49).
 
 ### 48.4 Verification
 
-Branch: `cursor/p5-receipt-cross-user-resolve-8ffd` (base main after #87 / `54ba939`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipt-cross-user-resolve-8ffd` (base main after #87 / `54ba939`). Tip CI green on PR #88 (all three checks); squash-merged as `1cbce0c`.
 
 - pgTAP matrix 47; Vitest partner-review route map; PA-13b EXECUTE list includes the new wrapper.
+
+## 49. As built: partners PWA resolve for receipt_cross_user_match
+
+Numbering: **this section 49.** No migration. Closes the portal half of §48: approve/reject buttons on open `receipt_cross_user_match` queue rows call `POST /partner-review/resolve/receipt-cross-user`.
+
+### 49.1 What was built
+
+- **API**: `postResolveReceiptCrossUser` → `resolve/receipt-cross-user` (same `{ id, approve }` body as held-reward resolve).
+- **Controller / admin**: `resolveReceiptCrossUser` under the A3 client gate (fresh TOTP window).
+- **Review screen**: offer_code / entitlement / `receipt_cross_user_match` each get their own approve/reject actions; other `review_item` kinds stay read-only. Empty handle shows a placeholder (queue rows for review items have no profile join).
+- **i18n**: `admin.notOpen`, `review.noHandle`, `review.readonly` (en + fr-CA); `not_open` maps in `messageForError`.
+- **Fake server + Vitest**: queue seeds a cross-user row; resolve posts to the new path.
+
+### 49.2 Decisions and departures
+
+- **No new Edge or DB surface** — §48 already shipped the route; this slice is partners-PWA only.
+- **Read-only for other review kinds** — `held_offer_budget_unreserved` and similar have no partner resolve definer; showing buttons that call entitlement resolve was a latent bug for non-offer rows.
+
+### 49.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, picker UI, image preview in the review queue.
+
+### 49.4 Verification
+
+Branch: `cursor/p5-receipt-cross-user-ui-8ffd` (base main after #88 / `1cbce0c`). Recorded when CI is green on the PR tip.
+
+- Partners Vitest: review resolve for receipt_cross_user_match; existing offer-code resolve cell still green.
 

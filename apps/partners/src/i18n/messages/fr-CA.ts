@@ -330,6 +330,7 @@ export const frCA: Record<MessageKey, string> = {
   "admin.noTrailRow": "Enregistrez le programme du circuit avant celui de l'établissement.",
   "admin.invalidEligibility": "L'admissibilité a échoué à la validation.",
   "admin.notHeld": "Cette récompense n'attend pas de revue.",
+  "admin.notOpen": "Cet élément de revue n'est pas ouvert.",
   "admin.notFound": "Cet enregistrement est introuvable.",
   "admin.failed": "Ce changement n'a pas pu être appliqué.",
 
@@ -412,6 +413,8 @@ export const frCA: Record<MessageKey, string> = {
   "review.load": "Actualiser la file et le SLA",
   "review.sla": "Codes retenus {codes}, droits {ents}, éléments ouverts {open}. Dépassements SLA : récompenses {breachR}, éléments {breachI} ({hours} h).",
   "review.row": "{kind} · {handle} · SLA dépassé {breached}",
+  "review.noHandle": "(sans identifiant)",
+  "review.readonly": "Aucune action de résolution pour cet élément.",
   "review.approve": "Approuver",
   "review.reject": "Refuser",
   "review.lastState": "Résolu en {state}.",

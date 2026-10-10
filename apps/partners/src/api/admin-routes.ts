@@ -412,6 +412,13 @@ export async function postResolveEntitlement(api: PartnerApi, id: string, approv
   return { state: data["state"] };
 }
 
+/** §48/§49: approve or reject an open `receipt_cross_user_match` review item (A3 admin). */
+export async function postResolveReceiptCrossUser(api: PartnerApi, id: string, approve: boolean): Promise<{ state: string }> {
+  const data = await api.call("POST", "partner-review", "resolve/receipt-cross-user", { id, approve });
+  if (!isObject(data) || !isString(data["state"])) malformed();
+  return { state: data["state"] };
+}
+
 export interface SettlementLine {
   readonly facilityId: string;
   readonly month: string;

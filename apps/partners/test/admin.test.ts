@@ -11,6 +11,7 @@ const TRAIL = "trl_demo";
 const FACILITY = "44444444-4444-4444-8444-444444444444";
 const OFFER_ID = "61000000-0000-0000-0000-000000006101";
 const REVIEW_ID = "81000000-0000-0000-0000-000000008101";
+const RECEIPT_CROSS_USER_ID = "91000000-0000-0000-0000-000000009101";
 
 const operatorWhoami = {
   aal: 2,
@@ -196,6 +197,7 @@ describe("S7d review screen", () => {
       const w = home(s.controller).work;
       if (w?.kind === "review") {
         expect(w.items?.[0]?.handle).toBe("player_one");
+        expect(w.items?.some((i) => i.reviewKind === "receipt_cross_user_match")).toBe(true);
         expect(w.sla?.slaHours).toBe(48);
       }
     }
@@ -208,6 +210,25 @@ describe("S7d review screen", () => {
     const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-review/resolve/offer-code"));
     expect(posts).toHaveLength(1);
     expect(JSON.parse(posts[0]!.body)).toEqual({ id: REVIEW_ID, approve: true });
+  });
+
+  it("resolves a receipt_cross_user_match review item (A3)", async () => {
+    const s = await setup(adminWhoami);
+    s.controller.openReview();
+    await s.controller.loadReview();
+    await until(() => {
+      const w = home(s.controller).work;
+      return w?.kind === "review" && (w.items?.some((i) => i.id === RECEIPT_CROSS_USER_ID) ?? false);
+    }, "receipt cross-user item never loaded");
+
+    await s.controller.resolveReceiptCrossUser(RECEIPT_CROSS_USER_ID, false);
+    await until(() => home(s.controller).notice?.kind === "review-resolved", "receipt cross-user resolve never completed");
+    expect(home(s.controller).notice).toEqual({ kind: "review-resolved" });
+    const w = home(s.controller).work;
+    if (w?.kind === "review") expect(w.lastState).toBe("rejected");
+    const posts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-review/resolve/receipt-cross-user"));
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(posts[0]!.body)).toEqual({ id: RECEIPT_CROSS_USER_ID, approve: false });
   });
 
   it("staff without isAdmin cannot open review", async () => {

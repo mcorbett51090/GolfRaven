@@ -353,23 +353,35 @@ export function adminView(state: SignedInState, controller: AppController, local
         ? h(
             "ul",
             { "data-testid": "review-queue" },
-            ...work.items.map((item) =>
-              h(
+            ...work.items.map((item) => {
+              const rowKind = item.reviewKind ?? item.kind;
+              const handleLabel = item.handle.length > 0 ? item.handle : t("review.noHandle");
+              const isOffer = item.kind === "offer_code" || item.subjectTable === "offer_code" || item.subjectTable === "offer_codes";
+              const isEntitlement = item.kind === "entitlement" || item.subjectTable === "entitlement";
+              const isReceiptCrossUser = item.kind === "review_item" && item.reviewKind === "receipt_cross_user_match";
+              const actions = isOffer
+                ? [
+                    h("button", { type: "button", disabled: busy, "data-testid": `review-approve-code-${item.id}`, onclick: () => void controller.resolveOfferCode(item.id, true) }, t("review.approve")),
+                    h("button", { type: "button", disabled: busy, "data-testid": `review-reject-code-${item.id}`, onclick: () => void controller.resolveOfferCode(item.id, false) }, t("review.reject")),
+                  ]
+                : isEntitlement
+                  ? [
+                      h("button", { type: "button", disabled: busy, "data-testid": `review-approve-ent-${item.id}`, onclick: () => void controller.resolveEntitlement(item.id, true) }, t("review.approve")),
+                      h("button", { type: "button", disabled: busy, "data-testid": `review-reject-ent-${item.id}`, onclick: () => void controller.resolveEntitlement(item.id, false) }, t("review.reject")),
+                    ]
+                  : isReceiptCrossUser
+                    ? [
+                        h("button", { type: "button", disabled: busy, "data-testid": `review-approve-rxu-${item.id}`, onclick: () => void controller.resolveReceiptCrossUser(item.id, true) }, t("review.approve")),
+                        h("button", { type: "button", disabled: busy, "data-testid": `review-reject-rxu-${item.id}`, onclick: () => void controller.resolveReceiptCrossUser(item.id, false) }, t("review.reject")),
+                      ]
+                    : [h("span", { class: "muted", "data-testid": `review-readonly-${item.id}` }, t("review.readonly"))];
+              return h(
                 "li",
                 {},
-                h("span", {}, t("review.row", { kind: item.kind, handle: item.handle, breached: item.slaBreached ? t("common.yes") : t("common.no") })),
-                h(
-                  "div",
-                  { class: "actions" },
-                  item.kind === "offer_code" || item.subjectTable === "offer_codes"
-                    ? h("button", { type: "button", disabled: busy, "data-testid": `review-approve-code-${item.id}`, onclick: () => void controller.resolveOfferCode(item.id, true) }, t("review.approve"))
-                    : h("button", { type: "button", disabled: busy, "data-testid": `review-approve-ent-${item.id}`, onclick: () => void controller.resolveEntitlement(item.id, true) }, t("review.approve")),
-                  item.kind === "offer_code" || item.subjectTable === "offer_codes"
-                    ? h("button", { type: "button", disabled: busy, "data-testid": `review-reject-code-${item.id}`, onclick: () => void controller.resolveOfferCode(item.id, false) }, t("review.reject"))
-                    : h("button", { type: "button", disabled: busy, "data-testid": `review-reject-ent-${item.id}`, onclick: () => void controller.resolveEntitlement(item.id, false) }, t("review.reject")),
-                ),
-              ),
-            ),
+                h("span", {}, t("review.row", { kind: rowKind, handle: handleLabel, breached: item.slaBreached ? t("common.yes") : t("common.no") })),
+                h("div", { class: "actions" }, ...actions),
+              );
+            }),
           )
         : null,
       h(

@@ -713,6 +713,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     offers: new Map<string, FakeOffer>(),
     sponsorships: new Map<string, FakeSponsorship>(),
     reviewOpen: true,
+    /** Open receipt_cross_user_match review item (0069 / §49). Cleared on resolve. */
+    receiptCrossUserOpen: true,
   };
 
   function needA3(session: FakeSession): Response | null {
@@ -1221,31 +1223,48 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
 
     if (fn === "partner-review") {
       if (route === "queue" && req.method === "GET") {
-        return ok(200, {
-          items: adminState.reviewOpen
-            ? [{
-                kind: "offer_code",
-                id: "81000000-0000-0000-0000-000000008101",
-                subjectTable: "offer_codes",
-                subjectId: "81000000-0000-0000-0000-000000008102",
-                userId: USER_ID,
-                handle: "player_one",
-                facilityId: "44444444-4444-4444-8444-444444444444",
-                trailId: "trl_demo",
-                holdDetail: "held_review",
-                reservedAmount: 10,
-                heldAt: new Date().toISOString(),
-                slaBreached: false,
-                reviewKind: "offer_code",
-              }]
-            : [],
-        });
+        const items: Record<string, unknown>[] = [];
+        if (adminState.reviewOpen) {
+          items.push({
+            kind: "offer_code",
+            id: "81000000-0000-0000-0000-000000008101",
+            subjectTable: "offer_code",
+            subjectId: "81000000-0000-0000-0000-000000008102",
+            userId: USER_ID,
+            handle: "player_one",
+            facilityId: "44444444-4444-4444-8444-444444444444",
+            trailId: "trl_demo",
+            holdDetail: "held_review",
+            reservedAmount: 10,
+            heldAt: new Date().toISOString(),
+            slaBreached: false,
+            reviewKind: null,
+          });
+        }
+        if (adminState.receiptCrossUserOpen) {
+          items.push({
+            kind: "review_item",
+            id: "91000000-0000-0000-0000-000000009101",
+            subjectTable: "purchase_evidence",
+            subjectId: "a7000000-0000-0000-0000-000000009101",
+            userId: USER_ID,
+            handle: "",
+            facilityId: "44444444-4444-4444-8444-444444444444",
+            trailId: null,
+            holdDetail: null,
+            reservedAmount: null,
+            heldAt: new Date().toISOString(),
+            slaBreached: false,
+            reviewKind: "receipt_cross_user_match",
+          });
+        }
+        return ok(200, { items });
       }
       if (route === "sla" && req.method === "GET") {
         return ok(200, {
           heldOfferCodes: adminState.reviewOpen ? 1 : 0,
           heldEntitlements: 0,
-          openReviewItems: adminState.reviewOpen ? 1 : 0,
+          openReviewItems: (adminState.reviewOpen ? 1 : 0) + (adminState.receiptCrossUserOpen ? 1 : 0),
           slaBreachedRewards: 0,
           slaBreachedReviewItems: 0,
           slaHours: 48,
@@ -1259,6 +1278,16 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         if (body.id === "budget-short") return err(422, "budget_short");
         if (!adminState.reviewOpen && body.id !== "81000000-0000-0000-0000-000000008101") return err(409, "not_held");
         adminState.reviewOpen = false;
+        return ok(200, { state: body.approve ? "approved" : "rejected" });
+      }
+      if (route === "resolve/receipt-cross-user" && req.method === "POST") {
+        const refused = needA3(session);
+        if (refused !== null) return refused;
+        const body = (await req.json()) as { id?: string; approve?: boolean };
+        if (typeof body.id !== "string" || typeof body.approve !== "boolean") return err(400, "bad_request");
+        if (!adminState.receiptCrossUserOpen) return err(409, "not_open");
+        if (body.id !== "91000000-0000-0000-0000-000000009101") return err(404, "not_found");
+        adminState.receiptCrossUserOpen = false;
         return ok(200, { state: body.approve ? "approved" : "rejected" });
       }
       return err(404, "not_found");
@@ -1343,6 +1372,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       adminState.offers.clear();
       adminState.sponsorships.clear();
       adminState.reviewOpen = true;
+      adminState.receiptCrossUserOpen = true;
     },
     async seedPin(pin, o = {}) {
       const user = users.get(o.userId ?? USER_ID);

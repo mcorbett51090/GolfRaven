@@ -417,7 +417,7 @@ Status against this doc's own items:
   `REJECTED_SOURCES`). **`receipt_green_fee` has its own path** (0067 / design §46): player-lane
   `POST /v1/receipts` → `receipt_intake_for_actor` writes the evidence row; attested cosignal
   promote to `approved` + `coSignalFix` is 0068 / design §47; admin resolve of
-  open `receipt_cross_user_match` is 0069 / design §48. Partner-attest,
+  open `receipt_cross_user_match` is 0069 / design §48 (partners PWA affordance §49). Partner-attest,
   the P7 webhook, and the P8 connectors remain unbuilt for the other rejected sources.
   `courseId: null` (vs. omitted) is rejected as a structural error, matching the OMITTED-not-null rule.
 - **§3 (limits/fraud signals) — enforced for what's in scope.** Clock skew > 24h, a `failed`-grade
