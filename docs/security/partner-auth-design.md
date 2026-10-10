@@ -2975,11 +2975,40 @@ Numbering: **this section 53.** No migration. Closes the online scan half left o
 
 ### 53.3 Not built, honestly
 
-- In-app barcode scanner, `associatedDomains` / App Links hosting, flipping either UI flag, OCR / aHash / receipts flag flip.
+- In-app barcode scanner, `associatedDomains` / App Links hosting (→ §54), flipping either UI flag, OCR / aHash / receipts flag flip.
 
 ### 53.4 Verification
 
-Branch: `cursor/p5-marker-scan-paste-8ffd` (base main after #92 / `a0fa173`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-marker-scan-paste-8ffd` (base main after #92 / `a0fa173`). Tip CI green on PR #93 (all three checks); squash-merged as `2a92a04`.
 
-- Mobile Vitest: marker-scan + existing marker suites; i18n parity; typecheck.
+- Mobile Vitest: marker-scan + existing marker suites; checkin-no-prompt-at-launch allowlist; i18n parity; typecheck.
+
+## 54. As built: course-QR App Links + open-URL park
+
+Numbering: **this section 54.** No migration. Closes the associatedDomains / App Links hosting half left open by §53.3: claim `https://golfraven.app/q/m` and `/q/f/*` on iOS/Android, host AASA + assetlinks on the public site (Team ID / Play SHA inject at deploy), soft-bounce pages for browsers, and park an opened URL for MarkerCard paste-scan. Still no CAMERA; flags stay false.
+
+### 54.1 What was built
+
+- **Mobile `app.json`**: `ios.associatedDomains: applinks:golfraven.app`; Android `intentFilters` for `/q/m` and `/q/f` (autoVerify).
+- **`marker/pending-link.ts`**: park / take a parsed course-QR URL (in-memory).
+- **`app/q/m.tsx`**, **`app/q/f/[slug].tsx`**: universal-link landings; park via `useURL`, redirect home or to facility by slug.
+- **MarkerCard**: on mount, `takeCourseQrLink` into the paste field.
+- **Site**: `/q/m/` and `/q/f/` soft bounces; `gen-applinks.mjs` writes `.well-known/apple-app-site-association` + `assetlinks.json` (empty details until `GOLFRAVEN_APPLE_TEAM_ID` / `GOLFRAVEN_PLAY_CERT_SHA256`); `/q/f/* → /q/f/` rewrite; `_headers` Content-Type + noindex for well-known and `/q/*`.
+- **Policy**: associated-domains entitlement allow-listed for `applinks:golfraven.app` only.
+
+### 54.2 Decisions and departures
+
+- **Host pin `golfraven.app`** — matches package id and QR test fixtures; must equal `GR_COURSE_QR_LINK_ORIGIN` host in deploy.
+- **Team ID / Play SHA not in git** — same rule as the Apple runbook; AASA/assetlinks gain details only when build env is set.
+- **Park only, no auto-scan** — opening a link never prompts for location; the player still taps Submit (and flags stay false so the card is not shown in release).
+
+### 54.3 Not built, honestly
+
+- In-app barcode scanner, flipping either UI flag, OCR / aHash / receipts flag flip, verified AASA on a live `golfraven.app` with real Team ID (`[unverified]` until deploy env is set).
+
+### 54.4 Verification
+
+Branch: `cursor/p5-course-qr-applinks-8ffd` (base main after #93 / `2a92a04`). Recorded when CI is green on the PR tip.
+
+- Mobile: marker-pending-link, policy associatedDomains; site: applinks unit tests; typecheck.
 

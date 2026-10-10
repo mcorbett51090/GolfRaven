@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Linking, TextInput } from "react-native";
 import { useApp } from "../runtime/AppProvider";
 import { facilityName, type CourseEntry } from "../browse";
 import { markerFailureText, needsSettings } from "../checkin";
-import type { MarkerCaptureOutcome, MarkerScanOutcome } from "../marker";
+import { takeCourseQrLink, type MarkerCaptureOutcome, type MarkerScanOutcome } from "../marker";
 import { useTheme } from "../ui/theme";
 import { Banner, Body, Button, Card, H2 } from "../ui/components";
 import type { MessageKey, Params } from "../i18n";
@@ -11,7 +11,7 @@ import type { MessageKey, Params } from "../i18n";
 /**
  * "Buying a marker" on the facility page (build plan §7.6 "Offline marker purchase", G2-03). Rendered ONLY while `markerCosignalUiAvailable()` (both `CHECKIN_UI_ENABLED` and
  * `MARKER_COSIGNAL_UI_ENABLED`); capture and paste-scan refuse while either is false. Offline capture queues a local co-signal (`marker/capture.ts`); paste scan POSTs `marker-scan`
- * with the shop QR (`marker/scan.ts`, P5 §53). Both flags stay false in release builds.
+ * with the shop QR (`marker/scan.ts`, P5 §53). A universal-link open parks the URL for this paste field (P5 §54). Both flags stay false in release builds.
  */
 export function MarkerCard({ entry }: { entry: CourseEntry }) {
   const { t, locale, session, services, snapshot } = useApp();
@@ -21,6 +21,11 @@ export function MarkerCard({ entry }: { entry: CourseEntry }) {
   const [scanOutcome, setScanOutcome] = useState<MarkerScanOutcome | null>(null);
   const [link, setLink] = useState("");
   const [pin, setPin] = useState("");
+
+  useEffect(() => {
+    const parked = takeCourseQrLink();
+    if (parked !== null) setLink(parked);
+  }, []);
 
   async function onMarkerPress(): Promise<void> {
     if (busy || session === null) return;

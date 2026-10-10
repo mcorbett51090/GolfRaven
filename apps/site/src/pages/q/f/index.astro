@@ -1,0 +1,26 @@
+---
+/**
+ * Soft bounce for printed facility QR links (`/q/f/<slug>#kid.sig`).
+ * Real slugs are rewritten here by `_redirects` (`/q/f/* → /q/f/` 200) so the
+ * static build does not need every facility slug. App Links claim the URL first
+ * when the app is installed.
+ */
+import BaseLayout from "../../../layouts/BaseLayout.astro";
+
+const title = "Open in GolfRaven";
+const description = "This printed facility QR opens in the GolfRaven app.";
+---
+
+<BaseLayout title={title} description={description} path="/q/f/" noindex={true}>
+  <main>
+    <h1>{title}</h1>
+    <p>
+      This link is a GolfRaven printed facility QR. With the app installed, open the
+      link again so GolfRaven can park it for shop-QR scan. You will also need today’s
+      four-digit PIN from the shop.
+    </p>
+    <p>
+      <a href="/">Back to GolfRaven</a>
+    </p>
+  </main>
+</BaseLayout>
