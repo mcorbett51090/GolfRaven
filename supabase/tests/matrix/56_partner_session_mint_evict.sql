@@ -114,12 +114,15 @@ SELECT is(
   'COMMENT mentions eviction'
 );
 
+-- FORCE RLS on function_inventory: SELECT is service_role-only (0014); same pattern as matrix 54
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(
   (SELECT note LIKE '%evict%' FROM private.function_inventory
    WHERE schema_name = 'private' AND function_name = 'partner_session_mint'),
   true,
   'function_inventory note mentions eviction'
 );
+SELECT tests.clear_actor();
 
 -- ----------------------------------------------------------------------------
 -- 2. 4.1: four older live sessions + a successful mint → three live; two oldest revoked
