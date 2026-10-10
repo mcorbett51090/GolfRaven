@@ -71,6 +71,15 @@ import { makeSelfCheckGate, type SelfCheckGate } from "./edge-selfcheck-gate.ts"
 import {
   type AdminEnrolmentResult,
   type ChallengeIssue,
+  type CourseQrDb,
+  type CourseQrMintResult,
+  type CourseQrPrintKeyResult,
+  type CourseQrPrintReadResult,
+  type CourseQrPrintWriteResult,
+  type CourseQrRefreshResult,
+  type CourseQrTx,
+  type CoursePinRotateResult,
+  type CoursePinShowResult,
   type CredentialLookup,
   type CredentialOptionsResult,
   type CredentialRegisterInput,
@@ -4681,6 +4690,73 @@ function buildPartnerEntitlementsTx(trx: TxSql): PartnerEntitlementsTx {
   };
 }
 
+const COURSE_PIN_SHOW_STATUSES: ReadonlySet<string> = new Set(["ok", "no_facility", "no_programme"]);
+const COURSE_QR_REFRESH_STATES: ReadonlySet<string> = new Set(["live", "used", "expired", "unknown"]);
+const COURSE_QR_PRINT_WRITE_STATUSES: ReadonlySet<string> = new Set(["ok", "no_facility", "kid_mismatch", "key_mismatch", "key_revoked"]);
+
+/** The course-QR staff definers of the bound lane (0055). Every one is a `select private.*(...)` matching the migration's argument order; the signing key (`o_signing_key`) is read into a local and returned to the one caller that signs. */
+function buildCourseQrTx(trx: TxSql): CourseQrTx {
+  return {
+    async pinShow(facilityId: string): Promise<CoursePinShowResult> {
+      const rows = await trx`
+        select o_status, o_pin, o_local_date::text as o_local_date, o_valid_until, o_pin_epoch::int as o_pin_epoch
+        from private.course_pin_show_for_partner(${facilityId}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !COURSE_PIN_SHOW_STATUSES.has(r.o_status)) throw new Error("course_pin_show_for_partner returned no usable status");
+      if (r.o_status === "no_facility") return { status: "no_facility" };
+      if (r.o_status === "no_programme") return { status: "no_programme" };
+      const validUntil = isoOrNull(r.o_valid_until);
+      if (typeof r.o_pin !== "string" || typeof r.o_local_date !== "string" || validUntil === null) throw new Error("course_pin_show_for_partner returned ok without a PIN");
+      return { status: "ok", dailyPin: r.o_pin, localDate: r.o_local_date, validUntil, pinEpoch: Number(r.o_pin_epoch) };
+    },
+    async pinRotate(facilityId: string): Promise<CoursePinRotateResult> {
+      const rows = await trx`select o_status, o_pin_epoch::int as o_pin_epoch from private.course_pin_rotate_for_partner(${facilityId}::text)`;
+      const r = rows[0];
+      if (r?.o_status === "ok") return { status: "ok", pinEpoch: Number(r.o_pin_epoch) };
+      if (r?.o_status === "no_programme") return { status: "no_programme" };
+      throw new Error("course_pin_rotate_for_partner returned no usable status");
+    },
+    async mint(facilityId: string, nonceHash: string): Promise<CourseQrMintResult> {
+      const rows = await trx`
+        select o_status, o_kid, o_signing_key, o_public_key, o_issued_at::text as o_issued_at, o_expires_at::text as o_expires_at
+        from private.course_qr_mint_for_partner(${facilityId}::text, ${nonceHash}::text)`;
+      const r = rows[0];
+      if (r?.o_status === "no_programme") return { status: "no_programme" };
+      if (r?.o_status !== "ok" || typeof r.o_kid !== "string" || typeof r.o_signing_key !== "string" || typeof r.o_public_key !== "string") throw new Error("course_qr_mint_for_partner returned no usable row");
+      return { status: "ok", kid: r.o_kid, signingKey: r.o_signing_key, publicKey: r.o_public_key, issuedAt: Number(r.o_issued_at), expiresAt: Number(r.o_expires_at) };
+    },
+    async refresh(facilityId: string, nonceHash: string): Promise<CourseQrRefreshResult> {
+      const rows = await trx`select o_state, o_seconds_left::int as o_seconds_left from private.course_qr_refresh_for_partner(${facilityId}::text, ${nonceHash}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_state !== "string" || !COURSE_QR_REFRESH_STATES.has(r.o_state)) throw new Error("course_qr_refresh_for_partner returned no usable state");
+      return { state: r.o_state as CourseQrRefreshResult["state"], secondsLeft: Number(r.o_seconds_left) };
+    },
+    async printKey(facilityId: string): Promise<CourseQrPrintKeyResult> {
+      const rows = await trx`select o_status, o_kid, o_signing_key, o_public_key, o_slug from private.course_qr_print_key_for_partner(${facilityId}::text)`;
+      const r = rows[0];
+      if (r?.o_status === "no_facility") return { status: "no_facility" };
+      if (r?.o_status === "key_revoked") return { status: "key_revoked" };
+      if (r?.o_status !== "ok" || typeof r.o_kid !== "string" || typeof r.o_signing_key !== "string" || typeof r.o_slug !== "string") throw new Error("course_qr_print_key_for_partner returned no usable row");
+      return { status: "ok", kid: r.o_kid, signingKey: r.o_signing_key, publicKey: textOrNull(r.o_public_key), slug: r.o_slug };
+    },
+    async printWrite(facilityId: string, qrKid: string, sig: string, publicKey: string): Promise<CourseQrPrintWriteResult> {
+      const rows = await trx`select o_status, o_changed from private.course_qr_print_write_for_partner(${facilityId}::text, ${qrKid}::text, ${sig}::text, ${publicKey}::text)`;
+      const r = rows[0];
+      if (typeof r?.o_status !== "string" || !COURSE_QR_PRINT_WRITE_STATUSES.has(r.o_status)) throw new Error("course_qr_print_write_for_partner returned no usable status");
+      return { status: r.o_status as CourseQrPrintWriteResult["status"], changed: r.o_changed === true };
+    },
+    async printRead(facilityId: string): Promise<CourseQrPrintReadResult> {
+      const rows = await trx`select o_status, o_qr_kid, o_sig, o_printed_at, o_revoked_at from private.course_qr_print_read_for_partner(${facilityId}::text)`;
+      const r = rows[0];
+      if (r?.o_status === "no_facility") return { status: "no_facility" };
+      if (r?.o_status === "not_printed") return { status: "not_printed" };
+      const printedAt = isoOrNull(r?.o_printed_at);
+      if (r?.o_status !== "ok" || typeof r.o_qr_kid !== "string" || typeof r.o_sig !== "string" || printedAt === null) throw new Error("course_qr_print_read_for_partner returned no usable row");
+      return { status: "ok", qrKid: r.o_qr_kid, sig: r.o_sig, printedAt, revokedAt: isoOrNull(r.o_revoked_at) };
+    },
+  };
+}
+
 /** The partner sign-in minter's transaction (kind "partner_mint": the ONE caller of that kind, the lint's `privileged-mint-scope` rule keeps it so). */
 export async function withPartnerMint<T>(op: (m: PartnerMintTx & PartnerInviteMintTx) => Promise<T>): Promise<T> {
   try {
@@ -4696,7 +4772,7 @@ const PARTNER_TOKEN_HASH = /^[0-9a-f]{64}$/;
 export async function withPartnerSession<T>(
   tokenHash: string,
   op: (
-    s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx & PartnerProgrammeTx & PartnerOffersAdminTx & PartnerSponsorshipsTx & PartnerOffersRedeemTx & PartnerSettlementExportTx,
+    s: PartnerSessionTx & PartnerInvitesTx & PartnerMembersTx & PartnerAttestTx & PartnerReviewTx & PartnerStockTx & PartnerEntitlementsTx & PartnerProgrammeTx & PartnerOffersAdminTx & PartnerSponsorshipsTx & PartnerOffersRedeemTx & PartnerSettlementExportTx & CourseQrTx,
   ) => Promise<T>,
 ): Promise<T> {
   if (!PARTNER_TOKEN_HASH.test(tokenHash)) throw new PartnerSessionRefused();
@@ -4715,6 +4791,7 @@ export async function withPartnerSession<T>(
         ...buildPartnerSponsorshipsTx(trx),
         ...buildPartnerOffersRedeemTx(trx),
         ...buildPartnerSettlementExportTx(trx),
+        ...buildCourseQrTx(trx),
       }),
     );
   } catch (err) {
@@ -4762,6 +4839,20 @@ export const partnerDb: PartnerDb = {
   hitRateLimit: hitRateLimitForPartner,
   hitSystemRateLimit: hitSystemRateLimitForPartner,
 };
+
+/** The database port the `course-qr` and `qr-print` entrypoints hand the pure handlers (S2b, 0055): the same bound transaction as `partnerDb.withSession`, typed for the course-QR definers. */
+export const courseQrDb: CourseQrDb = {
+  withCourseQr: withPartnerSession,
+  hitRateLimit: hitRateLimitForPartner,
+};
+
+/**
+ * The origin of the universal links a course QR carries (`https://golfraven.<tld>/q/m#<token>`, `/q/f/<slug>#<kid>.<sig>`): `GR_COURSE_QR_LINK_ORIGIN`, an exact https origin. Unset: null (the responses then carry
+ * no link; the token and the signature are the same). Malformed: throws, at boot, rather than print a link nobody meant.
+ */
+export function loadCourseQrLinkOrigin(): string | null {
+  return parseAllowedOrigin(Deno.env.get("GR_COURSE_QR_LINK_ORIGIN"));
+}
 
 /** The anon-key Auth client's one call the partner lane needs to SEND a one-time code: the email OTP. A proof and an enrolment token go to an account that already exists (`shouldCreateUser` false); only an INVITE may create the account of the address it names. */
 export interface OtpSendClient {

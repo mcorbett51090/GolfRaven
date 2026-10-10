@@ -937,3 +937,77 @@ export class PartnerInvalidArgument extends Error {
     this.name = "PartnerInvalidArgument";
   }
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// S2b (migration 0055): the staff lane of the course QR (`course-qr`, `qr-print`). A SEPARATE port from `PartnerDb`, so no existing fake or handler needs a new method: the same bound transaction as
+// `withSession`, typed for the definers of 0055. Statuses are the SQL's own, one for one; every one is a RETURNED row, and a handler that wants a status to roll the transaction back (a refused
+// mint must not spend the PIN grant) throws inside the callback.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/** GET course-qr/pin (course_pin_show_for_partner, class A0): today's PIN for the facility-local date and the epoch live now, or why there is none. */
+export type CoursePinShowResult =
+  | { readonly status: "ok"; readonly dailyPin: string; readonly localDate: string; readonly validUntil: string; readonly pinEpoch: number }
+  | { readonly status: "no_facility" }
+  | { readonly status: "no_programme" };
+
+/** POST course-qr/pin/rotate (course_pin_rotate_for_partner, class A2). */
+export type CoursePinRotateResult = { readonly status: "ok"; readonly pinEpoch: number } | { readonly status: "no_programme" };
+
+/**
+ * POST course-qr/tokens (course_qr_mint_for_partner, class A1): the token row is written and the Vault signing key released WITH it. `signingKey` is the 32-byte Ed25519 seed as 43 base64url
+ * characters: it exists only inside the callback that signs, is never logged, never returned to a client and never stored.
+ */
+export type CourseQrMintResult =
+  | {
+    readonly status: "ok";
+    readonly kid: string;
+    readonly signingKey: string;
+    /** The PUBLIC key registered for `kid`: what the Edge verifies its own signature against before it hands a token out. */
+    readonly publicKey: string;
+    /** Seconds since the epoch: the row's issued_at (truncated to the second) and issued_at + 120. */
+    readonly issuedAt: number;
+    readonly expiresAt: number;
+  }
+  | { readonly status: "no_programme" };
+
+/** POST course-qr/tokens/refresh (course_qr_refresh_for_partner, class A0_KEEPALIVE): the state of a token this person's own mint created. Writes nothing. */
+export interface CourseQrRefreshResult {
+  readonly state: "live" | "used" | "expired" | "unknown";
+  readonly secondsLeft: number;
+}
+
+/** qr-print step 1 (course_qr_print_key_for_partner, class A3). `publicKey` is null when no row is registered for the Vault kid yet. */
+export type CourseQrPrintKeyResult =
+  | { readonly status: "ok"; readonly kid: string; readonly signingKey: string; readonly publicKey: string | null; readonly slug: string }
+  | { readonly status: "no_facility" }
+  | { readonly status: "key_revoked" };
+
+/** qr-print step 2 (course_qr_print_write_for_partner, class A3). */
+export interface CourseQrPrintWriteResult {
+  readonly status: "ok" | "no_facility" | "kid_mismatch" | "key_mismatch" | "key_revoked";
+  readonly changed: boolean;
+}
+
+/** GET qr-print (course_qr_print_read_for_partner, class A0). */
+export type CourseQrPrintReadResult =
+  | { readonly status: "ok"; readonly qrKid: string; readonly sig: string; readonly printedAt: string; readonly revokedAt: string | null }
+  | { readonly status: "no_facility" }
+  | { readonly status: "not_printed" };
+
+/** One transaction as `edge_partner`, bound to the presented session. Every method is a `_for_partner` definer that begins with `partner_authorize`; the facility scope is the database's. */
+export interface CourseQrTx {
+  pinShow(facilityId: string): Promise<CoursePinShowResult>;
+  pinRotate(facilityId: string): Promise<CoursePinRotateResult>;
+  mint(facilityId: string, nonceHash: string): Promise<CourseQrMintResult>;
+  refresh(facilityId: string, nonceHash: string): Promise<CourseQrRefreshResult>;
+  printKey(facilityId: string): Promise<CourseQrPrintKeyResult>;
+  printWrite(facilityId: string, qrKid: string, sig: string, publicKey: string): Promise<CourseQrPrintWriteResult>;
+  printRead(facilityId: string): Promise<CourseQrPrintReadResult>;
+}
+
+export interface CourseQrDb {
+  /** Runs `op` in one transaction as `edge_partner` bound to the session whose token hash this is. COMMITS when `op` returns, ROLLS BACK when it throws. Throws `PartnerSessionRefused` when the binder refuses and `PartnerAuthorityRefused` on a 42501 refusal. */
+  withCourseQr<T>(tokenHash: string, op: (s: CourseQrTx) => Promise<T>): Promise<T>;
+  /** One hit of a per-member bucket in its OWN short transaction, committed before any request transaction opens. */
+  hitRateLimit(tokenHash: string, bucket: string, windowSeconds: number, max: number): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
+}

@@ -416,6 +416,8 @@ jobs:
             supabase/functions/partner-offers-redeem/index.ts \
             supabase/functions/settlement-export/index.ts \
             supabase/functions/exports-purge/index.ts \
+            supabase/functions/course-qr/index.ts \
+            supabase/functions/qr-print/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -487,6 +489,8 @@ jobs:
             supabase/functions/partner-offers-redeem/index.ts \
             supabase/functions/settlement-export/index.ts \
             supabase/functions/exports-purge/index.ts \
+            supabase/functions/course-qr/index.ts \
+            supabase/functions/qr-print/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts
 
@@ -578,6 +582,8 @@ jobs:
             supabase/functions/partner-offers-redeem/index.ts \
             supabase/functions/settlement-export/index.ts \
             supabase/functions/exports-purge/index.ts \
+            supabase/functions/course-qr/index.ts \
+            supabase/functions/qr-print/index.ts \
             supabase/functions/_shared/privileged.ts \
             supabase/functions/_shared/partner/webauthn.ts 2>&1)
           TAMPER_EXIT=$?

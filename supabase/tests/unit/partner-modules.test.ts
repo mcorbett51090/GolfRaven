@@ -16,11 +16,13 @@ import { challengeToken, credentialJson, NOW_MS } from "./partner-fakes.ts";
 const FUNCTIONS = join(import.meta.dirname, "..", "..", "functions");
 /** The partner lane's Edge Functions (design 4.5): each is a directory with an `index.ts`, `verify_jwt = false`, and no use of the player identity. */
 /** Named for their resource (the design names them so), not with the `partner-` prefix; still partner-lane functions. */
-const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin", "programme-config", "offers-admin", "sponsorships-admin", "settlement-export"];
+const UNPREFIXED_PARTNER_FUNCTIONS = ["stock-admin", "programme-config", "offers-admin", "sponsorships-admin", "settlement-export", "course-qr", "qr-print"];
 const PARTNER_FUNCTIONS = [
   "partner-session",
   "partner-invites",
   "partner-members",
+  "course-qr",
+  "qr-print",
   "partner-attest",
   "partner-review",
   "stock-admin",
@@ -243,6 +245,8 @@ describe("PA-11: the partner modules never log", () => {
       "sponsorships-admin/index.ts", "partner/sponsorships-handler.ts", "partner/sponsorships-shape.ts",
       "partner-offers-redeem/index.ts", "partner/offers-redeem-handler.ts", "partner/offers-redeem-shape.ts",
       "settlement-export/index.ts", "partner/settlement-handler.ts", "partner/settlement-shape.ts",
+      "course-qr/index.ts", "qr-print/index.ts", "partner/course-qr-handler.ts", "partner/qr-print-handler.ts",
+      "partner/course-qr-shape.ts", "partner/course-qr-signer.ts",
     ]) expect(names).toContain(n);
   });
 
@@ -303,6 +307,8 @@ describe("the entrypoints and the configuration", () => {
     "sponsorships-admin": "handlePartnerSponsorshipsRequest",
     "partner-offers-redeem": "handlePartnerOffersRedeemRequest",
     "settlement-export": "handleSettlementExportRequest",
+    "course-qr": "handleCourseQrRequest",
+    "qr-print": "handleQrPrintRequest",
   };
 
   it("lists exactly the partner functions that exist: every directory under functions/ that holds a partner-* (or unprefixed partner) entrypoint is named here", () => {
