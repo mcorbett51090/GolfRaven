@@ -2598,9 +2598,10 @@ Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-au
 
 ### 40.4 Verification
 
-Branch: `cursor/p5-receipts-upload-8ffd`.
+Branch: `cursor/p5-receipts-upload-8ffd` (base main after #79). Tip `ed6aae8` CI green on PR #80 (all three checks) before merge.
 
 - Matrix **42**: EXECUTE/grant cells, happy intake, same-user duplicate, cross-user `review_item`, `review_account`, `no_facility`, `bad_args`, no `edge_actor` on raw dedupe.
-- Vitest: `receipts-image.test.ts` (EXIF strip, MIME reject, aHash stability, size constant), `receipts-handler.test.ts` (status map, Storage path).
-- `deno check` includes `receipts/index.ts` in CI function lists.
+- Vitest: `receipts-image.test.ts` (EXIF strip, MIME reject, sha256 phash stability, size constant), `receipts-handler.test.ts` (status map, Storage path, orphan remove).
+- `deno check` includes `receipts/index.ts` in CI function lists; service-role-lint clean.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
 
