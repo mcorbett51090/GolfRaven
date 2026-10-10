@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../src/api/errors";
-import type { CheckinTokenResult } from "../src/api/types";
+import type { CheckinTokenResult, MarkerScanRequest } from "../src/api/types";
 import { scanMarkerFromLink, type MarkerScanDeps } from "../src/marker";
 import { DEVICE, NOW0, entryOf, facility, makeRig, rawFix } from "./support/checkin-rig";
 
@@ -16,7 +16,7 @@ function token(): CheckinTokenResult {
 describe("scanMarkerFromLink", () => {
   function setup(over: Partial<MarkerScanDeps> = {}) {
     const rig = makeRig();
-    const scanMarker = vi.fn(async () => ({
+    const scanMarker = vi.fn(async (_req: MarkerScanRequest) => ({
       outcome: "credited" as const,
       facilityId: "fac_x",
       localDate: "2026-10-10",
