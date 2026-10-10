@@ -13,6 +13,7 @@ import { h } from "./dom";
 import { noticeElement } from "./notice";
 import { enrolView } from "./views-enrol";
 import { panelView } from "./views-panels";
+import { stopCameraScan } from "./camera-scan";
 import { workView } from "./views-work";
 
 export interface RenderEnv {
@@ -67,6 +68,7 @@ function roles(s: WhoAmI, locale: Locale): HTMLElement {
 }
 
 export function render(root: HTMLElement, state: AppState, controller: AppController, env: RenderEnv): void {
+  stopCameraScan();
   const { locale } = env;
   const t = (k: MessageKey, p?: Record<string, string | number>) => translate(locale, k, p);
   document.documentElement.setAttribute("lang", locale);

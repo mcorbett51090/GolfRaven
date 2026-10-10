@@ -9,6 +9,7 @@ import { STOCK_MOVE_KINDS, type StockMoveKind } from "../api/work-routes";
 import { translate, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
 import { noticeElement } from "./notice";
+import { tokenScanField } from "./scan-field";
 import { adminView } from "./views-admin";
 
 function facilitySelect(state: SignedInState, controller: AppController, locale: Locale): HTMLElement {
@@ -55,7 +56,7 @@ export function workView(state: SignedInState, controller: AppController, locale
               void controller.submitOnlineAttest(String(fd.get("token") ?? ""));
             },
           },
-          h("label", { class: "field" }, h("span", {}, t("attest.token.label")), h("input", { name: "token", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "attest-token", disabled: busy })),
+          tokenScanField({ name: "token", label: t("attest.token.label"), testid: "attest-token", busy, autofocus: true, t }),
           h("p", { class: "muted" }, t("attest.token.hint")),
           h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "attest-online-submit" }, t("attest.token.submit"))),
         )
@@ -261,7 +262,7 @@ export function workView(state: SignedInState, controller: AppController, locale
             },
           },
           codeField,
-          h("label", { class: "field" }, h("span", {}, t("offerRedeem.credential")), h("input", { name: "credential", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "offer-redeem-credential", disabled: busy })),
+          tokenScanField({ name: "credential", label: t("offerRedeem.credential"), testid: "offer-redeem-credential", busy, autofocus: true, t }),
           h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-submit" }, t("offerRedeem.submit"))),
         )
       : h(
@@ -405,12 +406,14 @@ export function workView(state: SignedInState, controller: AppController, locale
         },
       },
       h("label", { class: "field" }, h("span", {}, t("handover.entitlement")), h("input", { name: "entitlementId", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-testid": "handover-entitlement", disabled: busy })),
-      h(
-        "label",
-        { class: "field" },
-        h("span", {}, scan ? t("handover.credential.scan") : t("handover.credential.token")),
-        h("input", { name: "credential", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "handover-credential", disabled: busy }),
-      ),
+      tokenScanField({
+        name: "credential",
+        label: scan ? t("handover.credential.scan") : t("handover.credential.token"),
+        testid: "handover-credential",
+        busy,
+        autofocus: true,
+        t,
+      }),
       h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "handover-redeem-submit" }, t("handover.redeem"))),
     ),
     work.lastRedeem !== null

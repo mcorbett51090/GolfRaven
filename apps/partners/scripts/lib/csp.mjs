@@ -75,8 +75,8 @@ export function buildCsp(apiBase, opts = {}) {
  * Chromium, from the back/forward cache (a page whose main resource is no-store is not bfcache-eligible there). The hashed `/assets/*` stay immutable.
  * They are separate blocks from `/assets/*` and match disjoint paths, so no request gets two `Cache-Control` values.
  *
- * Permissions-Policy: `camera=(self)` from S7b (the attest / course-QR screens). S7a kept `camera=()`; scanning a player token QR into the attest
- * field is not built yet (paste only), but the policy is open so a later build of the same screen can call `getUserMedia` without another header change.
+ * Permissions-Policy: `camera=(self)` from S7b (the attest / course-QR / redeem screens). The shop-floor scan field calls `getUserMedia` on the
+ * same origin; paste remains the fallback when BarcodeDetector or the camera is unavailable.
  *
  * @param {string} apiBase the functions root (see buildCsp)
  */
