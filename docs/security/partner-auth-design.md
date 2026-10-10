@@ -2593,7 +2593,8 @@ Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-au
 
 ### 40.3 Not built, honestly
 
-- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip.
+- OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip.
+- **Mobile client** — moved to **§43** (`api.uploadReceipt`, flag off).
 - **90-day image purge** — moved to **§42** (`receipts-purge`).
 - **Rollups-refresh writer** — moved to **§41** (migration `0065`).
 - JPEG ancillary markers beyond APP1 (e.g. APP13/COM) are not stripped; residual metadata risk is accepted until a re-encode path exists.
@@ -2666,12 +2667,43 @@ Edge function **`receipts-purge`** (`POST`).
 
 ### 42.3 Not built, honestly
 
-- OCR pipeline, mobile client, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, in-repo scheduler, native Storage lifecycle rules (if the platform gains them).
+- OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, in-repo scheduler, native Storage lifecycle rules (if the platform gains them).
+- **Mobile client** — moved to **§43**.
 
 ### 42.4 Verification
 
-Branch: `cursor/p5-receipts-purge-8ffd` (base main after #81). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-receipts-purge-8ffd` (base main after #81). Tip `76af2ab` CI green on PR #82 (all three checks) before squash-merge as `ebff2a4`.
 
 - Vitest: `receipts-purge-handler.test.ts` (auth order, 90-day cutoff, 429/500); `ci-function-lists` + `review-account-gate` list `receipts-purge` as system lane.
 - `deno check` / `deno cache --frozen` lists include `receipts-purge/index.ts`; service-role-lint clean.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 43. As built: mobile receipt upload client (API + wire)
+
+Numbering: **this section 43.** No migration. Closes the player-app half of §40 (multipart `POST receipts`) without shipping picker/camera UI.
+
+### 43.1 What was built
+
+- **`api.uploadReceipt`** on the real HTTP client: `POST <base>/receipts` as `multipart/form-data` (`facilityId`, `file`, optional `localDate` / `receiptNumberOcr`). Owner bearer (`credentials.accessToken`); **not retried** (a blind repeat may open another fingerprint / review path). Success status **201** only; zod `receiptUploadResultSchema` (`ok` | `duplicate` | `review`).
+- **`HttpFetch` / `once`**: body may be `FormData`; Content-Type left unset so fetch supplies the boundary (JSON calls unchanged).
+- **`receiptUploadFormData`**: Blob/File (Node/web) or React Native `{ uri, name, type }` file part.
+- Mock + unconfigured clients; build flag **`RECEIPTS_UPLOAD_UI_ENABLED = false`** (no screen, no callers outside `src/api`).
+- Wire tests: `apps/mobile/test/receipts-wire.test.ts` (multipart shape, schema, refusals, no callers).
+
+### 43.2 Decisions and departures
+
+- **API-first, flag off** — same pattern as `scanMarker` / `MARKER_COSIGNAL_UI_ENABLED`: store privacy (CAMERA / photo library) and product copy stay out of this slice.
+- **Handler-shaped fixtures, not `edge-contract.json` yet** — multipart recording is deferred; success/refusal bodies match `mapStatus` / `okResponse` / Edge error codes from §40.
+- **No UI** — no image picker, no CAMERA permission, no gallery read.
+
+### 43.3 Not built, honestly
+
+- Picker/camera screen, OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, edge-contract multipart recording.
+
+### 43.4 Verification
+
+Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Recorded when CI is green on the PR tip.
+
+- Vitest: `receipts-wire.test.ts` (FormData wire, 201 shapes, refusal map, flag off / no callers); flag count in `rewards-activation.test.ts`.
+- Typecheck includes `uploadReceipt` on `ApiClient`.
 

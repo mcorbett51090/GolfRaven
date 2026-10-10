@@ -36,3 +36,10 @@ export const WALLET_ACTIVATION_UI_ENABLED = false;
  * Flip it in the change that adds the server endpoint and the sender (README, "Before flipping the flags").
  */
 export const MARKER_COSIGNAL_UI_ENABLED = false;
+
+/**
+ * `RECEIPTS_UPLOAD_UI_ENABLED` (P5 §43): whether any screen can pick/capture a receipt image and POST it to the receipts Edge function.
+ * It is `false`: the Edge + DB half is built (§40) and the HTTP client is wired, but no picker/camera UI ships yet (store privacy declarations for
+ * CAMERA / READ_EXTERNAL_STORAGE / photo library, and product copy, are still open). Flip it in the change that adds the screen.
+ */
+export const RECEIPTS_UPLOAD_UI_ENABLED = false;

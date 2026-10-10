@@ -162,7 +162,7 @@ describe("every error status maps to an ApiError (recorded bodies)", () => {
   });
 
   it("the table covers every recorded error fixture", () => {
-    // The evidence lane's fixtures (challenge_ / token_ / evidence_ / batch_) are covered by `evidence-wire.test.ts`, the key-registration ones (attestkey_) by `attest-send.test.ts`, the offline-seed ones (offlineseed_) by `offline-code-manager.test.ts` the reward-activation ones (activate_) by `rewards-activation.test.ts` and the check-in screen's (checkin_) by `checkin-wire.test.ts` and the marker scan's (markerscan_, P5.1a S2a) by `marker-scan-wire.test.ts`.
+    // The evidence lane's fixtures (challenge_ / token_ / evidence_ / batch_) are covered by `evidence-wire.test.ts`, the key-registration ones (attestkey_) by `attest-send.test.ts`, the offline-seed ones (offlineseed_) by `offline-code-manager.test.ts` the reward-activation ones (activate_) by `rewards-activation.test.ts` and the check-in screen's (checkin_) by `checkin-wire.test.ts` and the marker scan's (markerscan_, P5.1a S2a) by `marker-scan-wire.test.ts`. Receipts multipart (`receipts_*`) is not in edge-contract yet — see `receipts-wire.test.ts`.
     const errorFixtures = Object.entries(RECORDED).filter(([k, r]) => r.status >= 400 && !/^(challenge|token|evidence|batch|attestkey|offlineseed|activate|checkin|markerscan)_/.test(k)).map(([k]) => k);
     expect(table.map((t) => t[0]).sort()).toEqual(errorFixtures.sort());
   });
