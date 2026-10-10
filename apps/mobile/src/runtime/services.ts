@@ -23,7 +23,17 @@ import { ChallengeManager, MemoryChallengeStore, SqliteChallengeStore, type Chal
 import { enqueueEvidence, newFixId, type EvidenceEnqueued, type EvidenceInput } from "../evidence";
 import { checkinUiAvailable, markerCosignalUiAvailable, picksFromItems, runCheckIn, type CheckInInput, type CheckInOutcome } from "../checkin";
 import { createExpoLocationPort } from "../checkin/expo-location";
-import { MemoryMarkerCosignalStore, SqliteMarkerCosignalStore, captureMarkerCoSignal, type MarkerCaptureInput, type MarkerCaptureOutcome, type MarkerCosignalStore, heldOpenCount } from "../marker";
+import {
+  MemoryMarkerCosignalStore,
+  SqliteMarkerCosignalStore,
+  captureMarkerCoSignal,
+  drainMarkerCoSignals,
+  type MarkerCaptureInput,
+  type MarkerCaptureOutcome,
+  type MarkerCosignalStore,
+  type MarkerSendOutcome,
+  heldOpenCount,
+} from "../marker";
 import { receiptsUploadUiAvailable, uploadReceiptImage, type ReceiptUploadInput, type ReceiptUploadOutcome } from "../receipts";
 import { createExpoReceiptPicker } from "../receipts/expo-image-picker";
 import type { AuthService } from "../auth";
@@ -83,8 +93,10 @@ export interface AppServices {
   activateReward: (rewardId: string) => Promise<ActivationOutcome>;
   /** The foreground check-in (P4.2c, `checkin/flow.ts`): location, matching, challenge, evidence, outbox. Called from the "I'm here" button only; refuses (`disabled`, no prompt) while `CHECKIN_UI_ENABLED` is false. */
   checkin: (input: CheckInInput) => Promise<CheckInOutcome>;
-  /** "Buying a marker" (P4.2c, `marker/capture.ts`): captures a co-signal into the LOCAL queue; nothing sends it (no server path yet). Refuses while `MARKER_COSIGNAL_UI_ENABLED` or `CHECKIN_UI_ENABLED` is false. */
+  /** "Buying a marker" (P4.2c, `marker/capture.ts`): captures a co-signal into the local queue. Refuses while `MARKER_COSIGNAL_UI_ENABLED` or `CHECKIN_UI_ENABLED` is false. */
   markerCosignal: (input: MarkerCaptureInput) => Promise<MarkerCaptureOutcome>;
+  /** Drain queued marker co-signals through `marker/send.ts` → `api.scanMarker` (P5 §52). Not flag-gated: already-queued rows may clear while capture UI is off. */
+  drainMarkerCosignals: () => Promise<MarkerSendOutcome[]>;
   /** The local marker co-signal records (account deletion wipes the deleted user's). */
   markerStore: MarkerCosignalStore;
   /** Receipt image upload (P5 §50): pick from the photo library and POST to `receipts`. Refuses while `RECEIPTS_UPLOAD_UI_ENABLED` is false. */
@@ -310,6 +322,15 @@ export async function createServices(): Promise<AppServices> {
         },
         input,
       ),
+    drainMarkerCosignals: () =>
+      drainMarkerCoSignals({
+        now: () => Date.now(),
+        redeem: (req, credentials) => api.redeemCheckinChallenge(req, credentials),
+        scan: api,
+        store: markerStore,
+        currentUserId,
+        accessTokenFor: (userId) => session.accessTokenFor(userId),
+      }),
     markerStore,
     uploadReceipt: (input) =>
       uploadReceiptImage(
