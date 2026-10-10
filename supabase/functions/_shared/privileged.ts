@@ -2675,6 +2675,8 @@ export async function refreshRollups(month: string | null): Promise<{
  *   abandoned_pending_purchases  `private.purge_abandoned_pending_purchases()`   pending purchases past awaiting.until (+ their pending credits)
  * and, since 0072 (P5 §58), the PIN epoch log:
  *   course_pin_epoch_log         `private.purge_course_pin_epoch_log()`          epoch log 90 days past effective_from (latest per facility kept)
+ * and, since 0074 (P5 §60), the partner-auth alarm:
+ *   partner_auth_alarms          `private.purge_partner_auth_alarms()`           alarms 90 days past raised_at
  * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
  * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
  *
@@ -2739,6 +2741,8 @@ export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): R
     step("abandoned_pending_purchases", fixed, async (trx) => n(await trx`select private.purge_abandoned_pending_purchases() as n`)),
     // 0072 (P5 §58): PIN epoch log retention
     step("course_pin_epoch_log", fixed, async (trx) => n(await trx`select private.purge_course_pin_epoch_log() as n`)),
+    // 0074 (P5 §60): partner_auth_alarm retention (0048 / §59.3)
+    step("partner_auth_alarms", fixed, async (trx) => n(await trx`select private.purge_partner_auth_alarms() as n`)),
   ];
 }
 
