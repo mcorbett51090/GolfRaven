@@ -340,7 +340,8 @@ REVOKE CREATE ON SCHEMA private FROM private_definer;
 -- ============================================================================
 -- 3. Registries
 -- ============================================================================
-GRANT UPDATE ON private.function_inventory TO CURRENT_USER;
+-- DELETE needs an explicit grant (UPDATE alone is not enough; see 0037). INSERT still uses the 0017 owner policy.
+GRANT UPDATE, DELETE ON private.function_inventory TO CURRENT_USER;
 CREATE POLICY current_user_edit_function_inventory_0063 ON private.function_inventory
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 
@@ -365,7 +366,7 @@ SET note = '0062/0063 (P5.1b offline offer redeem). edge_partner only; class A1;
 WHERE schema_name = 'private' AND function_name = 'partner_offers_redeem_offline_for_partner';
 
 DROP POLICY current_user_edit_function_inventory_0063 ON private.function_inventory;
-REVOKE UPDATE ON private.function_inventory FROM CURRENT_USER;
+REVOKE UPDATE, DELETE ON private.function_inventory FROM CURRENT_USER;
 
 DO $assert_0063$
 BEGIN
