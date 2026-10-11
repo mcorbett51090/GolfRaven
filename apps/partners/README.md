@@ -172,7 +172,7 @@ dependency) plus the setup key and `otpauth://` link as text. CSP `img-src` stil
 |---|---|
 | Camera scan of a player check-in QR into the attest token field | `camera=(self)` is open; the field is paste-only today |
 | Hand-over, stock, offer redeem, manager / operator / admin / settlement (S7c–S7) | `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
-| Invite create / list / revoke, branch E (an existing member joins another org), member recovery, credential list | `partner-invites` and `partner-members` are in the CSP and the `call()` allow-list; the pre-session half is built, the session half is not |
+| Invite create / list / revoke, branch E, member recovery, credential list | **built (§81–§89):** session-half surfaces on home / work; pre-session enrol remains for first credential |
 | A QR for the TOTP seed | **built (§90):** canvas QR from the `otpauth://` URI; seed + link remain as text fallback |
 | Offline behaviour | none |
 | **Service worker** | **deliberately none.** The page is installable-ish through its manifest only. A service worker would sit between the page and the token's requests and could cache an API response; the design wants neither. If one is ever added it must never cache API responses or touch the token, `worker-src` must be widened to `'self'`, and the build scan's service-worker rule must be revisited deliberately |
