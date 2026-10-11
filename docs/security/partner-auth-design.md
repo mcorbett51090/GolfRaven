@@ -3907,11 +3907,37 @@ Numbering: **matrix n/a (PWA only), this section 87.** Closes the §86.3 leftove
 
 ### 87.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Invites manage UI (list / create / revoke) → §88; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 87.4 Verification
 
-Branch: `cursor/p5-admin-enrolment-ui-8ffd` (base after #126 / `61cce7a`). Tip on PR (this slice).
+Branch: `cursor/p5-admin-enrolment-ui-8ffd` (base after #126 / `61cce7a`). Squash-merged as `a59249a` (#127).
 
 - `@golfraven/partners` vitest (admin enrolment A3); typecheck clean; no Edge / migration change.
+
+## 88. As built: partners invites manage UI (list / create / revoke)
+
+Numbering: **matrix n/a (PWA only), this section 88.** Closes the §87.3 leftover: managers / operators (and admins) list, create and revoke org invites via existing `GET` / `POST` / `DELETE partner-invites/invites`. Create and revoke are class A2 (reauth + PIN); list is A0. Show-once `gr_inv_` token + inviteUrl (recover / hand-over pattern). No migration, no Edge change, no UI flag flips. Accept flow stays on the pre-session enrol screens.
+
+### 88.1 What was built
+
+- **`invites-routes.ts`** — `listInvites`, `createInvite`, `revokeInvite` with closed body parsing.
+- **Work screen** — `invites` kind: org / email / role drafts; create (A2) holds plaintext until dismiss; list pending; revoke (A2).
+- **Fake partner server** — `withInvites` create / list / revoke / branch E over the in-memory invite store (real `partner-invites` handler).
+- **i18n** EN + fr-CA; Vitest covers staff refuse, create show-once, revoke, and already-member.
+
+### 88.2 Decisions and departures
+
+- **Same home gate as team passkeys** — staff cannot open the surface; Edge still enforces rank and scope on write.
+- **Sponsor role refused in the client** — matches Edge `invites-shape` (staff | manager | operator only).
+
+### 88.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 88.4 Verification
+
+Branch: `cursor/p5-invites-manage-ui-8ffd` (base after #127 / `a59249a`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (invites manage A0/A2); typecheck clean; no Edge / migration change.
 

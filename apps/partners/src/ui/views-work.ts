@@ -518,6 +518,156 @@ export function workView(state: SignedInState, controller: AppController, locale
     );
   }
 
+  if (work.kind === "invites") {
+    const memberRole = (role: string): string => {
+      const key = `role.${role}` as MessageKey;
+      const label = translate(locale, key);
+      return label === key ? role : label;
+    };
+    const manageOrgs = (() => {
+      const ids = new Set<string>();
+      for (const m of state.session.memberships) {
+        if ((m.role === "manager" || m.role === "operator") && /^[0-9a-f-]{36}$/i.test(m.orgId)) ids.add(m.orgId.toLowerCase());
+      }
+      if (state.session.isAdmin && work.orgIdDraft !== "" && /^[0-9a-f-]{36}$/i.test(work.orgIdDraft)) {
+        ids.add(work.orgIdDraft.toLowerCase());
+      }
+      return [...ids].sort();
+    })();
+    const pending = work.rows === null ? null : work.rows.filter((r) => r.acceptedAt === null && r.revokedAt === null);
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "invites" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("invites.title")),
+      noticeElement(state.notice, locale),
+      h("p", { class: "muted" }, t("invites.hint")),
+      work.created !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "invite-created" },
+            h("p", {}, t("invites.created.lead")),
+            h("p", { "data-testid": "invite-created-token" }, work.created.token),
+            h("p", { "data-testid": "invite-created-url" }, work.created.inviteUrl),
+            h("p", { class: "muted" }, t("invites.created.until", { until: work.created.expiresAt })),
+            h(
+              "button",
+              { type: "button", disabled: busy, "data-testid": "invite-created-dismiss", onclick: () => controller.dismissInviteCreated() },
+              t("invites.created.dismiss"),
+            ),
+          )
+        : null,
+      h(
+        "section",
+        { "data-testid": "invite-create" },
+        h("h2", {}, t("invites.create.title")),
+        h("p", { class: "muted" }, t("invites.create.hint")),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("invites.org")),
+          manageOrgs.length > 0
+            ? h(
+                "select",
+                {
+                  disabled: busy,
+                  "data-testid": "invite-org",
+                  "aria-label": t("invites.org"),
+                  onchange: (e: Event) => controller.setInviteOrgId((e.target as HTMLSelectElement).value),
+                },
+                ...manageOrgs.map((id) => h("option", { value: id, selected: id === work.orgIdDraft }, id.slice(0, 8))),
+              )
+            : h("input", {
+                type: "text",
+                autocomplete: "off",
+                spellcheck: "false",
+                disabled: busy,
+                value: work.orgIdDraft,
+                "data-testid": "invite-org",
+                onchange: (e: Event) => controller.setInviteOrgId((e.target as HTMLInputElement).value),
+              }),
+        ),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("invites.email")),
+          h("input", {
+            type: "email",
+            autocomplete: "off",
+            spellcheck: "false",
+            disabled: busy || work.created !== null,
+            value: work.emailDraft,
+            "data-testid": "invite-email",
+            onchange: (e: Event) => controller.setInviteEmail((e.target as HTMLInputElement).value),
+          }),
+        ),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("invites.role")),
+          h(
+            "select",
+            {
+              disabled: busy || work.created !== null,
+              "data-testid": "invite-role",
+              "aria-label": t("invites.role"),
+              onchange: (e: Event) => controller.setInviteRole((e.target as HTMLSelectElement).value as "staff" | "manager" | "operator"),
+            },
+            ...(["staff", "manager", "operator"] as const).map((role) =>
+              h("option", { value: role, selected: role === work.roleDraft }, memberRole(role)),
+            ),
+          ),
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            disabled: busy || work.created !== null,
+            "data-testid": "invite-create",
+            onclick: () => void controller.createInvite(),
+          },
+          t("invites.create.action"),
+        ),
+      ),
+      pending !== null
+        ? pending.length === 0
+          ? h("p", { "data-testid": "invites-empty" }, t("invites.empty"))
+          : h(
+              "ul",
+              { "data-testid": "invites-list" },
+              ...pending.map((inv) =>
+                h(
+                  "li",
+                  { "data-testid": `invite-row-${inv.id}` },
+                  h("p", {}, t("invites.email"), ": ", inv.inviteeEmail),
+                  h("p", { class: "muted" }, t("invites.role"), ": ", memberRole(inv.role)),
+                  h("p", { class: "muted" }, t("invites.org"), ": ", inv.orgId.slice(0, 8)),
+                  h("p", { class: "muted" }, t("invites.expires"), ": ", inv.expiresAt),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "danger",
+                      disabled: busy,
+                      "data-testid": `invite-revoke-${inv.id}`,
+                      onclick: () => void controller.revokeInvite(inv.id),
+                    },
+                    t("invites.revoke"),
+                  ),
+                ),
+              ),
+            )
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "invites-load", onclick: () => void controller.loadInvites() }, t("invites.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
   if (work.kind === "credentials") {
     const others = work.targetUserId !== null;
     const active = work.rows === null ? null : work.rows.filter((c) => c.revokedAt === null);

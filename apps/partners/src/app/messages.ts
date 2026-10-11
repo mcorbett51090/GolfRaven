@@ -29,7 +29,8 @@ export type ErrorContext =
   | "rollups"
   | "settlement"
   | "credentials"
-  | "members";
+  | "members"
+  | "invites";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
@@ -136,6 +137,12 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "no_email") return { key: "members.noEmail" };
     if (code === "totp_not_set") return { key: "members.totpNotSet" };
     if (code === "not_found" || kind === "not_found") return { key: "members.notFound" };
+  }
+  if (context === "invites") {
+    if (code === "already_member") return { key: "invites.alreadyMember" };
+    if (code === "invite_accepted") return { key: "invites.alreadyAccepted" };
+    if (code === "invite_revoked") return { key: "invites.alreadyRevoked" };
+    if (code === "not_found" || kind === "not_found") return { key: "invites.notFound" };
   }
   return null;
 }
