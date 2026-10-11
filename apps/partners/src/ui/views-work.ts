@@ -283,12 +283,28 @@ export function workView(state: SignedInState, controller: AppController, locale
       const label = translate(locale, key);
       return label === key ? role : label;
     };
+    const isSelf = (userId: string) => userId.toLowerCase() === state.session.userId.toLowerCase();
     return h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "members" },
       h("h1", { tabindex: "-1", "data-testid": "heading" }, t("members.title")),
       noticeElement(state.notice, locale),
       h("p", { class: "muted" }, t("members.hint")),
+      work.recovered !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "member-recovered" },
+            h("p", {}, t("members.recovered.lead")),
+            h("p", { "data-testid": "member-recover-token" }, work.recovered.token),
+            h("p", { "data-testid": "member-recover-url" }, work.recovered.enrolUrl),
+            h("p", { class: "muted" }, t("members.recovered.until", { until: work.recovered.expiresAt })),
+            h(
+              "button",
+              { type: "button", disabled: busy, "data-testid": "member-recover-dismiss", onclick: () => controller.dismissMemberRecover() },
+              t("members.recovered.dismiss"),
+            ),
+          )
+        : null,
       work.rows !== null
         ? work.rows.length === 0
           ? h("p", { "data-testid": "members-empty" }, t("members.empty"))
@@ -319,11 +335,22 @@ export function workView(state: SignedInState, controller: AppController, locale
                       "button",
                       {
                         type: "button",
-                        disabled: busy || m.userId.toLowerCase() === state.session.userId.toLowerCase(),
+                        disabled: busy || isSelf(m.userId),
                         "data-testid": `member-pin-reset-${m.userId}`,
                         onclick: () => void controller.resetMemberPin(m.userId),
                       },
                       t("members.resetPin"),
+                    ),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        class: "danger",
+                        disabled: busy || isSelf(m.userId),
+                        "data-testid": `member-recover-${m.userId}`,
+                        onclick: () => void controller.recoverMember(m.userId),
+                      },
+                      t("members.recover"),
                     ),
                   ),
                 ),

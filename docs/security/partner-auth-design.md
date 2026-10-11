@@ -3774,11 +3774,38 @@ Numbering: **matrix n/a (PWA only), this section 82.** Closes part of the §81.3
 
 ### 82.3 Not built, honestly
 
-- Member recover UI; member revoke UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Member recover UI → §83; member revoke UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 82.4 Verification
 
-Branch: `cursor/p5-member-pin-reset-ui-8ffd` (base after #121 / `19c4733`). Tip on PR (this slice).
+Squash-merged as `1f4fd9a` (#122). Branch: `cursor/p5-member-pin-reset-ui-8ffd` (base after #121 / `19c4733`).
 
-- `@golfraven/partners` vitest (member PIN reset A2); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **1023 passed** (member PIN reset A2); typecheck clean; CI green; no Edge / migration change.
+
+## 83. As built: partners member recover UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 83.** Closes the §82.3 leftover: managers / operators (and admins) recover another person's account under the reach rule via existing `POST partner-members/members/{id}/recover`, showing the one-time `gr_enr_` / enrolUrl once (handover-mint pattern). No migration, no Edge change, no UI flag flips.
+
+### 83.1 What was built
+
+- **`members-routes.ts`** — `recoverMember(api, userId)` → 201 `{ tokenId, expiresAt, token, enrolUrl }`; maps 409 → `no_email`.
+- **Work screen** — `recoverMember` / `dismissMemberRecover` on the roster: reauth + A2 then POST; `work.recovered` holds plaintext until dismiss; notice `member-recovered`; client refuse for oneself.
+- **Fake partner server** — recover under reach; revokes target credentials; `seedMember({ email: null })` for `no_email`.
+- **i18n** EN + fr-CA; Vitest covers A2 order, show-once dismiss, self-refuse, and `no_email`.
+
+### 83.2 Decisions and departures
+
+- **Show once** — same discipline as hand-over mint: plaintext only in `work.recovered`, never logged, cleared on dismiss / leave.
+- **Destructive copy** — UI states that all passkeys and sessions end (not a soft PIN unlock).
+- **Member revoke stays out** — `POST …/revoke` remains a later seam.
+
+### 83.3 Not built, honestly
+
+- Member revoke UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 83.4 Verification
+
+Branch: `cursor/p5-member-recover-ui-8ffd` (base after #122 / `1f4fd9a`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (member recover A2); typecheck clean; no Edge / migration change.
 

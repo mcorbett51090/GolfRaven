@@ -488,18 +488,25 @@ export const en = {
   "notice.credentialAdded": "Passkey added.",
 
   "members.title": "Team passkeys",
-  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, or reset a locked PIN. Email is not shown.",
+  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, or recover their account. Email is not shown.",
   "members.load": "Load team",
   "members.empty": "No team members in your facility scope.",
   "members.role": "Role",
   "members.user": "Member",
   "members.openCredentials": "Manage passkeys",
   "members.resetPin": "Reset PIN",
+  "members.recover": "Recover account",
   "members.back": "Back to team",
   "members.pinSelf": "You cannot reset your own PIN here. Use Set or change PIN on the home screen.",
+  "members.recoverSelf": "You cannot recover your own account here.",
   "members.pinNotSet": "That person has no PIN to reset.",
+  "members.noEmail": "That person has no email address on file for recovery.",
   "members.notFound": "That team member was not found.",
+  "members.recovered.lead": "Show this recovery link or token once. All of their passkeys and sessions have ended. It is not stored again.",
+  "members.recovered.until": "Expires {until}",
+  "members.recovered.dismiss": "I have shown it",
   "notice.memberPinReset": "PIN reset. They must set a new PIN at the next sensitive action.",
+  "notice.memberRecovered": "Account recovered. Show the one-time link before you leave this screen.",
 } as const;
 
 export type MessageKey = keyof typeof en;
