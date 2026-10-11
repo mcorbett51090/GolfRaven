@@ -79,7 +79,7 @@ export const en = {
   "home.admin.settlement": "Settlement export",
 
   "signIn.haveInvite": "I have an invite or enrolment code",
-  "notice.enrolExistingMember": "You already have a passkey. Sign in with it.",
+  "notice.enrolExistingMember": "You already have a passkey. Sign in with it, then join the organisation from the home screen.",
   "notice.enrolRecoverRequired": "Your account needs to be recovered first. Ask a manager for help.",
   "notice.enrolSaved": "Your passkey is saved. Sign in with it to continue.",
   "notice.enrolCodeSent": "If the invite is valid, a code was emailed to the address it was sent to. Enter it below.",
@@ -543,6 +543,13 @@ export const en = {
   "notice.adminEnrolment": "Admin enrolment link ready. Show it once before leaving this screen.",
   "notice.inviteCreated": "Invite ready. Show the one-time link before leaving this screen.",
   "notice.inviteRevoked": "Invite revoked.",
+  "notice.inviteAcceptPending": "You have an invite to join an organisation. Confirm with your passkey and PIN.",
+  "notice.inviteAccepted": "You joined the organisation.",
+
+  "home.inviteAccept.title": "Join organisation",
+  "home.inviteAccept.hint": "An invite is waiting. Your passkey and PIN confirm you are the invited person. No new passkey is created.",
+  "home.inviteAccept.action": "Join organisation",
+  "home.inviteAccept.dismiss": "Dismiss invite",
 
   "invites.title": "Invites",
   "invites.hint": "Create a join invite for your organisation, list pending invites, or revoke one that has not been accepted. Sponsor invites are not available. The invite link is shown once.",
@@ -565,6 +572,7 @@ export const en = {
   "invites.alreadyAccepted": "That invite has already been accepted.",
   "invites.alreadyRevoked": "That invite has already been revoked.",
   "invites.notFound": "That invite was not found.",
+  "invites.acceptRefused": "That invite could not be accepted. Check you are signed in as the invited person.",
 } as const;
 
 export type MessageKey = keyof typeof en;

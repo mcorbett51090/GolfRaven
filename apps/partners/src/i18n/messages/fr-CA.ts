@@ -80,7 +80,7 @@ export const frCA: Record<MessageKey, string> = {
   "home.admin.rollups": "Voir les bilans",
   "home.admin.settlement": "Exporter le règlement",
   "signIn.haveInvite": "J'ai une invitation ou un code d'inscription",
-  "notice.enrolExistingMember": "Vous avez déjà une clé d'accès. Connectez-vous avec celle-ci.",
+  "notice.enrolExistingMember": "Vous avez déjà une clé d'accès. Connectez-vous avec celle-ci, puis rejoignez l'organisme depuis l'écran d'accueil.",
   "notice.enrolRecoverRequired": "Votre compte doit d'abord être récupéré. Demandez l'aide d'un gestionnaire.",
   "notice.enrolSaved": "Votre clé d'accès est enregistrée. Connectez-vous avec celle-ci pour continuer.",
   "notice.enrolCodeSent": "Si l'invitation est valide, un code a été envoyé par courriel à l'adresse visée. Saisissez-le ci-dessous.",
@@ -544,6 +544,13 @@ export const frCA: Record<MessageKey, string> = {
   "notice.adminEnrolment": "Lien d'inscription administrateur prêt. Montrez-le une seule fois avant de quitter cet écran.",
   "notice.inviteCreated": "Invitation prête. Montrez le lien à usage unique avant de quitter cet écran.",
   "notice.inviteRevoked": "Invitation révoquée.",
+  "notice.inviteAcceptPending": "Vous avez une invitation à rejoindre un organisme. Confirmez avec votre clé d'accès et votre NIP.",
+  "notice.inviteAccepted": "Vous avez rejoint l'organisme.",
+
+  "home.inviteAccept.title": "Rejoindre l'organisme",
+  "home.inviteAccept.hint": "Une invitation est en attente. Votre clé d'accès et votre NIP confirment que vous êtes la personne invitée. Aucune nouvelle clé n'est créée.",
+  "home.inviteAccept.action": "Rejoindre l'organisme",
+  "home.inviteAccept.dismiss": "Ignorer l'invitation",
 
   "invites.title": "Invitations",
   "invites.hint": "Créez une invitation à rejoindre votre organisme, listez les invitations en attente ou révoquez une invitation non acceptée. Les invitations de commanditaire ne sont pas disponibles. Le lien d'invitation n'est montré qu'une fois.",
@@ -566,4 +573,5 @@ export const frCA: Record<MessageKey, string> = {
   "invites.alreadyAccepted": "Cette invitation a déjà été acceptée.",
   "invites.alreadyRevoked": "Cette invitation a déjà été révoquée.",
   "invites.notFound": "Cette invitation est introuvable.",
+  "invites.acceptRefused": "Cette invitation n'a pas pu être acceptée. Vérifiez que vous êtes connecté en tant que personne invitée.",
 };

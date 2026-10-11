@@ -197,6 +197,39 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
             ),
           )
         : null,
+      state.pendingInviteAccept
+        ? h(
+            "section",
+            { "data-testid": "home-invite-accept" },
+            h("h2", {}, t("home.inviteAccept.title")),
+            h("p", { class: "muted" }, t("home.inviteAccept.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              h(
+                "button",
+                {
+                  type: "button",
+                  class: "primary",
+                  disabled: busy || needsSecondFactor,
+                  "data-testid": "invite-accept",
+                  onclick: () => void controller.acceptInvite(),
+                },
+                t("home.inviteAccept.action"),
+              ),
+              h(
+                "button",
+                {
+                  type: "button",
+                  disabled: busy,
+                  "data-testid": "invite-accept-dismiss",
+                  onclick: () => controller.dismissInviteAccept(),
+                },
+                t("home.inviteAccept.dismiss"),
+              ),
+            ),
+          )
+        : null,
       needsSecondFactor
         ? h(
             "section",

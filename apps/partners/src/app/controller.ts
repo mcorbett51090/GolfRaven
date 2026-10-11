@@ -33,6 +33,7 @@ import type { GetAssertionDeps } from "../webauthn/assertion";
 import type { CreateCredentialDeps } from "../webauthn/registration";
 import { createAdminScreens } from "./admin";
 import { createEnrolFlow } from "./enrol-flow";
+import { createInviteAccept } from "./invite-accept";
 import { messageForError } from "./messages";
 import { createPanels, type PinSetupInput } from "./panels";
 import type { AppState, Notice } from "./state";
@@ -57,6 +58,12 @@ export interface AppController extends StepUp {
   requestEnrolCode(pasted?: string): Promise<void>;
   submitEnrolCode(code: string): Promise<void>;
   createPasskey(): Promise<void>;
+
+  /** Branch E (§89): hold / accept / dismiss a `gr_inv_` token while signed in (or after existing_member_sign_in). */
+  holdInviteAccept(token: string): boolean;
+  hasPendingInviteAccept(): boolean;
+  dismissInviteAccept(): void;
+  acceptInvite(): Promise<void>;
 
   /** The PIN prompt (`requirePin` opens it) and the PIN, email-proof and second-factor panels (see panels.ts). */
   submitPin(pin: string): void;
@@ -216,10 +223,29 @@ export function createController(deps: ControllerDeps): AppController {
     create: creationDeps(deps.webauthn),
   });
   const admin = createAdminScreens({ api, host });
+  const inviteAccept = createInviteAccept({
+    api,
+    host,
+    stepUp: panels,
+    webauthn: assertionDeps(deps.webauthn),
+    onPendingChange(pending) {
+      if (state.screen === "signed-in" && state.pendingInviteAccept !== pending) {
+        set({
+          ...state,
+          pendingInviteAccept: pending,
+          notice: pending ? { kind: "invite-accept-pending" } : state.notice?.kind === "invite-accept-pending" ? null : state.notice,
+        });
+      }
+    },
+  });
   const enrol = createEnrolFlow({
     api,
     webauthn: creationDeps(deps.webauthn),
     host,
+    /** Branch E: keep the invite token when accept/verify says the person already has a passkey. */
+    onExistingMemberInvite(token) {
+      inviteAccept.hold(token);
+    },
     // the first session is open: show it, and ask for the first PIN before anything else (design 6.1 step 5). A person who already has one (a recovery) goes home.
     async onSession(grant: SessionGrant, signal: AbortSignal) {
       const session = await api.session(signal);
@@ -230,7 +256,17 @@ export function createController(deps: ControllerDeps): AppController {
         // unknown: ask for a PIN, the safe side
       }
       const panel = mode === "set" ? ({ kind: "pin-setup", mode: "set", forced: true, canSkip: false, busy: false, notice: null } as const) : null;
-      set({ screen: "signed-in", grant, session, busy: null, notice: null, panel, work: null });
+      const pending = inviteAccept.hasPending();
+      set({
+        screen: "signed-in",
+        grant,
+        session,
+        busy: null,
+        notice: pending ? { kind: "invite-accept-pending" } : null,
+        panel,
+        work: null,
+        pendingInviteAccept: pending,
+      });
     },
   });
   /** The sign-in in progress; null when none, or once it was cancelled (the flow then drops whatever it produces). */
@@ -251,6 +287,7 @@ export function createController(deps: ControllerDeps): AppController {
   // Every way a session ends (sign-out, lock, a 401 anywhere, an explicit forget) arrives here AFTER the token has been wiped.
   api.onSessionEnded((reason) => {
     panels.sessionEnded();
+    inviteAccept.reset();
     if (state.screen === "signed-in") set({ screen: "signed-out", notice: NOTICE_FOR_REASON[reason] });
   });
 
@@ -319,7 +356,17 @@ export function createController(deps: ControllerDeps): AppController {
           return;
         }
         abort = null;
-        set({ screen: "signed-in", grant, session, busy: null, notice: null, panel: null, work: null });
+        const pending = inviteAccept.hasPending();
+        set({
+          screen: "signed-in",
+          grant,
+          session,
+          busy: null,
+          notice: pending ? { kind: "invite-accept-pending" } : null,
+          panel: null,
+          work: null,
+          pendingInviteAccept: pending,
+        });
       } catch (e) {
         if (!live()) {
           // cancelled: cancelSignIn() already showed signed-out; make sure nothing is held
@@ -365,6 +412,11 @@ export function createController(deps: ControllerDeps): AppController {
     requestEnrolCode: (pasted) => enrol.requestCode(pasted),
     submitEnrolCode: (code) => enrol.submitCode(code),
     createPasskey: () => enrol.createPasskey(),
+
+    holdInviteAccept: (token) => inviteAccept.hold(token),
+    hasPendingInviteAccept: () => inviteAccept.hasPending(),
+    dismissInviteAccept: () => inviteAccept.dismiss(),
+    acceptInvite: () => inviteAccept.accept(),
 
     requirePin: (actionClass, signal) => panels.requirePin(actionClass, signal),
     submitPin: (pin) => panels.submitPin(pin),
@@ -479,6 +531,7 @@ export function createController(deps: ControllerDeps): AppController {
       abort?.abort();
       abort = null;
       enrol.reset();
+      inviteAccept.reset();
       panels.sessionEnded();
       clearRetryTimer();
       void dropSession(opts.keepalive === true);

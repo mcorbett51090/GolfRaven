@@ -44,6 +44,11 @@ export interface EnrolDeps {
   readonly host: Host;
   /** Called once the first session is open: the controller moves to signed-in. Throws are the flow's failure. */
   readonly onSession: (grant: { expiresAt: string; aal: number }, signal: AbortSignal) => Promise<void>;
+  /**
+   * Branch E (§89): when accept/verify returns `existing_member_sign_in`, hold the invite token so the
+   * person can join after signing in. Not called for enrolment tokens or recover_required.
+   */
+  readonly onExistingMemberInvite?: (token: string) => void;
 }
 
 const TOKEN_FIND_RE = /gr_(inv|enr)_[A-Za-z0-9_-]{43}/;
@@ -167,6 +172,9 @@ export function createEnrolFlow(deps: EnrolDeps): EnrolFlow {
       } catch (e) {
         if (!mine(r)) return;
         if (isPartnerApiError(e) && e.kind === "conflict" && (e.code === "existing_member_sign_in" || e.code === "recover_required")) {
+          if (e.code === "existing_member_sign_in" && k === "invite" && token !== null) {
+            deps.onExistingMemberInvite?.(token);
+          }
           drop();
           host.set({ screen: "signed-out", notice: { kind: e.code === "recover_required" ? "enrol-recover-required" : "enrol-existing-member" } });
           return;

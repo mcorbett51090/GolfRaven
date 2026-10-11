@@ -49,7 +49,16 @@ describe("sign-in", () => {
     const { controller } = setup();
     await controller.signIn();
     const s = controller.getState();
-    expect(Object.keys(s).sort()).toEqual(["busy", "grant", "notice", "panel", "screen", "session", "work"]);
+    expect(Object.keys(s).sort()).toEqual([
+      "busy",
+      "grant",
+      "notice",
+      "panel",
+      "pendingInviteAccept",
+      "screen",
+      "session",
+      "work",
+    ]);
     if (s.screen === "signed-in") expect(Object.keys(s.grant).sort()).toEqual(["aal", "expiresAt"]);
   });
 
