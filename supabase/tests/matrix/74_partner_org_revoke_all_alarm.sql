@@ -129,8 +129,12 @@ SELECT is(
   'detail.status is ok'
 );
 
--- Panic revoked the actor session: mint a second manager session for the flood cell.
+-- Panic revoked the actor session: mint a second manager session, then smudge
+-- xact (PA-2 / matrix 69) so a second bind in this transaction is allowed.
 SELECT pg_temp.mk_session('mx2', '00000000-0000-0000-0000-2000000000b1', :'c_mx') AS s_mx2 \gset
+SET LOCAL ROLE private_definer;
+UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
+RESET ROLE;
 SELECT is(pg_temp.revoke_all('10000000-0000-0000-0000-000000000001', 'mx2'), 'ok',
   'second revoke-all in the same minute still returns ok');
 SELECT is(
