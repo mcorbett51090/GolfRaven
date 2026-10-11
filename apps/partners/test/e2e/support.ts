@@ -16,7 +16,7 @@ interface Block {
   readonly headers: Array<[string, string]>;
 }
 
-/** Cloudflare Pages `_headers` semantics for the subset this build emits: every block whose pattern matches applies, in file order; a repeated name is joined with ", ". */
+/** Cloudflare Pages `_headers` semantics for the subset this build emits: every block whose pattern matches applies, in file order; a repeated name is joined with ", "; `! Name` detaches. */
 export function parseHeaders(text: string): Block[] {
   const blocks: Block[] = [];
   for (const raw of text.split("\n")) {
@@ -24,6 +24,10 @@ export function parseHeaders(text: string): Block[] {
     if (!/^\s/.test(raw)) blocks.push({ path: raw.trim(), headers: [] });
     else {
       const t = raw.trim();
+      if (t.startsWith("! ")) {
+        blocks[blocks.length - 1]!.headers.push([`! ${t.slice(2).trim()}`, ""]);
+        continue;
+      }
       const i = t.indexOf(":");
       if (i > 0) blocks[blocks.length - 1]!.headers.push([t.slice(0, i).trim(), t.slice(i + 1).trim()]);
     }
@@ -37,6 +41,10 @@ export function headersFor(blocks: Block[], pathname: string): Record<string, st
     const hit = b.path === "/*" || (b.path.endsWith("/*") ? pathname.startsWith(b.path.slice(0, -1)) : pathname === b.path);
     if (!hit) continue;
     for (const [name, value] of b.headers) {
+      if (name.startsWith("! ")) {
+        out.delete(name.slice(2).trim().toLowerCase());
+        continue;
+      }
       const k = name.toLowerCase();
       const prev = out.get(k);
       out.set(k, [name, prev ? `${prev[1]}, ${value}` : value]);
@@ -63,8 +71,8 @@ export async function listen(server: Server): Promise<Listening> {
 export interface StaticOptions {
   /** pathname -> a file of `dist` served in its place (e.g. a second URL for the same page), under the headers that match the ALIAS pathname */
   readonly alias?: Record<string, string>;
-  /** pathname -> headers added on top (a header listed here replaces the generated one of the same name) */
-  readonly extraHeaders?: Record<string, Record<string, string>>;
+  /** pathname -> headers added on top (replaces the generated one of the same name; `null` omits it) */
+  readonly extraHeaders?: Record<string, Record<string, string | null>>;
 }
 
 /** A static server for `dist()`, resolved on every request (the port must be known before the bundle is built, because the API origin is baked into it). */
@@ -93,7 +101,11 @@ export function staticServer(dist: () => string | null, extra: Record<string, st
         const blocks = parseHeaders(await readFile(join(root, "_headers"), "utf8"));
         const generated = headersFor(blocks, url.pathname);
         const over = opts.extraHeaders?.[url.pathname] ?? {};
-        const merged = Object.fromEntries([...Object.entries(generated).filter(([k]) => !Object.keys(over).some((o) => o.toLowerCase() === k.toLowerCase())), ...Object.entries(over)]);
+        // null/undefined in extraHeaders omits the generated header (bfcache control cells need a URL that is not no-store under /*).
+        const merged = Object.fromEntries([
+          ...Object.entries(generated).filter(([k]) => !Object.keys(over).some((o) => o.toLowerCase() === k.toLowerCase())),
+          ...Object.entries(over).filter((entry): entry is [string, string] => entry[1] != null),
+        ]);
         res.writeHead(200, { "Content-Type": MIME[extname(file)] ?? "application/octet-stream", ...merged });
         res.end(body);
       } catch {

@@ -64,8 +64,8 @@ Output (`dist/`): `index.html`, `assets/app-<hash>.js`, `assets/styles-<hash>.cs
 inline script, eval, `new Function`, a storage API, a service worker, a source map or an origin that is not the API's, and (from esbuild's metafile)
 on any bundle input that is not under `src/` or that comes from `node_modules`.
 
-`_headers` also carries `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and marks `/`, `/index.html` and `/invite` `Cache-Control: no-store`
-(the hashed `/assets/*` stay immutable). `Permissions-Policy: camera=(self)` from S7b (paste-only attest for now; a later scan into the token field can use the camera without another header change).
+`_headers` also carries `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and marks `/*` `Cache-Control: no-store` (so SPA fallbacks
+such as `/invite` are covered too). Hashed `/assets/*` detach that header (`! Cache-Control`) and stay immutable. `Permissions-Policy: camera=(self)` from S7b (paste-only attest for now; a later scan into the token field can use the camera without another header change).
 
 ### Deploy checklist (operator steps; none are code)
 
@@ -158,7 +158,7 @@ The PIN is four digits, typed on this page, turned into 32 derived bytes **in th
 4. **Create passkey** (a button press: Safari wants a user gesture): `navigator.credentials.create` for the server's options, which the page refuses if they weaken the ceremony (UV and resident key required, attestation `none`, ES256 / RS256 only, 32-byte challenge); then `POST credentials`, which stores the credential and opens the **first session**.
 5. **The forced first PIN**, then home. If `aal` is below the required level the home screen offers the second factor.
 
-Deploy: `/invite` must serve `index.html` (Cloudflare Pages does this for a project with no `404.html`; `_headers` marks `/invite` no-store).
+Deploy: `/invite` must serve `index.html` (Cloudflare Pages does this for a project with no `404.html`; `_headers` marks `/*` no-store, so `/invite` is covered).
 
 ## The second factor (operators and admins)
 

@@ -1804,7 +1804,7 @@ The rulings:
 - **Auto-lock on `visibilitychange` is a product decision.** Should the shop iPad lock after being hidden for N seconds? A backgrounded tab or an auto-locked screen keeps a signed-in page until server idle expiry. This is not a regression; it is the owner's call.
 - **Server follow-up from 20.4:** closed in **§72** / migration `0085` — `partner_session_lock_for_partner` revokes with `revoke_reason = 'lock'`. **PWA Lock UI:** closed in **§73** — page sends `POST lock`.
 - **NIT (S1.2 server code):** closed in **§99** — `Object.hasOwn(ROUTE_METHODS, route)` so `/partner-session/constructor` is 404, not 405.
-- **NIT:** `no-store` covers only `/` and `/index.html`. If the host falls back to `index.html` for unknown paths, those copies are covered only by the `pagehide`/`pageshow` handlers. Optionally use `/*` with `! Cache-Control` in the `/assets/*` block.
+- **NIT:** closed in **§103** — `/*` is `Cache-Control: no-store`; `/assets/*` uses `! Cache-Control` then the immutable lifetime.
 
 Gate counts, round 2:
 - partners: vitest 13 files / 369; Playwright 38.
@@ -4307,7 +4307,33 @@ Numbering: **migration `0097`, matrix `75`, this section 102.** Closes the §101
 
 ### 102.4 Verification
 
-Branch: `cursor/p5-member-revoke-alarm-8ffd` (base after #141 / `0241cc0`). Squash-merged as _pending_.
+Branch: `cursor/p5-member-revoke-alarm-8ffd` (base after #141 / `0241cc0`). Squash-merged as `f0cb028`.
 
 - pgTAP matrix `75`; tip `0097`; partners i18n / auth-alarms unit cells.
+
+## 103. As built: PWA `/*` Cache-Control no-store
+
+Numbering: **migration n/a (PWA headers), this section 103.** Closes the §20.12 / §102.3 leftover: generated `_headers` puts `Cache-Control: no-store` on `/*` so host SPA fallbacks (`/invite`, `/members`, …) are uncacheable, not only `/` and `/index.html`. Hashed `/assets/*` detach with `! Cache-Control` then set `public, max-age=31536000, immutable`. No migration; tip remains `0097`. No UI flag flips; no CAMERA / OCR.
+
+### 103.1 What was built
+
+- **`buildHeadersFile`** — `Cache-Control: no-store` on the `/*` security block; remove per-path `/` / `/index.html` / `/invite` blocks; `/assets/*` does `! Cache-Control` then the immutable value.
+- **Parsers** — unit + e2e `_headers` helpers honour Cloudflare Pages detach (`! Name`).
+- **bfcache cells** — cacheable control aliases omit `Cache-Control` via `extraHeaders: null` so DEFENCE IN DEPTH / CONTROL 1 still isolate the pagehide/pageshow defence.
+- **README** — deploy notes match `/*` + asset detach.
+
+### 103.2 Decisions and departures
+
+- **Favicon / manifest also no-store** — they match `/*`; only content-hashed `/assets/*` stay long-lived. Acceptable for a shop-floor PWA.
+- **No Edge / DB change** — headers-only; tip stays `0097`.
+
+### 103.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 103.4 Verification
+
+Branch: `cursor/p5-pwa-nostore-all-8ffd` (base after #142 / `f0cb028`). Squash-merged as _pending_.
+
+- partners `csp.test.ts` + e2e header / bfcache cells; tip unchanged `0097`.
 

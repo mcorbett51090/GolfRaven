@@ -9,8 +9,8 @@
  *     is allowed to outlive the page) revokes it on the server. This runs whether or not the page is about to enter the bfcache.
  *   - `pageshow` with `persisted` (a restore from the bfcache) forces the signed-out state: nothing a restored page shows or holds is trusted.
  *
- * The page itself is also served `Cache-Control: no-store` (scripts/lib/csp.mjs), which keeps it out of the HTTP cache and, in Chromium, out of the
- * bfcache; this module is the part that does not depend on the browser honouring that.
+ * The page itself is also served `Cache-Control: no-store` on `/*` (scripts/lib/csp.mjs; assets detach it), which keeps HTML paths out of the HTTP
+ * cache and, in Chromium, out of the bfcache; this module is the part that does not depend on the browser honouring that.
  */
 
 import type { PartnerApi } from "../api/client";

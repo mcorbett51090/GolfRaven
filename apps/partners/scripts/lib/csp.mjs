@@ -79,12 +79,10 @@ export function buildCsp(apiBase, opts = {}) {
 }
 
 /**
- * The generated `_headers` file (Cloudflare Pages syntax, as apps/site). One `/*` block carries the security headers; the hashed assets add a long cache
- * lifetime in their own block (no header name is repeated across blocks: Pages joins repeated names with a comma instead of replacing them).
- *
- * `/`, `/index.html` and `/invite` (the page itself; `/invite#<token>` is the link an invite carries, served the same page by the host's single-page fallback) are `no-store`, so a back/forward navigation never serves the signed-in page from the HTTP cache or, in
- * Chromium, from the back/forward cache (a page whose main resource is no-store is not bfcache-eligible there). The hashed `/assets/*` stay immutable.
- * They are separate blocks from `/assets/*` and match disjoint paths, so no request gets two `Cache-Control` values.
+ * The generated `_headers` file (Cloudflare Pages syntax, as apps/site). One `/*` block carries the security headers and `Cache-Control: no-store`
+ * so every HTML-shaped path the host may fall back to `index.html` for (`/invite`, `/members`, …) is uncacheable — not only `/` and `/index.html`
+ * (design §20.12 NIT / §103). The hashed `/assets/*` detach that header (`! Cache-Control`) and set a long immutable lifetime; Pages joins repeated
+ * names with a comma instead of replacing them, so the detach is required before the asset value.
  *
  * Permissions-Policy: `camera=(self)` from S7b (the attest / course-QR / redeem screens). The shop-floor scan field calls `getUserMedia` on the
  * same origin; paste remains the fallback when BarcodeDetector or the camera is unavailable.
@@ -103,17 +101,10 @@ export function buildHeadersFile(apiBase) {
     `  Cross-Origin-Opener-Policy: same-origin\n` +
     `  Cross-Origin-Resource-Policy: same-origin\n` +
     `  X-Robots-Tag: noindex, nofollow\n` +
-    `\n` +
-    `/\n` +
-    `  Cache-Control: no-store\n` +
-    `\n` +
-    `/index.html\n` +
-    `  Cache-Control: no-store\n` +
-    `\n` +
-    `/invite\n` +
     `  Cache-Control: no-store\n` +
     `\n` +
     `/assets/*\n` +
+    `  ! Cache-Control\n` +
     `  Cache-Control: public, max-age=31536000, immutable\n`
   );
 }
