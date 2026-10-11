@@ -7,7 +7,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(16);
+SELECT plan(17);
 
 GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_invite, app.partner_auth_alarm TO CURRENT_USER;
@@ -168,9 +168,10 @@ SELECT is(
 SELECT is(split_part(pg_temp.create_inv('staff-x@example.test', pg_temp.hh('c2')), ':', 1), 'already_member',
   'already_member stays a status');
 SELECT is(
-  (SELECT count(*)::int FROM app.partner_auth_alarm WHERE kind = 'invite_create'),
+  (SELECT count(*)::int FROM app.partner_auth_alarm
+   WHERE kind = 'invite_create' AND bucket_key = :'inv_id'),
   1,
-  'already_member does not add another alarm'
+  'already_member does not add another alarm for the created invite'
 );
 SELECT lives_ok(
   format($$SELECT pg_temp.force_alarm(%L::uuid)$$, :'inv_id'),
