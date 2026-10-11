@@ -141,7 +141,7 @@ SELECT is(
 
 -- Restore active membership so a second revoke in the same minute can fire (flood).
 UPDATE app.partner_member
-SET revoked_at = NULL, revoked_by = NULL
+SET revoked_at = NULL
 WHERE user_id = '00000000-0000-0000-0000-1000000000a1'
   AND org_id = '10000000-0000-0000-0000-000000000001';
 SELECT is(pg_temp.revoke_mem('00000000-0000-0000-0000-1000000000a1', '10000000-0000-0000-0000-000000000001'), 'ok',
