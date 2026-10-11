@@ -209,11 +209,32 @@ describe("POST options", () => {
     const res = await handlePartnerSessionRequest(req("POST", "options", { headers: { origin: ORIGIN }, body: {} }), f.deps);
     expect(res.status).toBe(200);
     const b = (await bodyOf(res)) as { data: { options: unknown; challengeToken: string; expiresAt: string } };
-    expect(f.calls).toEqual(["db.withMint", "mint.rpConfig", "mint.issueChallenge", "webauthn.options"]);
+    expect(f.calls).toEqual([
+      "db.hitSystemRateLimit",
+      "db.hitSystemRateLimit",
+      "db.withMint",
+      "mint.rpConfig",
+      "mint.issueChallenge",
+      "webauthn.options",
+    ]);
     expect(b.data.challengeToken).toMatch(/^[A-Za-z0-9_-]{43}\.[0-9]+\.[A-Za-z0-9_-]{43}$/);
     expect(b.data.expiresAt).toBe(new Date((NOW_MS / 1000 + 120) * 1000).toISOString());
     expect(f.tx).toEqual([{ kind: "mint", committed: true }]);
     expect((await handlePartnerSessionRequest(req("POST", "options", { body: { extra: 1 } }), f.deps)).status).toBe(400);
+  });
+
+  it("§68 alert-only: a tripped IP/global options bucket raises an alarm and still returns 200 (never 429)", async () => {
+    const f = makeFakes({ systemRateLimitOk: false });
+    const res = await handlePartnerSessionRequest(
+      req("POST", "options", { headers: { origin: ORIGIN, "x-forwarded-for": "203.0.113.9" }, body: {} }),
+      f.deps,
+    );
+    expect(res.status).toBe(200);
+    expect(f.calls.filter((c) => c.startsWith("mint.raiseRateAlarm:"))).toEqual([
+      expect.stringMatching(/^mint\.raiseRateAlarm:rate_options_ip:[0-9a-f]{64}$/),
+      "mint.raiseRateAlarm:rate_options_global:global",
+    ]);
+    expect(res.headers.get("retry-after")).toBeNull();
   });
 
   it("a configured origin that differs from partner_rp_config.origin is a 503 and a rollback (the two copies of one fact cannot drift apart silently)", async () => {
@@ -313,9 +334,27 @@ describe("POST verify (PA-12): the wrapper first, the mint second, COMMIT on eve
     const f = makeFakes({ verify: { ok: false, counterOnly: false } });
     const res = await handlePartnerSessionRequest(req("POST", "verify", { body: verifyBody() }), f.deps);
     expect(res.status).toBe(401);
-    expect(f.calls).toEqual(["db.withMint", "mint.rpConfig", "mint.lookupCredential", "webauthn.verify", "mint.recordFailure"]);
+    expect(f.calls).toEqual([
+      "db.withMint",
+      "mint.rpConfig",
+      "mint.lookupCredential",
+      "webauthn.verify",
+      "mint.recordFailure",
+      "db.hitSystemRateLimit",
+    ]);
     expect(f.mintInputs).toHaveLength(0);
     expect(f.tx).toEqual([{ kind: "mint", committed: true }]);
+  });
+
+  it("§68 alert-only: a tripped verify-IP bucket after an Edge assertion failure raises rate_verify_ip and still returns 401 (never 429)", async () => {
+    const f = makeFakes({ verify: { ok: false, counterOnly: false }, systemRateLimitOk: false });
+    const res = await handlePartnerSessionRequest(
+      req("POST", "verify", { headers: { "cf-connecting-ip": "198.51.100.4" }, body: verifyBody() }),
+      f.deps,
+    );
+    expect(res.status).toBe(401);
+    expect(f.calls).toContainEqual(expect.stringMatching(/^mint\.raiseRateAlarm:rate_verify_ip:[0-9a-f]{64}$/));
+    expect(res.headers.get("retry-after")).toBeNull();
   });
 
   it("an unknown, a revoked and a cooling credential are ONE answer, nothing is verified and nothing is counted (the cooldown is not extended by presenting more)", async () => {

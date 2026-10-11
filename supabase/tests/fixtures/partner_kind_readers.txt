@@ -44,6 +44,8 @@ private.marker_scan_for_actor(p_facility_id text, p_variant text, p_nonce_hash t
 # 0048 (partner sign-in mint, S1.1b): the two MINT definers read the binding only to REFUSE any bound transaction (the 0041 rule: a minter binds nothing). Neither writes or reads a kind as authority.
 private.partner_challenge_issue_sign_in()
 private.partner_session_mint(p_token_hash text, p_credential_id bytea, p_nonce bytea, p_exp bigint, p_mac bytea, p_authenticator_data bytea, p_client_data_json bytea, p_signature bytea)
+# 0081 (§68): minter-lane alert-only rate raiser; reads the binding only to REFUSE any bound transaction (the 0041 rule).
+private.partner_rate_alarm_raise(p_kind text, p_bucket_key text, p_detail jsonb)
 # 0049 (partner session edge core, S1.2): outside the *_for_partner family, five functions read the binding. hit_partner_rate_limit takes the bound PARTNER user for its bucket key and refuses any other kind
 # (it authorises nothing: it counts). partner_credential_lookup and partner_sign_in_failure_record are minter-lane definers that read the binding only to REFUSE any bound transaction (the 0041 rule). partner_reauth_apply
 # and partner_reauth_clear are owned by partner_reauth_verifier (R5-L1) and take the session from the binding: they are reachable only from partner_session_reauth_for_partner / partner_session_lock_for_partner,

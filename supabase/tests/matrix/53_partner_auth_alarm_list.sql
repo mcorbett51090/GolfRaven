@@ -100,9 +100,9 @@ SELECT pg_temp.mk_session('mgr', '00000000-0000-0000-0000-2000000000b1', :'c_mgr
 SELECT pg_temp.mk_session('stf', '00000000-0000-0000-0000-1000000000a1', :'c_stf') AS s_stf \gset
 SELECT pg_temp.mk_session('opy', '00000000-0000-0000-0000-3000000000c1', :'c_opy', 2) AS s_opy \gset
 
-INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket, detail, raised_at) VALUES
-  ('signature_invalid', 'a5300000-0000-0000-0000-000000000001', 1000, '{"src":"old"}'::jsonb, now() - interval '2 days'),
-  ('counter_regression', 'a5300000-0000-0000-0000-000000000002', 2000, '{"src":"new"}'::jsonb, now() - interval '1 hour');
+INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket, detail, raised_at) VALUES
+  ('signature_invalid', 'a5300000-0000-0000-0000-000000000001', 'a5300000-0000-0000-0000-000000000001', 1000, '{"src":"old"}'::jsonb, now() - interval '2 days'),
+  ('counter_regression', 'a5300000-0000-0000-0000-000000000002', 'a5300000-0000-0000-0000-000000000002', 2000, '{"src":"new"}'::jsonb, now() - interval '1 hour');
 
 SAVEPOINT adm;
 SET LOCAL ROLE edge_partner;

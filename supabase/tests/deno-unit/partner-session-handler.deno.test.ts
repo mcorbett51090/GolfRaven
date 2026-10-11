@@ -83,6 +83,9 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
       m.statuses.push("counter_regression");
       return { status: "counter_regression", aal: null, expiresAt: null };
     },
+    raiseRateAlarm: async () => {
+      // alert-only path is covered by the vitest / handler suite; this model never trips the soft caps
+    },
   };
   const db: PartnerDb = {
     withMint: async (op) => {
@@ -104,7 +107,8 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
     withOffersRedeem: () => Promise.reject(new Error("not used")),
     withSettlementExport: () => Promise.reject(new Error("not used")),
     hitRateLimit: () => Promise.reject(new Error("not used")),
-    hitSystemRateLimit: () => Promise.reject(new Error("not used")),
+    // options / verify alert-only buckets always under the soft cap in this suite
+    hitSystemRateLimit: () => Promise.resolve({ ok: true, retryAfterSeconds: 0 }),
   };
   m.deps = { db, allowedOrigin: RP.origin, webauthn: assertionVerifier, otp: NO_OTP, nowMs: () => NOW, newSessionToken: newPartnerSessionToken };
   return m;

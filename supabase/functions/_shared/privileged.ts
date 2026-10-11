@@ -4042,6 +4042,9 @@ function buildPartnerMintTx(trx: TxSql): PartnerMintTx & PartnerInviteMintTx {
       if (typeof r?.o_status !== "string") throw new Error("partner_session_mint returned no status");
       return { status: r.o_status, aal: r.o_aal === null || r.o_aal === undefined ? null : Number(r.o_aal), expiresAt: r.o_expires_at instanceof Date ? r.o_expires_at.toISOString() : null };
     },
+    async raiseRateAlarm(kind, bucketKey, detail): Promise<void> {
+      await trx`select private.partner_rate_alarm_raise(${kind}::text, ${bucketKey}::text, ${trx.json((detail ?? {}) as never)}::jsonb)`;
+    },
   };
 }
 
@@ -4453,8 +4456,10 @@ function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
         from private.partner_auth_alarm_list_for_partner()`;
       return rows.map((r) => {
         const raisedAt = isoOrNull(r.o_raised_at);
+        const credentialId = r.o_credential_id === null || r.o_credential_id === undefined ? null : String(r.o_credential_id);
         if (
-          typeof r.o_id !== "string" || typeof r.o_kind !== "string" || typeof r.o_credential_id !== "string" ||
+          typeof r.o_id !== "string" || typeof r.o_kind !== "string" ||
+          (credentialId !== null && typeof r.o_credential_id !== "string") ||
           raisedAt === null
         ) {
           throw new Error("partner_auth_alarm_list_for_partner returned a malformed row");
@@ -4462,7 +4467,7 @@ function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
         return {
           id: r.o_id,
           kind: r.o_kind,
-          credentialId: r.o_credential_id,
+          credentialId,
           minuteBucket: Number(r.o_minute_bucket),
           detail: r.o_detail ?? null,
           raisedAt,

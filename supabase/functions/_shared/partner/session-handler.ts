@@ -39,6 +39,7 @@ import {
   type ChallengeIssue,
   type EmailOtpPort,
   type PartnerDb,
+  type PartnerRateAlarmKind,
   type PinWriteResult,
   PartnerAuthorityRefused,
   PartnerConflict,
@@ -72,6 +73,50 @@ export const OTP_SEND_PER_MEMBER_PER_HOUR = 3;
 export const OTP_SEND_BUCKET = "partner-otp-send:member";
 export const OTP_VERIFY_PER_MEMBER_PER_HOUR = 5;
 export const OTP_VERIFY_BUCKET = "partner-otp-verify:member";
+/** Design 8 / §68: alert-only (never 429) options + verify-failure buckets. */
+export const OPTIONS_PER_IP_PER_HOUR = 600;
+export const OPTIONS_GLOBAL_PER_HOUR = 20_000;
+export const VERIFY_FAIL_PER_IP_PER_HOUR = 100;
+export const OPTIONS_IP_BUCKET = "partner-session-options-ip";
+export const OPTIONS_GLOBAL_BUCKET = "partner-session-options-global";
+export const VERIFY_IP_BUCKET = "partner-session-verify-ip";
+
+/** First X-Forwarded-For hop, else CF-Connecting-IP, else "unknown". Never stored raw — hash before any bucket_key. */
+export function partnerClientIp(req: Request): string {
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff !== null) {
+    const first = xff.split(",")[0]?.trim() ?? "";
+    if (first.length > 0) return first;
+  }
+  const cf = req.headers.get("cf-connecting-ip");
+  if (cf !== null) {
+    const t = cf.trim();
+    if (t.length > 0) return t;
+  }
+  return "unknown";
+}
+
+async function partnerIpBucketKey(req: Request): Promise<string> {
+  return sha256Hex(partnerClientIp(req));
+}
+
+/** Alert-only: hit the system bucket; on !ok raise partner_auth_alarm. Never returns 429; writer errors are swallowed. */
+async function alertOnlyRate(
+  deps: PartnerSessionDeps,
+  systemBucket: string,
+  max: number,
+  kind: PartnerRateAlarmKind,
+  alarmBucketKey: string,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const lim = await deps.db.hitSystemRateLimit(systemBucket, 3600, max);
+  if (lim.ok) return;
+  try {
+    await deps.db.withMint((m) => m.raiseRateAlarm(kind, alarmBucketKey, detail));
+  } catch {
+    // alert-only: a writer fault must not refuse the request
+  }
+}
 
 export interface PartnerSessionDeps {
   readonly db: PartnerDb;
@@ -213,6 +258,10 @@ type Decision = ReturnType<typeof decideOrigin>;
 
 async function handleOptions(req: Request, deps: PartnerSessionDeps, decision: Decision): Promise<Response> {
   await emptyBody(req);
+  // §68 alert-only: IP then global. Never 429 — a shared office NAT must not become a login DoS lever.
+  const ipKey = await partnerIpBucketKey(req);
+  await alertOnlyRate(deps, `${OPTIONS_IP_BUCKET}:${ipKey}`, OPTIONS_PER_IP_PER_HOUR, "rate_options_ip", ipKey, { stage: "options" });
+  await alertOnlyRate(deps, OPTIONS_GLOBAL_BUCKET, OPTIONS_GLOBAL_PER_HOUR, "rate_options_global", "global", { stage: "options" });
   const { rp, ch } = await deps.db.withMint(async (m) => {
     const rp = await m.rpConfig();
     assertSameOrigin(deps, rp);
@@ -232,6 +281,7 @@ async function handleVerify(req: Request, deps: PartnerSessionDeps, decision: De
   const { assertion, token } = body;
 
   // ONE transaction as edge_partner_minter. Every refusal below is a RETURNED value: the transaction commits whatever it holds (the failure counter, the burned nonce, the alarm rows).
+  let recordedAssertFailure = false;
   const outcome = await deps.db.withMint(async (m): Promise<Refusal | { readonly kind: "minted"; readonly aal: number; readonly expiresAt: string }> => {
     const rp = await m.rpConfig();
     assertSameOrigin(deps, rp);
@@ -250,6 +300,7 @@ async function handleVerify(req: Request, deps: PartnerSessionDeps, decision: De
     if (!verified.ok && !verified.counterOnly) {
       // a refused verification is a guess: it counts against the credential (design 8), and the count commits with this refusal
       await m.recordFailure(assertion.credentialId);
+      recordedAssertFailure = true;
       return REFUSED;
     }
     // `counterOnly`: the signature is genuine and only the counter did not advance. It goes to the mint anyway, which writes the audit_log and alarm rows (PA-12) and answers counter_regression
@@ -266,6 +317,12 @@ async function handleVerify(req: Request, deps: PartnerSessionDeps, decision: De
     if (minted.status !== "ok" || minted.aal === null || minted.expiresAt === null) return REFUSED;
     return { kind: "minted", aal: minted.aal, expiresAt: minted.expiresAt };
   });
+
+  // §68 alert-only verify-IP bucket: only when the Edge assertion failed and we recorded a failure (not counterOnly / success). Never 429.
+  if (recordedAssertFailure) {
+    const ipKey = await partnerIpBucketKey(req);
+    await alertOnlyRate(deps, `${VERIFY_IP_BUCKET}:${ipKey}`, VERIFY_FAIL_PER_IP_PER_HOUR, "rate_verify_ip", ipKey, { stage: "verify" });
+  }
 
   if (outcome.kind === "refused") return unauthenticated(decision);
   // the token leaves this function exactly once, here, in the body of the response

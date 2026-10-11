@@ -131,7 +131,7 @@ SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authentic
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private', 'public') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rate_alarm_raise', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
   'PA-8: the minter can execute NOTHING ELSE in app, api or private but the three minter-lane definers of 0049 (S1.2: the credential lookup, the failure counter and the relying-party read) and the five of 0054 (S1.5: matrix 32 proves them); the pgTAP and extension functions of public aside');
 SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
@@ -513,7 +513,9 @@ SELECT is((pg_temp.side('sig') ->> 'alarms')::int || ':' || (pg_temp.side('sig')
 SELECT is((SELECT (a.minute_bucket = pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint) FROM app.partner_auth_alarm a JOIN creds c ON c.cred_row = a.credential_id WHERE c.label = 'sig' AND a.kind = 'signature_invalid'), true,
   'the alarm''s bucket is the current clock minute (floor(epoch / 60); the cells above ran inside one minute), so one alarm per credential, kind and MINUTE');
 -- ... and an alarm of ANOTHER minute neither suppresses nor is suppressed by it: with a row already present for the previous minute, the next refusal still writes its own row
-INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket) SELECT 'counter_regression', c.cred_row, pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint - 1 FROM creds c WHERE c.label = 'sig';
+INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket)
+SELECT 'counter_regression', c.cred_row, c.cred_row::text, pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint - 1
+FROM creds c WHERE c.label = 'sig';
 SELECT is(pg_temp.go('sig_cnt', 'sig', 1), 'counter_regression', 'setup: a counter regression on the same credential (counter 1 is not above the stored 1)');
 SELECT is((SELECT count(*)::int FROM app.partner_auth_alarm a JOIN creds c ON c.cred_row = a.credential_id WHERE c.label = 'sig' AND a.kind = 'counter_regression'), 2, 'a counter_regression row of the PREVIOUS minute does not suppress this minute''s: two rows, two minutes');
 SELECT pg_temp.newcred('sig2') IS NOT NULL AS sig2_cred \gset
@@ -614,7 +616,7 @@ RESET ROLE;
 SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('anything_else', gen_random_uuid(), '{}'::jsonb)$$, '22023', NULL, 'the alarm writer takes only its two kinds');
 SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('signature_invalid', NULL, '{}'::jsonb)$$, '22023', NULL, 'the alarm writer refuses a NULL credential with the argument error (22023), not a NOT NULL violation from the table');
 RESET ROLE;
-SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket) VALUES ('signature_invalid', gen_random_uuid(), 1)$$, '42501', NULL, 'the issuer cannot insert alarm rows itself (no privilege): only through the writer');
+SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket) VALUES ('signature_invalid', gen_random_uuid(), 'x', 1)$$, '42501', NULL, 'the issuer cannot insert alarm rows itself (no privilege): only through the writer');
 RESET ROLE;
 
 -- ----------------------------------------------------------------------------
