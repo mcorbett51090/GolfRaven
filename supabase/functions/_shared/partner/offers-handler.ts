@@ -18,7 +18,9 @@
 
 import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
-import { bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+import {
+  alertMemberAnyCall,
+  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { validateOfferEligibility } from "./offer-eligibility.ts";
 import { parseOfferIdBody, parseOffersQuery, parseOfferUpsertBody } from "./offers-shape.ts";
@@ -57,6 +59,7 @@ export async function handlePartnerOffersAdminRequest(req: Request, deps: Partne
         if (refusal !== null) return refusal;
         const tokenHash = await bearerHash(req.headers);
         if (tokenHash === null) return unauthenticated(decision);
+        await alertMemberAnyCall(deps.db, tokenHash);
 
         switch (matched.spec.name) {
           case "offers":

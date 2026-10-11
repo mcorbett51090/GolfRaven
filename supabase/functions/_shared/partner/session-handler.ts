@@ -62,6 +62,7 @@ import {
   type VerifyRequest,
 } from "./session-shape.ts";
 import { type NewSessionToken, partnerTokenFromHeader, sha256Hex, toB64u } from "./token.ts";
+import { alertMemberAnyCall } from "./handler-kit.ts";
 import { buildOtpauthUrl, encodeTotpSeed } from "./totp-contract.ts";
 
 export const PARTNER_SESSION_FUNCTION = "partner-session";
@@ -192,6 +193,7 @@ export async function handlePartnerSessionRequest(req: Request, deps: PartnerSes
           const token = partnerTokenFromHeader(req.headers.get("authorization"));
           if (token === null) return unauthenticated(decision);
           tokenHash = await sha256Hex(token);
+          await alertMemberAnyCall(deps.db, tokenHash);
         }
 
         switch (route) {

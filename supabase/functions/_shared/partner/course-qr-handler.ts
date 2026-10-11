@@ -25,7 +25,9 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import { CourseQrKeyMismatch, signRotatingToken } from "./course-qr-signer.ts";
 import { parseFacilityBody, parseFacilityQuery, parseRefreshBody } from "./course-qr-shape.ts";
-import { bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+import {
+  alertMemberAnyCall,
+  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { type CourseQrDb, PartnerNotConfigured } from "./ports.ts";
 import { toHex } from "./token.ts";
@@ -95,6 +97,7 @@ export async function handleCourseQrRequest(req: Request, deps: CourseQrDeps): P
 
         const tokenHash = await bearerHash(req.headers);
         if (tokenHash === null) return unauthenticated(decision);
+        await alertMemberAnyCall(deps.db, tokenHash);
 
         switch (matched.spec.name) {
           case "pin":

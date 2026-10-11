@@ -19,7 +19,9 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import { parseFacilityBody, parseFacilityQuery } from "./course-qr-shape.ts";
 import { CourseQrKeyMismatch, signPrintedQr } from "./course-qr-signer.ts";
-import { bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+import {
+  alertMemberAnyCall,
+  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { type CourseQrDb, PartnerNotConfigured } from "./ports.ts";
 
@@ -67,6 +69,7 @@ export async function handleQrPrintRequest(req: Request, deps: QrPrintDeps): Pro
         if (refusal !== null) return refusal;
         const tokenHash = await bearerHash(req.headers);
         if (tokenHash === null) return unauthenticated(decision);
+        await alertMemberAnyCall(deps.db, tokenHash);
         return req.method === "POST" ? await handlePrint(req, deps, decision, tokenHash) : await handleRead(req, deps, decision, tokenHash);
       } catch (err) {
         if (err instanceof CourseQrKeyMismatch) return mapPartnerError(decision, new PartnerNotConfigured());

@@ -28,6 +28,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   assertSameOrigin,
+  alertMemberAnyCall,
   bearerHash,
   type Decision,
   emptyBody,
@@ -95,6 +96,7 @@ export async function handlePartnerMembersRequest(req: Request, deps: PartnerMem
         // (4) every route is a session route: anything but a gr_ps_ bearer is the one 401, and no port is touched
         const tokenHash = await bearerHash(req.headers);
         if (tokenHash === null) return unauthenticated(decision);
+        await alertMemberAnyCall(deps.db, tokenHash);
         const id = matched.ids[0] ?? "";
 
         switch (matched.spec.name) {

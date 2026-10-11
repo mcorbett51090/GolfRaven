@@ -175,6 +175,8 @@ export interface PartnerSessionTx {
   totpVerify(code: string): Promise<TotpVerifyResult>;
   /** Reset of another person's TOTP (class A3, the reach rule): used by `partner-members` through `PartnerMembersTx`. */
   totpReset(targetUid: string): Promise<TotpResetResult>;
+  /** Alert-only member any-call soft-cap (0083 / §70): one partner_auth_alarm rate_member row keyed on the bound uid. Never refuses the request. */
+  raiseMemberRateAlarm(detail: unknown): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -1070,6 +1072,8 @@ export interface CourseQrTx {
   printKey(facilityId: string): Promise<CourseQrPrintKeyResult>;
   printWrite(facilityId: string, qrKid: string, sig: string, publicKey: string): Promise<CourseQrPrintWriteResult>;
   printRead(facilityId: string): Promise<CourseQrPrintReadResult>;
+  /** Alert-only member any-call soft-cap (0083 / §70): same writer as PartnerSessionTx.raiseMemberRateAlarm. */
+  raiseMemberRateAlarm(detail: unknown): Promise<void>;
 }
 
 export interface CourseQrDb {

@@ -96,6 +96,44 @@ export function rateLimited(decision: Decision, message: string, retryAfterSecon
   return partnerError(decision, 429, "rate_limited", message, { "retry-after": String(Math.max(1, retryAfterSeconds)) });
 }
 
+/** Design §8 / §70: alert-only 1,200/h any-partner-call soft-cap. Never a 429; does not replace hard per-route caps. */
+export const MEMBER_ANY_CALL_BUCKET = "partner-any-call";
+export const MEMBER_ANY_CALL_PER_HOUR = 1200;
+
+type RaiseMemberRateAlarmTx = { raiseMemberRateAlarm(detail: unknown): Promise<void> };
+
+/** Minimal port surface for `alertMemberAnyCall` (PartnerDb.withSession or CourseQrDb.withCourseQr). */
+export type MemberAnyCallDb = {
+  hitRateLimit(
+    tokenHash: string,
+    bucket: string,
+    windowSeconds: number,
+    max: number,
+  ): Promise<{ readonly ok: boolean; readonly retryAfterSeconds: number }>;
+  withSession?<T>(tokenHash: string, op: (s: RaiseMemberRateAlarmTx) => Promise<T>): Promise<T>;
+  withCourseQr?<T>(tokenHash: string, op: (s: RaiseMemberRateAlarmTx) => Promise<T>): Promise<T>;
+};
+
+/**
+ * Soft-cap every authenticated partner call (0083 / §70): hit `partner-any-call` at 1,200/h; when over, raise
+ * `rate_member` via a bound session. Never returns 429; writer errors are swallowed. Call once per HTTP request
+ * immediately after a successful bearer hash.
+ */
+export async function alertMemberAnyCall(db: MemberAnyCallDb, tokenHash: string): Promise<void> {
+  const lim = await db.hitRateLimit(tokenHash, MEMBER_ANY_CALL_BUCKET, 3600, MEMBER_ANY_CALL_PER_HOUR);
+  if (lim.ok) return;
+  try {
+    const raise = (s: RaiseMemberRateAlarmTx) => s.raiseMemberRateAlarm({ stage: "partner-any-call" });
+    if (typeof db.withSession === "function") {
+      await db.withSession(tokenHash, raise);
+    } else if (typeof db.withCourseQr === "function") {
+      await db.withCourseQr(tokenHash, raise);
+    }
+  } catch {
+    // alert-only: a writer fault must not refuse the request
+  }
+}
+
 /**
  * A create ceremony the database refused, by its status. The enrolling person (an OTP-proved mailbox owner, or a signed-in member) is the only caller that can reach these, so they may be told apart a little:
  * an expired acceptance or challenge is a 410 (start again), a state conflict is a 409 (it names itself), and everything else (a challenge that does not belong, a malformed ceremony) is one 403.

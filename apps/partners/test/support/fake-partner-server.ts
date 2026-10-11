@@ -460,11 +460,15 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           state.reauthUntil = new Date(Date.now() + 5 * 60_000).toISOString();
           return { status: "ok", reauthUntil: state.reauthUntil };
         },
+        async raiseMemberRateAlarm() {
+          /* alert-only §70; fake never trips the soft-cap */
+        },
       };
       return await op(tx);
     },
     async hitRateLimit(hash, bucket) {
       if (!sessions.has(hash) || state.revokedSessions.has(hash)) throw new PartnerSessionRefused();
+      if (bucket === "partner-any-call") return { ok: true, retryAfterSeconds: 0 };
       if (bucket !== "partner-reauth:member") return { ok: true, retryAfterSeconds: 0 };
       state.reauthHits += 1;
       return state.reauthHits > state.reauthLimit ? { ok: false, retryAfterSeconds: 1800 } : { ok: true, retryAfterSeconds: 0 };

@@ -4,6 +4,7 @@
 // authenticator are supabase/tests/deno-unit/partner-session-handler.deno.test.ts (the S0 wrapper and the software authenticator); the cells that need a real database are
 // supabase/tests/integration/partner-session.deno.test.ts. Here the ports are fakes, and every cell states one thing the handler decides ON ITS OWN.
 
+import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handlePartnerSessionRequest, REAUTH_BUCKET, routeOf } from "../../functions/_shared/partner/session-handler.ts";
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
@@ -495,7 +496,7 @@ describe("reauth (PA-27)", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("3600");
     expect(f.calls).toEqual(["db.hitRateLimit"]);
-    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: REAUTH_BUCKET, windowSeconds: 3600, max: 10 }]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { hash: await sha256Hex(SESSION_TOKEN), bucket: REAUTH_BUCKET, windowSeconds: 3600, max: 10 }]);
   });
 
   it("a valid reauth: hit, then ONE transaction: the session's own credential, the wrapper, the definer; the answer carries reauthUntil", async () => {

@@ -4190,6 +4190,9 @@ function buildPartnerSessionTx(trx: TxSql): PartnerSessionTx {
       if (typeof r?.o_status !== "string") throw new Error("partner_session_reauth_for_partner returned no status");
       return { status: r.o_status, reauthUntil: r.o_reauth_until instanceof Date ? r.o_reauth_until.toISOString() : null };
     },
+    async raiseMemberRateAlarm(detail): Promise<void> {
+      await trx`select private.partner_member_rate_alarm_raise(${trx.json((detail ?? {}) as never)}::jsonb)`;
+    },
   };
 }
 
@@ -5110,6 +5113,9 @@ function buildCourseQrTx(trx: TxSql): CourseQrTx {
       const printedAt = isoOrNull(r?.o_printed_at);
       if (r?.o_status !== "ok" || typeof r.o_qr_kid !== "string" || typeof r.o_sig !== "string" || printedAt === null) throw new Error("course_qr_print_read_for_partner returned no usable row");
       return { status: "ok", qrKid: r.o_qr_kid, sig: r.o_sig, printedAt, revokedAt: isoOrNull(r.o_revoked_at) };
+    },
+    async raiseMemberRateAlarm(detail): Promise<void> {
+      await trx`select private.partner_member_rate_alarm_raise(${trx.json((detail ?? {}) as never)}::jsonb)`;
     },
   };
 }

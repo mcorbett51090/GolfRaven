@@ -1,4 +1,5 @@
 // supabase/tests/unit/partner-members-handler.test.ts
+import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
 //
 // The `partner-members` handler (docs/security/partner-auth-design.md 4.5, 6.4, 6.5, 8, 22.4; PA-15, PA-16, PA-22, PA-25; slice S1.5), against the in-memory ports of partner-fakes.ts. What is decided HERE: the
 // route table with `{id}` segments, the Origin / bearer / media-type / strict-body order, that every route is a session route, the status-to-HTTP maps (42501 is a 403 that rolls back, a returned refusal is a
@@ -217,7 +218,7 @@ describe("credentials of a signed-in person", () => {
     expect(res.status).toBe(200);
     const { data } = JSON.parse(await text(res));
     expect(data.challengeToken).toMatch(/^[A-Za-z0-9_-]{43}\.\d+\.[A-Za-z0-9_-]{43}$/);
-    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: CREDENTIAL_BUCKET, windowSeconds: 3600, max: CREDENTIAL_PER_MEMBER_PER_HOUR }]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { hash: await sha256Hex(SESSION_TOKEN), bucket: CREDENTIAL_BUCKET, windowSeconds: 3600, max: CREDENTIAL_PER_MEMBER_PER_HOUR }]);
     expect(idx(f, "db.hitRateLimit")).toBeLessThan(idx(f, "session.credentialOptions"));
     const req = f.rec.registrationOptions[0]!;
     expect(req.userHandle).toEqual(uuidToBytes(USER_ID));
@@ -312,7 +313,8 @@ describe("credentials of a signed-in person", () => {
       expect(res.status, status).toBe(http);
       expect(f.rec.credentialRevoke).toEqual([CRED_ROW_ID]);
       expect(lastTx(f)).toEqual({ kind: "session", committed: true });
-      expect(f.rateLimitHits[0]).toMatchObject({ bucket: CREDENTIAL_BUCKET, windowSeconds: 3600, max: 10 });
+      expect(f.rateLimitHits.map((h) => h.bucket)).toEqual([MEMBER_ANY_CALL_BUCKET, CREDENTIAL_BUCKET]);
+      expect(f.rateLimitHits[1]).toMatchObject({ bucket: CREDENTIAL_BUCKET, windowSeconds: 3600, max: 10 });
     }
     const limited = makeFakes({ rateLimitOk: false });
     expect((await call(limited, "DELETE", `credentials/${CRED_ROW_ID}`, { headers: authed() })).status).toBe(429);
@@ -326,7 +328,7 @@ describe("credentials of a signed-in person", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ data: { note: "front desk" } });
     expect(f.rec.credentialNote).toEqual([{ id: CRED_ROW_ID, note: "front desk" }]);
-    expect(f.rateLimitHits).toEqual([]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }]);
     expect(lastTx(f)).toEqual({ kind: "session", committed: true });
 
     const clear = makeFakes();
