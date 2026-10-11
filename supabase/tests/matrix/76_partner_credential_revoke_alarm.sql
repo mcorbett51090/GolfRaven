@@ -2,12 +2,13 @@
 -- 0098_partner_credential_revoke_alarm.sql (P5 §104): kind credential_revoke on
 -- partner_auth_alarm raised from partner_credential_revoke_for_partner on ok.
 -- Proved here: kind/row CHECKs, policies, manager revoke raises one row
--- per credential per minute (ON CONFLICT quiet after restoring credential),
+-- per credential per minute, already_revoked stays quiet, ON CONFLICT quiet
+-- on a forced re-insert (revocation is final — cannot clear revoked_at),
 -- detail shape, inventory.
 
 \set QUIET 1
 BEGIN;
-SELECT plan(14);
+SELECT plan(15);
 
 GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_member, app.partner_auth_alarm TO CURRENT_USER;
@@ -57,8 +58,24 @@ BEGIN
   RETURN r.o_status;
 END
 $f$;
+-- Revocation is final (credential trigger); prove ON CONFLICT without un-revoking.
+CREATE FUNCTION pg_temp.force_alarm(p_cred uuid) RETURNS void LANGUAGE plpgsql AS $f$
+BEGIN
+  EXECUTE 'SET LOCAL ROLE private_definer';
+  INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket, detail)
+  VALUES (
+    'credential_revoke',
+    p_cred,
+    p_cred::text,
+    floor(date_part('epoch', clock_timestamp()) / 60)::bigint,
+    jsonb_build_object('subject', '00000000-0000-0000-0000-1000000000a1', 'own', false, 'status', 'ok')
+  )
+  ON CONFLICT (kind, bucket_key, minute_bucket) DO NOTHING;
+  EXECUTE 'RESET ROLE';
+END
+$f$;
 GRANT EXECUTE ON FUNCTION pg_temp.th(text), pg_temp.mk_cred(text, uuid), pg_temp.mk_session(text, uuid, uuid, int),
-  pg_temp.seed_a2(text), pg_temp.revoke_cred(uuid) TO PUBLIC;
+  pg_temp.seed_a2(text), pg_temp.revoke_cred(uuid), pg_temp.force_alarm(uuid) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
 -- 1. Kind / row CHECKs + structure
@@ -94,7 +111,7 @@ SELECT is(
 );
 
 -- ----------------------------------------------------------------------------
--- 2. Manager revoke raises alarm; restore credential and second call is quiet
+-- 2. Manager revoke raises alarm; already_revoked + ON CONFLICT stay at one row
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.mk_cred('sx', '00000000-0000-0000-0000-1000000000a1') AS c_sx \gset
 SELECT pg_temp.mk_cred('mx', '00000000-0000-0000-0000-2000000000b1') AS c_mx \gset
@@ -139,17 +156,23 @@ SELECT is(
   'detail.status is ok'
 );
 
--- Restore active credential so a second revoke in the same minute can fire (flood).
-UPDATE app.partner_credential
-SET revoked_at = NULL, revoked_by = NULL, revoke_reason = NULL
-WHERE id = :'c_sx';
-SELECT is(pg_temp.revoke_cred(:'c_sx'), 'ok',
-  'second revoke in the same minute still returns ok');
+SELECT is(pg_temp.revoke_cred(:'c_sx'), 'already_revoked',
+  'second revoke is already_revoked (revocation is final)');
 SELECT is(
   (SELECT count(*)::int FROM app.partner_auth_alarm
    WHERE kind = 'credential_revoke' AND bucket_key = :'c_sx'),
   1,
-  'second revoke in the same minute is ON CONFLICT DO NOTHING'
+  'already_revoked does not add another alarm'
+);
+SELECT lives_ok(
+  format($$SELECT pg_temp.force_alarm(%L::uuid)$$, :'c_sx'),
+  'forced re-insert in the same minute is ON CONFLICT DO NOTHING'
+);
+SELECT is(
+  (SELECT count(*)::int FROM app.partner_auth_alarm
+   WHERE kind = 'credential_revoke' AND bucket_key = :'c_sx'),
+  1,
+  'ON CONFLICT keeps a single credential_revoke row per minute'
 );
 
 -- ----------------------------------------------------------------------------
