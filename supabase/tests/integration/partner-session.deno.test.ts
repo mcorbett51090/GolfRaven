@@ -291,7 +291,7 @@ Deno.test("PA-11: a partner token sent to a PLAYER function is refused and NEVER
 // PA-12: sign in, GET session through PEEK, sign out
 // =============================================================================================================================================================
 
-Deno.test("PA-12: a valid assertion mints (ES256 and RS256); the token comes back once and only its hash is stored; GET session (PEEK) does not move last_seen_at; sign-out revokes", DT, async () => {
+Deno.test("PA-12: a valid assertion mints (ES256 and RS256); the token comes back once and only its hash is stored; GET session (PEEK) does not move last_seen_at; lock revokes with reason lock", DT, async () => {
   for (const alg of ["ES256", "RS256"] as const) {
     const auth = await enrol(STAFF, alg);
     const token = await signIn(auth);
@@ -310,13 +310,17 @@ Deno.test("PA-12: a valid assertion mints (ES256 and RS256); the token comes bac
       assert(info.memberships[0]!.facilityIds.includes("fac_x"));
     }
     assertEquals(((await sessionRow(hash))!.last_seen_at as Date).getTime(), before.getTime(), `${alg}: GET session did NOT move last_seen_at`);
-    // lock (a SESSION-class call) DOES move it: the control that makes the check above evidence
+    // lock (SESSION) revokes with reason lock (0085 / §72); also advances last_seen_at before the revoke (control vs PEEK)
     const lock = await call("POST", "lock", { headers: bearer(token), body: {} });
     assertEquals(lock.status, 200);
-    assert(((await sessionRow(hash))!.last_seen_at as Date).getTime() > before.getTime(), `${alg}: lock advanced last_seen_at (control)`);
+    const locked = await sessionRow(hash);
+    assert(((locked!.last_seen_at as Date).getTime() > before.getTime()), `${alg}: lock advanced last_seen_at (SESSION control)`);
+    assertEquals(locked!.revoke_reason, "lock", `${alg}: lock revokes with reason lock`);
+    assert(locked!.revoked_at != null, `${alg}: lock sets revoked_at`);
+    // same token is dead: post-lock sign-out must not succeed
     const out = await call("POST", "sign-out", { headers: bearer(token), body: {} });
-    assertEquals(out.status, 200);
-    assertEquals((await sessionRow(hash))!.revoke_reason, "sign_out");
+    assertEquals(out.status, 401, `${alg}: post-lock sign-out on the same token is refused`);
+    assertEquals((await sessionRow(hash))!.revoke_reason, "lock", `${alg}: revoke_reason stays lock (not overwritten by sign-out)`);
     const after = await call("GET", "session", { headers: bearer(token) });
     assertEquals(after.status, 401);
     assertEquals(await after.text(), UNIFORM_401);
@@ -442,9 +446,10 @@ Deno.test("section 8: an assertion under a credential id nobody holds is the uni
 // 4.1: an aal 1 operator session; reauth (PA-27); the member rate limit
 // =============================================================================================================================================================
 
-Deno.test("4.1 / PA-28: an aal 1 OPERATOR with no confirmed TOTP can GET session, lock, sign out, and reauth/options (A0_ENROL); normal A0 stays refused", DT, async () => {
+Deno.test("4.1 / PA-28: an aal 1 OPERATOR with no confirmed TOTP can GET session, lock, and reauth/options (A0_ENROL); normal A0 stays refused", DT, async () => {
   const auth = await enrol(OPERATOR);
   const token = await signIn(auth);
+  const hash = await sha256Hex(token);
   const who = await call("GET", "session", { headers: bearer(token) });
   assertEquals(who.status, 200);
   const info = (await who.json()).data as { requiredAal: number; aal: number };
@@ -452,10 +457,12 @@ Deno.test("4.1 / PA-28: an aal 1 OPERATOR with no confirmed TOTP can GET session
   // S1.4: reauth is A0_ENROL — reachable at aal 1 only while TOTP is unconfirmed (matrix 31 proves the post-confirm refusal).
   assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 200);
   assertEquals((await call("POST", "lock", { headers: bearer(token), body: {} })).status, 200);
-  assertEquals((await call("POST", "sign-out", { headers: bearer(token), body: {} })).status, 200);
+  assertEquals((await sessionRow(hash))!.revoke_reason, "lock");
+  // lock revokes: post-lock sign-out on the same token is refused (do not expect 200)
+  assertEquals((await call("POST", "sign-out", { headers: bearer(token), body: {} })).status, 401);
 });
 
-Deno.test("reauth: the session's own credential sets reauth_until (5 minutes); lock clears it; PA-27: another person's valid passkey is refused and nothing is written", DT, async () => {
+Deno.test("reauth: the session's own credential sets reauth_until (5 minutes); lock revokes; PA-27: another person's valid passkey is refused and nothing is written", DT, async () => {
   const auth = await enrol(STAFF);
   const other = freshUuid();
   await createTestUser(other, "reauth-other-" + other.slice(0, 8));
@@ -500,10 +507,10 @@ Deno.test("reauth: the session's own credential sets reauth_until (5 minutes); l
   const body = { challengeToken: ch.challengeToken, credential: await assertion(auth, ch) };
   assertEquals((await call("POST", "reauth", { headers: bearer(token), body })).status, 200);
   assertEquals((await call("POST", "reauth", { headers: bearer(token), body })).status, 403, "a replay");
-  // lock clears the window and keeps the session live
+  // lock revokes the session (0085 / §72); the old token is dead
   assertEquals((await call("POST", "lock", { headers: bearer(token), body: {} })).status, 200);
-  assertEquals((await sessionRow(hash))!.reauth_until, null, "lock cleared the reauth window");
-  assertEquals((await call("GET", "session", { headers: bearer(token) })).status, 200, "the session is still live");
+  assertEquals((await sessionRow(hash))!.revoke_reason, "lock", "lock revokes with reason lock");
+  assertEquals((await call("GET", "session", { headers: bearer(token) })).status, 401, "the session is dead after lock");
 });
 
 Deno.test("reauth / 17.8: a signature the Edge passed and the database refuses writes an audit_log row that COMMITS (the verifier-owned writer sets nothing)", DT, async () => {

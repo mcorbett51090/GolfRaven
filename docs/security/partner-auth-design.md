@@ -1659,7 +1659,7 @@ The first real version of `apps/partners`, the staff, operator and admin portal 
   - **Order (MEDIUM-2).** Lock and sign-out copy the token into a local variable, **wipe it and notify the listeners (the screen goes to sign-in) before anything is sent**, then send with the copy and drop the copy as soon as `fetch` has been called. The screen is therefore signed-out, and the page holds no copy of the token, while a revoking request that never answers is still hanging (Playwright: a `POST sign-out` that is received and never answered, then a V8 heap search for the token: absent, with the positive control that it was present while signed in). If the request fails or times out the plain notice is replaced by the honest "the server could not be told" one, and only if nothing newer has happened. Lock and Sign-out stay enabled while a refresh is busy, and a wipe aborts every authenticated request still in flight.
   - **Why.** The passkey proves the device, not the person (4.1), the in-memory token is stealable by a script on the page (4.6, mitigated by the CSP and not removed), and a locked-but-live session is a valid bearer for up to its idle window, which the old lock itself restarted. Revoking closes that window at the lock. The cost, accepted: **a lock is no longer cheap to undo** (resuming is a full passkey sign-in, as it already was; it now also opens a new session rather than leaving the old one idle).
   - **Cell.** After a lock the old token is refused by the real handler (`server.state.revokedSessions.size === 1`, the old bearer gets the uniform 401): `contract.test.ts`, `controller.test.ts` and the Playwright lock cell.
-  - **Server follow-up, NOT in this slice (no database or migration change here):** retire `private.partner_session_lock_for_partner` (0049) **or** make it revoke with `revoke_reason = 'lock'`; and **any non-revoking lock that remains must authorize as PEEK** (a lock that clears grants but keeps a live session must not count as activity and restart the idle clock, as the 0049 function does today). Until then the `lock` route stays callable by a future client but this page does not call it.
+  - **Server follow-up (closed in §72 / migration `0085`):** `private.partner_session_lock_for_partner` now **revokes** with `revoke_reason = 'lock'` (make-revoke; function kept). The PWA Lock UI still sends `POST sign-out` and does not call the `lock` route.
   - What was here before (the old "wipe only" lock, its server-side effect on `pin_grant_until`, `reauth_until` and `otp_proof_until`, and the three options put to the gate) is kept in git history at `41cfbfd`; option (2) was chosen.
 - **The page refuses sign-in options that weaken the ceremony.** The server sets `userVerification: "required"` and an empty `allowCredentials` (6.2); the client does not trust that blindly and never calls the browser for anything else.
 - **`GET session` follows every sign-in**, so the home screen shows what the server computed rather than what the client assumed (the aal and the required aal are shown side by side).
@@ -1761,7 +1761,7 @@ The threat model the gate applied: **a shared shop iPad. The browser must never 
 
 - **The target device is an iPad, so Safari/WebKit matters, and no WebKit was available here.** Whether WebKit enters the page into its page cache, whether it honours `Cache-Control: no-store` for that, and whether the keepalive sign-out is delivered when the page is hidden are all `[unverified]`. What does not depend on any of that: the in-memory wipe in `pagehide` and the forced signed-out in `pageshow` are synchronous and local, so a restored page shows sign-in and holds no token; the server-side revoke is the best-effort part.
 - A full second passkey sign-in after a V8 heap snapshot in the same page failed once with "The passkey could not be used" in the Playwright harness (cause not isolated), so the hung-lock cell does not repeat a sign-in after its heap checks; the second sign-in while an old revoke hangs is a controller unit cell instead.
-- The server follow-up in 20.4 (retire or make revoking `partner_session_lock_for_partner`; any non-revoking lock authorizes as PEEK) is **not** in this slice.
+- The server follow-up in 20.4 (make-revoke `partner_session_lock_for_partner` with `revoke_reason = 'lock'`) is closed in **§72** / migration `0085`.
 
 **Verification (this round)**
 
@@ -1802,7 +1802,7 @@ The rulings:
   - The structural fix is a dedicated partners API host that proxies only `partner-*` functions, so `connect-src` can be host-scoped (ties to owner question Q1).
   - Optional hardening: the partner handlers refuse a raw path containing `%2F`, `%5C` or `%2E` with a 400.
 - **Auto-lock on `visibilitychange` is a product decision.** Should the shop iPad lock after being hidden for N seconds? A backgrounded tab or an auto-locked screen keeps a signed-in page until server idle expiry. This is not a regression; it is the owner's call.
-- **Server follow-up from 20.4:** retire `partner_session_lock_for_partner`, or make it revoke with `revoke_reason = 'lock'`. Any lock that does not revoke must authorize as PEEK. The page no longer calls it.
+- **Server follow-up from 20.4:** closed in **§72** / migration `0085` — `partner_session_lock_for_partner` revokes with `revoke_reason = 'lock'`. The page still sends `POST sign-out` for Lock UI.
 - **NIT (S1.2 server code):** `ROUTE_METHODS[route]` is a plain object lookup, so `/partner-session/constructor` gives 405 rather than 404. Use `Object.hasOwn` or a null-prototype map the next time that code is touched.
 - **NIT:** `no-store` covers only `/` and `/index.html`. If the host falls back to `index.html` for unknown paths, those copies are covered only by the `pagehide`/`pageshow` handlers. Optionally use `/*` with `! Cache-Control` in the `/assets/*` block.
 
@@ -1847,7 +1847,7 @@ The partner (staff) **operator/admin TOTP factor**: `aal` 2, the five-minute MFA
 | **PA-24** (enrol / confirm / reset) | enrol refused once confirmed; first enrol needs enrolment or OTP proof; unconfirmed re-enrol bumps seed; confirm same session only; reset admin-only lite | matrix 31; unit `partner-totp-handler.test.ts` (enrol body, already_confirmed 409, confirm session statuses) |
 | **PA-28** (aal 1 enrol window) | A0_ENROL at aal 1 only with no confirmed TOTP; after confirm the same calls refuse at aal 1 | matrix 31 |
 | **HOTP RFC vector** | TypeScript `hotpSha1` matches node:crypto reference and the six Appendix B counters | `partner-totp-vectors.test.ts` |
-| **Lock clears `mfa_until`** | `partner_session_lock_for_partner` calls `partner_totp_mfa_clear` (verifier-owned) | matrix 31 (and the migration grants assertion) |
+| **Lock clears `mfa_until`** | was 0053: `partner_session_lock_for_partner` called `partner_totp_mfa_clear`; **superseded by §72 / 0085** — lock revokes the row (`revoke_reason = 'lock'`), so `mfa_until` is moot | matrix 31 (revoked row); matrix 63 |
 | **`otp_proof` spend on enrol/confirm** | wrappers clear `otp_proof_until` on `ok` only (same transaction) | matrix 31 |
 | **Edge routes** | strict bodies, status→HTTP map, COMMIT on every status, otpauth assembly, Origin refusal | `partner-totp-handler.test.ts` |
 
@@ -3466,12 +3466,39 @@ Numbering: **migration `0084`, matrix `62`, this section 71.** Closes the automa
 
 ### 71.3 Not built, honestly
 
-- Credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Session-lock make-revoke (`partner_session_lock_for_partner` → `revoke_reason = 'lock'`) → §72; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 71.4 Verification
 
-Branch: `cursor/p5-pepper-previous-purge-8ffd` (base after #110 / `6ac6ec8`).
+Squash-merged as `21bf562` (#111). Branch: `cursor/p5-pepper-previous-purge-8ffd` (base after #110 / `6ac6ec8`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (Files=83, Tests=5939; matrix 62 ok; 20 / 24 / 30 privilege / pepper-namer lists).
 - Deno integration **390 passed**; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 72. As built: partner session lock revokes with reason lock
+
+Numbering: **migration `0085`, matrix `63`, this section 72.** Closes the 20.4 / 20.12 server follow-up left open by S7a and named in §71.3: make `private.partner_session_lock_for_partner` revoke with `revoke_reason = 'lock'` (function kept; do not retire). PWA Lock UI stays on `POST sign-out` — no `apps/partners` behaviour change this slice.
+
+### 72.1 What was built
+
+- **`CREATE OR REPLACE private.partner_session_lock_for_partner() RETURNS void`** — same owner/ACL/signature as today (`private_definer`, `EXECUTE` for `edge_partner` only, class `SESSION`). Body mirrors `partner_session_revoke_for_partner`: `partner_authorize(..., 'SESSION')` → `partner_binding_session()` → `UPDATE` `revoked_at` + `revoke_reason = 'lock'` where `revoked_at IS NULL`. No PIN/reauth/OTP/mfa clears before revoke (redundant once the row is dead).
+- **Inventory / COMMENT** — note records revoke-with-reason-lock; COMMENT updated.
+- **pgTAP matrix 63** + collateral flips in matrices 27 / 28 / 31 (live-after-lock → revoked; mfa clear → row dead) and Deno PA-12 / reauth / PA-28 (assert `revoke_reason = 'lock'`; do not expect successful post-lock sign-out on the same token).
+
+### 72.2 Decisions and departures
+
+- **Make-revoke, not retire** — the `lock` route stays callable; the page still does not call it (20.4: `POST sign-out` alone is enough for Lock UI).
+- **Revoke-only body** — clearing grants on a dead session was redundant; `partner_totp_mfa_clear` remains for other callers but is no longer invoked from lock.
+- **Class stays SESSION** — lock still advances `last_seen_at` (authorize) then revokes; a non-revoking lock would have needed PEEK, but that path is gone.
+
+### 72.3 Not built, honestly
+
+- PWA Lock UI switch from `POST sign-out` to `POST lock`; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 72.4 Verification
+
+Branch: `cursor/p5-session-lock-revoke-8ffd` (base after #111 / `21bf562`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 63 ok; 27 / 28 / 31 collateral).
+- Deno partner-session integration green for the PA-12 / lock area.
 

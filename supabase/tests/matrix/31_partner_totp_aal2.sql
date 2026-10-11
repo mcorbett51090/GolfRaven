@@ -468,7 +468,7 @@ RESET ROLE;
 ROLLBACK TO SAVEPOINT pa28_after;
 
 -- ----------------------------------------------------------------------------
--- 6. lock clears mfa_until; staff cannot enrol
+-- 6. lock revokes (row dead; 0085 / §72); staff cannot enrol
 -- ----------------------------------------------------------------------------
 SAVEPOINT lock_mfa;
 SELECT pg_temp.seed_step('op', '{"mfa_s": 240}'::jsonb);
@@ -476,7 +476,7 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
 SELECT private.partner_session_lock_for_partner();
 RESET ROLE;
-SELECT is((SELECT mfa_until IS NULL FROM app.partner_session WHERE token_hash = pg_temp.th('op')), true, 'lock clears mfa_until through partner_totp_mfa_clear');
+SELECT is((SELECT revoked_at IS NOT NULL AND revoke_reason = 'lock' FROM app.partner_session WHERE token_hash = pg_temp.th('op')), true, 'lock revokes with reason lock (row dead; mfa_until moot)');
 ROLLBACK TO SAVEPOINT lock_mfa;
 
 SAVEPOINT staff_enrol;
