@@ -79,7 +79,8 @@ export type Notice =
         | "member-recovered"
         | "member-revoked"
         | "org-revoke-all"
-        | "member-totp-reset";
+        | "member-totp-reset"
+        | "admin-enrolment";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -248,6 +249,10 @@ export type WorkView =
         readonly sessions: number;
         readonly credentials: number;
       } | null;
+      /** Target user id draft for admin enrolment issue (§87). */
+      readonly adminEnrolUserIdDraft: string;
+      /** Plaintext `gr_enr_…` / enrolUrl shown once after admin enrolment issue; cleared on dismiss or leave. */
+      readonly adminEnrolment: MemberRecovered | null;
     }
   | {
       readonly kind: "credentials";

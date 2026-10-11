@@ -941,3 +941,76 @@ describe("§86 member TOTP reset under reach (admin, A3)", () => {
     expect(s.w.server.log.some((r) => r.path.includes("/totp-reset"))).toBe(false);
   });
 });
+
+describe("§87 admin enrolment issue (admin, A3)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_ADMIN = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const adminWhoami = {
+    aal: 2,
+    requiredAal: 2,
+    isAdmin: true,
+    memberships: [{ orgId: ORG, role: "operator", facilityIds: [FACILITY], trailIds: [] }],
+  };
+  const adminLowAal = {
+    aal: 1,
+    requiredAal: 2,
+    isAdmin: true,
+    memberships: [{ orgId: ORG, role: "operator", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupAdmin(whoami: typeof adminWhoami) {
+    const w = makeWorld({ whoami });
+    await w.server.seedPin(PIN);
+    w.server.seedAdminUser(OTHER_ADMIN);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("issues a one-time enrolment link when the admin holds aal 2", async () => {
+    const s = await setupAdmin(adminWhoami);
+    s.controller.openMembers();
+    s.controller.setAdminEnrolUserId(OTHER_ADMIN);
+    await s.controller.issueAdminEnrolment();
+    expect(home(s.controller).notice).toEqual({ kind: "admin-enrolment" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") {
+        expect(w.adminEnrolment).not.toBeNull();
+        expect(w.adminEnrolment?.token.startsWith("gr_enr_")).toBe(true);
+        expect(w.adminEnrolment?.enrolUrl).toContain("#gr_enr_");
+      }
+    }
+    const calls = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-members/admin/enrolments"));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body)).toEqual({ userId: OTHER_ADMIN });
+    s.controller.dismissAdminEnrolment();
+    {
+      const w = home(s.controller).work;
+      if (w?.kind === "members") expect(w.adminEnrolment).toBeNull();
+    }
+  });
+
+  it("refuses without aal 2 and does not call the server", async () => {
+    const s = await setupAdmin(adminLowAal);
+    s.controller.openMembers();
+    s.controller.setAdminEnrolUserId(OTHER_ADMIN);
+    await s.controller.issueAdminEnrolment();
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.needTotp" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/admin/enrolments"))).toBe(false);
+  });
+
+  it("refuses issuing for oneself without calling the server", async () => {
+    const s = await setupAdmin(adminWhoami);
+    const selfId = home(s.controller).session.userId;
+    s.controller.openMembers();
+    s.controller.setAdminEnrolUserId(selfId);
+    await s.controller.issueAdminEnrolment();
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.adminEnrolSelf" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/admin/enrolments"))).toBe(false);
+  });
+});

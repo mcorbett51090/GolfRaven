@@ -380,6 +380,57 @@ export function workView(state: SignedInState, controller: AppController, locale
             ),
           )
         : null,
+      state.session.isAdmin
+        ? h(
+            "section",
+            { "data-testid": "admin-enrolment" },
+            h("h2", {}, t("members.adminEnrol.title")),
+            h("p", { class: "muted" }, t("members.adminEnrol.hint")),
+            work.adminEnrolment !== null
+              ? h(
+                  "div",
+                  { role: "status", "data-testid": "admin-enrolment-issued" },
+                  h("p", {}, t("members.adminEnrol.lead")),
+                  h("p", { "data-testid": "admin-enrol-token" }, work.adminEnrolment.token),
+                  h("p", { "data-testid": "admin-enrol-url" }, work.adminEnrolment.enrolUrl),
+                  h("p", { class: "muted" }, t("members.adminEnrol.until", { until: work.adminEnrolment.expiresAt })),
+                  h(
+                    "button",
+                    { type: "button", disabled: busy, "data-testid": "admin-enrol-dismiss", onclick: () => controller.dismissAdminEnrolment() },
+                    t("members.adminEnrol.dismiss"),
+                  ),
+                )
+              : h(
+                  "div",
+                  { class: "actions" },
+                  h(
+                    "label",
+                    { class: "field" },
+                    h("span", {}, t("members.adminEnrol.userId")),
+                    h("input", {
+                      type: "text",
+                      autocomplete: "off",
+                      spellcheck: "false",
+                      disabled: busy,
+                      value: work.adminEnrolUserIdDraft,
+                      "data-testid": "admin-enrol-user-id",
+                      onchange: (e: Event) => controller.setAdminEnrolUserId((e.target as HTMLInputElement).value),
+                    }),
+                  ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "primary",
+                      disabled: busy,
+                      "data-testid": "admin-enrol-issue",
+                      onclick: () => void controller.issueAdminEnrolment(),
+                    },
+                    t("members.adminEnrol.action"),
+                  ),
+                ),
+          )
+        : null,
       work.rows !== null
         ? work.rows.length === 0
           ? h("p", { "data-testid": "members-empty" }, t("members.empty"))
