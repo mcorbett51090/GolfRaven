@@ -1423,6 +1423,23 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         const members = memberRoster.filter((m) => orgId === null || orgId === "" || m.orgId === orgId);
         return ok(200, { members });
       }
+      const pinResetMatch = /^members\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/pin-reset$/i.exec(route);
+      if (pinResetMatch !== null && req.method === "POST") {
+        if (!canListMembers()) return err(403, "forbidden");
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const target = pinResetMatch[1]!.toLowerCase();
+        if (target === session.userId) return err(422, "invalid_request");
+        if (!reachUsers.has(target)) return err(403, "forbidden");
+        const user = users.get(target);
+        if (user === undefined || user.pin === null) return err(409, "pin_not_set");
+        user.pin.locked = false;
+        user.pin.failures = 0;
+        user.pin.backoffUntil = 0;
+        user.pin.mustChange = true;
+        return ok(200, { reset: true });
+      }
       if (route === "credentials" && req.method === "GET") {
         const target = url.searchParams.get("userId");
         const ownerId = target === null || target === "" ? session.userId : target.toLowerCase();
@@ -1671,6 +1688,15 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         createdAt: "2026-01-01T00:00:00.000Z",
       });
       reachUsers.add(id);
+      if (!users.has(id)) {
+        users.set(id, {
+          id,
+          email: `${id.slice(0, 8)}@partners.example.test`,
+          memberships: [{ orgId, role, facilityIds: facilityId === null ? [] : [facilityId], trailIds: [] }],
+          pin: null,
+          totp: null,
+        });
+      }
     },
     seedCredentialForUser(userId, id = randomUUID()) {
       const owner = userId.toLowerCase();

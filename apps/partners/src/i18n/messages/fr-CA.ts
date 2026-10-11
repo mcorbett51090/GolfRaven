@@ -489,11 +489,16 @@ export const frCA: Record<MessageKey, string> = {
   "notice.credentialAdded": "Clé d'accès ajoutée.",
 
   "members.title": "Clés d'accès de l'équipe",
-  "members.hint": "Personnes dans les installations que vous gérez. Ouvrez une personne pour modifier une note d'affichage ou révoquer une clé d'accès. Le courriel n'est pas affiché.",
+  "members.hint": "Personnes dans les installations que vous gérez. Ouvrez une personne pour modifier une note d'affichage ou révoquer une clé d'accès, ou réinitialisez un NIP verrouillé. Le courriel n'est pas affiché.",
   "members.load": "Charger l'équipe",
   "members.empty": "Aucun membre d'équipe dans la portée de vos installations.",
   "members.role": "Rôle",
   "members.user": "Membre",
   "members.openCredentials": "Gérer les clés d'accès",
+  "members.resetPin": "Réinitialiser le NIP",
   "members.back": "Retour à l'équipe",
+  "members.pinSelf": "Vous ne pouvez pas réinitialiser votre propre NIP ici. Utilisez Définir ou changer le NIP sur l'écran d'accueil.",
+  "members.pinNotSet": "Cette personne n'a pas de NIP à réinitialiser.",
+  "members.notFound": "Ce membre de l'équipe est introuvable.",
+  "notice.memberPinReset": "NIP réinitialisé. La personne devra en définir un nouveau à la prochaine action sensible.",
 };

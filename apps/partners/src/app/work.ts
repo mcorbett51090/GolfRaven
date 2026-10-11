@@ -17,6 +17,7 @@ import {
   listMembers,
   patchCredentialNote,
   registerCredential,
+  resetMemberPin as postMemberPinReset,
   revokeCredential as deleteCredential,
 } from "../api/members-routes";
 import type { WhoAmI } from "../api/types";
@@ -103,6 +104,8 @@ export interface WorkScreens {
   loadMembers(): Promise<void>;
   /** Open credentials for a roster member under reach (no add). */
   openMemberCredentials(userId: string): void;
+  /** Class A2: reauth + PIN, then POST members/{id}/pin-reset under reach. Never for oneself. */
+  resetMemberPin(userId: string): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -749,7 +752,33 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         if (cur !== null && cur.work?.kind === "members") host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
       } catch (e) {
         const cur = live(host, grant);
-        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    async resetMemberPin(userId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.pinSelf" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await postMemberPinReset(api, target);
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: { kind: "member-pin-reset" } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
       }
     },
 

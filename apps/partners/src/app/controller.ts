@@ -112,6 +112,7 @@ export interface AppController extends StepUp {
   openMembers(): void;
   loadMembers(): Promise<void>;
   openMemberCredentials(userId: string): void;
+  resetMemberPin(userId: string): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -401,6 +402,7 @@ export function createController(deps: ControllerDeps): AppController {
     openMembers: () => work.openMembers(),
     loadMembers: () => work.loadMembers(),
     openMemberCredentials: (userId) => work.openMemberCredentials(userId),
+    resetMemberPin: (userId) => work.resetMemberPin(userId),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

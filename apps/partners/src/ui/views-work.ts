@@ -315,6 +315,16 @@ export function workView(state: SignedInState, controller: AppController, locale
                       },
                       t("members.openCredentials"),
                     ),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        disabled: busy || m.userId.toLowerCase() === state.session.userId.toLowerCase(),
+                        "data-testid": `member-pin-reset-${m.userId}`,
+                        onclick: () => void controller.resetMemberPin(m.userId),
+                      },
+                      t("members.resetPin"),
+                    ),
                   ),
                 ),
               ),
