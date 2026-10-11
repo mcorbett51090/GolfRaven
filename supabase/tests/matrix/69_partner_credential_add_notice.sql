@@ -159,7 +159,11 @@ SELECT private.bind_partner_session(:'th_sx');
 RESET ROLE;
 SELECT throws_ok($$SELECT pg_temp.call_reach()$$, '42501', NULL,
   'staff cannot call list_reach (manager|operator only)');
-ROLLBACK TO SAVEPOINT staff_fail;
+-- RELEASE (not ROLLBACK): ROLLBACK TO SAVEPOINT restores __tcache__.curr_test to
+-- the pre-savepoint value while __tresults___numb_seq does not roll back, so
+-- finish() would see "planned 14 but ran 5". Same reason matrix 68 keeps a
+-- final assertion outside rolled-back savepoints.
+RELEASE SAVEPOINT staff_fail;
 
 SELECT * FROM finish();
 ROLLBACK;
