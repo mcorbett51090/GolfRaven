@@ -11,7 +11,7 @@
 
 import type { PartnerApi } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
-import { getCredentials, patchCredentialNote } from "../api/members-routes";
+import { getCredentials, patchCredentialNote, revokeCredential as deleteCredential } from "../api/members-routes";
 import type { WhoAmI } from "../api/types";
 import {
   getCollectQueue,
@@ -86,6 +86,8 @@ export interface WorkScreens {
   openCredentials(): void;
   loadCredentials(): Promise<void>;
   saveCredentialNote(id: string, note: string): Promise<void>;
+  /** Class A2: reauth + PIN, then DELETE. Refuses when this is the only active passkey. */
+  revokeCredential(id: string): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -734,6 +736,37 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
             work: { ...cur.work, rows, lastSavedId: credId },
             notice: { kind: "credential-note-saved" },
           });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
+    async revokeCredential(id) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      if (!UUID_RE.test(id)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const active = (s.work.rows ?? []).filter((c) => c.revokedAt === null);
+      if (active.length <= 1) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "credentials.lastActive" } } });
+        return;
+      }
+      const grant = s.grant;
+      const credId = id.toLowerCase();
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await deleteCredential(api, credId);
+        const listed = await getCredentials(api);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "credential-revoked" } });
         }
       } catch (e) {
         const cur = live(host, grant);

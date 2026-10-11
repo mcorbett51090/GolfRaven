@@ -3521,11 +3521,39 @@ Numbering: **matrix n/a (PWA only), this section 73.** Closes the §72.3 leftove
 
 ### 73.3 Not built, honestly
 
-- Credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Credential revoke UI (own, A2) → §74; second-credential add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 73.4 Verification
 
-Branch: `cursor/p5-lock-ui-post-lock-8ffd` (base after #112 / `5cfd70b`).
+Squash-merged as `d6ef09f` (#113). Branch: `cursor/p5-lock-ui-post-lock-8ffd` (base after #112 / `5cfd70b`).
 
-- `@golfraven/partners` vitest **986 passed** (lock → `POST lock`, `lockCalls === 1`); typecheck clean; Playwright e2e deferred to CI (Chromium not in this agent image); no Edge / migration change.
+- `@golfraven/partners` vitest **986 passed** (lock → `POST lock`, `lockCalls === 1`); typecheck clean; CI green (incl. Playwright); no Edge / migration change.
+
+## 74. As built: partners credential revoke UI (own, A2)
+
+Numbering: **matrix n/a (PWA only), this section 74.** Closes part of the §73.3 leftover: revoke an **own** passkey from the credentials screen under class A2 (passkey reauth + PIN grant), via existing `DELETE partner-members/credentials/{id}`. Second-credential add and reach-rule note edits stay later. No migration, no UI flag flips.
+
+### 74.1 What was built
+
+- **`apps/partners/src/api/members-routes.ts`** — `revokeCredential(api, id)` → `DELETE credentials/{id}`; maps 404 → `not_found`, 409 → `already_revoked`.
+- **Work screen** — `revokeCredential(id)`: `reauthWithPasskey` then `requirePin("A2")` then DELETE then reload list; notice `credential-revoked`.
+- **Last active refuse** — if only one active passkey, no DELETE (client `credentials.lastActive`); recovery stays the manager path.
+- **Fake partner server** — DELETE on own credential; CORS allow-methods include DELETE; already-revoked → 409.
+- **i18n** EN + fr-CA; Vitest covers A2 order + last-active refuse.
+
+### 74.2 Decisions and departures
+
+- **Own list only** — GET credentials is own-scoped; reach-rule revoke of another's passkey stays Edge-only (managers use recover).
+- **Add stays out** — `POST credentials/options` + register remain later UI.
+- **Last passkey** — client refuses; DB still allows (recovery / reach paths).
+
+### 74.3 Not built, honestly
+
+- Second-credential add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 74.4 Verification
+
+Branch: `cursor/p5-credential-revoke-ui-8ffd` (base after #113 / `d6ef09f`).
+
+- `@golfraven/partners` vitest **994 passed** (credentials revoke A2 + last-active refuse); typecheck clean; no Edge / migration change.
 

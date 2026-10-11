@@ -347,3 +347,54 @@ describe("§67 credentials display-note screen", () => {
     expect(patches).toHaveLength(0);
   });
 });
+
+describe("§74 credentials revoke (own, A2)", () => {
+  const SEEDED_CRED = "11111111-1111-4111-8111-111111111111";
+  const EXTRA_CRED = "22222222-2222-4222-8222-222222222222";
+
+  it("refuses to revoke the only active passkey without calling the server", async () => {
+    const s = await setup();
+    s.controller.openCredentials();
+    await s.controller.loadCredentials();
+    await s.controller.revokeCredential(SEEDED_CRED);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "credentials.lastActive" } });
+    const deletes = s.w.server.log.filter((r) => r.method === "DELETE" && r.path.includes("/partner-members/credentials/"));
+    expect(deletes).toHaveLength(0);
+    expect(s.w.server.log.some((r) => r.path.endsWith("/reauth/options"))).toBe(false);
+  });
+
+  it("revokes a second passkey after reauth + A2 PIN, then reloads the list", async () => {
+    const s = await setup();
+    s.w.server.seedExtraCredential(EXTRA_CRED);
+    s.controller.openCredentials();
+    await s.controller.loadCredentials();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows).toHaveLength(2);
+    }
+
+    const pending = s.controller.revokeCredential(EXTRA_CRED);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for credential revoke");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "credential-revoked" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") {
+        expect(w.rows).toHaveLength(1);
+        expect(w.rows?.[0]?.id).toBe(SEEDED_CRED);
+      }
+    }
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth"))).toBe(true);
+    const pinPosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/step-up/pin"));
+    expect(pinPosts).toHaveLength(1);
+    expect(JSON.parse(pinPosts[0]!.body).derived).not.toContain(PIN);
+    const deletes = s.w.server.log.filter((r) => r.method === "DELETE" && r.path.endsWith(`/partner-members/credentials/${EXTRA_CRED}`));
+    expect(deletes).toHaveLength(1);
+  });
+});

@@ -285,6 +285,7 @@ export function workView(state: SignedInState, controller: AppController, locale
       h("h1", { tabindex: "-1", "data-testid": "heading" }, t("credentials.title")),
       noticeElement(state.notice, locale),
       h("p", { class: "muted" }, t("credentials.hint")),
+      active !== null && active.length === 1 ? h("p", { class: "muted", "data-testid": "credentials-last-hint" }, t("credentials.lastHint")) : null,
       active !== null
         ? active.length === 0
           ? h("p", { "data-testid": "credentials-empty" }, t("credentials.empty"))
@@ -324,6 +325,17 @@ export function workView(state: SignedInState, controller: AppController, locale
                       "div",
                       { class: "actions" },
                       h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": `credential-save-${c.id}` }, t("credentials.save")),
+                      h(
+                        "button",
+                        {
+                          type: "button",
+                          class: "danger",
+                          disabled: busy || active.length <= 1,
+                          "data-testid": `credential-revoke-${c.id}`,
+                          onclick: () => void controller.revokeCredential(c.id),
+                        },
+                        t("credentials.revoke"),
+                      ),
                     ),
                   ),
                 ),

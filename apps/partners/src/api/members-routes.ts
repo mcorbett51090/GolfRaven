@@ -1,7 +1,7 @@
 /**
- * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67).
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74).
  *
- * List + display-note PATCH only (class A0). Revoke and add stay out of this surface.
+ * List + display-note PATCH (class A0); own revoke DELETE (class A2). Second-credential add stays out of this surface.
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -63,6 +63,22 @@ export async function patchCredentialNote(api: PartnerApi, id: string, note: str
   } catch (e) {
     if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
       throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
+    }
+    throw e;
+  }
+}
+
+/** DELETE credentials/{id} (class A2). 404 → `not_found`; 409 → `already_revoked`. */
+export async function revokeCredential(api: PartnerApi, id: string): Promise<void> {
+  try {
+    const data = await api.call("DELETE", "partner-members", `credentials/${id}`);
+    if (!isObject(data) || data["revoked"] !== true) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
+      throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
+    }
+    if (isPartnerApiError(e) && (e.code === "already_revoked" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "already_revoked" });
     }
     throw e;
   }

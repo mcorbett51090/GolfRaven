@@ -107,6 +107,8 @@ export interface FakeServer {
   };
   /** Gives a user a PIN, derived here exactly as the browser derives it (pin-contract.ts). Default user: the signed-in one. */
   seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean; failures?: number }): Promise<void>;
+  /** Adds a second (or further) active credential row for the signed-in user so revoke UI can be exercised (§74). */
+  seedExtraCredential(id?: string): string;
   /** What the server stores of a user's PIN (never the digits), or null. */
   pinRecord(userId?: string): { derived: string; salt: string; iterations: number; failures: number; locked: boolean; mustChange: boolean } | null;
   /** A new invite (branch N) for an address: the token the invite link would carry. */
@@ -749,7 +751,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         status: 204,
         headers: {
           "access-control-allow-origin": opts.pageOrigin,
-          "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+          "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
           "access-control-allow-headers": "authorization, content-type",
           "access-control-max-age": "600",
           vary: "Origin",
@@ -1417,6 +1419,14 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         entry[1].note = wire;
         return ok(200, { note: wire });
       }
+      if (credMatch !== null && req.method === "DELETE") {
+        const credId = credMatch[1]!.toLowerCase();
+        const entry = [...credentials.entries()].find(([, c]) => c.id === credId && c.userId === session.userId);
+        if (entry === undefined) return err(404, "not_found");
+        if (entry[1].revokedAt !== null) return err(409, "already_revoked");
+        entry[1].revokedAt = new Date().toISOString();
+        return ok(200, { revoked: true });
+      }
       return err(404, "not_found");
     }
 
@@ -1508,6 +1518,19 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       const salt = newPinSalt();
       const iterations = o.iterations ?? 210_000;
       user.pin = { salt, iterations, derived: await derivePinKey(pin, salt, iterations), failures: o.failures ?? 0, locked: o.locked === true, mustChange: o.mustChange === true, backoffUntil: 0 };
+    },
+    seedExtraCredential(id = "22222222-2222-4222-8222-222222222222") {
+      const key = toB64u(randomBytes(32));
+      credentials.set(key, {
+        id,
+        userId: USER_ID,
+        alg: -7,
+        publicKey: opts.credential.publicKeySpki,
+        signCount: 0,
+        note: null,
+        revokedAt: null,
+      });
+      return id;
     },
     pinRecord(userId = USER_ID) {
       const pin = users.get(userId)?.pin ?? null;
