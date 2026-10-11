@@ -3691,7 +3691,7 @@ Numbering: **migration `0089`, matrix `67`, this section 79.** Closes the §76.2
 
 ### 79.3 Not built, honestly
 
-- Org member roster GET → §80; partners PWA for others' credentials; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Org member roster GET → §80; partners PWA for others' credentials → §81; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 79.4 Verification
 
@@ -3719,11 +3719,39 @@ Numbering: **migration `0090`, matrix `68`, this section 80.** Closes the §79.3
 
 ### 80.3 Not built, honestly
 
-- Partners PWA for others' credentials; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Partners PWA for others' credentials → §81; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 80.4 Verification
 
-Branch: `cursor/p5-member-list-reach-8ffd` (base after #119 / `d02f88f`). Tip on PR #120.
+Squash-merged as `307fbd5` (#120). Branch: `cursor/p5-member-list-reach-8ffd` (base after #119 / `d02f88f`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 68 ok; 10 / 25 / 28 allowlists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 81. As built: partners PWA for others' credentials
+
+Numbering: **matrix n/a (PWA only), this section 81.** Closes the §80.3 leftover: managers / operators (and admins) pick a person from the org roster and list / note / revoke that person's passkeys under the reach rule, via existing `GET members`, `GET credentials?userId=`, `PATCH` / `DELETE credentials/{id}`. No migration, no Edge change, no UI flag flips.
+
+### 81.1 What was built
+
+- **`members-routes.ts`** — `listMembers(api, orgId?)`; `getCredentials(api, userId?)` (optional query).
+- **Work screens** — `members` roster kind; `credentials.targetUserId` for others (no add; no last-active refuse); own credentials unchanged (`targetUserId: null`).
+- **Home** — "Team passkeys" for manager|operator|admin (`canOpenMemberCredentials`).
+- **Fake partner server** — `GET members`, credentials `?userId=`, reach PATCH/DELETE, `seedMember` / `seedCredentialForUser`; request log `search`.
+- **i18n** EN + fr-CA; Vitest covers roster → note → sole-credential revoke (A2) and staff gate.
+
+### 81.2 Decisions and departures
+
+- **No add for others** — second-credential register stays own-only (A2 + create ceremony on the target device).
+- **Actor's A2** — revoke under reach still needs the manager's passkey reauth + PIN, not the target's.
+- **Last active** — client refuse applies only to own list; under reach a sole passkey may be revoked (matches DB / recover path).
+
+### 81.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 81.4 Verification
+
+Branch: `cursor/p5-credential-others-ui-8ffd` (base after #120 / `307fbd5`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (team credentials under reach); typecheck clean; no Edge / migration change.
 

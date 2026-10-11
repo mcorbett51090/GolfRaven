@@ -14,6 +14,7 @@ import { isPartnerApiError } from "../api/errors";
 import {
   credentialOptions,
   getCredentials,
+  listMembers,
   patchCredentialNote,
   registerCredential,
   revokeCredential as deleteCredential,
@@ -93,16 +94,27 @@ export interface WorkScreens {
   openCredentials(): void;
   loadCredentials(): Promise<void>;
   saveCredentialNote(id: string, note: string): Promise<void>;
-  /** Class A2: reauth + PIN, then DELETE. Refuses when this is the only active passkey. */
+  /** Class A2: reauth + PIN, then DELETE. Refuses when this is the only active passkey (own list only). */
   revokeCredential(id: string): Promise<void>;
-  /** Class A2: reauth once; PIN → options; create; PIN → register. Refuses at five active. */
+  /** Class A2: reauth once; PIN → options; create; PIN → register. Own list only; refuses at five active. */
   addCredential(): Promise<void>;
+  /** Manager / operator / admin: org roster under facility scope (§80 / §81). */
+  openMembers(): void;
+  loadMembers(): Promise<void>;
+  /** Open credentials for a roster member under reach (no add). */
+  openMemberCredentials(userId: string): void;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
 export function canOpenOfferRedeem(session: WhoAmI): boolean {
   if (session.isAdmin) return true;
   return session.memberships.some((m) => m.role === "staff" || m.role === "manager");
+}
+
+/** Manager or operator of a facility (or platform admin) may open the team passkeys roster. */
+export function canOpenMemberCredentials(session: WhoAmI): boolean {
+  if (session.isAdmin) return true;
+  return session.memberships.some((m) => m.role === "manager" || m.role === "operator");
 }
 
 export interface WorkDeps {
@@ -247,7 +259,29 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
     openCredentials() {
       const s = signedIn(host);
       if (s === null || s.busy !== null || s.panel !== null) return;
-      withWork(s, { kind: "credentials", busy: false, rows: null, lastSavedId: null }, null);
+      withWork(s, { kind: "credentials", busy: false, rows: null, lastSavedId: null, targetUserId: null }, null);
+    },
+
+    openMembers() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      withWork(s, { kind: "members", busy: false, rows: null }, null);
+    },
+
+    openMemberCredentials(userId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      withWork(s, {
+        kind: "credentials",
+        busy: false,
+        rows: null,
+        lastSavedId: null,
+        targetUserId: userId.toLowerCase(),
+      }, null);
     },
 
     closeWork() {
@@ -704,13 +738,29 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       );
     },
 
+    async loadMembers() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const rows = await listMembers(api);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
     async loadCredentials() {
       const s = signedIn(host);
       if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
       const grant = s.grant;
+      const targetUserId = s.work.targetUserId;
       host.set({ ...s, busy: "work", notice: null });
       try {
-        const listed = await getCredentials(api);
+        const listed = await getCredentials(api, targetUserId);
         const rows = listed.filter((c) => c.revokedAt === null);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "credentials") host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
@@ -735,10 +785,11 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       const wireNote = trimmed.length === 0 ? null : trimmed;
       const grant = s.grant;
       const credId = id.toLowerCase();
+      const targetUserId = s.work.targetUserId;
       host.set({ ...s, busy: "work", notice: null });
       try {
         await patchCredentialNote(api, credId, wireNote);
-        const listed = await getCredentials(api);
+        const listed = await getCredentials(api, targetUserId);
         const rows = listed.filter((c) => c.revokedAt === null);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "credentials") {
@@ -762,8 +813,10 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
         return;
       }
+      const targetUserId = s.work.targetUserId;
       const active = (s.work.rows ?? []).filter((c) => c.revokedAt === null);
-      if (active.length <= 1) {
+      // Own list only: refuse the last active passkey client-side. Under reach, sole-credential revoke is allowed (recovery path).
+      if (targetUserId === null && active.length <= 1) {
         host.set({ ...s, notice: { kind: "error", message: { key: "credentials.lastActive" } } });
         return;
       }
@@ -774,7 +827,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         await reauthWithPasskey(api, webauthn);
         await stepUp.requirePin("A2");
         await deleteCredential(api, credId);
-        const listed = await getCredentials(api);
+        const listed = await getCredentials(api, targetUserId);
         const rows = listed.filter((c) => c.revokedAt === null);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "credentials") {
@@ -789,6 +842,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
     async addCredential() {
       const s = signedIn(host);
       if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      if (s.work.targetUserId !== null) return;
       const active = (s.work.rows ?? []).filter((c) => c.revokedAt === null);
       if (active.length >= MAX_ACTIVE_CREDENTIALS) {
         host.set({ ...s, notice: { kind: "error", message: { key: "credentials.tooMany" } } });

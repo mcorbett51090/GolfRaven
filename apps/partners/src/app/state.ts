@@ -19,7 +19,7 @@ import type {
   TrailProgramme,
 } from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
-import type { PartnerCredential } from "../api/members-routes";
+import type { PartnerCredential, PartnerMember } from "../api/members-routes";
 import type {
   AttestKind,
   AttestResult,
@@ -230,10 +230,17 @@ export type WorkView =
       readonly export: SettlementExport | null;
     }
   | {
+      readonly kind: "members";
+      readonly busy: boolean;
+      readonly rows: readonly PartnerMember[] | null;
+    }
+  | {
       readonly kind: "credentials";
       readonly busy: boolean;
       readonly rows: readonly PartnerCredential[] | null;
       readonly lastSavedId: string | null;
+      /** null = own passkeys (add + last-active refuse). Set = manage under reach (no add). */
+      readonly targetUserId: string | null;
     };
 
 export type AppState =

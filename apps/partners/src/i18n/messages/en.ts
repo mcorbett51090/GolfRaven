@@ -172,6 +172,9 @@ export const en = {
   "home.credentials.title": "Passkeys",
   "home.credentials.button": "Manage passkeys",
   "home.credentials.hint": "List your passkeys, edit a short display note, add another passkey, or revoke one. Notes never affect sign-in.",
+  "home.members.title": "Team passkeys",
+  "home.members.button": "Manage team passkeys",
+  "home.members.hint": "List people in your facilities, then edit a display note or revoke a passkey under your reach. You cannot add a passkey for someone else.",
   "home.totp.title": "Second factor",
   "home.totp.enter": "Enter authenticator code",
   "home.totp.add": "Add an authenticator",
@@ -465,6 +468,8 @@ export const en = {
 
   "credentials.title": "Your passkeys",
   "credentials.hint": "Edit a display note (at most 40 characters), add another passkey, or revoke one. Add and revoke ask for a fresh passkey tap and your PIN.",
+  "credentials.othersTitle": "Team member passkeys",
+  "credentials.othersHint": "Edit a display note (at most 40 characters) or revoke a passkey. Revoke asks for your passkey tap and your PIN. You cannot add a passkey for this person.",
   "credentials.load": "Load passkeys",
   "credentials.add": "Add passkey",
   "credentials.empty": "No active passkeys on this account.",
@@ -481,6 +486,15 @@ export const en = {
   "notice.credentialNoteSaved": "Display note saved.",
   "notice.credentialRevoked": "Passkey revoked. Sessions that used it have ended.",
   "notice.credentialAdded": "Passkey added.",
+
+  "members.title": "Team passkeys",
+  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey. Email is not shown.",
+  "members.load": "Load team",
+  "members.empty": "No team members in your facility scope.",
+  "members.role": "Role",
+  "members.user": "Member",
+  "members.openCredentials": "Manage passkeys",
+  "members.back": "Back to team",
 } as const;
 
 export type MessageKey = keyof typeof en;

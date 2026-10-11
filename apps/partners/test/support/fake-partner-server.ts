@@ -59,6 +59,8 @@ export const USER_ID = "00000000-0000-4000-8000-0000000000a1";
 export interface LoggedRequest {
   readonly method: string;
   readonly path: string;
+  /** URL search including `?`, or empty. Used to assert GET query shapes (e.g. credentials?userId=). */
+  readonly search: string;
   readonly contentType: string | null;
   readonly authorization: string | null;
   readonly cookie: string | null;
@@ -109,6 +111,10 @@ export interface FakeServer {
   seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean; failures?: number }): Promise<void>;
   /** Adds a second (or further) active credential row for the signed-in user so revoke / add-cap UI can be exercised (§74 / §75). */
   seedExtraCredential(id?: string): string;
+  /** Seeds an org membership row for GET members and marks the user as under reach for credential list/note/revoke (§81). */
+  seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null }): void;
+  /** Adds an active credential for another user (must be seedMember'd for reach PATCH/DELETE). */
+  seedCredentialForUser(userId: string, id?: string): string;
   /** What the server stores of a user's PIN (never the digits), or null. */
   pinRecord(userId?: string): { derived: string; salt: string; iterations: number; failures: number; locked: boolean; mustChange: boolean } | null;
   /** A new invite (branch N) for an address: the token the invite link would carry. */
@@ -189,6 +195,17 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
   const sessions = new Map<string, FakeSession>();
   const users = new Map<string, FakeUser>();
   const credentials = new Map<string, FakeCredential>();
+  /** Org roster rows for GET partner-members/members (§80 / §81). */
+  const memberRoster: Array<{
+    userId: string;
+    orgId: string;
+    role: string;
+    facilityId: string | null;
+    invitedBy: string | null;
+    createdAt: string;
+  }> = [];
+  /** userIds whose credentials the signed-in actor may list / note / revoke under reach (seeded via seedMember). */
+  const reachUsers = new Set<string>();
   const invites = new Map<string, FakeInvite>();
   const usedGotrueSessions = new Set<string>();
   const log: LoggedRequest[] = [];
@@ -1387,9 +1404,31 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     }
 
     if (fn === "partner-members") {
+      const canListMembers = (): boolean => {
+        if (opts.whoami?.isAdmin === true) return true;
+        const user = users.get(session.userId);
+        if (user === undefined) return false;
+        return user.memberships.some((m) => {
+          if (typeof m !== "object" || m === null) return false;
+          const role = (m as { role?: unknown }).role;
+          return role === "manager" || role === "operator";
+        });
+      };
+      const canTouchCredential = (ownerId: string): boolean =>
+        ownerId === session.userId || reachUsers.has(ownerId);
+
+      if (route === "members" && req.method === "GET") {
+        if (!canListMembers()) return ok(200, { members: [] });
+        const orgId = url.searchParams.get("orgId");
+        const members = memberRoster.filter((m) => orgId === null || orgId === "" || m.orgId === orgId);
+        return ok(200, { members });
+      }
       if (route === "credentials" && req.method === "GET") {
+        const target = url.searchParams.get("userId");
+        const ownerId = target === null || target === "" ? session.userId : target.toLowerCase();
+        // Outside reach: empty list (no oracle), matching §79.
         const views = [...credentials.values()]
-          .filter((c) => c.userId === session.userId)
+          .filter((c) => c.userId === ownerId && canTouchCredential(ownerId))
           .map((c) => ({
             id: c.id,
             label: `Passkey · ${c.id.slice(0, 8)}`,
@@ -1414,14 +1453,14 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           if (trimmed.length > 40) return err(400, "bad_request");
           wire = trimmed.length === 0 ? null : trimmed;
         } else return err(400, "bad_request");
-        const entry = [...credentials.entries()].find(([, c]) => c.id === credId && c.userId === session.userId);
+        const entry = [...credentials.entries()].find(([, c]) => c.id === credId && canTouchCredential(c.userId));
         if (entry === undefined) return err(404, "not_found");
         entry[1].note = wire;
         return ok(200, { note: wire });
       }
       if (credMatch !== null && req.method === "DELETE") {
         const credId = credMatch[1]!.toLowerCase();
-        const entry = [...credentials.entries()].find(([, c]) => c.id === credId && c.userId === session.userId);
+        const entry = [...credentials.entries()].find(([, c]) => c.id === credId && canTouchCredential(c.userId));
         if (entry === undefined) return err(404, "not_found");
         if (entry[1].revokedAt !== null) return err(409, "already_revoked");
         entry[1].revokedAt = new Date().toISOString();
@@ -1526,16 +1565,20 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
 
   const handler = async (req: Request): Promise<Response> => {
     const body = req.method === "GET" || req.method === "OPTIONS" ? "" : await req.clone().text();
-    log.push({
-      method: req.method,
-      path: new URL(req.url).pathname,
-      contentType: req.headers.get("content-type"),
-      authorization: req.headers.get("authorization"),
-      cookie: req.headers.get("cookie"),
-      origin: req.headers.get("origin"),
-      referer: req.headers.get("referer"),
-      body,
-    });
+    {
+      const u = new URL(req.url);
+      log.push({
+        method: req.method,
+        path: u.pathname,
+        search: u.search,
+        contentType: req.headers.get("content-type"),
+        authorization: req.headers.get("authorization"),
+        cookie: req.headers.get("cookie"),
+        origin: req.headers.get("origin"),
+        referer: req.headers.get("referer"),
+        body,
+      });
+    }
     const route = new URL(req.url).pathname.split(/\/(?:partner-(?:session|invites|attest)|course-qr|qr-print)\//)[1] ?? "";
     if (req.method !== "OPTIONS" && state.hang.has(route)) {
       return await new Promise<Response>((resolve) => {
@@ -1572,6 +1615,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       gotrueCounter = 0;
       users.clear();
       credentials.clear();
+      memberRoster.length = 0;
+      reachUsers.clear();
       invites.clear();
       usedGotrueSessions.clear();
       seed();
@@ -1602,6 +1647,37 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       credentials.set(key, {
         id,
         userId: USER_ID,
+        alg: -7,
+        publicKey: opts.credential.publicKeySpki,
+        signCount: 0,
+        note: null,
+        revokedAt: null,
+      });
+      return id;
+    },
+    seedMember({
+      userId,
+      orgId = "33333333-3333-4333-8333-333333333333",
+      role = "staff",
+      facilityId = "44444444-4444-4444-8444-444444444444",
+    }) {
+      const id = userId.toLowerCase();
+      memberRoster.push({
+        userId: id,
+        orgId,
+        role,
+        facilityId,
+        invitedBy: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      reachUsers.add(id);
+    },
+    seedCredentialForUser(userId, id = randomUUID()) {
+      const owner = userId.toLowerCase();
+      const key = toB64u(randomBytes(32));
+      credentials.set(key, {
+        id,
+        userId: owner,
         alg: -7,
         publicKey: opts.credential.publicKeySpki,
         signCount: 0,

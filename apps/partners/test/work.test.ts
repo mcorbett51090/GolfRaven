@@ -467,3 +467,110 @@ describe("§75 credentials add (second passkey, A2)", () => {
     expect(registers[0]!.body).not.toMatch(/7391/);
   });
 });
+
+describe("§81 team credentials under reach (manager)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const OTHER_CRED = "33333333-3333-4333-8333-333333333301";
+  const managerWhoami = {
+    aal: 1,
+    requiredAal: 1,
+    isAdmin: false,
+    memberships: [{ orgId: ORG, role: "manager", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupManager() {
+    const w = makeWorld({ whoami: managerWhoami });
+    await w.server.seedPin(PIN);
+    w.server.seedMember({ userId: OTHER_USER, orgId: ORG, role: "staff", facilityId: FACILITY });
+    w.server.seedCredentialForUser(OTHER_USER, OTHER_CRED);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("opens roster, loads members, then lists and notes another member's passkey", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    expect(home(s.controller).work).toMatchObject({ kind: "members", rows: null });
+
+    await s.controller.loadMembers();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") {
+        expect(w.rows).toHaveLength(1);
+        expect(w.rows?.[0]).toMatchObject({ userId: OTHER_USER, role: "staff", orgId: ORG });
+      }
+    }
+    const memberGets = s.w.server.log.filter((r) => r.method === "GET" && r.path.endsWith("/partner-members/members"));
+    expect(memberGets).toHaveLength(1);
+
+    s.controller.openMemberCredentials(OTHER_USER);
+    expect(home(s.controller).work).toMatchObject({ kind: "credentials", targetUserId: OTHER_USER, rows: null });
+
+    await s.controller.loadCredentials();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") {
+        expect(w.rows).toHaveLength(1);
+        expect(w.rows?.[0]).toMatchObject({ id: OTHER_CRED, note: null });
+      }
+    }
+    const credGets = s.w.server.log.filter((r) => r.method === "GET" && r.path.endsWith("/partner-members/credentials"));
+    expect(credGets.some((r) => r.search === `?userId=${OTHER_USER}`)).toBe(true);
+
+    await s.controller.saveCredentialNote(OTHER_CRED, "Shop floor");
+    expect(home(s.controller).notice).toEqual({ kind: "credential-note-saved" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows?.[0]?.note).toBe("Shop floor");
+    }
+    const patches = s.w.server.log.filter((r) => r.method === "PATCH" && r.path.endsWith(`/partner-members/credentials/${OTHER_CRED}`));
+    expect(patches).toHaveLength(1);
+    expect(JSON.parse(patches[0]!.body)).toEqual({ note: "Shop floor" });
+  });
+
+  it("revokes another member's only passkey after reauth + A2 PIN (no last-active refuse)", async () => {
+    const s = await setupManager();
+    s.controller.openMemberCredentials(OTHER_USER);
+    await s.controller.loadCredentials();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows).toHaveLength(1);
+    }
+
+    const pending = s.controller.revokeCredential(OTHER_CRED);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for team credential revoke");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "credential-revoked" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows).toHaveLength(0);
+    }
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    const pinPosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/step-up/pin"));
+    expect(pinPosts).toHaveLength(1);
+    expect(JSON.parse(pinPosts[0]!.body).derived).not.toContain(PIN);
+    const deletes = s.w.server.log.filter((r) => r.method === "DELETE" && r.path.endsWith(`/partner-members/credentials/${OTHER_CRED}`));
+    expect(deletes).toHaveLength(1);
+    expect(s.w.server.log.some((r) => r.path.endsWith("/partner-members/credentials/options"))).toBe(false);
+  });
+
+  it("staff whoami: openMembers is a no-op and never GETs members", async () => {
+    const s = await setup();
+    s.controller.openMembers();
+    expect(home(s.controller).work).toBeNull();
+    expect(s.w.server.log.some((r) => r.path.endsWith("/partner-members/members"))).toBe(false);
+  });
+});
