@@ -4441,11 +4441,40 @@ Numbering: **migration `0101`, matrix `79`, this section 107.** Closes the §106
 
 ### 107.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); invite-accept operator alarm → §108; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 107.4 Verification
 
-Branch: `cursor/p5-invite-create-alarm-8ffd` (base after #146 / `5d31992`). Squash-merged as _pending_.
+Branch: `cursor/p5-invite-create-alarm-8ffd` (base after #146 / `5d31992`). Squash-merged as `d594896`.
 
 - pgTAP matrix `79`; tip `0101`; partners i18n / auth-alarms unit cells.
+
+## 108. As built: invite-accept operator alarm
+
+Numbering: **migration `0102`, matrix `80`, this section 108.** Closes the §107.3 / §21.4 leftover after `invite_create`: when `app.partner_invite.accepted_at` first becomes non-NULL, raise `app.partner_auth_alarm` kind `invite_accept` (one row per invite id per minute) so the admin auth-alarms list surfaces acceptances from both branch N (`partner_invite_accept`) and branch E (`partner_invite_accept_for_partner`), not only `audit_log` `partner.invite.accept`. Quiet statuses that never set `accepted_at` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 108.1 What was built
+
+- **Kind + row CHECK** — `invite_accept` with `credential_id` NULL and `bucket_key` = invite id text (same uuid shape as `invite_create` / `invite_revoke`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer` (branch E). Unbound mint-lane accepts use the existing 0048 binding-IS-NULL policies.
+- **Trigger** — `AFTER UPDATE OF accepted_at` → `private.partner_invite_accept_alarm_on_update`: first accept only; `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"invite","org","role","subject","status"}` (`subject` = `accepted_by`); never the token hash or invitee email.
+- **Catalogue** — `review.authAlarms.kind.invite_accept` (EN / fr-CA); subject prefix already reads `detail.invite` / `detail.subject` / `detail.org`.
+- **Inventories** — trigger function note + definer_policy_allowlist for the two policies.
+
+### 108.2 Decisions and departures
+
+- **Trigger, not wrapper REPLACE** — one writer covers both accept owners (`partner_session_issuer` branch N and `private_definer` branch E) without granting the issuer new table privileges on `partner_auth_alarm`.
+- **ok only** — quiet statuses (`email_mismatch`, `already_member`, `not_found`, …) never set `accepted_at`, so the trigger stays quiet.
+- **Bucket = invite id** — flood shape is one row per invite per UTC minute.
+- **Detail keeps `subject`** — acceptor uid (no email), matching the credential-add subject pattern.
+
+### 108.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 108.4 Verification
+
+Branch: `cursor/p5-invite-accept-alarm-8ffd` (base after #147 / `d594896`). Squash-merged as _pending_.
+
+- pgTAP matrix `80`; tip `0102`; partners i18n / auth-alarms unit cells.
 
