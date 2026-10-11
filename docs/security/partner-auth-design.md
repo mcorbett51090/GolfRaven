@@ -3638,8 +3638,8 @@ Numbering: **migration `0087`, matrix `65`, this section 77.** Closes design D4 
 
 ### 77.4 Verification
 
-Branch: `cursor/p5-partner-pin-pepper-8ffd` (base after #116 / `3ee503b`).
+Branch: `cursor/p5-partner-pin-pepper-8ffd` (base after #116 / `3ee503b`). Tip on PR #117.
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP (matrix 65); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0086`.
-- `node --test tools/db/rotate-partner-pin-pepper.test.mjs`.
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 65 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+- `node --test tools/db/rotate-partner-pin-pepper.test.mjs` (7 passed).
 
