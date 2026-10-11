@@ -461,6 +461,7 @@ export const en = {
   "review.authAlarms.kind.org_revoke_all": "Org revoke-all",
   "review.authAlarms.kind.member_revoke": "Member revoke",
   "review.authAlarms.kind.credential_revoke": "Passkey revoked",
+  "review.authAlarms.kind.invite_revoke": "Invite revoked",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",
