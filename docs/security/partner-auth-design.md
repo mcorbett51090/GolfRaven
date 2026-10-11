@@ -3438,9 +3438,39 @@ Numbering: **migration `0083`, matrix `61`, this section 70.** Closes design §8
 
 ### 70.3 Not built, honestly
 
-- Retire-previous purge; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Automatic 7-day purge of `course_pin_pepper_previous` → §71; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 70.4 Verification
 
-Branch: `cursor/p5-member-rate-alert-8ffd` (base after #109 / `ed5692a`).
+Squash-merged as `6ac6ec8` (#110). Branch: `cursor/p5-member-rate-alert-8ffd` (base after #109 / `ed5692a`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 61 ok; 10 / 25 PA-1 allowlists).
+- Focused: `alertMemberAnyCall` + session-handler Vitest; Deno PA-13b golden; `definer_policy_exprs` + `verify-function-inventory`.
+
+## 71. As built: course_pin_pepper_previous retention purge
+
+Numbering: **migration `0084`, matrix `62`, this section 71.** Closes the automatic 7-day retire of Vault `course_pin_pepper_previous` left open by 0082 / §69.3 / §70.3. Wired into the existing hourly `retention-purge` schedule (seventeen → eighteen steps).
+
+### 71.1 What was built
+
+- **`private.purge_course_pin_pepper_previous() RETURNS integer`** — SECURITY DEFINER, `search_path=''`, owned by `private_definer`; calls `private.course_pin_pepper_rotate('retire_previous')`; maps `ok` → 1, `too_early` / `previous_absent` → 0; raises only on unexpected SQL errors (unexpected status is a programming error).
+- **Grants** — REVOKE PUBLIC; GRANT EXECUTE to `edge_system` only. **Never** GRANT any edge role EXECUTE on `course_pin_pepper_rotate` (owner / SQL-editor only, 0082).
+- **Audit** — keep existing `operator.course_pin_pepper.rotate` from `retire_previous`; no separate `system.*` audit on this seam.
+- **Edge** — `RetentionStep` name `course_pin_pepper_previous` after `partner_auth_alarms`; matrices 20 / 24 / 30 / Deno step-order updated.
+
+### 71.2 Decisions and departures
+
+- **Wrapper only** — the 7-day floor and Vault DELETE stay inside `course_pin_pepper_rotate`; retention-purge never holds pepper bytes and never widens rotate's ACL.
+- **Reuse `retention-purge`** — no new Edge function.
+- **Status → count** — rotate's text statuses become the integer the schedule already expects (`ok` is one row of work; no-ops are zero).
+
+### 71.3 Not built, honestly
+
+- Credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 71.4 Verification
+
+Branch: `cursor/p5-pepper-previous-purge-8ffd` (base after #110 / `6ac6ec8`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 62 ok; 20 / 24 / 30 privilege / pepper-namer lists).
 
