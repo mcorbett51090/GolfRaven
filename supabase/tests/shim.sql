@@ -268,6 +268,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO service_role;
 -- writes plaintext into vault.secrets (same as the rest of this stand-in).
 -- Migration 0082 GRANTs EXECUTE to private_definer; delete of a named secret
 -- is DELETE FROM vault.secrets (no vault.delete_secret in the hosted API).
+-- INVOKER (not SECURITY DEFINER): matrix 10 forbids non-private SECURITY
+-- DEFINER outside a pinned extension list; hosted supabase_vault's real
+-- create_secret/update_secret are extension-owned and never appear in this
+-- harness. Callers need DML on vault.secrets (0082 grants private_definer
+-- INSERT/UPDATE/DELETE) — the plaintext stand-in has no encryption step.
 CREATE OR REPLACE FUNCTION vault.create_secret(
   new_secret text,
   new_name text DEFAULT NULL,
@@ -275,7 +280,6 @@ CREATE OR REPLACE FUNCTION vault.create_secret(
   new_key_id uuid DEFAULT NULL
 ) RETURNS uuid
 LANGUAGE plpgsql
-SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
@@ -298,7 +302,6 @@ CREATE OR REPLACE FUNCTION vault.update_secret(
   new_key_id uuid DEFAULT NULL
 ) RETURNS void
 LANGUAGE plpgsql
-SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN

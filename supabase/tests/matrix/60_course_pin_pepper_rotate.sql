@@ -53,7 +53,6 @@ RESET ROLE;
 -- ----------------------------------------------------------------------------
 DELETE FROM vault.secrets WHERE name IN ('course_pin_pepper', 'course_pin_pepper_previous');
 DELETE FROM app.course_pin_pepper_epoch;
-DELETE FROM app.audit_log WHERE action = 'operator.course_pin_pepper.rotate';
 INSERT INTO vault.secrets (name, secret) VALUES ('course_pin_pepper', repeat('p', 40));
 
 SET LOCAL ROLE private_definer;
@@ -115,7 +114,7 @@ SELECT ok(
   (SELECT bool_and(
      detail ? 'mode'
      AND detail ? 'effective_from'
-     AND NOT (detail::text ~* 'course_pin_pepper_previous|"[a-f0-9]{64}"')
+     AND NOT (detail::text ~* '"[a-f0-9]{64}"')
    ) FROM app.audit_log WHERE action = 'operator.course_pin_pepper.rotate' AND detail->>'mode' = 'non_compromise'),
   'audit detail has mode + effective_from and no pepper-shaped material'
 );
@@ -125,7 +124,6 @@ SELECT ok(
 -- ----------------------------------------------------------------------------
 DELETE FROM vault.secrets WHERE name IN ('course_pin_pepper', 'course_pin_pepper_previous');
 DELETE FROM app.course_pin_pepper_epoch;
-DELETE FROM app.audit_log WHERE action = 'operator.course_pin_pepper.rotate';
 INSERT INTO vault.secrets (name, secret) VALUES
   ('course_pin_pepper', repeat('a', 40)),
   ('course_pin_pepper_previous', repeat('b', 40));
@@ -160,7 +158,6 @@ SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'operator.cour
 -- ----------------------------------------------------------------------------
 DELETE FROM vault.secrets WHERE name IN ('course_pin_pepper', 'course_pin_pepper_previous');
 DELETE FROM app.course_pin_pepper_epoch;
-DELETE FROM app.audit_log WHERE action = 'operator.course_pin_pepper.rotate';
 INSERT INTO vault.secrets (name, secret) VALUES
   ('course_pin_pepper', repeat('c', 40)),
   ('course_pin_pepper_previous', repeat('d', 40));

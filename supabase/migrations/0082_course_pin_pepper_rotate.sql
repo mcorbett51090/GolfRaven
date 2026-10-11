@@ -30,7 +30,10 @@
 -- the Vault API functions are absent (DO assert below).
 GRANT EXECUTE ON FUNCTION vault.create_secret(text, text, text, uuid) TO private_definer;
 GRANT EXECUTE ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) TO private_definer;
-GRANT DELETE ON vault.secrets TO private_definer;
+-- INSERT/UPDATE: harness Vault stand-ins are INVOKER (plaintext); hosted
+-- supabase_vault create_secret/update_secret are SECURITY DEFINER and do not
+-- need these, but the grants are harmless there and required for the shim.
+GRANT INSERT, UPDATE, DELETE ON vault.secrets TO private_definer;
 
 GRANT INSERT ON app.course_pin_pepper_epoch TO private_definer;
 CREATE POLICY pd_course_pin_pepper_epoch_insert ON app.course_pin_pepper_epoch
@@ -191,10 +194,20 @@ REVOKE INSERT, UPDATE ON private.function_inventory FROM CURRENT_USER;
 GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_seed_definer_policy_allowlist_0082 ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
-INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note) VALUES
+INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note, role_name) VALUES
   ('app', 'course_pin_pepper_epoch', 'pd_course_pin_pepper_epoch_insert', 'INSERT', true,
-   '0082: private.course_pin_pepper_rotate (non_compromise) writes effective_from = now(); no personal data; WITH CHECK (true)')
-ON CONFLICT DO NOTHING;
+   '0082: private.course_pin_pepper_rotate (non_compromise) writes effective_from = now(); no personal data; WITH CHECK (true)',
+   'private_definer')
+ON CONFLICT (schema_name, table_name, policy_name) DO UPDATE
+SET note = EXCLUDED.note, command = EXCLUDED.command, scoped = EXCLUDED.scoped, role_name = EXCLUDED.role_name;
+UPDATE private.definer_policy_allowlist al
+SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
+    with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
+FROM pg_policy pol
+JOIN pg_class c ON c.oid = pol.polrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE al.schema_name = n.nspname AND al.table_name = c.relname AND al.policy_name = pol.polname
+  AND al.policy_name IN ('pd_course_pin_pepper_epoch_insert', 'pd_marker_scan_pepper_epoch_select');
 UPDATE private.definer_policy_allowlist
 SET note = 'private.course_pin_matches / course_pin_pepper_rotate: WHEN the current pepper took effect; no personal data and no secret, so USING (true)'
 WHERE policy_name = 'pd_marker_scan_pepper_epoch_select';
@@ -216,8 +229,10 @@ BEGIN
      OR NOT has_function_privilege('private_definer', 'vault.update_secret(uuid, text, text, text, uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION '0082: private_definer must EXECUTE vault.create_secret / vault.update_secret';
   END IF;
-  IF NOT has_table_privilege('private_definer', 'vault.secrets', 'DELETE') THEN
-    RAISE EXCEPTION '0082: private_definer must DELETE vault.secrets (retire/compromise previous pepper only; body filters by name)';
+  IF NOT has_table_privilege('private_definer', 'vault.secrets', 'INSERT')
+     OR NOT has_table_privilege('private_definer', 'vault.secrets', 'UPDATE')
+     OR NOT has_table_privilege('private_definer', 'vault.secrets', 'DELETE') THEN
+    RAISE EXCEPTION '0082: private_definer must INSERT/UPDATE/DELETE vault.secrets (shim INVOKER writers + retire/compromise delete; body filters previous by name)';
   END IF;
   IF NOT has_table_privilege('private_definer', 'app.course_pin_pepper_epoch', 'INSERT') THEN
     RAISE EXCEPTION '0082: private_definer must INSERT app.course_pin_pepper_epoch';
