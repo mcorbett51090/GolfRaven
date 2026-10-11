@@ -125,6 +125,10 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "not_found") return { key: "settlement.empty" };
     if (kind === "unprocessable") return { key: "settlement.failed" };
   }
+  if (context === "credentials") {
+    if (code === "already_revoked" || kind === "conflict") return { key: "credentials.alreadyRevoked" };
+    if (code === "not_found" || kind === "not_found") return { key: "credentials.notFound" };
+  }
   return null;
 }
 

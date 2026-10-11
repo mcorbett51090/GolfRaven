@@ -107,6 +107,7 @@ export interface AppController extends StepUp {
   openCredentials(): void;
   loadCredentials(): Promise<void>;
   saveCredentialNote(id: string, note: string): Promise<void>;
+  revokeCredential(id: string): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -385,6 +386,7 @@ export function createController(deps: ControllerDeps): AppController {
     openCredentials: () => work.openCredentials(),
     loadCredentials: () => work.loadCredentials(),
     saveCredentialNote: (id, note) => work.saveCredentialNote(id, note),
+    revokeCredential: (id) => work.revokeCredential(id),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),
