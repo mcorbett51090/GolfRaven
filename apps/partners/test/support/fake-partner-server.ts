@@ -120,7 +120,14 @@ export interface FakeServer {
    * Seeds an unacked credential-add notice for the signed-in user (§93). Creates the credential row when needed.
    * Returns the notice id.
    */
-  seedCredentialAddNotice(input?: { noticeId?: string; credentialId?: string; label?: string; createdAt?: string }): string;
+  seedCredentialAddNotice(input?: {
+    noticeId?: string;
+    credentialId?: string;
+    label?: string;
+    createdAt?: string;
+    /** Defaults to the signed-in test user; set for manager reach inbox (§94). */
+    subjectUserId?: string;
+  }): string;
   /** Seeds an org membership row for GET members and marks the user as under reach for credential list/note/revoke (§81). `email: null` → recover returns `no_email`. */
   seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null; email?: string | null }): void;
   /** Confirmed TOTP for a seedMember'd user so §86 totp-reset can succeed. */
@@ -1973,19 +1980,21 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       return id;
     },
     seedCredentialAddNotice(input = {}) {
-      const credentialId = input.credentialId ?? "22222222-2222-4222-8222-222222222222";
+      const subjectUserId = (input.subjectUserId ?? USER_ID).toLowerCase();
+      const credentialId = (input.credentialId ?? "22222222-2222-4222-8222-222222222222").toLowerCase();
       if (![...credentials.values()].some((c) => c.id === credentialId)) {
-        this.seedExtraCredential(credentialId);
+        if (subjectUserId === USER_ID) this.seedExtraCredential(credentialId);
+        else this.seedCredentialForUser(subjectUserId, credentialId);
       }
       const noticeId = (input.noticeId ?? randomUUID()).toLowerCase();
       const label = input.label ?? `Passkey · ${credentialId.slice(0, 8)}`;
       const createdAt = input.createdAt ?? "2026-06-01T12:00:00.000Z";
       credentialAddNotices.push({
         noticeId,
-        credentialId: credentialId.toLowerCase(),
+        credentialId,
         label,
         createdAt,
-        subjectUserId: USER_ID,
+        subjectUserId,
         subjectAckedAt: null,
       });
       return noticeId;

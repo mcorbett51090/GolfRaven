@@ -281,6 +281,11 @@ export interface CredentialAddNotice {
   readonly credentialRevokedAt: string | null;
 }
 
+/** Edge reach row (GET credentials/notices/reach): same fields plus the subject under reach. */
+export interface CredentialAddNoticeReach extends CredentialAddNotice {
+  readonly subjectUserId: string;
+}
+
 function parseCredentialAddNotice(raw: unknown): CredentialAddNotice {
   if (
     !isObject(raw) || !isString(raw["noticeId"]) || !isString(raw["credentialId"]) || !isString(raw["label"]) ||
@@ -295,11 +300,24 @@ function parseCredentialAddNotice(raw: unknown): CredentialAddNotice {
   };
 }
 
+function parseCredentialAddNoticeReach(raw: unknown): CredentialAddNoticeReach {
+  const base = parseCredentialAddNotice(raw);
+  if (!isObject(raw) || !isString(raw["subjectUserId"])) malformed();
+  return { ...base, subjectUserId: raw["subjectUserId"] };
+}
+
 /** GET partner-members/credentials/notices (class A0): unacked credential-add notices for the subject. */
 export async function listCredentialAddNotices(api: PartnerApi): Promise<readonly CredentialAddNotice[]> {
   const data = await api.call("GET", "partner-members", "credentials/notices");
   if (!isObject(data) || !Array.isArray(data["notices"])) malformed();
   return data["notices"].map(parseCredentialAddNotice);
+}
+
+/** GET partner-members/credentials/notices/reach (class A0): unacked notices for reach-covered members (manager|operator). */
+export async function listCredentialAddNoticesReach(api: PartnerApi): Promise<readonly CredentialAddNoticeReach[]> {
+  const data = await api.call("GET", "partner-members", "credentials/notices/reach");
+  if (!isObject(data) || !Array.isArray(data["notices"])) malformed();
+  return data["notices"].map(parseCredentialAddNoticeReach);
 }
 
 /** POST credentials/notices/{id}/ack (class A0). 404 → `not_found`; 409 already_acked treated as success. */

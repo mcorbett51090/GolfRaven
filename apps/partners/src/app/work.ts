@@ -21,6 +21,7 @@ import {
   credentialOptions,
   getCredentials,
   issueAdminEnrolment as postAdminEnrolment,
+  listCredentialAddNoticesReach,
   listMembers,
   patchCredentialNote,
   recoverMember as postMemberRecover,
@@ -328,6 +329,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         kind: "members",
         busy: false,
         rows: null,
+        credentialAddNotices: null,
         recovered: null,
         createdAfterDraft: "",
         lastRevokeAll: null,
@@ -812,10 +814,10 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       const grant = s.grant;
       host.set({ ...s, busy: "work", notice: null });
       try {
-        const rows = await listMembers(api);
+        const [rows, credentialAddNotices] = await Promise.all([listMembers(api), listCredentialAddNoticesReach(api)]);
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "members") {
-          host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows, credentialAddNotices } });
         }
       } catch (e) {
         const cur = live(host, grant);
