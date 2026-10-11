@@ -862,10 +862,10 @@ WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname L
   AND (has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_system', p.oid, 'EXECUTE')
        OR EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))
 UNION ALL
-SELECT '(e) edge_partner holds an EXECUTE grant outside its allowed set (bind_partner_session, partner_binding, partner_binding_kind, hit_partner_rate_limit and the *_for_partner family): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+SELECT '(e) edge_partner holds an EXECUTE grant outside its allowed set (bind_partner_session, partner_binding, partner_binding_kind, hit_partner_rate_limit, partner_member_rate_alarm_raise and the *_for_partner family): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')
-  AND (n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')') <> ALL (ARRAY['private.bind_partner_session(text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.hit_partner_rate_limit(text, interval, integer)'])
+  AND (n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')') <> ALL (ARRAY['private.bind_partner_session(text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.hit_partner_rate_limit(text, interval, integer)', 'private.partner_member_rate_alarm_raise(jsonb)'])
   AND p.proname NOT LIKE '%\_for\_partner'
 
   ) AS t(v)
@@ -1631,7 +1631,7 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(d)%private.zz_pub_for_partner') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (d) MUST FAIL: a *_for_partner function executable by edge_actor');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_pub_for_partner();
--- (e) (S1.1a gate LOW 1) the EXECUTE set of edge_partner is EXACTLY the binder, the two read-only binding helpers, hit_partner_rate_limit and the *_for_partner family
+-- (e) (S1.1a gate LOW 1) the EXECUTE set of edge_partner is EXACTLY the binder, the two read-only binding helpers, hit_partner_rate_limit, partner_member_rate_alarm_raise and the *_for_partner family
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is(pg_temp.edge_check_14(), NULL::text[], 'check 14 (e): in the clean schema edge_partner executes only the binder and the two binding helpers (nothing else is granted to it)');
 SELECT tests.clear_actor();
@@ -1688,7 +1688,7 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT bool_or(v LIKE '(e)%app.partner_authorize()') FROM unnest(pg_temp.edge_check_14()) v), true, 'check 14 (e) MUST FAIL: the authorization seam''s own name, granted to edge_partner (the seam is reached only from inside a *_for_partner definer, never by the lane directly)');
 SELECT tests.clear_actor();
 DROP FUNCTION app.partner_authorize();
--- the allowed names: a *_for_partner function and hit_partner_rate_limit may be granted to edge_partner
+-- the allowed names: a *_for_partner function, hit_partner_rate_limit and partner_member_rate_alarm_raise may be granted to edge_partner
 CREATE FUNCTION private.zz_e_ok_for_partner() RETURNS int LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $z$
 BEGIN
   PERFORM private.partner_authorize('fac_x', NULL, ARRAY['staff']::app.partner_role[], 'A0');
@@ -1699,7 +1699,7 @@ REVOKE EXECUTE ON FUNCTION private.zz_e_ok_for_partner() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.zz_e_ok_for_partner() TO edge_partner;
 -- (S1.2, 0049: the real private.hit_partner_rate_limit(text, interval, integer) exists and is granted to edge_partner, so it is the control; the planted look-alike this cell used before 0049 would collide with it)
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is((SELECT bool_or(v LIKE '(e)%') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): a *_for_partner function and the real hit_partner_rate_limit are allowed on edge_partner (controls)');
+SELECT is((SELECT bool_or(v LIKE '(e)%') FROM unnest(pg_temp.edge_check_14()) v), NULL, 'check 14 (e): a *_for_partner function, hit_partner_rate_limit and partner_member_rate_alarm_raise are allowed on edge_partner (controls)');
 SELECT tests.clear_actor();
 DROP FUNCTION private.zz_e_ok_for_partner();
 SELECT tests.authenticate_as('service_role', '{}'::jsonb);

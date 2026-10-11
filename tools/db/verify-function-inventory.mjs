@@ -810,10 +810,10 @@ WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind = 'f' AND p.proname L
   AND (has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_system', p.oid, 'EXECUTE')
        OR EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))
 UNION ALL
-SELECT '(e) edge_partner holds an EXECUTE grant outside its allowed set (bind_partner_session, partner_binding, partner_binding_kind, hit_partner_rate_limit and the *_for_partner family): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+SELECT '(e) edge_partner holds an EXECUTE grant outside its allowed set (bind_partner_session, partner_binding, partner_binding_kind, hit_partner_rate_limit, partner_member_rate_alarm_raise and the *_for_partner family): ' || n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname IN ('app', 'api', 'private') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')
-  AND (n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')') <> ALL (ARRAY['private.bind_partner_session(text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.hit_partner_rate_limit(text, interval, integer)'])
+  AND (n.nspname || '.' || p.proname || '(' || oidvectortypes(p.proargtypes) || ')') <> ALL (ARRAY['private.bind_partner_session(text)', 'private.partner_binding()', 'private.partner_binding_kind()', 'private.hit_partner_rate_limit(text, interval, integer)', 'private.partner_member_rate_alarm_raise(jsonb)'])
   AND p.proname NOT LIKE '%\\_for\\_partner'
 `],
   [15, "every GUC-keyed private_definer policy ends its window with the top-level partner conjunct", `WITH tails(tail) AS (
