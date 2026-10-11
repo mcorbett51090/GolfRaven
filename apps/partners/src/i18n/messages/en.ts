@@ -467,6 +467,7 @@ export const en = {
   "review.authAlarms.kind.invite_accept": "Invite accepted",
   "review.authAlarms.kind.enrolment_accept": "Enrolment accepted",
   "review.authAlarms.kind.totp_locked": "TOTP locked",
+  "review.authAlarms.kind.credential_register": "First passkey registered",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",

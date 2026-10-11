@@ -36,6 +36,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "enrolment_accept")).toBe("Inscription acceptée");
     expect(authAlarmKindLabel("en", "totp_locked")).toBe("TOTP locked");
     expect(authAlarmKindLabel("fr-CA", "totp_locked")).toBe("TOTP verrouillé");
+    expect(authAlarmKindLabel("en", "credential_register")).toBe("First passkey registered");
+    expect(authAlarmKindLabel("fr-CA", "credential_register")).toBe("Première clé d'accès enregistrée");
   });
 
   it("falls back to the raw kind for an unknown token", () => {
