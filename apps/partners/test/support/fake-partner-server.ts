@@ -113,6 +113,8 @@ export interface FakeServer {
   seedExtraCredential(id?: string): string;
   /** Seeds an org membership row for GET members and marks the user as under reach for credential list/note/revoke (§81). `email: null` → recover returns `no_email`. */
   seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null; email?: string | null }): void;
+  /** Confirmed TOTP for a seedMember'd user so §86 totp-reset can succeed. */
+  seedMemberTotp(userId: string): void;
   /** Adds an active credential for another user (must be seedMember'd for reach PATCH/DELETE). */
   seedCredentialForUser(userId: string, id?: string): string;
   /** What the server stores of a user's PIN (never the digits), or null. */
@@ -1440,6 +1442,22 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         user.pin.mustChange = true;
         return ok(200, { reset: true });
       }
+      const totpResetMatch = /^members\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/totp-reset$/i.exec(route);
+      if (totpResetMatch !== null && req.method === "POST") {
+        const a3 = needA3(session);
+        if (a3 !== null) return a3;
+        if (opts.whoami?.isAdmin !== true) return err(403, "forbidden");
+        const target = totpResetMatch[1]!.toLowerCase();
+        if (target === session.userId) return err(422, "invalid_request");
+        if (!reachUsers.has(target)) return err(403, "forbidden");
+        const row = memberRoster.find((m) => m.userId === target);
+        const targetUser = users.get(target);
+        const isOperator = row?.role === "operator";
+        if (!isOperator) return err(403, "forbidden");
+        if (targetUser === undefined || targetUser.totp === null) return err(409, "totp_not_set");
+        targetUser.totp = { seed: targetUser.totp.seed, confirmed: false, enrolSession: null };
+        return ok(200, { reset: true });
+      }
       const memberRevokeMatch = /^members\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/revoke$/i.exec(route);
       if (memberRevokeMatch !== null && req.method === "POST") {
         if (!canListMembers()) return err(403, "forbidden");
@@ -1803,6 +1821,12 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       } else if (email !== undefined) {
         existing.email = mail;
       }
+    },
+    seedMemberTotp(userId) {
+      const id = userId.toLowerCase();
+      const user = users.get(id);
+      if (user === undefined) throw new Error("fake partner server: seedMemberTotp requires seedMember first");
+      user.totp = { seed: new Uint8Array(randomBytes(20)), confirmed: true, enrolSession: null };
     },
     seedCredentialForUser(userId, id = randomUUID()) {
       const owner = userId.toLowerCase();

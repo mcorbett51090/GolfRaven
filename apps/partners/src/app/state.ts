@@ -78,7 +78,8 @@ export type Notice =
         | "member-pin-reset"
         | "member-recovered"
         | "member-revoked"
-        | "org-revoke-all";
+        | "org-revoke-all"
+        | "member-totp-reset";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 

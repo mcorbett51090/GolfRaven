@@ -5,6 +5,7 @@
  * Org roster GET (class A0) and credentials `?userId=` under the reach rule (§79 / §80 / §81).
  * Member PIN reset / recover / revoke under reach (class A2, §82–§84).
  * Org sessions revoke-all (stolen-iPad, class A2, §85).
+ * Member TOTP reset under reach (class A3, §86).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -251,6 +252,19 @@ export async function revokeAllOrgSessions(
   } catch (e) {
     if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
       throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
+    }
+    throw e;
+  }
+}
+
+/** POST members/{id}/totp-reset (class A3): admin resets another's TOTP under reach. 409 `totp_not_set` when unset. */
+export async function resetMemberTotp(api: PartnerApi, userId: string): Promise<void> {
+  try {
+    const data = await api.call("POST", "partner-members", `members/${userId}/totp-reset`, {});
+    if (!isObject(data) || data["reset"] !== true) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "totp_not_set" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "totp_not_set" });
     }
     throw e;
   }

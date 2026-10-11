@@ -134,6 +134,7 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
   if (context === "members") {
     if (code === "pin_not_set") return { key: "members.pinNotSet" };
     if (code === "no_email") return { key: "members.noEmail" };
+    if (code === "totp_not_set") return { key: "members.totpNotSet" };
     if (code === "not_found" || kind === "not_found") return { key: "members.notFound" };
   }
   return null;

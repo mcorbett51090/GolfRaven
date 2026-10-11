@@ -489,7 +489,7 @@ export const frCA: Record<MessageKey, string> = {
   "notice.credentialAdded": "Clé d'accès ajoutée.",
 
   "members.title": "Clés d'accès de l'équipe",
-  "members.hint": "Personnes dans les installations que vous gérez. Ouvrez une personne pour modifier une note d'affichage ou révoquer une clé d'accès, réinitialisez un NIP verrouillé, récupérez son compte, ou mettez fin à une adhésion. Utilisez Terminer toutes les sessions si un appareil du magasin est volé. Le courriel n'est pas affiché.",
+  "members.hint": "Personnes dans les installations que vous gérez. Ouvrez une personne pour modifier une note d'affichage ou révoquer une clé d'accès, réinitialisez un NIP verrouillé, récupérez son compte, ou mettez fin à une adhésion. Utilisez Terminer toutes les sessions si un appareil du magasin est volé. Les administrateurs peuvent réinitialiser l'authentificateur d'un opérateur. Le courriel n'est pas affiché.",
   "members.load": "Charger l'équipe",
   "members.empty": "Aucun membre d'équipe dans la portée de vos installations.",
   "members.role": "Rôle",
@@ -518,8 +518,14 @@ export const frCA: Record<MessageKey, string> = {
   "members.revokeAll.dismiss": "Compris",
   "members.createdAfterInvalid": "Utilisez un instant UTC tel que 2030-01-01T12:00:00Z.",
   "members.createdAfterFuture": "Cette date limite est dans le futur.",
+  "members.resetTotp": "Réinitialiser l'authentificateur",
+  "members.needTotp": "La réinitialisation d'un authentificateur exige d'abord votre second facteur.",
+  "members.totpSelf": "Vous ne pouvez pas réinitialiser votre propre authentificateur ici.",
+  "members.totpAdminOnly": "Seul un administrateur peut réinitialiser l'authentificateur d'une autre personne.",
+  "members.totpNotSet": "Cette personne n'a pas d'authentificateur à réinitialiser.",
   "notice.memberPinReset": "NIP réinitialisé. La personne devra en définir un nouveau à la prochaine action sensible.",
   "notice.memberRecovered": "Compte récupéré. Montrez le lien à usage unique avant de quitter cet écran.",
   "notice.memberRevoked": "Adhésion terminée pour cette organisation.",
   "notice.orgRevokeAll": "Toutes les sessions de cet organisme sont terminées.",
+  "notice.memberTotpReset": "Authentificateur réinitialisé. Ses sessions sont terminées; elle doit en enregistrer un nouveau.",
 };

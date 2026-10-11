@@ -439,6 +439,19 @@ export function workView(state: SignedInState, controller: AppController, locale
                       },
                       t("members.revoke"),
                     ),
+                    state.session.isAdmin && m.role === "operator"
+                      ? h(
+                          "button",
+                          {
+                            type: "button",
+                            class: "danger",
+                            disabled: busy || isSelf(m.userId),
+                            "data-testid": `member-totp-reset-${m.userId}`,
+                            onclick: () => void controller.resetMemberTotp(m.userId),
+                          },
+                          t("members.resetTotp"),
+                        )
+                      : null,
                   ),
                 ),
               ),

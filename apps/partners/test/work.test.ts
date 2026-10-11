@@ -882,3 +882,62 @@ describe("§85 org sessions revoke-all (manager, A2)", () => {
     expect(s.w.server.log.some((r) => r.path.includes("/sessions/revoke-all"))).toBe(false);
   });
 });
+
+describe("§86 member TOTP reset under reach (admin, A3)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const adminWhoami = {
+    aal: 2,
+    requiredAal: 2,
+    isAdmin: true,
+    memberships: [{ orgId: ORG, role: "operator", facilityIds: [FACILITY], trailIds: [] }],
+  };
+  const adminLowAal = {
+    aal: 1,
+    requiredAal: 2,
+    isAdmin: true,
+    memberships: [{ orgId: ORG, role: "operator", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupAdmin(whoami: typeof adminWhoami) {
+    const w = makeWorld({ whoami });
+    await w.server.seedPin(PIN);
+    w.server.seedMember({ userId: OTHER_USER, orgId: ORG, role: "operator", facilityId: FACILITY });
+    w.server.seedMemberTotp(OTHER_USER);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("resets an operator's TOTP when the admin already holds aal 2 (no PIN prompt)", async () => {
+    const s = await setupAdmin(adminWhoami);
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+    await s.controller.resetMemberTotp(OTHER_USER);
+    expect(home(s.controller).notice).toEqual({ kind: "member-totp-reset" });
+    expect(home(s.controller).panel).toBeNull();
+    const calls = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/members/${OTHER_USER}/totp-reset`));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body)).toEqual({});
+  });
+
+  it("refuses without aal 2 and does not call the server", async () => {
+    const s = await setupAdmin(adminLowAal);
+    s.controller.openMembers();
+    await s.controller.resetMemberTotp(OTHER_USER);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.needTotp" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/totp-reset"))).toBe(false);
+  });
+
+  it("refuses to reset one's own authenticator without calling the server", async () => {
+    const s = await setupAdmin(adminWhoami);
+    const selfId = home(s.controller).session.userId;
+    s.controller.openMembers();
+    await s.controller.resetMemberTotp(selfId);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.totpSelf" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/totp-reset"))).toBe(false);
+  });
+});

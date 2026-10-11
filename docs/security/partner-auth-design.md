@@ -3855,11 +3855,37 @@ Numbering: **matrix n/a (PWA only), this section 85.** Closes the §84.3 leftove
 
 ### 85.3 Not built, honestly
 
-- Member TOTP reset UI (A3); admin enrolment issue UI (A3); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Member TOTP reset UI → §86; admin enrolment issue UI (A3); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 85.4 Verification
 
-Branch: `cursor/p5-org-revoke-all-ui-8ffd` (base after #124 / `326f227`). Tip on PR (this slice).
+Squash-merged as `d09d5c3` (#125). Branch: `cursor/p5-org-revoke-all-ui-8ffd` (base after #124 / `326f227`).
 
-- `@golfraven/partners` vitest (org revoke-all A2); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **1052 passed** (org revoke-all A2); typecheck clean; CI green; no Edge / migration change.
+
+## 86. As built: partners member TOTP reset UI (A3)
+
+Numbering: **matrix n/a (PWA only), this section 86.** Closes the §85.3 leftover: an admin resets another operator's (or admin's) TOTP under the reach rule via existing `POST partner-members/members/{id}/totp-reset` (class A3). Bumps `seed_version`, clears confirmation, revokes the target's sessions. No migration, no Edge change, no UI flag flips.
+
+### 86.1 What was built
+
+- **`members-routes.ts`** — `resetMemberTotp(api, userId)` → `{ reset: true }`; maps 409 → `totp_not_set`.
+- **Work screen** — `resetMemberTotp` on the §81 roster: client A3 gate (`aal` 2); POST; notice `member-totp-reset`; refuse for oneself and for non-admins; roster button only for `operator` rows when the actor is admin.
+- **Fake partner server** — totp-reset under A3 + reach; `seedMemberTotp` for fixtures.
+- **i18n** EN + fr-CA; Vitest covers A3 refuse and happy path.
+
+### 86.2 Decisions and departures
+
+- **No PIN / reauth** — same client A3 gate as printed-QR write and admin screens; fresh MFA is the server's.
+- **Operator rows only in the roster UI** — admin-on-admin reset stays available via API when a different admin appears under reach; the facility roster commonly lists operators.
+
+### 86.3 Not built, honestly
+
+- Admin enrolment issue UI (A3); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 86.4 Verification
+
+Branch: `cursor/p5-member-totp-reset-ui-8ffd` (base after #125 / `d09d5c3`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (member TOTP reset A3); typecheck clean; no Edge / migration change.
 
