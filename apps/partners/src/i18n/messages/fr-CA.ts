@@ -491,6 +491,16 @@ export const frCA: Record<MessageKey, string> = {
   "notice.credentialNoteSaved": "Note d'affichage enregistrée.",
   "notice.credentialRevoked": "Clé d'accès révoquée. Les sessions qui l'utilisaient sont terminées.",
   "notice.credentialAdded": "Clé d'accès ajoutée.",
+  "notice.credentialNoticeAcked": "Avis de clé d'accès reconnu.",
+
+  "credentialNotice.title": "Une clé d'accès a été ajoutée",
+  "credentialNotice.lead": "Quelqu'un a ajouté une clé d'accès à votre compte. Si ce n'était pas vous, révoquez-la maintenant. Vous devez reconnaître cet avis avant de continuer.",
+  "credentialNotice.label": "Étiquette de la clé d'accès",
+  "credentialNotice.createdAt": "Ajoutée",
+  "credentialNotice.ack": "Je reconnais cette clé d'accès",
+  "credentialNotice.revoke": "Révoquer cette clé d'accès",
+  "credentialNotice.alreadyRevoked": "Cette clé d'accès a déjà été révoquée. Reconnaissez l'avis pour continuer.",
+  "credentialNotice.busy": "Traitement…",
 
   "members.title": "Clés d'accès de l'équipe",
   "members.hint": "Personnes dans les installations que vous gérez. Ouvrez une personne pour modifier une note d'affichage ou révoquer une clé d'accès, réinitialisez un NIP verrouillé, récupérez son compte, ou mettez fin à une adhésion. Utilisez Terminer toutes les sessions si un appareil du magasin est volé. Les administrateurs peuvent réinitialiser l'authentificateur d'un opérateur. Le courriel n'est pas affiché.",

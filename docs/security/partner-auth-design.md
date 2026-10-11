@@ -1908,7 +1908,7 @@ A later harness / Deno integration run should record file and test counts here t
 
 - **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
 - **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
-- **The out-of-band notice of a credential add** (open item U1): server half → §92 (`partner_credential_add_notice` + `credential_add` alarm); PWA interstitial still open. **The operator alert on a TOTP reset** remains an `audit_log` row only.
+- **The out-of-band notice of a credential add** (open item U1): server half → §92; PWA blocking interstitial → §93. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** remains an `audit_log` row only.
 - The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
 
 ### 22.4 Seams left for the Edge half
@@ -1942,7 +1942,7 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 - `PATCH credentials/{id}` (the display note): closed by §65 / migration `0079`.
 - The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
 - Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
-- The PWA screens and `apps/partners` client; U1 credential-add notice server half → §92; PWA blocking interstitial remains open.
+- The PWA screens and `apps/partners` client; U1 credential-add notice → §92 (server) + §93 (PWA interstitial); email notice (Q7) remains open.
 - `gr_enr_` on `getActorFromRequest`'s refusal list → closed by §91 (defence in depth with `gr_ps_` / `gr_inv_`).
 
 ## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
@@ -3986,7 +3986,7 @@ Numbering: **matrix n/a (PWA only), this section 90.** Closes the §24.3 / §89.
 
 ### 90.3 Not built, honestly
 
-- `gr_enr_` on `getActorFromRequest` refusal list → §91; U1 credential-add notice server → §92 / PWA interstitial open; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 email notice (Q7); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 90.4 Verification
 
@@ -4010,7 +4010,7 @@ Numbering: **matrix n/a (Edge shared), this section 91.** Closes the §23.3 / §
 
 ### 91.3 Not built, honestly
 
-- U1 credential-add blocking interstitial (PWA only) → §92 closes the DB + Edge half; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 credential-add blocking interstitial (PWA only) → §92 closes the DB + Edge half; §93 closes the PWA interstitial; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 91.4 Verification
 
@@ -4020,7 +4020,7 @@ Branch: `cursor/p5-gr-enr-refuse-8ffd` (base after #130 / `2a1b744`). Squash-mer
 
 ## 92. As built: credential-add notice (U1 server half)
 
-Numbering: **migration `0091`, matrix `69`, this section 92.** Closes U1 conditions (1)+(2) server half from §802 / §91.3: `app.partner_credential_add_notice` written on every second credential add (`created_via_credential_id` set), member `GET credentials/notices` + `POST credentials/notices/{id}/ack`, manager `GET credentials/notices/reach`, operator alarm kind `credential_add`, retention purge, and Edge routes on `partner-members`. **PWA blocking interstitial at next sign-in is still open (§92.3).** No UI flag flips; no CAMERA / OCR.
+Numbering: **migration `0091`, matrix `69`, this section 92.** Closes U1 conditions (1)+(2) server half from §802 / §91.3: `app.partner_credential_add_notice` written on every second credential add (`created_via_credential_id` set), member `GET credentials/notices` + `POST credentials/notices/{id}/ack`, manager `GET credentials/notices/reach`, operator alarm kind `credential_add`, retention purge, and Edge routes on `partner-members`. **PWA blocking interstitial → §93.** No UI flag flips; no CAMERA / OCR.
 
 ### 92.1 What was built
 
@@ -4036,11 +4036,38 @@ Numbering: **migration `0091`, matrix `69`, this section 92.** Closes U1 conditi
 
 ### 92.3 Not built, honestly
 
-- U1 **blocking interstitial** in `apps/partners` (ack + revoke affordance at next sign-in); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 **blocking interstitial** in `apps/partners` → §93; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 92.4 Verification
 
 Branch: `cursor/p5-credential-notice-8ffd` (base after #131 / `0780e0d`). Squash-merged as `54d4413` (#132).
 
 - pgTAP matrix `69`; vitest `partner-members-handler`, `partner-modules`, `review-account-gate`; retention step `partner_credential_add_notices` in matrices `20` / `30` and `retentionPurgeSteps`.
+
+## 93. As built: credential-add notice interstitial (U1 PWA)
+
+Numbering: **migration n/a (clients only), this section 93.** Closes U1 condition (1) from §802 / §92.3: after sign-in on any device, unacked `GET partner-members/credentials/notices` rows open a **blocking** panel that names the database-derived label and offers **ack** (A0) or **revoke then ack** (A2 reauth + PIN). Forced first-PIN enrolment still wins when both apply; Lock / Sign out remain reachable. No migration; no UI flag flips; no CAMERA / OCR.
+
+### 93.1 What was built
+
+- **API** — `listCredentialAddNotices` / `ackCredentialAddNotice` on `members-routes.ts` (Edge shapes from §92).
+- **Gate** — `credential-notice.ts`: `maybeOpen` after sign-in and after a forced PIN clears; one notice at a time; fetch failure does not invent a permanent block.
+- **Panel** — `credential-add-notice` in state / `views-panels` / `closePanel` refuse; i18n en + fr-CA.
+- **Fake + tests** — `seedCredentialAddNotice` + notices routes on the fake partner server; `credential-notice.test.ts`.
+
+### 93.2 Decisions and departures
+
+- **Revoke clears the notice** — A2 revoke then ack in one flow (subject still must acknowledge; revoke alone is not enough on the server).
+- **Manager reach list** — Edge `GET credentials/notices/reach` remains available (§92); no manager inbox UI in this slice (operator alarm + audit already fire).
+- **Offline list failure** — home stays open with an error notice rather than blocking the shop floor forever.
+
+### 93.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; manager reach inbox UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 93.4 Verification
+
+Branch: `cursor/p5-credential-notice-ui-8ffd` (base after #132 / `54d4413`). Squash-merged as _pending_.
+
+- `@golfraven/partners` vitest (`credential-notice`); typecheck clean; no Edge / migration change; tip remains `0091`.
 

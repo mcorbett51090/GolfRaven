@@ -51,6 +51,8 @@ export interface PanelDeps {
   readonly api: PartnerApi;
   readonly host: Host;
   readonly nowMs: () => number;
+  /** After a forced first PIN is set or skipped, home may open the credential-add interstitial (§93). */
+  readonly onHomeReady?: (grant: SessionGrant) => Promise<void>;
 }
 
 const CODE_RE = /^[0-9]{6,10}$/;
@@ -58,7 +60,7 @@ const TOTP_RE = /^[0-9]{6}$/;
 const PIN_RE = /^[0-9]{4}$/;
 
 export function createPanels(deps: PanelDeps): Panels {
-  const { api, host, nowMs } = deps;
+  const { api, host, nowMs, onHomeReady } = deps;
   /** The waiting `ask` of a `requirePin` call: settling it with a string submits it, with null cancels. */
   let waiting: ((pin: string | null) => void) | null = null;
 
@@ -208,7 +210,10 @@ export function createPanels(deps: PanelDeps): Panels {
         // the PIN is saved either way; the next refresh shows the rest
       }
       const after = live(grant);
-      if (after !== null) host.set({ ...after, session, panel: null, notice: { kind: panel.mode === "set" ? "pin-set" : "pin-changed" } });
+      if (after !== null) {
+        host.set({ ...after, session, panel: null, notice: { kind: panel.mode === "set" ? "pin-set" : "pin-changed" } });
+        if (panel.forced && onHomeReady !== undefined) await onHomeReady(grant);
+      }
     },
 
     async startEmailProof() {
@@ -339,8 +344,12 @@ export function createPanels(deps: PanelDeps): Panels {
         return;
       }
       if (s.panel.kind === "pin-setup" && s.panel.forced && !s.panel.canSkip) return;
+      if (s.panel.kind === "credential-add-notice") return;
       if (s.panel.busy) return;
+      const grant = s.grant;
+      const wasForcedPin = s.panel.kind === "pin-setup" && s.panel.forced;
       host.set({ ...s, panel: null });
+      if (wasForcedPin && onHomeReady !== undefined) void onHomeReady(grant);
     },
 
     sessionEnded() {

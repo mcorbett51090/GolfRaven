@@ -32,6 +32,7 @@ import type { StepUp } from "../auth/step-up";
 import type { GetAssertionDeps } from "../webauthn/assertion";
 import type { CreateCredentialDeps } from "../webauthn/registration";
 import { createAdminScreens } from "./admin";
+import { createCredentialNoticeGate } from "./credential-notice";
 import { createEnrolFlow } from "./enrol-flow";
 import { createInviteAccept } from "./invite-accept";
 import { messageForError } from "./messages";
@@ -76,6 +77,10 @@ export interface AppController extends StepUp {
   startTotpEnrol(): Promise<void>;
   submitTotp(code: string): Promise<void>;
   closePanel(): void;
+
+  /** U1 credential-add interstitial (§93): ack (A0) or revoke then ack (A2). */
+  ackCredentialAddNotice(): Promise<void>;
+  revokeCredentialAddNotice(): Promise<void>;
 
   /** S7b/S7c/S7 work screens (attest, course-QR, stock, hand-over, offer redeem; see work.ts). */
   openAttest(facilityId: string): void;
@@ -214,7 +219,21 @@ export function createController(deps: ControllerDeps): AppController {
     getState: () => state,
     set: (next: AppState) => set(next),
   };
-  const panels = createPanels({ api, host, nowMs });
+  /** Filled after `createPanels` so `onHomeReady` can open the U1 interstitial once a forced PIN clears. */
+  const noticeGate: { current: ReturnType<typeof createCredentialNoticeGate> | null } = { current: null };
+  const panels = createPanels({
+    api,
+    host,
+    nowMs,
+    onHomeReady: (grant) => noticeGate.current!.maybeOpen(grant),
+  });
+  const credentialNotice = createCredentialNoticeGate({
+    api,
+    host,
+    stepUp: panels,
+    webauthn: assertionDeps(deps.webauthn),
+  });
+  noticeGate.current = credentialNotice;
   const work = createWorkScreens({
     api,
     host,
@@ -267,6 +286,7 @@ export function createController(deps: ControllerDeps): AppController {
         work: null,
         pendingInviteAccept: pending,
       });
+      if (panel === null) await credentialNotice.maybeOpen(grant);
     },
   });
   /** The sign-in in progress; null when none, or once it was cancelled (the flow then drops whatever it produces). */
@@ -367,6 +387,7 @@ export function createController(deps: ControllerDeps): AppController {
           work: null,
           pendingInviteAccept: pending,
         });
+        await credentialNotice.maybeOpen(grant);
       } catch (e) {
         if (!live()) {
           // cancelled: cancelSignIn() already showed signed-out; make sure nothing is held
@@ -429,6 +450,9 @@ export function createController(deps: ControllerDeps): AppController {
     startTotpEnrol: () => panels.startTotpEnrol(),
     submitTotp: (code) => panels.submitTotp(code),
     closePanel: () => panels.closePanel(),
+
+    ackCredentialAddNotice: () => credentialNotice.ack(),
+    revokeCredentialAddNotice: () => credentialNotice.revoke(),
 
     openAttest: (facilityId) => work.openAttest(facilityId),
     openCourseQr: (facilityId) => work.openCourseQr(facilityId),

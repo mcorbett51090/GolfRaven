@@ -4,7 +4,7 @@
  */
 
 import type { AppController } from "../app/controller";
-import type { EmailProofPanel, PinPromptPanel, PinSetupPanel, TotpPanel } from "../app/state";
+import type { CredentialAddNoticePanel, EmailProofPanel, PinPromptPanel, PinSetupPanel, TotpPanel } from "../app/state";
 import { translate, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
 import { field, form } from "./forms";
@@ -12,7 +12,13 @@ import { noticeElement } from "./notice";
 import { totpQrCanvas } from "./totp-qr";
 
 type T = (k: MessageKey, p?: Record<string, string | number>) => string;
-type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
+type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel | CredentialAddNoticePanel;
+
+function formatTime(iso: string, locale: Locale): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(d);
+}
 
 const wrap = (titleKey: MessageKey, t: T, screen: string, busy: boolean, ...children: Array<Node | null>): HTMLElement =>
   h("main", { "aria-busy": busy ? "true" : "false", "data-screen": screen }, h("h1", { tabindex: "-1", "data-testid": "heading" }, t(titleKey)), ...children);
@@ -161,6 +167,57 @@ function totp(p: TotpPanel, c: AppController, t: T, locale: Locale): HTMLElement
   );
 }
 
+function credentialAddNotice(p: CredentialAddNoticePanel, c: AppController, t: T, locale: Locale): HTMLElement {
+  const alreadyRevoked = p.notice.credentialRevokedAt !== null;
+  return wrap(
+    "credentialNotice.title",
+    t,
+    "credential-add-notice",
+    p.busy,
+    noticeElement(p.panelNotice, locale),
+    h("p", {}, t("credentialNotice.lead")),
+    h(
+      "dl",
+      { class: "fields", "data-testid": "credential-notice-fields" },
+      h("dt", {}, t("credentialNotice.label")),
+      h("dd", { "data-testid": "credential-notice-label" }, p.notice.label),
+      h("dt", {}, t("credentialNotice.createdAt")),
+      h("dd", { "data-testid": "credential-notice-created" }, formatTime(p.notice.createdAt, locale)),
+    ),
+    alreadyRevoked ? h("p", { class: "muted", "data-testid": "credential-notice-revoked" }, t("credentialNotice.alreadyRevoked")) : null,
+    h(
+      "div",
+      { class: "actions" },
+      h(
+        "button",
+        {
+          type: "button",
+          class: "primary",
+          disabled: p.busy,
+          "data-autofocus": true,
+          "data-testid": "credential-notice-ack",
+          onclick: () => void c.ackCredentialAddNotice(),
+        },
+        t("credentialNotice.ack"),
+      ),
+      alreadyRevoked
+        ? null
+        : h(
+            "button",
+            {
+              type: "button",
+              class: "danger",
+              disabled: p.busy,
+              "data-testid": "credential-notice-revoke",
+              onclick: () => void c.revokeCredentialAddNotice(),
+            },
+            t("credentialNotice.revoke"),
+          ),
+    ),
+    p.busy ? busyLine(t, "credentialNotice.busy") : null,
+  );
+}
+
 export function panelView(panel: Panel, controller: AppController, locale: Locale): HTMLElement {
   const t: T = (k, p) => translate(locale, k, p);
   switch (panel.kind) {
@@ -170,6 +227,8 @@ export function panelView(panel: Panel, controller: AppController, locale: Local
       return pinSetup(panel, controller, t, locale);
     case "email-proof":
       return emailProof(panel, controller, t, locale);
+    case "credential-add-notice":
+      return credentialAddNotice(panel, controller, t, locale);
     default:
       return totp(panel, controller, t, locale);
   }
