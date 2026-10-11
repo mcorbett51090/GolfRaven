@@ -490,6 +490,16 @@ export const en = {
   "notice.credentialNoteSaved": "Display note saved.",
   "notice.credentialRevoked": "Passkey revoked. Sessions that used it have ended.",
   "notice.credentialAdded": "Passkey added.",
+  "notice.credentialNoticeAcked": "Passkey notice acknowledged.",
+
+  "credentialNotice.title": "A passkey was added",
+  "credentialNotice.lead": "Someone added a passkey to your account. If this was not you, revoke it now. You must acknowledge this notice before continuing.",
+  "credentialNotice.label": "Passkey label",
+  "credentialNotice.createdAt": "Added",
+  "credentialNotice.ack": "I recognise this passkey",
+  "credentialNotice.revoke": "Revoke this passkey",
+  "credentialNotice.alreadyRevoked": "This passkey has already been revoked. Acknowledge to continue.",
+  "credentialNotice.busy": "Working…",
 
   "members.title": "Team passkeys",
   "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, recover their account, or end one membership. Use End all sessions if a shop device is stolen. Admins can reset an operator's authenticator. Email is not shown.",

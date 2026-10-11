@@ -20,7 +20,7 @@ import type {
 } from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
 import type { InviteCreated, InviteRole, PartnerInvite } from "../api/invites-routes";
-import type { MemberRecovered, PartnerCredential, PartnerMember } from "../api/members-routes";
+import type { CredentialAddNotice, MemberRecovered, PartnerCredential, PartnerMember } from "../api/members-routes";
 import type {
   AttestKind,
   AttestResult,
@@ -85,7 +85,8 @@ export type Notice =
         | "invite-created"
         | "invite-revoked"
         | "invite-accept-pending"
-        | "invite-accepted";
+        | "invite-accepted"
+        | "credential-notice-acked";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -140,7 +141,16 @@ export interface TotpPanel {
   readonly notice: Notice | null;
 }
 
-export type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
+/** U1 blocking interstitial (§93): a credential was added; ack (A0) or revoke then ack (A2). Cannot be dismissed. */
+export interface CredentialAddNoticePanel {
+  readonly kind: "credential-add-notice";
+  readonly notice: CredentialAddNotice;
+  readonly busy: boolean;
+  /** Inline error / status on the interstitial (distinct from the signed-in home `notice`). */
+  readonly panelNotice: Notice | null;
+}
+
+export type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel | CredentialAddNoticePanel;
 
 /** The S7b–S7 work screens drawn in place of the signed-in home (design 24.3 → S7b/S7c/S7d/S7). `null` means home. */
 export type WorkView =

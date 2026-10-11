@@ -1,5 +1,5 @@
 /**
- * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81 / §82 / §84 / §85).
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81 / §82 / §84 / §85 / §93).
  *
  * List + display-note PATCH (class A0); own revoke DELETE and second-credential add (class A2).
  * Org roster GET (class A0) and credentials `?userId=` under the reach rule (§79 / §80 / §81).
@@ -7,6 +7,7 @@
  * Org sessions revoke-all (stolen-iPad, class A2, §85).
  * Member TOTP reset under reach (class A3, §86).
  * Admin enrolment issue for another admin (class A3, §87).
+ * Credential-add notices list + ack (class A0, §92 / §93).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -266,6 +267,50 @@ export async function resetMemberTotp(api: PartnerApi, userId: string): Promise<
   } catch (e) {
     if (isPartnerApiError(e) && (e.code === "totp_not_set" || e.kind === "conflict")) {
       throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "totp_not_set" });
+    }
+    throw e;
+  }
+}
+
+/** Edge `CredentialAddNoticeView` (GET credentials/notices). Unacked rows for the signed-in subject. */
+export interface CredentialAddNotice {
+  readonly noticeId: string;
+  readonly credentialId: string;
+  readonly label: string;
+  readonly createdAt: string;
+  readonly credentialRevokedAt: string | null;
+}
+
+function parseCredentialAddNotice(raw: unknown): CredentialAddNotice {
+  if (
+    !isObject(raw) || !isString(raw["noticeId"]) || !isString(raw["credentialId"]) || !isString(raw["label"]) ||
+    !isString(raw["createdAt"]) || !isStringOrNull(raw["credentialRevokedAt"] ?? null)
+  ) malformed();
+  return {
+    noticeId: raw["noticeId"],
+    credentialId: raw["credentialId"],
+    label: raw["label"],
+    createdAt: raw["createdAt"],
+    credentialRevokedAt: (raw["credentialRevokedAt"] as string | null) ?? null,
+  };
+}
+
+/** GET partner-members/credentials/notices (class A0): unacked credential-add notices for the subject. */
+export async function listCredentialAddNotices(api: PartnerApi): Promise<readonly CredentialAddNotice[]> {
+  const data = await api.call("GET", "partner-members", "credentials/notices");
+  if (!isObject(data) || !Array.isArray(data["notices"])) malformed();
+  return data["notices"].map(parseCredentialAddNotice);
+}
+
+/** POST credentials/notices/{id}/ack (class A0). 404 → `not_found`; 409 already_acked treated as success. */
+export async function ackCredentialAddNotice(api: PartnerApi, noticeId: string): Promise<void> {
+  try {
+    const data = await api.call("POST", "partner-members", `credentials/notices/${noticeId}/ack`, {});
+    if (!isObject(data) || data["acked"] !== true) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "already_acked" || e.kind === "conflict")) return;
+    if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
+      throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
     }
     throw e;
   }

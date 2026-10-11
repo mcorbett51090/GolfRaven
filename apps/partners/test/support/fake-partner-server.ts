@@ -116,6 +116,11 @@ export interface FakeServer {
   seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean; failures?: number }): Promise<void>;
   /** Adds a second (or further) active credential row for the signed-in user so revoke / add-cap UI can be exercised (§74 / §75). */
   seedExtraCredential(id?: string): string;
+  /**
+   * Seeds an unacked credential-add notice for the signed-in user (§93). Creates the credential row when needed.
+   * Returns the notice id.
+   */
+  seedCredentialAddNotice(input?: { noticeId?: string; credentialId?: string; label?: string; createdAt?: string }): string;
   /** Seeds an org membership row for GET members and marks the user as under reach for credential list/note/revoke (§81). `email: null` → recover returns `no_email`. */
   seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null; email?: string | null }): void;
   /** Confirmed TOTP for a seedMember'd user so §86 totp-reset can succeed. */
@@ -200,6 +205,14 @@ interface FakeInvite {
   revokedAt: string | null;
   attempts: number;
 }
+interface FakeCredentialAddNotice {
+  noticeId: string;
+  credentialId: string;
+  label: string;
+  createdAt: string;
+  subjectUserId: string;
+  subjectAckedAt: string | null;
+}
 
 const SPKI_P256_PREFIX = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
 const equalBytes = (a: Uint8Array, b: Uint8Array): boolean => Buffer.from(a).equals(Buffer.from(b));
@@ -222,6 +235,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
   }> = [];
   /** userIds whose credentials the signed-in actor may list / note / revoke under reach (seeded via seedMember). */
   const reachUsers = new Set<string>();
+  /** Unacked credential-add notices for the U1 interstitial (§93). */
+  const credentialAddNotices: FakeCredentialAddNotice[] = [];
   /** Platform admin user ids for §87 POST admin/enrolments. */
   const adminUsers = new Set<string>();
   const invites = new Map<string, FakeInvite>();
@@ -1680,6 +1695,50 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         }
         return ok(200, { revokedSessions: sessionsRevoked, revokedCredentials: credentialsRevoked });
       }
+      if (route === "credentials/notices" && req.method === "GET") {
+        const notices = credentialAddNotices
+          .filter((n) => n.subjectUserId === session.userId && n.subjectAckedAt === null)
+          .map((n) => {
+            const cred = [...credentials.values()].find((c) => c.id === n.credentialId);
+            return {
+              noticeId: n.noticeId,
+              credentialId: n.credentialId,
+              label: n.label,
+              createdAt: n.createdAt,
+              credentialRevokedAt: cred?.revokedAt ?? null,
+            };
+          });
+        return ok(200, { notices });
+      }
+      if (route === "credentials/notices/reach" && req.method === "GET") {
+        if (!canListMembers()) return ok(200, { notices: [] });
+        const notices = credentialAddNotices
+          .filter((n) => n.subjectAckedAt === null && n.subjectUserId !== session.userId && reachUsers.has(n.subjectUserId))
+          .map((n) => {
+            const cred = [...credentials.values()].find((c) => c.id === n.credentialId);
+            return {
+              noticeId: n.noticeId,
+              credentialId: n.credentialId,
+              label: n.label,
+              createdAt: n.createdAt,
+              credentialRevokedAt: cred?.revokedAt ?? null,
+              subjectUserId: n.subjectUserId,
+            };
+          });
+        return ok(200, { notices });
+      }
+      const noticeAckMatch =
+        /^credentials\/notices\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/ack$/i.exec(route);
+      if (noticeAckMatch !== null && req.method === "POST") {
+        const body = await req.text();
+        if (body.trim() !== "" && body.trim() !== "{}") return err(400, "bad_request");
+        const noticeId = noticeAckMatch[1]!.toLowerCase();
+        const row = credentialAddNotices.find((n) => n.noticeId === noticeId && n.subjectUserId === session.userId);
+        if (row === undefined) return err(404, "not_found");
+        if (row.subjectAckedAt !== null) return err(409, "already_acked");
+        row.subjectAckedAt = new Date().toISOString();
+        return ok(200, { acked: true });
+      }
       if (route === "credentials" && req.method === "GET") {
         const target = url.searchParams.get("userId");
         const ownerId = target === null || target === "" ? session.userId : target.toLowerCase();
@@ -1874,6 +1933,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       credentials.clear();
       memberRoster.length = 0;
       reachUsers.clear();
+      credentialAddNotices.length = 0;
       invites.clear();
       usedGotrueSessions.clear();
       seed();
@@ -1911,6 +1971,24 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         revokedAt: null,
       });
       return id;
+    },
+    seedCredentialAddNotice(input = {}) {
+      const credentialId = input.credentialId ?? "22222222-2222-4222-8222-222222222222";
+      if (![...credentials.values()].some((c) => c.id === credentialId)) {
+        this.seedExtraCredential(credentialId);
+      }
+      const noticeId = (input.noticeId ?? randomUUID()).toLowerCase();
+      const label = input.label ?? `Passkey · ${credentialId.slice(0, 8)}`;
+      const createdAt = input.createdAt ?? "2026-06-01T12:00:00.000Z";
+      credentialAddNotices.push({
+        noticeId,
+        credentialId: credentialId.toLowerCase(),
+        label,
+        createdAt,
+        subjectUserId: USER_ID,
+        subjectAckedAt: null,
+      });
+      return noticeId;
     },
     seedMember({
       userId,
