@@ -465,6 +465,7 @@ export const en = {
   "review.authAlarms.kind.enrolment_issue": "Admin enrolment issued",
   "review.authAlarms.kind.invite_create": "Invite created",
   "review.authAlarms.kind.invite_accept": "Invite accepted",
+  "review.authAlarms.kind.enrolment_accept": "Enrolment accepted",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",
