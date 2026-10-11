@@ -15,7 +15,7 @@
 --      actor — unlike rate_member).
 --   4. CREATE OR REPLACE partner_totp_reset_for_partner: after audit,
 --      INSERT alarm ON CONFLICT DO NOTHING; detail
---      {"target":"<uuid>","status":"ok"|"unset"} only (no actor email).
+--      {"subject":"<uuid>","status":"ok"|"unset"} only (no actor email).
 --
 -- DELIBERATELY NOT HERE: Q7 email (U1 condition 3); OCR / aHash / UI
 -- flag flips / CAMERA. Nothing from 0001–0091 is edited.
@@ -113,7 +113,7 @@ BEGIN
   PERFORM private.partner_sessions_revoke('user', p_target_uid, 'totp_reset');
   PERFORM private.partner_audit_write('partner.totp.reset', 'app.partner_totp', p_target_uid::text,
     pg_catalog.jsonb_build_object('status', v_status));
-  v_detail := pg_catalog.jsonb_build_object('target', p_target_uid::text, 'status', v_status);
+  v_detail := pg_catalog.jsonb_build_object('subject', p_target_uid::text, 'status', v_status);
   INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket, detail)
   VALUES (
     'totp_reset',

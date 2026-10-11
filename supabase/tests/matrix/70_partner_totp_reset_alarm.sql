@@ -125,10 +125,10 @@ SELECT is(
   'totp_reset leaves credential_id NULL'
 );
 SELECT is(
-  (SELECT detail ->> 'target' FROM app.partner_auth_alarm
+  (SELECT detail ->> 'subject' FROM app.partner_auth_alarm
    WHERE kind = 'totp_reset' AND bucket_key = '00000000-0000-0000-0000-3000000000c1'),
   '00000000-0000-0000-0000-3000000000c1',
-  'detail.target is the reset target'
+  'detail.subject is the reset target'
 );
 SELECT is(
   (SELECT detail ->> 'status' FROM app.partner_auth_alarm

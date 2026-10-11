@@ -1942,7 +1942,7 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 - `PATCH credentials/{id}` (the display note): closed by §65 / migration `0079`.
 - The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
 - Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
-- The PWA screens and `apps/partners` client; U1 credential-add notice → §92–§94; email notice (Q7) remains open.
+- The PWA screens and `apps/partners` client; U1 credential-add notice → §92–§94; email notice (Q7) remains open; TOTP-reset operator alarm → §95.
 - `gr_enr_` on `getActorFromRequest`'s refusal list → closed by §91 (defence in depth with `gr_ps_` / `gr_inv_`).
 
 ## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
@@ -4105,7 +4105,7 @@ Numbering: **migration `0092`, matrix `70`, this section 95.** Closes the §1911
 
 - **Kind + row CHECK** — `totp_reset` with `credential_id` NULL and `bucket_key` = target uid text (same shape as `rate_member`).
 - **Policies** — partner-bound INSERT/SELECT for `private_definer` (bucket is the target, not the actor).
-- **Wrapper** — `CREATE OR REPLACE partner_totp_reset_for_partner`: after audit, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"target","status"}` only.
+- **Wrapper** — `CREATE OR REPLACE partner_totp_reset_for_partner`: after audit, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` only.
 - **Inventories** — function note + definer_policy_allowlist for the two policies.
 
 ### 95.2 Decisions and departures
