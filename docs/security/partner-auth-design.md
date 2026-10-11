@@ -3695,7 +3695,7 @@ Numbering: **migration `0089`, matrix `67`, this section 79.** Closes the §76.2
 
 ### 79.4 Verification
 
-Branch: `cursor/p5-credential-list-reach-8ffd` (base after #118 / `1ecd6fd`). Tip on draft PR.
+Branch: `cursor/p5-credential-list-reach-8ffd` (base after #118 / `1ecd6fd`). Tip on PR #119.
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → (pending).
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 67 ok; matrix 32 ACL); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 
