@@ -65,7 +65,7 @@ $f$;
 CREATE FUNCTION pg_temp.accept_e(p_label text) RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE r record;
 BEGIN
-  PERFORM pg_temp.seed_a2('sx');
+  PERFORM pg_temp.seed_a2('em');
   EXECUTE 'SET LOCAL ROLE edge_partner';
   SELECT * INTO r FROM private.partner_invite_accept_for_partner(pg_temp.hh(p_label));
   EXECUTE 'RESET ROLE';
@@ -90,11 +90,13 @@ $f$;
 GRANT EXECUTE ON FUNCTION pg_temp.th(text), pg_temp.hh(text), pg_temp.mk_cred(text, uuid), pg_temp.mk_session(text, uuid, uuid, int),
   pg_temp.seed_a2(text), pg_temp.mk_inv(text, uuid, app.partner_role, text), pg_temp.accept_e(text), pg_temp.force_alarm(uuid) TO PUBLIC;
 
--- helpers seed staff-x without email_confirmed_at; accept_core requires confirmed.
+-- Confirmed mailbox at facility X (helpers staff-x has no email_confirmed_at; accept_core requires it).
 SET LOCAL ROLE service_role;
-UPDATE auth.users SET email_confirmed_at = now()
-WHERE id = '00000000-0000-0000-0000-1000000000a1' AND email_confirmed_at IS NULL;
+INSERT INTO auth.users (id, email, email_confirmed_at)
+VALUES ('ee800000-0000-0000-0000-000000000009', 'em-80@example.test', now());
 RESET ROLE;
+INSERT INTO app.partner_member (user_id, org_id, role, invited_by)
+VALUES ('ee800000-0000-0000-0000-000000000009', '10000000-0000-0000-0000-000000000001', 'staff', NULL);
 
 -- ----------------------------------------------------------------------------
 -- 1. Kind / row CHECKs + structure
@@ -142,7 +144,7 @@ SELECT ok(
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.mk_inv('n1', '10000000-0000-0000-0000-000000000001', 'staff', 'newbie-80@example.test') AS inv_n1 \gset
 UPDATE app.partner_invite
-SET accepted_at = clock_timestamp(), accepted_by = '00000000-0000-0000-0000-1000000000a1', attempts = 1
+SET accepted_at = clock_timestamp(), accepted_by = 'ee800000-0000-0000-0000-000000000009', attempts = 1
 WHERE id = :'inv_n1';
 SELECT is(
   (SELECT count(*)::int FROM app.partner_auth_alarm
@@ -154,17 +156,17 @@ SELECT is(
 -- ----------------------------------------------------------------------------
 -- 3. Branch E accept raises alarm; quiet statuses; ON CONFLICT quiet
 -- ----------------------------------------------------------------------------
-SELECT pg_temp.mk_cred('sx', '00000000-0000-0000-0000-1000000000a1') AS c_sx \gset
-SELECT pg_temp.mk_session('sx', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS s_sx \gset
-SELECT pg_temp.th('sx') AS th_sx \gset
+SELECT pg_temp.mk_cred('em', 'ee800000-0000-0000-0000-000000000009') AS c_em \gset
+SELECT pg_temp.mk_session('em', 'ee800000-0000-0000-0000-000000000009', :'c_em') AS s_em \gset
+SELECT pg_temp.th('em') AS th_em \gset
 
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_sx');
+SELECT private.bind_partner_session(:'th_em');
 RESET ROLE;
 
-SELECT pg_temp.mk_inv('e1', '10000000-0000-0000-0000-000000000002', 'staff', 'staff-x@example.test') AS inv_e1 \gset
+SELECT pg_temp.mk_inv('e1', '10000000-0000-0000-0000-000000000002', 'staff', 'em-80@example.test') AS inv_e1 \gset
 SELECT is(pg_temp.accept_e('e1'), 'ok:10000000-0000-0000-0000-000000000002',
-  'branch E: staff-x accepts facility-Y staff invite → ok');
+  'branch E: confirmed member accepts facility-Y staff invite → ok');
 SELECT is(
   (SELECT count(*)::int FROM app.partner_auth_alarm
    WHERE kind = 'invite_accept' AND bucket_key = :'inv_e1'),
@@ -198,7 +200,7 @@ SELECT is(
 SELECT is(
   (SELECT detail ->> 'subject' FROM app.partner_auth_alarm
    WHERE kind = 'invite_accept' AND bucket_key = :'inv_e1'),
-  '00000000-0000-0000-0000-1000000000a1',
+  'ee800000-0000-0000-0000-000000000009',
   'detail.subject is accepted_by'
 );
 SELECT is(
@@ -218,7 +220,7 @@ SELECT is(
   'email_mismatch does not raise invite_accept'
 );
 
-SELECT pg_temp.mk_inv('e3', '10000000-0000-0000-0000-000000000001', 'staff', 'staff-x@example.test') AS inv_e3 \gset
+SELECT pg_temp.mk_inv('e3', '10000000-0000-0000-0000-000000000001', 'staff', 'em-80@example.test') AS inv_e3 \gset
 SELECT is(split_part(pg_temp.accept_e('e3'), ':', 1), 'already_member',
   'already_member stays a status');
 SELECT is(
