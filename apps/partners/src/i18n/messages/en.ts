@@ -488,7 +488,7 @@ export const en = {
   "notice.credentialAdded": "Passkey added.",
 
   "members.title": "Team passkeys",
-  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, recover their account, or end one membership. Email is not shown.",
+  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, recover their account, or end one membership. Use End all sessions if a shop device is stolen. Email is not shown.",
   "members.load": "Load team",
   "members.empty": "No team members in your facility scope.",
   "members.role": "Role",
@@ -508,9 +508,19 @@ export const en = {
   "members.recovered.lead": "Show this recovery link or token once. All of their passkeys and sessions have ended. It is not stored again.",
   "members.recovered.until": "Expires {until}",
   "members.recovered.dismiss": "I have shown it",
+  "members.revokeAll.title": "Stolen device",
+  "members.revokeAll.hint": "Ends every live session for this organisation, including yours. Optionally revoke passkeys created after a UTC time (not yours).",
+  "members.revokeAll.createdAfter": "Also revoke passkeys created after (UTC, optional)",
+  "members.revokeAll.action": "End all sessions",
+  "members.revokeAll.result": "Organisation {org}: ended {sessions} session(s) and {credentials} passkey(s).",
+  "members.revokeAll.signInAgain": "Your session for this organisation has ended. Sign in again when you are ready.",
+  "members.revokeAll.dismiss": "Understood",
+  "members.createdAfterInvalid": "Use a UTC instant such as 2030-01-01T12:00:00Z.",
+  "members.createdAfterFuture": "That cut-off time is in the future.",
   "notice.memberPinReset": "PIN reset. They must set a new PIN at the next sensitive action.",
   "notice.memberRecovered": "Account recovered. Show the one-time link before you leave this screen.",
   "notice.memberRevoked": "Membership ended for that organisation.",
+  "notice.orgRevokeAll": "All sessions for that organisation have ended.",
 } as const;
 
 export type MessageKey = keyof typeof en;

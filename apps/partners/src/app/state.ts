@@ -77,7 +77,8 @@ export type Notice =
         | "credential-added"
         | "member-pin-reset"
         | "member-recovered"
-        | "member-revoked";
+        | "member-revoked"
+        | "org-revoke-all";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -238,6 +239,14 @@ export type WorkView =
       readonly rows: readonly PartnerMember[] | null;
       /** Plaintext `gr_enr_…` / enrolUrl shown once after recover; cleared on dismiss or leave. Never logged. */
       readonly recovered: MemberRecovered | null;
+      /** Optional UTC instant draft for revoke-all credential cut-off (`…Z`). */
+      readonly createdAfterDraft: string;
+      /** Counts from the last org revoke-all; cleared on dismiss or leave. */
+      readonly lastRevokeAll: {
+        readonly orgId: string;
+        readonly sessions: number;
+        readonly credentials: number;
+      } | null;
     }
   | {
       readonly kind: "credentials";

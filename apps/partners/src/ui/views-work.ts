@@ -284,6 +284,16 @@ export function workView(state: SignedInState, controller: AppController, locale
       return label === key ? role : label;
     };
     const isSelf = (userId: string) => userId.toLowerCase() === state.session.userId.toLowerCase();
+    const manageOrgs = (() => {
+      const ids = new Set<string>();
+      for (const m of state.session.memberships) {
+        if ((m.role === "manager" || m.role === "operator") && /^[0-9a-f-]{36}$/i.test(m.orgId)) ids.add(m.orgId.toLowerCase());
+      }
+      if (state.session.isAdmin && work.rows !== null) {
+        for (const row of work.rows) if (/^[0-9a-f-]{36}$/i.test(row.orgId)) ids.add(row.orgId.toLowerCase());
+      }
+      return [...ids].sort();
+    })();
     return h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "members" },
@@ -302,6 +312,71 @@ export function workView(state: SignedInState, controller: AppController, locale
               "button",
               { type: "button", disabled: busy, "data-testid": "member-recover-dismiss", onclick: () => controller.dismissMemberRecover() },
               t("members.recovered.dismiss"),
+            ),
+          )
+        : null,
+      work.lastRevokeAll !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "org-revoke-all-result" },
+            h(
+              "p",
+              {},
+              t("members.revokeAll.result", {
+                org: work.lastRevokeAll.orgId.slice(0, 8),
+                sessions: String(work.lastRevokeAll.sessions),
+                credentials: String(work.lastRevokeAll.credentials),
+              }),
+            ),
+            h("p", { class: "muted" }, t("members.revokeAll.signInAgain")),
+            h(
+              "button",
+              { type: "button", disabled: busy, "data-testid": "org-revoke-all-dismiss", onclick: () => controller.dismissOrgRevokeAll() },
+              t("members.revokeAll.dismiss"),
+            ),
+          )
+        : null,
+      manageOrgs.length > 0
+        ? h(
+            "section",
+            { "data-testid": "org-revoke-all" },
+            h("h2", {}, t("members.revokeAll.title")),
+            h("p", { class: "muted" }, t("members.revokeAll.hint")),
+            h(
+              "label",
+              { class: "field" },
+              h("span", {}, t("members.revokeAll.createdAfter")),
+              h("input", {
+                type: "text",
+                autocomplete: "off",
+                spellcheck: "false",
+                disabled: busy,
+                value: work.createdAfterDraft,
+                "data-testid": "org-revoke-created-after",
+                onchange: (e: Event) => controller.setOrgRevokeCreatedAfter((e.target as HTMLInputElement).value),
+              }),
+            ),
+            h(
+              "ul",
+              { "data-testid": "org-revoke-all-list" },
+              ...manageOrgs.map((orgId) =>
+                h(
+                  "li",
+                  { "data-testid": `org-revoke-row-${orgId}` },
+                  h("p", { class: "muted" }, t("members.org"), ": ", orgId.slice(0, 8)),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "danger",
+                      disabled: busy,
+                      "data-testid": `org-revoke-all-${orgId}`,
+                      onclick: () => void controller.revokeAllOrgSessions(orgId),
+                    },
+                    t("members.revokeAll.action"),
+                  ),
+                ),
+              ),
             ),
           )
         : null,
