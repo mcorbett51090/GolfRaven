@@ -4247,11 +4247,39 @@ Numbering: **migration `0095`, matrix `73`, this section 100.** Closes the §21.
 
 ### 100.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; org revoke-all operator alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; org revoke-all operator alarm → §101; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 100.4 Verification
 
-Branch: `cursor/p5-member-recover-alarm-8ffd` (base after #139 / `3b2d65d`). Squash-merged as _pending_.
+Branch: `cursor/p5-member-recover-alarm-8ffd` (base after #139 / `3b2d65d`). Squash-merged as `5fe353d` (#140).
 
 - pgTAP matrix `73`; tip `0095`; partners i18n / auth-alarms unit cells.
+
+## 101. As built: org revoke-all operator alarm
+
+Numbering: **migration `0096`, matrix `74`, this section 101.** Closes the §100.3 / §21.4 leftover: a successful `partner_org_sessions_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `org_revoke_all` (one row per org id per minute) so the admin auth-alarms list surfaces the stolen-iPad button, not only `audit_log` `partner.org.revoke_all`. `not_found` stays quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 101.1 What was built
+
+- **Kind + row CHECK** — `org_revoke_all` with `credential_id` NULL and `bucket_key` = org id text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_org_sessions_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"org","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.org_revoke_all` (EN / fr-CA); `authAlarmSubjectPrefix` reads `detail.org` as well as `detail.subject`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 101.2 Decisions and departures
+
+- **ok only** — `not_found` returns before audit/alarm.
+- **Bucket = org id** — not actor uid; flood shape is one row per org per UTC minute.
+- **Detail uses `org`** — not `subject`, so person-uid kinds stay unambiguous; the Review prefix helper accepts either key.
+
+### 101.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; member-revoke operator alarm; PWA Cache-Control `/*` no-store NIT (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 101.4 Verification
+
+Branch: `cursor/p5-org-revoke-alarm-8ffd` (base after #140 / `5fe353d`). Squash-merged as _pending_.
+
+- pgTAP matrix `74`; tip `0096`; partners i18n / auth-alarms unit cells.
 
