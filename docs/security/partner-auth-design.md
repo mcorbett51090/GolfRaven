@@ -4616,7 +4616,17 @@ Numbering: **migration `0107`, matrix `85`, this section 113.** Closes the §112
 
 ### 113.4 Verification
 
-Branch: `cursor/p5-totp-enrol-alarm-8ffd` (base after #152 / `5a2f57a`). Squash-merged as _pending_.
+Branch: `cursor/p5-totp-enrol-alarm-8ffd` (base after #152 / `5a2f57a`). Squash-merged as `a5e8bce`.
 
 - pgTAP matrix `85`; tip `0107`; partners i18n / auth-alarms unit cells.
+
+### 113.5 Keep-going note (no next in-repo seam)
+
+After §113 the partner auth-alarm ceremony trail
+(`enrolment_issue` → `enrolment_accept` → `credential_register` → `pin_set` → `totp_enrol`,
+plus the earlier revoke / lock / reset / invite trail through §110) has no further
+in-repo closable leftover under standing constraints: U1 condition (3) / Q7 email,
+staging path probe against a live gateway (§20.12), and OCR / aHash / UI flag flips /
+CAMERA remain blocked. `totp_confirm` and `pin_change` stay deliberate non-alarms
+(§113.2 / §112.2). Tip remains `0107`.
 
