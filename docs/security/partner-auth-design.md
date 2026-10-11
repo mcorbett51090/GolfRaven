@@ -4040,7 +4040,7 @@ Numbering: **migration `0091`, matrix `69`, this section 92.** Closes U1 conditi
 
 ### 92.4 Verification
 
-Branch: `cursor/p5-credential-notice-8ffd` (base after #131 / `0780e0d`).
+Branch: `cursor/p5-credential-notice-8ffd` (base after #131 / `0780e0d`). Squash-merged as `54d4413` (#132).
 
 - pgTAP matrix `69`; vitest `partner-members-handler`, `partner-modules`, `review-account-gate`; retention step `partner_credential_add_notices` in matrices `20` / `30` and `retentionPurgeSteps`.
 
