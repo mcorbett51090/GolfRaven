@@ -40,6 +40,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "credential_register")).toBe("Première clé d'accès enregistrée");
     expect(authAlarmKindLabel("en", "pin_set")).toBe("PIN set");
     expect(authAlarmKindLabel("fr-CA", "pin_set")).toBe("NIP défini");
+    expect(authAlarmKindLabel("en", "totp_enrol")).toBe("TOTP enrolled");
+    expect(authAlarmKindLabel("fr-CA", "totp_enrol")).toBe("TOTP inscrit");
   });
 
   it("falls back to the raw kind for an unknown token", () => {
