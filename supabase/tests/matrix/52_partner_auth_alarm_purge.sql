@@ -7,7 +7,7 @@
 -- Every group is its own BEGIN ... ROLLBACK.
 -- Restricted harness: inventory via authenticate_as inside a transaction.
 
-SELECT plan(12);
+SELECT plan(13);
 
 CREATE FUNCTION pg_temp.can_exec(p_role text, p_names text[]) RETURNS int LANGUAGE sql STABLE AS $f$
   SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
