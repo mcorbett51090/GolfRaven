@@ -85,6 +85,15 @@ describe("routing, Origin, bearer and body order: every route is a session route
     expect(f.calls).toEqual([]);
   });
 
+  it("§99: a raw path that still carries %2F is 400 before any port", async () => {
+    const f = makeFakes();
+    const url = "https://project.example.test/functions/v1/partner-members%2Fmembers";
+    const res = await handlePartnerMembersRequest(new Request(url, { method: "GET", headers: authed() }), f.membersDeps);
+    expect(res.status).toBe(400);
+    expect(JSON.parse(await res.text())).toEqual({ error: { code: "bad_request", message: "encoded path segments are not allowed" } });
+    expect(f.calls).toEqual([]);
+  });
+
   it("the media type must be exactly application/json (415) and a route that takes no field takes exactly {} (400 otherwise)", async () => {
     const f = makeFakes();
     for (const [method, path] of ROUTES.filter(([m]) => m === "POST")) {

@@ -4,7 +4,13 @@
 // authenticator are supabase/tests/deno-unit/partner-session-handler.deno.test.ts (the S0 wrapper and the software authenticator); the cells that need a real database are
 // supabase/tests/integration/partner-session.deno.test.ts. Here the ports are fakes, and every cell states one thing the handler decides ON ITS OWN.
 
-import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
+import {
+  encodedPathRefusal,
+  MEMBER_ANY_CALL_BUCKET,
+  MEMBER_ANY_CALL_PER_HOUR,
+  rawPathHasEncodedSegments,
+  rawPathname,
+} from "../../functions/_shared/partner/handler-kit.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handlePartnerSessionRequest, REAUTH_BUCKET, routeOf } from "../../functions/_shared/partner/session-handler.ts";
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
@@ -161,6 +167,45 @@ describe("routing", () => {
     expect(r2.headers.get("allow")).toBe("GET");
     expect((await handlePartnerSessionRequest(req("DELETE", "session", { headers: authed() }), f.deps)).status).toBe(405);
     expect((await handlePartnerSessionRequest(req("PATCH", "lock", { headers: authed(), body: {} }), f.deps)).status).toBe(405);
+    expect(f.calls).toEqual([]);
+  });
+
+  it("Object.hasOwn: a prototype key such as constructor is 404, not 405 (20.12 NIT)", async () => {
+    const f = makeFakes();
+    const res = await handlePartnerSessionRequest(req("GET", "constructor"), f.deps);
+    expect(res.status).toBe(404);
+    expect(await bodyOf(res)).toEqual({ error: { code: "not_found", message: "not found" } });
+    expect(f.calls).toEqual([]);
+  });
+});
+
+describe("§20.12 / §99 encoded path refuse", () => {
+  it("rawPathname keeps percent-encoding and strips query/hash", () => {
+    expect(rawPathname("https://x.test/functions/v1/partner-session%2F..%2Frest")).toBe("/functions/v1/partner-session%2F..%2Frest");
+    expect(rawPathname("https://x.test/partner-session/verify?x=1#y")).toBe("/partner-session/verify");
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/verify")).toBe(false);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session%2Fverify")).toBe(true);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/%2e%2e/verify")).toBe(true);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/%5C../verify")).toBe(true);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/%2E%2E/verify")).toBe(true);
+    const decision = { kind: "none" as const };
+    const refusal = encodedPathRefusal(decision, "https://x.test/partner-session%2f..%2frest");
+    expect(refusal).not.toBeNull();
+    expect(refusal!.status).toBe(400);
+  });
+
+  it("a request whose URL still carries %2F or %5C is 400 before ports are touched", async () => {
+    const f = makeFakes();
+    const cases = [
+      "https://project.example.test/functions/v1/partner-session%2F..%2F..%2F..%2Frest%2Fv1%2F",
+      "https://project.example.test/functions/v1/partner-session/..%2F..%2F..%2Frest/v1/",
+      "https://project.example.test/functions/v1/partner-session/%5c../verify",
+    ];
+    for (const url of cases) {
+      const res = await handlePartnerSessionRequest(new Request(url, { method: "GET", headers: { origin: ORIGIN } }), f.deps);
+      expect(res.status, url).toBe(400);
+      expect(await bodyOf(res)).toEqual({ error: { code: "bad_request", message: "encoded path segments are not allowed" } });
+    }
     expect(f.calls).toEqual([]);
   });
 });

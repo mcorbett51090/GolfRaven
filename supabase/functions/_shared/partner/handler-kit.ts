@@ -4,6 +4,7 @@
 //
 //   * `routeOfFunction`: the path after the function's name.
 //   * `matchRoute`: a route table with `{id}` segments (a uuid and nothing else; any other shape is no route at all, a 404 before anything is touched).
+//   * `encodedPathRefusal`: §20.12 / §99 — a raw path that still carries `%2F`, `%5C` or `%2E` is 400 before the route table runs.
 //   * `mapPartnerError`: the ONE place a port error becomes a response (401 / 403 / 409 / 422 / 503), identical to the session handler's.
 //   * `emptyBody`, `assertSameOrigin`, `bearerHash`: the session-handler steps, unchanged.
 //   * `registrationRefusal`: the status map of a refused create ceremony (`partner_credential_register_first` and the second-credential wrapper).
@@ -48,6 +49,37 @@ export function routeOfFunction(url: string, functionName: string): string {
   const parts = new URL(url).pathname.split("/").filter((p) => p.length > 0);
   const i = parts.lastIndexOf(functionName);
   return (i >= 0 ? parts.slice(i + 1) : parts).join("/");
+}
+
+/**
+ * Pathname of an absolute (or path-only) URL string without percent-decoding and without query/hash.
+ * Used so `%2F` / `%5C` / `%2E` that the runtime left in `req.url` are still visible (WHATWG `pathname` keeps `%2F`/`%5C` but may normalise `%2E` segments).
+ */
+export function rawPathname(url: string): string {
+  const scheme = url.indexOf("://");
+  if (scheme < 0) {
+    const end = url.search(/[?#]/);
+    return end < 0 ? url : url.slice(0, end);
+  }
+  const pathStart = url.indexOf("/", scheme + 3);
+  if (pathStart < 0) return "";
+  let cut = url.length;
+  const q = url.indexOf("?", pathStart);
+  const h = url.indexOf("#", pathStart);
+  if (q >= 0) cut = Math.min(cut, q);
+  if (h >= 0) cut = Math.min(cut, h);
+  return url.slice(pathStart, cut);
+}
+
+/** True when the raw path still contains an encoded slash, backslash or dot (`%2F` / `%5C` / `%2E`, any hex case). */
+export function rawPathHasEncodedSegments(url: string): boolean {
+  return /%(?:2[fFeE]|5[cC])/.test(rawPathname(url));
+}
+
+/** §20.12 optional hardening: refuse encoded path segments with 400 before the closed route map runs. */
+export function encodedPathRefusal(decision: Decision, url: string): Response | null {
+  if (!rawPathHasEncodedSegments(url)) return null;
+  return partnerError(decision, 400, "bad_request", "encoded path segments are not allowed");
 }
 
 export function matchRoute(table: readonly RouteSpec[], route: string): MatchedRoute | null {

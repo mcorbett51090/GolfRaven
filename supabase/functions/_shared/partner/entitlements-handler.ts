@@ -24,7 +24,7 @@ import { decideOrigin, preflightResponse } from "./cors.ts";
 import { type EntitlementRef, parseCollectQuery, parseEntitlementRefBody, parseRedeemBody } from "./entitlements-shape.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { EntitlementQueueRow, HandoverMintResult, PartnerDb, RedeemResult, VoucherResult } from "./ports.ts";
 import { newPartnerHandoverToken, sha256Hex } from "./token.ts";
@@ -56,6 +56,8 @@ export async function handlePartnerEntitlementsRequest(req: Request, deps: Partn
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, PARTNER_ENTITLEMENTS_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);

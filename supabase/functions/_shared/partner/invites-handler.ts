@@ -33,6 +33,7 @@ import {
   alertMemberAnyCall,
   bearerHash,
   type Decision,
+  encodedPathRefusal,
   mapPartnerError,
   matchRoute,
   methodRefusal,
@@ -110,6 +111,8 @@ export async function handlePartnerInvitesRequest(req: Request, deps: PartnerInv
     async () => {
       try {
         // (3) the route and the method
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, PARTNER_INVITES_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);
