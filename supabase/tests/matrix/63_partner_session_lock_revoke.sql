@@ -39,7 +39,7 @@ $f$;
 GRANT EXECUTE ON FUNCTION pg_temp.th(text), pg_temp.mk_cred(text, uuid), pg_temp.mk_session(text, uuid, uuid, int) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
--- 1. Structure / ACL / inventory / class SESSION
+-- 1. Structure / ACL / class SESSION (inventory after behaviour: service_role SET ROLE)
 -- ----------------------------------------------------------------------------
 SELECT is(
   (SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -64,17 +64,6 @@ SELECT is(
   'privileges: edge_partner EXECUTE only among client/edge roles checked'
 );
 
-SELECT tests.authenticate_as('service_role', '{}'::jsonb);
-SELECT is(
-  (SELECT expected_edge_partner AND NOT expected_edge_partner_minter AND NOT expected_edge_system
-          AND note LIKE '%revoke_reason = lock%'
-   FROM private.function_inventory
-   WHERE schema_name = 'private' AND function_name = 'partner_session_lock_for_partner'),
-  true,
-  'inventory: edge_partner; note records revoke_reason = lock'
-);
-SELECT tests.clear_actor();
-
 SELECT is(
   (SELECT obj_description('private.partner_session_lock_for_partner()'::regprocedure)
           LIKE '%revoke_reason%lock%'),
@@ -94,7 +83,7 @@ SELECT is(
 );
 
 -- ----------------------------------------------------------------------------
--- 2. Behaviour: revoke bound session; other session untouched; re-bind 28000
+-- 2. Behaviour (before any authenticate_as / service_role SET ROLE)
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.mk_cred('a', '00000000-0000-0000-0000-1000000000a1') AS c_a \gset
 SELECT pg_temp.mk_cred('b', '00000000-0000-0000-0000-1000000000a1') AS c_b \gset
@@ -143,6 +132,20 @@ SELECT throws_ok(
 );
 RESET ROLE;
 ROLLBACK TO SAVEPOINT lock2;
+
+-- ----------------------------------------------------------------------------
+-- 3. Inventory (service_role read; after behaviour so SET ROLE cannot disturb bind)
+-- ----------------------------------------------------------------------------
+SELECT tests.authenticate_as('service_role', '{}'::jsonb);
+SELECT is(
+  (SELECT expected_edge_partner AND NOT expected_edge_partner_minter AND NOT expected_edge_system
+          AND note LIKE '%revoke_reason = lock%'
+   FROM private.function_inventory
+   WHERE schema_name = 'private' AND function_name = 'partner_session_lock_for_partner'),
+  true,
+  'inventory: edge_partner; note records revoke_reason = lock'
+);
+SELECT tests.clear_actor();
 
 SELECT * FROM finish();
 ROLLBACK;
