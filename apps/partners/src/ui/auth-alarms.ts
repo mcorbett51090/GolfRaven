@@ -1,6 +1,7 @@
 /**
  * Review auth-alarms row labels (§96): closed kind → catalogue key; unknown kinds stay raw.
- * Optional `detail.subject` (person uid) or `detail.org` (org id) for credential-less rows.
+ * Optional `detail.subject` (person uid), `detail.org` (org id), or `detail.invite`
+ * (invite id) for credential-less rows.
  */
 
 import { translate, type Locale, type MessageKey } from "../i18n";
@@ -12,10 +13,10 @@ export function authAlarmKindLabel(locale: Locale, kind: string): string {
   return kind;
 }
 
-/** First 8 chars of `detail.subject` or `detail.org` when present; never invents a value. */
+/** First 8 chars of `detail.subject`, `detail.org`, or `detail.invite` when present; never invents a value. */
 export function authAlarmSubjectPrefix(detail: unknown): string | null {
   if (detail === null || typeof detail !== "object" || Array.isArray(detail)) return null;
   const record = detail as Record<string, unknown>;
-  const subject = record["subject"] ?? record["org"];
+  const subject = record["subject"] ?? record["org"] ?? record["invite"];
   return typeof subject === "string" && subject.length > 0 ? subject.slice(0, 8) : null;
 }

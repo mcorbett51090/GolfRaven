@@ -24,6 +24,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "member_revoke")).toBe("Révocation de membre");
     expect(authAlarmKindLabel("en", "credential_revoke")).toBe("Passkey revoked");
     expect(authAlarmKindLabel("fr-CA", "credential_revoke")).toBe("Clé d'accès révoquée");
+    expect(authAlarmKindLabel("en", "invite_revoke")).toBe("Invite revoked");
+    expect(authAlarmKindLabel("fr-CA", "invite_revoke")).toBe("Invitation révoquée");
   });
 
   it("falls back to the raw kind for an unknown token", () => {
@@ -33,12 +35,13 @@ describe("authAlarmKindLabel", () => {
 });
 
 describe("authAlarmSubjectPrefix", () => {
-  it("returns the first 8 chars of detail.subject or detail.org", () => {
+  it("returns the first 8 chars of detail.subject, detail.org, or detail.invite", () => {
     expect(authAlarmSubjectPrefix({ subject: "22222222-2222-4222-8222-222222222222", status: "ok" })).toBe("22222222");
     expect(authAlarmSubjectPrefix({ org: "10000000-0000-0000-0000-000000000001", status: "ok" })).toBe("10000000");
+    expect(authAlarmSubjectPrefix({ invite: "a5300000-0000-0000-0000-000000000077", status: "ok" })).toBe("a5300000");
   });
 
-  it("returns null when subject/org is missing or not a string", () => {
+  it("returns null when subject/org/invite is missing or not a string", () => {
     expect(authAlarmSubjectPrefix(null)).toBeNull();
     expect(authAlarmSubjectPrefix({ status: "ok" })).toBeNull();
     expect(authAlarmSubjectPrefix({ subject: 1 })).toBeNull();

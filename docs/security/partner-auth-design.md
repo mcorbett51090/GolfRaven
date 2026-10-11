@@ -4361,7 +4361,35 @@ Numbering: **migration `0098`, matrix `76`, this section 104.** Closes the §103
 
 ### 104.4 Verification
 
-Branch: `cursor/p5-credential-revoke-alarm-8ffd` (base after #143 / `8f7af35`). Squash-merged as _pending_.
+Branch: `cursor/p5-credential-revoke-alarm-8ffd` (base after #143 / `8f7af35`). Squash-merged as `e07eab2`.
 
 - pgTAP matrix `76`; tip `0098`; partners i18n / auth-alarms unit cells.
+
+## 105. As built: invite-revoke operator alarm
+
+Numbering: **migration `0099`, matrix `77`, this section 105.** Closes the §104.3 / §21.4 leftover after the membership/credential alarm trail: a successful `partner_invite_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `invite_revoke` (one row per invite id per minute) so the admin auth-alarms list surfaces invite revokes, not only `audit_log` `partner.invite.revoke`. `not_found` / `already_accepted` / `already_revoked` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 105.1 What was built
+
+- **Kind + row CHECK** — `invite_revoke` with `credential_id` NULL and `bucket_key` = invite id text (same uuid shape as `org_revoke_all`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_invite_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"invite","org","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.invite_revoke` (EN / fr-CA); `authAlarmSubjectPrefix` reads `detail.invite` as well as `detail.subject` / `detail.org`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 105.2 Decisions and departures
+
+- **ok only** — `not_found` / `already_accepted` / `already_revoked` return before audit/alarm.
+- **Bucket = invite id** — flood shape is one row per invite per UTC minute (not per org).
+- **Detail keeps `org`** — operators can group revokes by facility without joining the invite row.
+
+### 105.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); admin `enrolment_issue` alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 105.4 Verification
+
+Branch: `cursor/p5-invite-revoke-alarm-8ffd` (base after #144 / `e07eab2`). Squash-merged as _pending_.
+
+- pgTAP matrix `77`; tip `0099`; partners i18n / auth-alarms unit cells.
 
