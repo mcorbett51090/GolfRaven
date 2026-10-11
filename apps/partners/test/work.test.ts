@@ -650,3 +650,94 @@ describe("§82 member PIN reset under reach (manager, A2)", () => {
     expect(resets).toHaveLength(1);
   });
 });
+
+describe("§83 member recover under reach (manager, A2)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const OTHER_CRED = "33333333-3333-4333-8333-333333333301";
+  const managerWhoami = {
+    aal: 1,
+    requiredAal: 1,
+    isAdmin: false,
+    memberships: [{ orgId: ORG, role: "manager", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupManager() {
+    const w = makeWorld({ whoami: managerWhoami });
+    await w.server.seedPin(PIN);
+    w.server.seedMember({ userId: OTHER_USER, orgId: ORG, role: "staff", facilityId: FACILITY });
+    w.server.seedCredentialForUser(OTHER_USER, OTHER_CRED);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("recovers another member after reauth + A2 PIN and holds the one-time token until dismiss", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+
+    const pending = s.controller.recoverMember(OTHER_USER);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for member recover");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "member-recovered" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") {
+        expect(w.recovered).not.toBeNull();
+        expect(w.recovered?.token).toMatch(/^gr_enr_[A-Za-z0-9_-]{43}$/);
+        expect(w.recovered?.enrolUrl).toContain(`/enrol#${w.recovered?.token}`);
+      }
+    }
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    const recovers = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/members/${OTHER_USER}/recover`));
+    expect(recovers).toHaveLength(1);
+    expect(JSON.parse(recovers[0]!.body)).toEqual({});
+    expect(recovers[0]!.body).not.toMatch(/gr_enr_|7391/);
+
+    s.controller.dismissMemberRecover();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") expect(w.recovered).toBeNull();
+    }
+    expect(home(s.controller).notice).toBeNull();
+  });
+
+  it("refuses to recover oneself without calling the server", async () => {
+    const s = await setupManager();
+    const selfId = home(s.controller).session.userId;
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+    await s.controller.recoverMember(selfId);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.recoverSelf" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/recover"))).toBe(false);
+  });
+
+  it("surfaces no_email when the target has no email", async () => {
+    const s = await setupManager();
+    const noMail = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    s.w.server.seedMember({ userId: noMail, orgId: ORG, role: "staff", facilityId: FACILITY, email: null });
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+
+    const pending = s.controller.recoverMember(noMail);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for no_email recover");
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.noEmail" } });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") expect(w.recovered).toBeNull();
+    }
+  });
+});

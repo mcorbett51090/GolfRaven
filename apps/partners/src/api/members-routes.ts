@@ -178,3 +178,33 @@ export async function resetMemberPin(api: PartnerApi, userId: string): Promise<v
     throw e;
   }
 }
+
+/** One-time recovery enrolment issued by POST members/{id}/recover. Plaintext shown once; never logged. */
+export interface MemberRecovered {
+  readonly tokenId: string;
+  readonly expiresAt: string;
+  readonly token: string;
+  readonly enrolUrl: string;
+}
+
+/** POST members/{id}/recover (class A2): revoke credentials/sessions, PIN must_change, return `gr_enr_` once. 409 `no_email`. */
+export async function recoverMember(api: PartnerApi, userId: string): Promise<MemberRecovered> {
+  try {
+    const data = await api.call("POST", "partner-members", `members/${userId}/recover`, {});
+    if (
+      !isObject(data) || !isString(data["tokenId"]) || !isString(data["expiresAt"]) ||
+      !isString(data["token"]) || !isString(data["enrolUrl"])
+    ) malformed();
+    return {
+      tokenId: data["tokenId"],
+      expiresAt: data["expiresAt"],
+      token: data["token"],
+      enrolUrl: data["enrolUrl"],
+    };
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "no_email" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "no_email" });
+    }
+    throw e;
+  }
+}

@@ -111,8 +111,8 @@ export interface FakeServer {
   seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean; failures?: number }): Promise<void>;
   /** Adds a second (or further) active credential row for the signed-in user so revoke / add-cap UI can be exercised (§74 / §75). */
   seedExtraCredential(id?: string): string;
-  /** Seeds an org membership row for GET members and marks the user as under reach for credential list/note/revoke (§81). */
-  seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null }): void;
+  /** Seeds an org membership row for GET members and marks the user as under reach for credential list/note/revoke (§81). `email: null` → recover returns `no_email`. */
+  seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null; email?: string | null }): void;
   /** Adds an active credential for another user (must be seedMember'd for reach PATCH/DELETE). */
   seedCredentialForUser(userId: string, id?: string): string;
   /** What the server stores of a user's PIN (never the digits), or null. */
@@ -1440,6 +1440,36 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         user.pin.mustChange = true;
         return ok(200, { reset: true });
       }
+      const recoverMatch = /^members\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/recover$/i.exec(route);
+      if (recoverMatch !== null && req.method === "POST") {
+        if (!canListMembers()) return err(403, "forbidden");
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const target = recoverMatch[1]!.toLowerCase();
+        if (target === session.userId) return err(422, "invalid_request");
+        if (!reachUsers.has(target)) return err(403, "forbidden");
+        const user = users.get(target);
+        if (user === undefined || user.email === "") return err(409, "no_email");
+        for (const c of credentials.values()) {
+          if (c.userId === target && c.revokedAt === null) c.revokedAt = new Date().toISOString();
+        }
+        if (user.pin !== null) {
+          user.pin.locked = false;
+          user.pin.failures = 0;
+          user.pin.backoffUntil = 0;
+          user.pin.mustChange = true;
+        }
+        const token = "gr_enr_" + toB64u(randomBytes(32));
+        const tokenId = randomUUID();
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+        return ok(201, {
+          tokenId,
+          expiresAt,
+          token,
+          enrolUrl: `${opts.pageOrigin}/enrol#${token}`,
+        });
+      }
       if (route === "credentials" && req.method === "GET") {
         const target = url.searchParams.get("userId");
         const ownerId = target === null || target === "" ? session.userId : target.toLowerCase();
@@ -1677,6 +1707,7 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       orgId = "33333333-3333-4333-8333-333333333333",
       role = "staff",
       facilityId = "44444444-4444-4444-8444-444444444444",
+      email,
     }) {
       const id = userId.toLowerCase();
       memberRoster.push({
@@ -1688,14 +1719,18 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         createdAt: "2026-01-01T00:00:00.000Z",
       });
       reachUsers.add(id);
-      if (!users.has(id)) {
+      const mail = email === null ? "" : (email ?? `${id.slice(0, 8)}@partners.example.test`);
+      const existing = users.get(id);
+      if (existing === undefined) {
         users.set(id, {
           id,
-          email: `${id.slice(0, 8)}@partners.example.test`,
+          email: mail,
           memberships: [{ orgId, role, facilityIds: facilityId === null ? [] : [facilityId], trailIds: [] }],
           pin: null,
           totp: null,
         });
+      } else if (email !== undefined) {
+        existing.email = mail;
       }
     },
     seedCredentialForUser(userId, id = randomUUID()) {

@@ -19,7 +19,7 @@ import type {
   TrailProgramme,
 } from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
-import type { PartnerCredential, PartnerMember } from "../api/members-routes";
+import type { MemberRecovered, PartnerCredential, PartnerMember } from "../api/members-routes";
 import type {
   AttestKind,
   AttestResult,
@@ -75,7 +75,8 @@ export type Notice =
         | "credential-note-saved"
         | "credential-revoked"
         | "credential-added"
-        | "member-pin-reset";
+        | "member-pin-reset"
+        | "member-recovered";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -234,6 +235,8 @@ export type WorkView =
       readonly kind: "members";
       readonly busy: boolean;
       readonly rows: readonly PartnerMember[] | null;
+      /** Plaintext `gr_enr_…` / enrolUrl shown once after recover; cleared on dismiss or leave. Never logged. */
+      readonly recovered: MemberRecovered | null;
     }
   | {
       readonly kind: "credentials";

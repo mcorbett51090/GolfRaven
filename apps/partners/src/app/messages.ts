@@ -132,7 +132,8 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "not_found" || kind === "not_found") return { key: "credentials.notFound" };
   }
   if (context === "members") {
-    if (code === "pin_not_set" || kind === "conflict") return { key: "members.pinNotSet" };
+    if (code === "pin_not_set") return { key: "members.pinNotSet" };
+    if (code === "no_email") return { key: "members.noEmail" };
     if (code === "not_found" || kind === "not_found") return { key: "members.notFound" };
   }
   return null;
