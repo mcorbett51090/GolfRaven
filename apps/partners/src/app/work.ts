@@ -19,6 +19,7 @@ import {
   recoverMember as postMemberRecover,
   registerCredential,
   resetMemberPin as postMemberPinReset,
+  resetMemberTotp as postMemberTotpReset,
   revokeAllOrgSessions as postOrgRevokeAll,
   revokeCredential as deleteCredential,
   revokeMember as postMemberRevoke,
@@ -119,6 +120,8 @@ export interface WorkScreens {
   /** Class A2: reauth + PIN, then POST orgs/{id}/sessions/revoke-all. Ends the actor's session for that org too. */
   revokeAllOrgSessions(orgId: string): Promise<void>;
   dismissOrgRevokeAll(): void;
+  /** Class A3: admin resets another's TOTP under reach. Client gate matches printed-QR write. Never for oneself. */
+  resetMemberTotp(userId: string): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -924,6 +927,38 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       const s = signedIn(host);
       if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
       withWork(s, { ...s.work, lastRevokeAll: null }, s.notice?.kind === "org-revoke-all" ? null : s.notice);
+    },
+
+    async resetMemberTotp(userId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!s.session.isAdmin) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.totpAdminOnly" } } });
+        return;
+      }
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.totpSelf" } } });
+        return;
+      }
+      if (s.session.aal < s.session.requiredAal || s.session.aal < 2) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.needTotp" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await postMemberTotpReset(api, target);
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: { kind: "member-totp-reset" } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
     },
 
     async loadCredentials() {

@@ -119,6 +119,7 @@ export interface AppController extends StepUp {
   setOrgRevokeCreatedAfter(value: string): void;
   revokeAllOrgSessions(orgId: string): Promise<void>;
   dismissOrgRevokeAll(): void;
+  resetMemberTotp(userId: string): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -415,6 +416,7 @@ export function createController(deps: ControllerDeps): AppController {
     setOrgRevokeCreatedAfter: (value) => work.setOrgRevokeCreatedAfter(value),
     revokeAllOrgSessions: (orgId) => work.revokeAllOrgSessions(orgId),
     dismissOrgRevokeAll: () => work.dismissOrgRevokeAll(),
+    resetMemberTotp: (userId) => work.resetMemberTotp(userId),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

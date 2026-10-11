@@ -488,7 +488,7 @@ export const en = {
   "notice.credentialAdded": "Passkey added.",
 
   "members.title": "Team passkeys",
-  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, recover their account, or end one membership. Use End all sessions if a shop device is stolen. Email is not shown.",
+  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, recover their account, or end one membership. Use End all sessions if a shop device is stolen. Admins can reset an operator's authenticator. Email is not shown.",
   "members.load": "Load team",
   "members.empty": "No team members in your facility scope.",
   "members.role": "Role",
@@ -517,10 +517,16 @@ export const en = {
   "members.revokeAll.dismiss": "Understood",
   "members.createdAfterInvalid": "Use a UTC instant such as 2030-01-01T12:00:00Z.",
   "members.createdAfterFuture": "That cut-off time is in the future.",
+  "members.resetTotp": "Reset authenticator",
+  "members.needTotp": "Resetting an authenticator needs your second factor first.",
+  "members.totpSelf": "You cannot reset your own authenticator here.",
+  "members.totpAdminOnly": "Only an admin can reset another person's authenticator.",
+  "members.totpNotSet": "That person has no authenticator to reset.",
   "notice.memberPinReset": "PIN reset. They must set a new PIN at the next sensitive action.",
   "notice.memberRecovered": "Account recovered. Show the one-time link before you leave this screen.",
   "notice.memberRevoked": "Membership ended for that organisation.",
   "notice.orgRevokeAll": "All sessions for that organisation have ended.",
+  "notice.memberTotpReset": "Authenticator reset. Their sessions have ended; they must enrol a new one.",
 } as const;
 
 export type MessageKey = keyof typeof en;
