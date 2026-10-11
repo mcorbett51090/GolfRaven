@@ -3386,7 +3386,8 @@ Numbering: **migration `0081`, matrix `59`, this section 68.** Closes design §8
 
 ### 68.4 Verification
 
-Branch: `cursor/p5-alert-rate-buckets-8ffd` (base after #107 / `5d760f7`). Recorded when CI is green on the PR tip.
+Branch: `cursor/p5-alert-rate-buckets-8ffd` (base after #107 / `5d760f7`). Tip `0376d5c`.
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → Result PASS; matrix 59; focused Deno/Vitest session-handler + partners admin.
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 59 ok; 10 / 25 / 26 PA-8 allowlists).
+- Focused: `partner-session-handler` Vitest + Deno-unit (23); `partner-review-handler` Vitest; `@golfraven/partners` `admin.test.ts` (null credentialId cell).
 
