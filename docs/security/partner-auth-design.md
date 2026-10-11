@@ -3497,7 +3497,7 @@ Numbering: **migration `0085`, matrix `63`, this section 72.** Closes the 20.4 /
 
 ### 72.4 Verification
 
-Branch: `cursor/p5-session-lock-revoke-8ffd` (base after #111 / `21bf562`). Tip: `e494cbd`.
+Branch: `cursor/p5-session-lock-revoke-8ffd` (base after #111 / `21bf562`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (Files=84, Tests=5952; matrix 63 ok; 27 / 28 / 31 collateral; serialisation 9b: one revoke / three not-live / no deadlock).
 - Deno integration **390 passed** (PA-12 lock revokes with reason `lock`; post-lock sign-out 401); `verify-function-inventory: OK`; service-role-lint clean.
