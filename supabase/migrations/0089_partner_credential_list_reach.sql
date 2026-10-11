@@ -53,11 +53,11 @@ $$;
 COMMENT ON FUNCTION private.partner_credential_list_for_partner(uuid) IS
   '0054/0089 (§79). edge_partner only; class A0. Lists credentials of the signed-in person (p_user_id NULL or self), or of a person the 6.5 reach rule covers. Never the public key, credential id bytes, or sign counter. Outside reach → empty.';
 
-RESET ROLE;
-REVOKE CREATE ON SCHEMA private FROM private_definer;
-
 REVOKE ALL ON FUNCTION private.partner_credential_list_for_partner(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.partner_credential_list_for_partner(uuid) TO edge_partner;
+
+RESET ROLE;
+REVOKE CREATE ON SCHEMA private FROM private_definer;
 
 -- ============================================================================
 -- 2. Inventories
