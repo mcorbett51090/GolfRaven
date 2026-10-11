@@ -4140,11 +4140,38 @@ Numbering: **matrix n/a (PWA only), this section 96.** Closes the §61 / §95 le
 
 ### 96.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; `pin_locked` / `pin_reset` operator alarms; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; `pin_locked` operator alarm → §97; `pin_reset` operator alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 96.4 Verification
 
-Branch: `cursor/p5-auth-alarms-i18n-8ffd` (base after #135 / `fcf44c9`). Squash-merged as _pending_.
+Branch: `cursor/p5-auth-alarms-i18n-8ffd` (base after #135 / `fcf44c9`). Squash-merged as `4b7bc7a` (#136).
 
 - `@golfraven/partners` vitest (`auth-alarms`, `admin`, `i18n`); tip remains `0092`.
+
+## 97. As built: PIN-lock operator alarm
+
+Numbering: **migration `0093`, matrix `71`, this section 97.** Closes the §19.5 / LOW-3 / §96.3 leftover: a newly locked partner PIN (`o_newly_locked` from verify or change) raises `app.partner_auth_alarm` kind `pin_locked` (one row per subject uid per minute) so the admin auth-alarms list surfaces locks, not only `audit_log` `partner.pin.locked`. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 97.1 What was built
+
+- **Kind + row CHECK** — `pin_locked` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `rate_member` / `totp_reset`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrappers** — `CREATE OR REPLACE partner_pin_verify_for_partner` and `partner_pin_change_for_partner`: after the existing audit, when `o_newly_locked`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","stage"}` (`verify` | `change`).
+- **Catalogue** — `review.authAlarms.kind.pin_locked` (EN / fr-CA).
+- **Inventories** — function notes + definer_policy_allowlist for the two policies.
+
+### 97.2 Decisions and departures
+
+- **Only on newly locked** — a further attempt against an already-locked PIN writes no audit and no alarm (same as today for `partner.pin.locked`).
+- **Operator alarm only** — member/manager email notice stays Q7; no new interstitial.
+
+### 97.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; `pin_reset` operator alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 97.4 Verification
+
+Branch: `cursor/p5-pin-locked-alarm-8ffd` (base after #136 / `4b7bc7a`). Squash-merged as _pending_.
+
+- pgTAP matrix `71`; tip `0093`; partners i18n / auth-alarms unit cells.
 

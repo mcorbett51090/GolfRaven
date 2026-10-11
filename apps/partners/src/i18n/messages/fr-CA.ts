@@ -456,6 +456,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.rate_member": "Débit d'appels membre",
   "review.authAlarms.kind.credential_add": "Clé d'accès ajoutée",
   "review.authAlarms.kind.totp_reset": "Réinitialisation TOTP",
+  "review.authAlarms.kind.pin_locked": "NIP verrouillé",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",
