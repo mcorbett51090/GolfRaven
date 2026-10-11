@@ -30,10 +30,12 @@
 -- the Vault API functions are absent (DO assert below).
 GRANT EXECUTE ON FUNCTION vault.create_secret(text, text, text, uuid) TO private_definer;
 GRANT EXECUTE ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) TO private_definer;
--- INSERT/UPDATE: harness Vault stand-ins are INVOKER (plaintext); hosted
--- supabase_vault create_secret/update_secret are SECURITY DEFINER and do not
--- need these, but the grants are harmless there and required for the shim.
-GRANT INSERT, UPDATE, DELETE ON vault.secrets TO private_definer;
+-- SELECT/INSERT/UPDATE/DELETE: harness Vault stand-ins are INVOKER (plaintext);
+-- create_secret uses INSERT … RETURNING (needs SELECT). Hosted supabase_vault
+-- create_secret/update_secret are SECURITY DEFINER and do not need table DML,
+-- but the grants are required for the shim and only widen private_definer
+-- (which already SELECTs decrypted_secrets).
+GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO private_definer;
 
 GRANT INSERT ON app.course_pin_pepper_epoch TO private_definer;
 CREATE POLICY pd_course_pin_pepper_epoch_insert ON app.course_pin_pepper_epoch
@@ -229,10 +231,11 @@ BEGIN
      OR NOT has_function_privilege('private_definer', 'vault.update_secret(uuid, text, text, text, uuid)', 'EXECUTE') THEN
     RAISE EXCEPTION '0082: private_definer must EXECUTE vault.create_secret / vault.update_secret';
   END IF;
-  IF NOT has_table_privilege('private_definer', 'vault.secrets', 'INSERT')
+  IF NOT has_table_privilege('private_definer', 'vault.secrets', 'SELECT')
+     OR NOT has_table_privilege('private_definer', 'vault.secrets', 'INSERT')
      OR NOT has_table_privilege('private_definer', 'vault.secrets', 'UPDATE')
      OR NOT has_table_privilege('private_definer', 'vault.secrets', 'DELETE') THEN
-    RAISE EXCEPTION '0082: private_definer must INSERT/UPDATE/DELETE vault.secrets (shim INVOKER writers + retire/compromise delete; body filters previous by name)';
+    RAISE EXCEPTION '0082: private_definer must SELECT/INSERT/UPDATE/DELETE vault.secrets (shim INVOKER writers + RETURNING + retire/compromise delete; body filters previous by name)';
   END IF;
   IF NOT has_table_privilege('private_definer', 'app.course_pin_pepper_epoch', 'INSERT') THEN
     RAISE EXCEPTION '0082: private_definer must INSERT app.course_pin_pepper_epoch';
