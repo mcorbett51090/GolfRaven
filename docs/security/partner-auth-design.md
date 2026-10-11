@@ -3415,8 +3415,8 @@ Numbering: **migration `0082`, matrix `60`, this section 69.** Closes design M1 
 
 ### 69.4 Verification
 
-Branch: `cursor/p5-pepper-rotate-8ffd` (base after #108 / `b583ab5`).
+Branch: `cursor/p5-pepper-rotate-8ffd` (base after #108 / `b583ab5`). Tip `35b5c19`.
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 60 ok).
-- `node --test tools/db/rotate-course-pin-pepper.test.mjs`.
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 60 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+- `node --test tools/db/rotate-course-pin-pepper.test.mjs` (7 passed).
 
