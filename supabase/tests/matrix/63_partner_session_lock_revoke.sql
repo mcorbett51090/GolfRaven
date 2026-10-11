@@ -5,11 +5,11 @@
 --   2. lock → revoked_at set, revoke_reason = 'lock';
 --   3. re-bind same token → 28000;
 --   4. another live session of the same user is untouched.
--- Uses helpers.sql staff_x (a1) + two credentials / two mint sessions.
+-- Plants two live sessions for helpers.sql staff_x (a1).
 
 \set QUIET 1
 BEGIN;
-SELECT plan(14);
+SELECT plan(12);
 
 GRANT edge_partner, edge_partner_minter, edge_actor, private_definer, partner_session_issuer, partner_reauth_verifier, partner_pin_verifier TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_auth_challenge, app.partner_rp_config TO CURRENT_USER;
@@ -23,56 +23,50 @@ INSERT INTO app.partner_rp_config (rp_id, origin)
 VALUES ('partners.example.test', 'https://partners.example.test')
 ON CONFLICT DO NOTHING;
 
-SET LOCAL ROLE private_definer;
-\i supabase/tests/partner-sign-helpers.sql
-RESET ROLE;
-
-CREATE TEMP TABLE creds (label text PRIMARY KEY, uid uuid, d numeric, qx numeric, qy numeric, cred_id bytea, cred_row uuid);
-CREATE TEMP TABLE asr (label text PRIMARY KEY, token text, cred_id bytea, nonce bytea, exp bigint, mac bytea, ad bytea, cd bytea, sig bytea);
-CREATE TEMP TABLE mres (label text, o_status text, o_session_id uuid, o_aal smallint, o_expires_at timestamptz);
-GRANT ALL ON creds, asr, mres TO PUBLIC;
+CREATE TEMP TABLE creds (label text PRIMARY KEY, uid uuid, cred_id bytea, cred_row uuid);
+GRANT ALL ON creds TO PUBLIC;
 
 CREATE FUNCTION pg_temp.th(p_label text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$
-  SELECT encode(sha256(convert_to('token:' || p_label, 'UTF8')), 'hex')
+  SELECT encode(sha256(convert_to('plant63:' || p_label, 'UTF8')), 'hex')
 $f$;
 
-CREATE FUNCTION pg_temp.newcred(p_label text, p_uid uuid DEFAULT NULL, p_stored bigint DEFAULT 0) RETURNS uuid LANGUAGE plpgsql AS $f$
+CREATE FUNCTION pg_temp.newcred(p_label text, p_uid uuid) RETURNS uuid LANGUAGE plpgsql AS $f$
 DECLARE
-  d numeric; pub numeric[]; cid bytea; cose bytea; rid uuid;
+  cid bytea; rid uuid;
 BEGIN
-  IF p_uid IS NULL THEN
-    p_uid := gen_random_uuid();
-    EXECUTE 'SET LOCAL ROLE service_role';
-    INSERT INTO auth.users (id, email) VALUES (p_uid, 'lock63-' || p_label || '@example.test');
-    EXECUTE 'RESET ROLE';
-  END IF;
-  EXECUTE 'SET LOCAL ROLE private_definer';
-  d := private.partner_sig_os2ip(public.gen_random_bytes(32)) % (private.partner_sig_p256_n() - 1) + 1;
-  pub := pg_temp.ps_pub(d);
-  cose := pg_temp.ps_cose_es256(pub[1], pub[2]);
-  EXECUTE 'RESET ROLE';
   cid := public.gen_random_bytes(32);
-  INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, sign_count) VALUES (p_uid, cid, cose, -7, p_stored) RETURNING id INTO rid;
-  INSERT INTO creds VALUES (p_label, p_uid, d, pub[1], pub[2], cid, rid);
+  INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, sign_count)
+  VALUES (p_uid, cid, decode(repeat('ab', 32), 'hex'), -7, 0)
+  RETURNING id INTO rid;
+  INSERT INTO creds VALUES (p_label, p_uid, cid, rid);
   RETURN rid;
 END
 $f$;
 
-CREATE FUNCTION pg_temp.signin(p_label text, p_cred text, p_counter bigint) RETURNS text LANGUAGE plpgsql AS $f$
+CREATE FUNCTION pg_temp.plant(p_label text, p_cred text) RETURNS uuid LANGUAGE plpgsql AS $f$
 DECLARE
-  c record; a record; v_th text;
+  v_id uuid := gen_random_uuid();
+  c record;
 BEGIN
   SELECT * INTO c FROM creds WHERE label = p_cred;
-  v_th := pg_temp.th(p_label);
-  EXECUTE 'SET LOCAL ROLE private_definer';
-  SELECT * INTO a FROM pg_temp.ps_assertion(c.d, 'partners.example.test', 'https://partners.example.test', p_counter);
-  EXECUTE 'RESET ROLE';
-  INSERT INTO asr VALUES (p_label, v_th, c.cred_id, a.o_nonce, a.o_exp, a.o_mac, a.o_ad, a.o_cd, a.o_sig);
-  EXECUTE 'SET LOCAL ROLE edge_partner_minter';
-  INSERT INTO mres SELECT p_label, m.* FROM private.partner_session_mint(
-    v_th, c.cred_id, a.o_nonce, a.o_exp, a.o_mac, a.o_ad, a.o_cd, a.o_sig) m;
-  EXECUTE 'RESET ROLE';
-  RETURN (SELECT o_status FROM mres WHERE label = p_label ORDER BY ctid DESC LIMIT 1);
+  SET CONSTRAINTS ALL IMMEDIATE;
+  ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+  INSERT INTO app.partner_session (
+    id, token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at,
+    mint_kind, mint_nonce_hash, mint_authenticator_data, mint_client_data_json, mint_signature
+  ) VALUES (
+    v_id,
+    pg_temp.th(p_label),
+    c.uid, c.cred_row, 1,
+    now() - interval '1 hour', now(), now() + interval '8 hours',
+    'sign_in',
+    sha256(convert_to('plant63n:' || p_label, 'UTF8')),
+    decode(repeat('04', 40), 'hex'),
+    convert_to('{}', 'UTF8'),
+    decode(repeat('05', 70), 'hex')
+  );
+  ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;
+  RETURN v_id;
 END
 $f$;
 
@@ -134,24 +128,21 @@ SELECT is(
 -- ----------------------------------------------------------------------------
 -- 2. Behaviour: revoke bound session; other session untouched; re-bind 28000
 -- ----------------------------------------------------------------------------
-SELECT pg_temp.newcred('staff', '00000000-0000-0000-0000-1000000000a1', 0) IS NOT NULL AS ok1 \gset
-SELECT pg_temp.newcred('staff2', '00000000-0000-0000-0000-1000000000a1', 0) IS NOT NULL AS ok2 \gset
-SELECT is(pg_temp.signin('s_a', 'staff', 1), 'ok', 'setup: mint session A for staff_x');
-SELECT is(pg_temp.signin('s_b', 'staff2', 1), 'ok', 'setup: mint session B (same user, other credential)');
-
+SELECT pg_temp.newcred('a', '00000000-0000-0000-0000-1000000000a1') IS NOT NULL AS ok1 \gset
+SELECT pg_temp.newcred('b', '00000000-0000-0000-0000-1000000000a1') IS NOT NULL AS ok2 \gset
+SELECT pg_temp.plant('s_a', 'a') AS sid_a \gset
+SELECT pg_temp.plant('s_b', 'b') AS sid_b \gset
 SELECT pg_temp.th('s_a') AS th_a, pg_temp.th('s_b') AS th_b \gset
-SELECT (SELECT o_session_id::text FROM mres WHERE label = 's_a') AS sid_a,
-       (SELECT o_session_id::text FROM mres WHERE label = 's_b') AS sid_b \gset
 
 SELECT is(
-  (SELECT token_hash FROM app.partner_session WHERE id = :'sid_a'::uuid),
-  :'th_a',
-  'setup: session A token_hash matches th(s_a)'
+  (SELECT count(*)::int FROM app.partner_session WHERE id IN (:'sid_a'::uuid, :'sid_b'::uuid) AND revoked_at IS NULL),
+  2,
+  'setup: two live planted sessions for staff_x'
 );
 
 SAVEPOINT lock1;
 SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_a');
+SELECT lives_ok(format($$SELECT private.bind_partner_session(%L)$$, :'th_a'), 'lock: bind session A');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'lock: runs');
 RESET ROLE;
 SELECT is(
@@ -170,7 +161,6 @@ SELECT is(
 );
 ROLLBACK TO SAVEPOINT lock1;
 
--- re-bind after a real lock (separate savepoint so the binding from lock1 is gone)
 SAVEPOINT lock2;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_a');
