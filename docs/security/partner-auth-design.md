@@ -1970,7 +1970,7 @@ Closes the seams 20.5 left for S1.3, S1.4 and S1.5, now that their Edge routes e
 
 - No screen consumes a PIN grant yet (S7b onward); `requirePin("A2")` does not also run the passkey reauth (`reauthWithPasskey` exists; the A2 screens compose the two).
 - Invite create / list / revoke, branch E (`invites/accept` for an existing member), `members/*` and the credential screens are not built; their CSP origins and the `call()` allow-list are in place.
-- No QR for the TOTP seed (text only).
+- No QR for the TOTP seed (text only) → closed by §90 (canvas QR, vendored encoder).
 - A JavaScript string cannot be wiped: the four digits stay in the page's heap until collected (measured: a V8 heap snapshot after a set still finds them; the invite token and the session token are gone once their flow ends). The guarantee is the one the design needs: the digits are in no request, URL, header, storage, console or controller state.
 - `[unverified]`: PBKDF2 at 600,000 iterations on a low-end iPad (S0 owns the measurement), and the French strings (not reviewed by a native fr-CA speaker).
 
@@ -3960,11 +3960,37 @@ Numbering: **matrix n/a (PWA only), this section 89.** Closes the §88.3 / §24.
 
 ### 89.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- TOTP enrol QR (otpauth canvas) → §90; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 89.4 Verification
 
-Branch: `cursor/p5-invite-branch-e-8ffd` (base after #128 / `fb71c09`). Tip on PR (this slice).
+Branch: `cursor/p5-invite-branch-e-8ffd` (base after #128 / `fb71c09`). Squash-merged as `400b0d2` (#129).
 
 - `@golfraven/partners` vitest (branch E A2 + enrol hand-off); typecheck clean; no Edge / migration change.
+
+## 90. As built: partners TOTP enrol QR (canvas, no npm)
+
+Numbering: **matrix n/a (PWA only), this section 90.** Closes the §24.3 / §89.3 leftover and design 6.4: show the TOTP setup `otpauth://` URI as a QR on enrol-confirm. No migration, no Edge change, no UI flag flips, no CAMERA (display only), no npm dependency.
+
+### 90.1 What was built
+
+- **`src/lib/qrcodegen.ts`** — Nayuki QR Code generator (MIT), adapted to an ES module; `// @ts-nocheck` for vendored strictness mismatch.
+- **`src/ui/qr.ts` / `totp-qr.ts`** — ECC M encode + quiet zone; paint onto `<canvas>` (CSP `img-src` has no `data:` / `blob:`).
+- **Enrol panel** — canvas above the setup-key / otpauth text; EN + fr-CA `totp.qr.label` + confirm lead; Vitest golden matrix + canvas stub.
+
+### 90.2 Decisions and departures
+
+- **No npm QR package** — partners README forbids a page dependency; vendored encoder stays under `src/`.
+- **Canvas, not `<img src=data:>`** — keeps the stricter CSP from §4.6 / `csp.mjs`.
+- **Text fallback kept** — seed and otpauth URI remain for apps that cannot scan.
+
+### 90.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 90.4 Verification
+
+Branch: `cursor/p5-totp-enrol-qr-8ffd` (base after #129 / `400b0d2`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (QR golden + panels); typecheck clean; no Edge / migration change.
 

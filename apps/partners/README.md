@@ -163,8 +163,8 @@ Deploy: `/invite` must serve `index.html` (Cloudflare Pages does this for a proj
 ## The second factor (operators and admins)
 
 When `aal < requiredAal` the home screen offers **Enter authenticator code** (`step-up/totp`) and **Add an authenticator** (`totp/enrol`, gated by the same
-email proof or enrolment window, then `totp/confirm` in the same session). The seed is shown **once, as text** (and the `otpauth://` link): there is no QR
-renderer in the page (no dependency may be added), so the person types the key into an authenticator app. The seed is in the state only while its panel is open.
+email proof or enrolment window, then `totp/confirm` in the same session). The seed is shown **once** as a canvas QR (vendored Nayuki encoder under `src/lib/`, no npm
+dependency) plus the setup key and `otpauth://` link as text. CSP `img-src` still has no `data:` / `blob:`. The seed is in the state only while its panel is open.
 
 ## Not built, and the seam each leaves
 
@@ -172,8 +172,8 @@ renderer in the page (no dependency may be added), so the person types the key i
 |---|---|
 | Camera scan of a player check-in QR into the attest token field | `camera=(self)` is open; the field is paste-only today |
 | Hand-over, stock, offer redeem, manager / operator / admin / settlement (S7c–S7) | `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
-| Invite create / list / revoke, branch E (an existing member joins another org), member recovery, credential list | `partner-invites` and `partner-members` are in the CSP and the `call()` allow-list; the pre-session half is built, the session half is not |
-| A QR for the TOTP seed | none: the seed and the `otpauth://` link are shown as text |
+| Invite create / list / revoke, branch E, member recovery, credential list | **built (§81–§89):** session-half surfaces on home / work; pre-session enrol remains for first credential |
+| A QR for the TOTP seed | **built (§90):** canvas QR from the `otpauth://` URI; seed + link remain as text fallback |
 | Offline behaviour | none |
 | **Service worker** | **deliberately none.** The page is installable-ish through its manifest only. A service worker would sit between the page and the token's requests and could cache an API response; the design wants neither. If one is ever added it must never cache API responses or touch the token, `worker-src` must be widened to `'self'`, and the build scan's service-worker rule must be revisited deliberately |
 

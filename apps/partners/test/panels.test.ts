@@ -250,7 +250,10 @@ describe("the operator / admin second factor", () => {
     expect(shown).toMatchObject({ kind: "totp", step: "enrol-confirm" });
     const seed = shown?.kind === "totp" ? shown.enrolment?.seed : undefined;
     expect(seed).toMatch(/^[A-Z2-7]{32}$/);
-    expect(shown?.kind === "totp" ? shown.enrolment?.otpauthUrl : "").toContain("otpauth://totp/");
+    const otpauth = shown?.kind === "totp" ? shown.enrolment?.otpauthUrl : undefined;
+    expect(otpauth).toContain("otpauth://totp/");
+    // §90: enrol panel draws a canvas QR from the otpauth URI (renderer unit-tested in qr.test.ts)
+    expect(otpauth!.length).toBeGreaterThan(40);
 
     await s.controller.submitTotp("12");
     expect(panel(s.controller)).toMatchObject({ notice: { kind: "error", message: { key: "totp.codeInvalid" } } });
