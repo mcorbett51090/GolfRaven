@@ -56,7 +56,7 @@ BEGIN
   PERFORM pg_temp.seed_a2('mx');
   EXECUTE 'SET LOCAL ROLE edge_partner';
   SELECT * INTO r FROM private.partner_invite_create_for_partner(
-    '10000000-0000-0000-0000-000000000001'::uuid, 'staff'::app.partner_role, p_email, p_hash);
+    '10000000-0000-0000-0000-000000000001'::uuid, 'staff', p_email, p_hash);
   EXECUTE 'RESET ROLE';
   RETURN r.o_status || ':' || coalesce(r.o_invite_id::text, '');
 END
