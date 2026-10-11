@@ -173,6 +173,9 @@ export const frCA: Record<MessageKey, string> = {
   "home.credentials.title": "Clés d'accès",
   "home.credentials.button": "Gérer les clés d'accès",
   "home.credentials.hint": "Consultez vos clés d'accès, modifiez une courte note d'affichage, ajoutez une clé ou révoquez-en une. Les notes n'affectent jamais la connexion.",
+  "home.members.title": "Clés d'accès de l'équipe",
+  "home.members.button": "Gérer les clés de l'équipe",
+  "home.members.hint": "Listez les personnes de vos installations, puis modifiez une note d'affichage ou révoquez une clé d'accès selon votre portée. Vous ne pouvez pas ajouter une clé pour quelqu'un d'autre.",
   "home.totp.title": "Second facteur",
   "home.totp.enter": "Saisir le code de l'application",
   "home.totp.add": "Ajouter une application d'authentification",
@@ -466,6 +469,8 @@ export const frCA: Record<MessageKey, string> = {
 
   "credentials.title": "Vos clés d'accès",
   "credentials.hint": "Modifiez une note d'affichage (au plus 40 caractères), ajoutez une clé d'accès ou révoquez-en une. L'ajout et la révocation demandent une nouvelle touche de clé d'accès et votre NIP.",
+  "credentials.othersTitle": "Clés d'accès d'un membre de l'équipe",
+  "credentials.othersHint": "Modifiez une note d'affichage (au plus 40 caractères) ou révoquez une clé d'accès. La révocation demande votre touche de clé d'accès et votre NIP. Vous ne pouvez pas ajouter une clé pour cette personne.",
   "credentials.load": "Charger les clés d'accès",
   "credentials.add": "Ajouter une clé d'accès",
   "credentials.empty": "Aucune clé d'accès active sur ce compte.",
@@ -482,4 +487,13 @@ export const frCA: Record<MessageKey, string> = {
   "notice.credentialNoteSaved": "Note d'affichage enregistrée.",
   "notice.credentialRevoked": "Clé d'accès révoquée. Les sessions qui l'utilisaient sont terminées.",
   "notice.credentialAdded": "Clé d'accès ajoutée.",
+
+  "members.title": "Clés d'accès de l'équipe",
+  "members.hint": "Personnes dans les installations que vous gérez. Ouvrez une personne pour modifier une note d'affichage ou révoquer une clé d'accès. Le courriel n'est pas affiché.",
+  "members.load": "Charger l'équipe",
+  "members.empty": "Aucun membre d'équipe dans la portée de vos installations.",
+  "members.role": "Rôle",
+  "members.user": "Membre",
+  "members.openCredentials": "Gérer les clés d'accès",
+  "members.back": "Retour à l'équipe",
 };

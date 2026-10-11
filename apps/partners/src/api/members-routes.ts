@@ -1,7 +1,8 @@
 /**
- * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75).
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81).
  *
  * List + display-note PATCH (class A0); own revoke DELETE and second-credential add (class A2).
+ * Org roster GET (class A0) and credentials `?userId=` under the reach rule (§79 / §80 / §81).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -19,6 +20,16 @@ export interface PartnerCredential {
   readonly revokedAt: string | null;
   readonly backupEligible: boolean;
   readonly backupState: boolean;
+}
+
+/** Edge `MemberView` (GET members). Never email / token. */
+export interface PartnerMember {
+  readonly userId: string;
+  readonly orgId: string;
+  readonly role: string;
+  readonly facilityId: string | null;
+  readonly invitedBy: string | null;
+  readonly createdAt: string;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -50,8 +61,43 @@ function parseCredential(raw: unknown): PartnerCredential {
   };
 }
 
-export async function getCredentials(api: PartnerApi): Promise<readonly PartnerCredential[]> {
-  const data = await api.call("GET", "partner-members", "credentials");
+function parseMember(raw: unknown): PartnerMember {
+  if (
+    !isObject(raw) || !isString(raw["userId"]) || !isString(raw["orgId"]) || !isString(raw["role"]) ||
+    !isStringOrNull(raw["facilityId"] ?? null) || !isStringOrNull(raw["invitedBy"] ?? null) || !isString(raw["createdAt"])
+  ) malformed();
+  return {
+    userId: raw["userId"],
+    orgId: raw["orgId"],
+    role: raw["role"],
+    facilityId: (raw["facilityId"] as string | null) ?? null,
+    invitedBy: (raw["invitedBy"] as string | null) ?? null,
+    createdAt: raw["createdAt"],
+  };
+}
+
+/** GET partner-members/members?orgId= (optional). A0; empty outside manager|operator facility scope. */
+export async function listMembers(api: PartnerApi, orgId?: string | null): Promise<readonly PartnerMember[]> {
+  const data = await api.call(
+    "GET",
+    "partner-members",
+    "members",
+    undefined,
+    orgId ? { orgId } : undefined,
+  );
+  if (!isObject(data) || !Array.isArray(data["members"])) malformed();
+  return data["members"].map(parseMember);
+}
+
+/** GET partner-members/credentials; omit userId for own, pass uuid for a person under the reach rule (§79). */
+export async function getCredentials(api: PartnerApi, userId?: string | null): Promise<readonly PartnerCredential[]> {
+  const data = await api.call(
+    "GET",
+    "partner-members",
+    "credentials",
+    undefined,
+    userId ? { userId } : undefined,
+  );
   if (!isObject(data) || !Array.isArray(data["credentials"])) malformed();
   return data["credentials"].map(parseCredential);
 }

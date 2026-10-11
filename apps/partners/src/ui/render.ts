@@ -6,7 +6,7 @@
 
 import type { WhoAmI } from "../api/types";
 import { canOpenAdminOps, canOpenReview, trailChoices } from "../app/admin";
-import { canOpenOfferRedeem } from "../app/work";
+import { canOpenMemberCredentials, canOpenOfferRedeem } from "../app/work";
 import type { AppState, AppController } from "../app/controller";
 import { translate, plural, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
@@ -100,6 +100,7 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
     const showAdminOps = canOpenAdminOps(state.session);
     const showReview = canOpenReview(state.session);
     const showOfferRedeem = canOpenOfferRedeem(state.session);
+    const showMembers = canOpenMemberCredentials(state.session);
     main = h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "signed-in" },
@@ -169,6 +170,19 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
         h("p", { class: "muted" }, t("home.credentials.hint")),
         h("div", { class: "actions" }, h("button", { type: "button", disabled: busy, "data-testid": "open-credentials", onclick: () => controller.openCredentials() }, t("home.credentials.button"))),
       ),
+      showMembers
+        ? h(
+            "section",
+            { "data-testid": "home-members" },
+            h("h2", {}, t("home.members.title")),
+            h("p", { class: "muted" }, t("home.members.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-members", onclick: () => controller.openMembers() }, t("home.members.button")),
+            ),
+          )
+        : null,
       needsSecondFactor
         ? h(
             "section",

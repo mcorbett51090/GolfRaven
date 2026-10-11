@@ -277,15 +277,74 @@ export function workView(state: SignedInState, controller: AppController, locale
     );
   }
 
+  if (work.kind === "members") {
+    const memberRole = (role: string): string => {
+      const key = `role.${role}` as MessageKey;
+      const label = translate(locale, key);
+      return label === key ? role : label;
+    };
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "members" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("members.title")),
+      noticeElement(state.notice, locale),
+      h("p", { class: "muted" }, t("members.hint")),
+      work.rows !== null
+        ? work.rows.length === 0
+          ? h("p", { "data-testid": "members-empty" }, t("members.empty"))
+          : h(
+              "ul",
+              { "data-testid": "members-list" },
+              ...work.rows.map((m) =>
+                h(
+                  "li",
+                  { "data-testid": `member-row-${m.userId}` },
+                  h("p", {}, t("members.user"), ": ", m.userId.slice(0, 8)),
+                  h("p", { class: "muted" }, t("members.role"), ": ", memberRole(m.role)),
+                  h(
+                    "div",
+                    { class: "actions" },
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        class: "primary",
+                        disabled: busy,
+                        "data-testid": `member-credentials-${m.userId}`,
+                        onclick: () => controller.openMemberCredentials(m.userId),
+                      },
+                      t("members.openCredentials"),
+                    ),
+                  ),
+                ),
+              ),
+            )
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "members-load", onclick: () => void controller.loadMembers() }, t("members.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
   if (work.kind === "credentials") {
+    const others = work.targetUserId !== null;
     const active = work.rows === null ? null : work.rows.filter((c) => c.revokedAt === null);
+    const credentialsBack = others
+      ? h("button", { type: "button", disabled: busy, "data-testid": "work-back", onclick: () => controller.openMembers() }, t("members.back"))
+      : back;
     return h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "credentials" },
-      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("credentials.title")),
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t(others ? "credentials.othersTitle" : "credentials.title")),
       noticeElement(state.notice, locale),
-      h("p", { class: "muted" }, t("credentials.hint")),
-      active !== null && active.length === 1 ? h("p", { class: "muted", "data-testid": "credentials-last-hint" }, t("credentials.lastHint")) : null,
+      h("p", { class: "muted" }, t(others ? "credentials.othersHint" : "credentials.hint")),
+      !others && active !== null && active.length === 1
+        ? h("p", { class: "muted", "data-testid": "credentials-last-hint" }, t("credentials.lastHint"))
+        : null,
       active !== null
         ? active.length === 0
           ? h("p", { "data-testid": "credentials-empty" }, t("credentials.empty"))
@@ -330,7 +389,7 @@ export function workView(state: SignedInState, controller: AppController, locale
                         {
                           type: "button",
                           class: "danger",
-                          disabled: busy || active.length <= 1,
+                          disabled: busy || (!others && active.length <= 1),
                           "data-testid": `credential-revoke-${c.id}`,
                           onclick: () => void controller.revokeCredential(c.id),
                         },
@@ -346,18 +405,20 @@ export function workView(state: SignedInState, controller: AppController, locale
         "div",
         { class: "actions" },
         h("button", { type: "button", disabled: busy, "data-testid": "credentials-load", onclick: () => void controller.loadCredentials() }, t("credentials.load")),
-        h(
-          "button",
-          {
-            type: "button",
-            class: "primary",
-            disabled: busy || active === null || active.length >= 5,
-            "data-testid": "credentials-add",
-            onclick: () => void controller.addCredential(),
-          },
-          t("credentials.add"),
-        ),
-        back,
+        others
+          ? null
+          : h(
+              "button",
+              {
+                type: "button",
+                class: "primary",
+                disabled: busy || active === null || active.length >= 5,
+                "data-testid": "credentials-add",
+                onclick: () => void controller.addCredential(),
+              },
+              t("credentials.add"),
+            ),
+        credentialsBack,
       ),
       busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
     );
