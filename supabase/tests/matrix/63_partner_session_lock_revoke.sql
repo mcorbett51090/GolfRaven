@@ -9,7 +9,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(12);
+SELECT plan(11);
 
 GRANT edge_partner, edge_partner_minter, edge_actor, private_definer
   TO CURRENT_USER WITH SET TRUE;
