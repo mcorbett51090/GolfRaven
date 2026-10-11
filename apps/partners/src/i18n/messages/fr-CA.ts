@@ -463,6 +463,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.member_revoke": "Révocation de membre",
   "review.authAlarms.kind.credential_revoke": "Clé d'accès révoquée",
   "review.authAlarms.kind.invite_revoke": "Invitation révoquée",
+  "review.authAlarms.kind.enrolment_issue": "Inscription admin émise",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",

@@ -4389,7 +4389,35 @@ Numbering: **migration `0099`, matrix `77`, this section 105.** Closes the §104
 
 ### 105.4 Verification
 
-Branch: `cursor/p5-invite-revoke-alarm-8ffd` (base after #144 / `e07eab2`). Squash-merged as _pending_.
+Branch: `cursor/p5-invite-revoke-alarm-8ffd` (base after #144 / `e07eab2`). Squash-merged as `5c0a093`.
 
 - pgTAP matrix `77`; tip `0099`; partners i18n / auth-alarms unit cells.
+
+## 106. As built: admin enrolment-issue operator alarm
+
+Numbering: **migration `0100`, matrix `78`, this section 106.** Closes the §105.3 leftover: a successful `partner_admin_enrolment_issue_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `enrolment_issue` (one row per target uid per minute) so the admin auth-alarms list surfaces admin enrolment-token issues, not only `audit_log` `partner.admin.enrolment_issue`. Exception paths (`42501` / `22023`) stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 106.1 What was built
+
+- **Kind + row CHECK** — `enrolment_issue` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_admin_enrolment_issue_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` (`ok`); never the token hash.
+- **Catalogue** — `review.authAlarms.kind.enrolment_issue` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 106.2 Decisions and departures
+
+- **ok only** — authorize / admin / hash failures RAISE before audit/alarm.
+- **Bucket = target uid** — flood shape is one row per target per UTC minute (not per token id).
+- **No token material in detail** — matches the audit payload's `target` only.
+
+### 106.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 106.4 Verification
+
+Branch: `cursor/p5-enrolment-issue-alarm-8ffd` (base after #145 / `5c0a093`). Squash-merged as _pending_.
+
+- pgTAP matrix `78`; tip `0100`; partners i18n / auth-alarms unit cells.
 
