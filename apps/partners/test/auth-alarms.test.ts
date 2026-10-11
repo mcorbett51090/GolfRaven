@@ -26,6 +26,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "credential_revoke")).toBe("Clé d'accès révoquée");
     expect(authAlarmKindLabel("en", "invite_revoke")).toBe("Invite revoked");
     expect(authAlarmKindLabel("fr-CA", "invite_revoke")).toBe("Invitation révoquée");
+    expect(authAlarmKindLabel("en", "enrolment_issue")).toBe("Admin enrolment issued");
+    expect(authAlarmKindLabel("fr-CA", "enrolment_issue")).toBe("Inscription admin émise");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

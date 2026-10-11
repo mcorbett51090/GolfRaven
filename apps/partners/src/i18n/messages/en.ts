@@ -462,6 +462,7 @@ export const en = {
   "review.authAlarms.kind.member_revoke": "Member revoke",
   "review.authAlarms.kind.credential_revoke": "Passkey revoked",
   "review.authAlarms.kind.invite_revoke": "Invite revoked",
+  "review.authAlarms.kind.enrolment_issue": "Admin enrolment issued",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",
