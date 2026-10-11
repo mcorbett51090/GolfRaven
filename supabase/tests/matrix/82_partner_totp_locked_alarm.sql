@@ -177,8 +177,7 @@ SELECT is(pg_temp.confirm('000000'), 'locked|900',
   'confirm: 5th wrong code locks TOTP');
 SELECT is(
   (SELECT detail ->> 'stage' FROM app.partner_auth_alarm
-   WHERE kind = 'totp_locked' AND bucket_key = '00000000-0000-0000-0000-3000000000c1'
-   ORDER BY raised_at DESC LIMIT 1),
+   WHERE kind = 'totp_locked' AND bucket_key = '00000000-0000-0000-0000-3000000000c1'),
   'confirm',
   'confirm lock raises totp_locked with detail.stage=confirm'
 );
