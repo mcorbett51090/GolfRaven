@@ -1014,3 +1014,128 @@ describe("§87 admin enrolment issue (admin, A3)", () => {
     expect(s.w.server.log.some((r) => r.path.includes("/admin/enrolments"))).toBe(false);
   });
 });
+
+describe("§88 invites manage UI (manager, A0/A2)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const INVITEE = "new.staff@example.test";
+  const managerWhoami = {
+    aal: 1,
+    requiredAal: 1,
+    isAdmin: false,
+    memberships: [{ orgId: ORG, role: "manager", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupManager() {
+    const w = makeWorld({ whoami: managerWhoami });
+    await w.server.seedPin(PIN);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("staff whoami: openInvites is a no-op", async () => {
+    const s = await setup();
+    s.controller.openInvites();
+    expect(home(s.controller).work).toBeNull();
+    expect(s.w.server.log.some((r) => r.path.includes("/partner-invites/invites"))).toBe(false);
+  });
+
+  it("lists pending invites (A0) and creates one after reauth + A2 PIN (show-once)", async () => {
+    const s = await setupManager();
+    s.controller.openInvites();
+    expect(home(s.controller).work).toMatchObject({ kind: "invites", orgIdDraft: ORG, rows: null, created: null });
+
+    await s.controller.loadInvites();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("invites");
+      if (w?.kind === "invites") expect(w.rows).toEqual([]);
+    }
+    expect(s.w.server.log.some((r) => r.method === "GET" && r.path.endsWith("/partner-invites/invites") && r.search === `?orgId=${ORG}`)).toBe(true);
+
+    s.controller.setInviteEmail(INVITEE);
+    s.controller.setInviteRole("staff");
+    const pending = s.controller.createInvite();
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for invite create");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "invite-created" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("invites");
+      if (w?.kind === "invites") {
+        expect(w.created).not.toBeNull();
+        expect(w.created?.token.startsWith("gr_inv_")).toBe(true);
+        expect(w.created?.inviteUrl).toContain("#gr_inv_");
+        expect(w.emailDraft).toBe("");
+      }
+    }
+    const creates = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-invites/invites"));
+    expect(creates).toHaveLength(1);
+    expect(JSON.parse(creates[0]!.body)).toEqual({ orgId: ORG, role: "staff", email: INVITEE });
+    expect(creates[0]!.body).not.toMatch(/7391/);
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    const pinPosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/step-up/pin"));
+    expect(pinPosts).toHaveLength(1);
+    expect(JSON.parse(pinPosts[0]!.body).derived).not.toContain(PIN);
+
+    s.controller.dismissInviteCreated();
+    {
+      const w = home(s.controller).work;
+      if (w?.kind === "invites") expect(w.created).toBeNull();
+    }
+
+    await s.controller.loadInvites();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("invites");
+      if (w?.kind === "invites") {
+        expect(w.rows).toHaveLength(1);
+        expect(w.rows?.[0]).toMatchObject({ inviteeEmail: INVITEE, role: "staff", orgId: ORG, revokedAt: null });
+      }
+    }
+  });
+
+  it("revokes a pending invite after reauth + A2 PIN", async () => {
+    const s = await setupManager();
+    const { inviteId } = s.w.server.addInvite({ email: INVITEE, orgId: ORG, role: "staff" });
+    s.controller.openInvites();
+    await s.controller.loadInvites();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("invites");
+      if (w?.kind === "invites") expect(w.rows?.some((r) => r.id === inviteId)).toBe(true);
+    }
+
+    const pending = s.controller.revokeInvite(inviteId);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for invite revoke");
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "invite-revoked" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("invites");
+      if (w?.kind === "invites") {
+        const row = w.rows?.find((r) => r.id === inviteId);
+        expect(row?.revokedAt).not.toBeNull();
+      }
+    }
+    const deletes = s.w.server.log.filter((r) => r.method === "DELETE" && r.path.endsWith(`/partner-invites/invites/${inviteId}`));
+    expect(deletes).toHaveLength(1);
+  });
+
+  it("refuses create with a bad email without calling the server", async () => {
+    const s = await setupManager();
+    s.controller.openInvites();
+    s.controller.setInviteEmail("not-an-email");
+    await s.controller.createInvite();
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "invites.emailInvalid" } });
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/partner-invites/invites"))).toBe(false);
+  });
+});

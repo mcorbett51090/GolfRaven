@@ -44,6 +44,8 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "org-revoke-all": "notice.orgRevokeAll",
   "member-totp-reset": "notice.memberTotpReset",
   "admin-enrolment": "notice.adminEnrolment",
+  "invite-created": "notice.inviteCreated",
+  "invite-revoked": "notice.inviteRevoked",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {

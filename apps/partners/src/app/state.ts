@@ -19,6 +19,7 @@ import type {
   TrailProgramme,
 } from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
+import type { InviteCreated, InviteRole, PartnerInvite } from "../api/invites-routes";
 import type { MemberRecovered, PartnerCredential, PartnerMember } from "../api/members-routes";
 import type {
   AttestKind,
@@ -80,7 +81,9 @@ export type Notice =
         | "member-revoked"
         | "org-revoke-all"
         | "member-totp-reset"
-        | "admin-enrolment";
+        | "admin-enrolment"
+        | "invite-created"
+        | "invite-revoked";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -253,6 +256,17 @@ export type WorkView =
       readonly adminEnrolUserIdDraft: string;
       /** Plaintext `gr_enr_…` / enrolUrl shown once after admin enrolment issue; cleared on dismiss or leave. */
       readonly adminEnrolment: MemberRecovered | null;
+    }
+  | {
+      readonly kind: "invites";
+      readonly busy: boolean;
+      readonly rows: readonly PartnerInvite[] | null;
+      /** Org for list/create (manager/operator membership or admin-picked). */
+      readonly orgIdDraft: string;
+      readonly emailDraft: string;
+      readonly roleDraft: InviteRole;
+      /** Plaintext `gr_inv_…` / inviteUrl shown once after create; cleared on dismiss or leave. Never logged. */
+      readonly created: InviteCreated | null;
     }
   | {
       readonly kind: "credentials";

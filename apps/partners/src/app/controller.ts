@@ -23,6 +23,7 @@ import type {
 } from "../api/admin-routes";
 import type { PartnerApi, SessionEndReason } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
+import type { InviteRole } from "../api/invites-routes";
 import type { AttestKind, OfferRedeemMode, RedeemMethod, StockMoveKind } from "../api/work-routes";
 import type { SessionGrant } from "../api/types";
 import { pinSetupMode } from "../auth/pin-setup";
@@ -123,6 +124,14 @@ export interface AppController extends StepUp {
   setAdminEnrolUserId(value: string): void;
   issueAdminEnrolment(): Promise<void>;
   dismissAdminEnrolment(): void;
+  openInvites(): void;
+  loadInvites(): Promise<void>;
+  setInviteOrgId(orgId: string): void;
+  setInviteEmail(email: string): void;
+  setInviteRole(role: InviteRole): void;
+  createInvite(): Promise<void>;
+  dismissInviteCreated(): void;
+  revokeInvite(inviteId: string): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -423,6 +432,14 @@ export function createController(deps: ControllerDeps): AppController {
     setAdminEnrolUserId: (value) => work.setAdminEnrolUserId(value),
     issueAdminEnrolment: () => work.issueAdminEnrolment(),
     dismissAdminEnrolment: () => work.dismissAdminEnrolment(),
+    openInvites: () => work.openInvites(),
+    loadInvites: () => work.loadInvites(),
+    setInviteOrgId: (orgId) => work.setInviteOrgId(orgId),
+    setInviteEmail: (email) => work.setInviteEmail(email),
+    setInviteRole: (role) => work.setInviteRole(role),
+    createInvite: () => work.createInvite(),
+    dismissInviteCreated: () => work.dismissInviteCreated(),
+    revokeInvite: (inviteId) => work.revokeInvite(inviteId),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

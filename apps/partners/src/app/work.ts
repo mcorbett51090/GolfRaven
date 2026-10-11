@@ -12,6 +12,12 @@
 import type { PartnerApi } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
 import {
+  createInvite as postInviteCreate,
+  listInvites,
+  revokeInvite as deleteInvite,
+  type InviteRole,
+} from "../api/invites-routes";
+import {
   credentialOptions,
   getCredentials,
   issueAdminEnrolment as postAdminEnrolment,
@@ -128,6 +134,17 @@ export interface WorkScreens {
   /** Class A3: admin issues `gr_enr_` for another admin; holds plaintext once. */
   issueAdminEnrolment(): Promise<void>;
   dismissAdminEnrolment(): void;
+  /** Manager / operator / admin: invite list / create / revoke (§88). */
+  openInvites(): void;
+  loadInvites(): Promise<void>;
+  setInviteOrgId(orgId: string): void;
+  setInviteEmail(email: string): void;
+  setInviteRole(role: InviteRole): void;
+  /** Class A2: reauth + PIN, then POST invites; holds plaintext once. */
+  createInvite(): Promise<void>;
+  dismissInviteCreated(): void;
+  /** Class A2: reauth + PIN, then DELETE invites/{id}. */
+  revokeInvite(inviteId: string): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -142,6 +159,22 @@ export function canOpenMemberCredentials(session: WhoAmI): boolean {
   return session.memberships.some((m) => m.role === "manager" || m.role === "operator");
 }
 
+/** Same reach as team passkeys: staff cannot invite; managers / operators / admins can. */
+export function canOpenInvites(session: WhoAmI): boolean {
+  return canOpenMemberCredentials(session);
+}
+
+const INVITE_ROLES: ReadonlySet<string> = new Set(["staff", "manager", "operator"]);
+const EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function firstManageOrgId(session: WhoAmI): string {
+  for (const m of session.memberships) {
+    if ((m.role === "manager" || m.role === "operator") && UUID_RE.test(m.orgId)) return m.orgId.toLowerCase();
+  }
+  return "";
+}
+
 export interface WorkDeps {
   readonly api: PartnerApi;
   readonly host: Host;
@@ -153,7 +186,6 @@ export interface WorkDeps {
 const FACILITY_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const HANDLE_RE = /^[a-z0-9_]{3,20}$/;
 const CODE_RE = /^[0-9]{6}$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Edge `members-shape` UTC instant (optional ms, must end in Z). */
 const ISO_INSTANT_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?Z$/;
 const HANDOVER_PREFIX = "gr_ho_";
@@ -1025,6 +1057,133 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       const s = signedIn(host);
       if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
       withWork(s, { ...s.work, adminEnrolment: null }, s.notice?.kind === "admin-enrolment" ? null : s.notice);
+    },
+
+    openInvites() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      withWork(s, {
+        kind: "invites",
+        busy: false,
+        rows: null,
+        orgIdDraft: firstManageOrgId(s.session),
+        emailDraft: "",
+        roleDraft: "staff",
+        created: null,
+      }, null);
+    },
+
+    setInviteOrgId(orgId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, orgIdDraft: orgId, rows: null }, s.notice);
+    },
+
+    setInviteEmail(email) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, emailDraft: email }, s.notice);
+    },
+
+    setInviteRole(role) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      if (!INVITE_ROLES.has(role)) return;
+      withWork(s, { ...s.work, roleDraft: role }, s.notice);
+    },
+
+    async loadInvites() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      const orgId = s.work.orgIdDraft.trim().toLowerCase();
+      if (orgId !== "" && !UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "invites.orgInvalid" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const rows = await listInvites(api, orgId === "" ? null : orgId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "invites") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "invites") });
+      }
+    },
+
+    async createInvite() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      const orgId = s.work.orgIdDraft.trim().toLowerCase();
+      if (!UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "invites.orgInvalid" } } });
+        return;
+      }
+      const email = s.work.emailDraft.trim().toLowerCase();
+      if (email.length < 3 || email.length > 254 || !EMAIL_RE.test(email) || /\s/.test(email)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "invites.emailInvalid" } } });
+        return;
+      }
+      if (!INVITE_ROLES.has(s.work.roleDraft)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const grant = s.grant;
+      const role = s.work.roleDraft;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const created = await postInviteCreate(api, { orgId, role, email });
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "invites") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, created, emailDraft: "", rows: null },
+            notice: { kind: "invite-created" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "invites") });
+      }
+    },
+
+    dismissInviteCreated() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, created: null }, s.notice?.kind === "invite-created" ? null : s.notice);
+    },
+
+    async revokeInvite(inviteId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      if (!UUID_RE.test(inviteId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const id = inviteId.toLowerCase();
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await deleteInvite(api, id);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "invites") {
+          const rows = cur.work.rows === null
+            ? null
+            : cur.work.rows.map((r) => (r.id === id ? { ...r, revokedAt: new Date().toISOString() } : r));
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "invite-revoked" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "invites") });
+      }
     },
 
     async loadCredentials() {

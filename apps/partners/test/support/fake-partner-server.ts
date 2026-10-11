@@ -23,7 +23,12 @@ import {
   type EmailOtpPort,
   type EnrolmentAcceptResult,
   type InviteAcceptResult,
+  type InviteCreateResult,
+  type InviteMemberAcceptResult,
+  type InviteRevokeStatus,
+  type InviteView,
   type MintInput,
+  type PartnerInvitesTx,
   type MintResult,
   type PartnerDb,
   type PartnerInviteMintTx,
@@ -187,6 +192,13 @@ interface FakeInvite {
   role: string;
   kind: "invite" | "enrolment";
   accepted: boolean;
+  facilityId: string | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+  attempts: number;
 }
 
 const SPKI_P256_PREFIX = Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex");
@@ -556,8 +568,92 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       };
       return await op(tx);
     },
-    withInvites() {
-      return Promise.reject(new Error("fake partner server: invite create / list / branch E are not implemented"));
+    async withInvites(hash, op) {
+      if (!sessions.has(hash) || state.revokedSessions.has(hash)) throw new PartnerSessionRefused();
+      const session = sessions.get(hash)!;
+      const actor = users.get(session.userId);
+      const tx: PartnerInvitesTx = {
+        async inviteCreate(orgId, role, inviteeEmail, tokenHash): Promise<InviteCreateResult> {
+          const email = inviteeEmail.trim().toLowerCase();
+          for (const u of users.values()) {
+            if (
+              u.email === email &&
+              u.memberships.some((m) => typeof m === "object" && m !== null && (m as { orgId?: string }).orgId === orgId)
+            ) {
+              return { status: "already_member", inviteId: null, expiresAt: null };
+            }
+          }
+          if (memberRoster.some((m) => m.orgId === orgId && users.get(m.userId)?.email === email)) {
+            return { status: "already_member", inviteId: null, expiresAt: null };
+          }
+          const id = randomUUID();
+          const now = Date.now();
+          const expiresAt = ISO(now + 72 * 3_600_000);
+          invites.set(tokenHash, {
+            id,
+            email,
+            orgId,
+            role,
+            kind: "invite",
+            accepted: false,
+            facilityId: null,
+            invitedBy: session.userId,
+            createdAt: ISO(now),
+            expiresAt,
+            acceptedAt: null,
+            revokedAt: null,
+            attempts: 0,
+          });
+          return { status: "ok", inviteId: id, expiresAt };
+        },
+        async inviteList(orgId): Promise<InviteView[]> {
+          const rows: InviteView[] = [];
+          for (const inv of invites.values()) {
+            if (inv.kind !== "invite") continue;
+            if (orgId !== null && inv.orgId !== orgId) continue;
+            rows.push({
+              id: inv.id,
+              orgId: inv.orgId,
+              role: inv.role,
+              facilityId: inv.facilityId,
+              inviteeEmail: inv.email,
+              invitedBy: inv.invitedBy,
+              createdAt: inv.createdAt,
+              expiresAt: inv.expiresAt,
+              acceptedAt: inv.acceptedAt,
+              revokedAt: inv.revokedAt,
+              attempts: inv.attempts,
+            });
+          }
+          rows.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+          return rows;
+        },
+        async inviteRevoke(inviteId): Promise<InviteRevokeStatus> {
+          for (const inv of invites.values()) {
+            if (inv.kind !== "invite" || inv.id !== inviteId) continue;
+            if (inv.accepted || inv.acceptedAt !== null) return "already_accepted";
+            if (inv.revokedAt !== null) return "already_revoked";
+            inv.revokedAt = ISO(Date.now());
+            return "ok";
+          }
+          return "not_found";
+        },
+        async inviteAcceptMember(tokenHash): Promise<InviteMemberAcceptResult> {
+          const inv = invites.get(tokenHash);
+          if (inv === undefined || inv.kind !== "invite" || inv.accepted || inv.revokedAt !== null) {
+            return { status: "not_found", orgId: null, role: null };
+          }
+          const email = actor?.email ?? "";
+          if (email !== inv.email) return { status: "email_mismatch", orgId: null, role: null };
+          inv.accepted = true;
+          inv.acceptedAt = ISO(Date.now());
+          if (actor !== undefined) {
+            actor.memberships = [{ orgId: inv.orgId, role: inv.role, facilityIds: ["44444444-4444-4444-8444-444444444444"], trailIds: [] }];
+          }
+          return { status: "ok", orgId: inv.orgId, role: inv.role };
+        },
+      };
+      return await op(tx);
     },
     withMembers() {
       return Promise.reject(new Error("fake partner server: members are not implemented"));
@@ -1877,12 +1973,42 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
     addInvite({ email, orgId = "55555555-5555-4555-8555-555555555555", role = "staff" }) {
       const token = "gr_inv_" + toB64u(randomBytes(32));
       const id = randomUUID();
-      invites.set(createHash("sha256").update(token).digest("hex"), { id, email, orgId, role, kind: "invite", accepted: false });
+      const now = Date.now();
+      invites.set(createHash("sha256").update(token).digest("hex"), {
+        id,
+        email,
+        orgId,
+        role,
+        kind: "invite",
+        accepted: false,
+        facilityId: null,
+        invitedBy: USER_ID,
+        createdAt: ISO(now),
+        expiresAt: ISO(now + 72 * 3_600_000),
+        acceptedAt: null,
+        revokedAt: null,
+        attempts: 0,
+      });
       return { token, inviteId: id };
     },
     addEnrolment({ email }) {
       const token = "gr_enr_" + toB64u(randomBytes(32));
-      invites.set(createHash("sha256").update(token).digest("hex"), { id: randomUUID(), email, orgId: "", role: "", kind: "enrolment", accepted: false });
+      const now = Date.now();
+      invites.set(createHash("sha256").update(token).digest("hex"), {
+        id: randomUUID(),
+        email,
+        orgId: "",
+        role: "",
+        kind: "enrolment",
+        accepted: false,
+        facilityId: null,
+        invitedBy: USER_ID,
+        createdAt: ISO(now),
+        expiresAt: ISO(now + 24 * 3_600_000),
+        acceptedAt: null,
+        revokedAt: null,
+        attempts: 0,
+      });
       return { token };
     },
     credentialsOf: (userId) => [...credentials].filter(([, c]) => c.userId === userId).map(([credentialId, c]) => ({ credentialId, publicKeySpki: c.publicKey })),
