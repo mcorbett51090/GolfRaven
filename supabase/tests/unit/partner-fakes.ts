@@ -26,6 +26,7 @@ import {
   type InviteView,
   type MemberRecoverResult,
   type MemberRevokeStatus,
+  type MemberView,
   type MintInput,
   type MintResult,
   type OrgRevokeAllResult,
@@ -115,6 +116,7 @@ export interface Recorded {
   readonly inviteList: Array<string | null>;
   readonly inviteRevoke: string[];
   readonly inviteAcceptMember: string[];
+  readonly memberList: Array<string | null>;
   readonly memberRevoke: Array<{ target: string; org: string }>;
   readonly memberRecover: Array<{ target: string; hash: string }>;
   readonly pinReset: string[];
@@ -196,6 +198,7 @@ export interface Fakes {
     inviteList: InviteView[];
     inviteRevoke: InviteRevokeStatus;
     inviteMemberAccept: InviteMemberAcceptResult;
+    memberList: MemberView[];
     memberRevoke: MemberRevokeStatus;
     memberRecover: MemberRecoverResult;
     pinReset: PinResetStatus;
@@ -279,6 +282,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     inviteList: [],
     inviteRevoke: [],
     inviteAcceptMember: [],
+    memberList: [],
     memberRevoke: [],
     memberRecover: [],
     pinReset: [],
@@ -340,6 +344,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     inviteList: [],
     inviteRevoke: "ok",
     inviteMemberAccept: { status: "ok", orgId: ORG_ID, role: "staff" },
+    memberList: [],
     memberRevoke: "ok",
     memberRecover: { status: "ok", tokenId: TOKEN_ID, expiresAt: "2030-01-02T12:00:00.000Z" },
     pinReset: "ok",
@@ -515,6 +520,12 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       rec.inviteAcceptMember.push(hash);
       maybeThrow("inviteAcceptMember");
       return state.inviteMemberAccept;
+    },
+    async memberList(orgId) {
+      calls.push("session.memberList");
+      rec.memberList.push(orgId);
+      maybeThrow("memberList");
+      return state.memberList;
     },
     async memberRevoke(target, org) {
       calls.push("session.memberRevoke");

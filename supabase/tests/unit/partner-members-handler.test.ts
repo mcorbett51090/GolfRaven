@@ -21,6 +21,7 @@ const idx = (f: F, c: string) => f.calls.indexOf(c);
 const lastTx = (f: F) => f.tx[f.tx.length - 1];
 
 const ROUTES: Array<[string, string, unknown]> = [
+  ["GET", "members", undefined],
   ["POST", `members/${TARGET_ID}/revoke`, { orgId: ORG_ID }],
   ["POST", `members/${TARGET_ID}/recover`, {}],
   ["POST", `members/${TARGET_ID}/pin-reset`, {}],
@@ -91,6 +92,32 @@ describe("routing, Origin, bearer and body order: every route is a session route
       expect((await post(f, path, { extra: 1 })).status, path).toBe(400);
     }
     expect(f.calls).toEqual([]);
+  });
+});
+
+describe("GET members (class A0 roster)", () => {
+  it("lists active members; optional orgId is passed through", async () => {
+    const row = {
+      userId: TARGET_ID,
+      orgId: ORG_ID,
+      role: "staff",
+      facilityId: "fac_x",
+      invitedBy: USER_ID,
+      createdAt: "2030-01-01T00:00:00.000Z",
+    };
+    const f = makeFakes({ memberList: [row] });
+    const res = await call(f, "GET", `members?orgId=${ORG_ID}`, { headers: authed() });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(await text(res)).data).toEqual({ members: [row] });
+    expect(f.rec.memberList).toEqual([ORG_ID]);
+  });
+
+  it("absent orgId passes null; bad query is 400", async () => {
+    const f = makeFakes();
+    expect((await call(f, "GET", "members", { headers: authed() })).status).toBe(200);
+    expect(f.rec.memberList).toEqual([null]);
+    expect((await call(f, "GET", "members?orgId=not-a-uuid", { headers: authed() })).status).toBe(400);
+    expect((await call(f, "GET", "members?x=1", { headers: authed() })).status).toBe(400);
   });
 });
 

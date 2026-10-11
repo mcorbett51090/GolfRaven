@@ -3691,11 +3691,39 @@ Numbering: **migration `0089`, matrix `67`, this section 79.** Closes the §76.2
 
 ### 79.3 Not built, honestly
 
-- Partners PWA for others' credentials; org member roster GET; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Org member roster GET → §80; partners PWA for others' credentials; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 79.4 Verification
 
-Branch: `cursor/p5-credential-list-reach-8ffd` (base after #118 / `1ecd6fd`). Tip on PR #119.
+Squash-merged as `d02f88f` (#119). Branch: `cursor/p5-credential-list-reach-8ffd` (base after #118 / `1ecd6fd`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 67 ok; matrix 32 ACL); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 80. As built: org member roster GET
+
+Numbering: **migration `0090`, matrix `68`, this section 80.** Closes the §79.3 leftover: managers / operators may list active memberships in orgs their facility scope covers, so the PWA can pick a `userId` for credential list / note / revoke under reach.
+
+### 80.1 What was built
+
+- **`private.partner_member_list_for_partner(p_org_id uuid)`** — class A0, `manager|operator` (admin passes). Active rows only; scoped via `has_facility_scope` on the org's facility (or `is_admin`). `p_org_id` NULL = every in-scope org. Outside scope → empty. Columns: userId, orgId, role, facilityId, invitedBy, createdAt — never email / token.
+- **SELECT policy** — unchanged (`pd_read_partner_member` USING(true); body is the real scope).
+- **Edge** — `GET /partner-members/members?orgId=` (optional); `PartnerMembersTx.memberList`.
+- **pgTAP matrix 68** + matrix 28 A0 allowlist + Deno EXECUTE allowlist.
+- **function_inventory** — `p_org_id uuid`, `expected_edge_partner`.
+
+### 80.2 Decisions and departures
+
+- **Facility orgs only for non-admins** — operator-org memberships (trail scope, no facility_id) appear only for admins; facility managers do not need them for the credential pick surface.
+- **No email** — unlike invite list; mailbox is not required to open credential list by userId.
+- **No PWA** — roster API only; partners UI for others stays later.
+
+### 80.3 Not built, honestly
+
+- Partners PWA for others' credentials; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 80.4 Verification
+
+Branch: `cursor/p5-member-list-reach-8ffd` (base after #119 / `d02f88f`). Tip on PR #120.
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 68 ok; 10 / 25 / 28 allowlists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 

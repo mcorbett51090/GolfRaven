@@ -1181,7 +1181,7 @@ SELECT is(
         'partner_handover_mint_for_partner',
         'partner_held_queue_for_partner',
         'partner_invite_accept_for_partner', 'partner_invite_create_for_partner', 'partner_invite_list_for_partner', 'partner_invite_revoke_for_partner',
-        'partner_member_rate_alarm_raise', 'partner_member_recover_for_partner', 'partner_member_revoke_for_partner',
+        'partner_member_list_for_partner', 'partner_member_rate_alarm_raise', 'partner_member_recover_for_partner', 'partner_member_revoke_for_partner',
         'partner_offer_approve_for_partner', 'partner_offer_end_for_partner', 'partner_offer_upsert_for_partner', 'partner_offers_list_for_partner',
         'partner_offers_queue_for_partner', 'partner_offers_redeem_for_partner', 'partner_offers_redeem_offline_for_partner',
         'partner_offline_attest_for_partner', 'partner_operator_rollup_for_partner', 'partner_org_sessions_revoke_for_partner', 'partner_pin_change_for_partner',

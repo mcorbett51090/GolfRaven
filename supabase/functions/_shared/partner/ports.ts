@@ -278,6 +278,15 @@ export interface PartnerInvitesTx {
   inviteAcceptMember(tokenHash: string): Promise<InviteMemberAcceptResult>;
 }
 
+/** GET members (class A0): one active membership in the actor's manager/operator facility scope. */
+export interface MemberView {
+  readonly userId: string;
+  readonly orgId: string;
+  readonly role: string;
+  readonly facilityId: string | null;
+  readonly invitedBy: string | null;
+  readonly createdAt: string;
+}
 export type MemberRevokeStatus = "ok" | "not_found";
 export type MemberRecoverResult =
   | { readonly status: "ok"; readonly tokenId: string; readonly expiresAt: string }
@@ -327,6 +336,8 @@ export type CredentialNoteStatus = "ok" | "not_found";
 
 /** One transaction as `edge_partner` for the `partner-members` routes. Every method is a `_for_partner` definer that begins with `partner_authorize`; the reach rule (6.5) is the database's: a target outside it is a 42501. */
 export interface PartnerMembersTx extends Pick<PartnerSessionTx, "totpReset"> {
+  /** GET members (class A0): active roster in manager/operator facility scope; `orgId` null = every in-scope org. */
+  memberList(orgId: string | null): Promise<MemberView[]>;
   /** POST members/{id}/revoke (class A2): ONE membership. */
   memberRevoke(targetUserId: string, orgId: string): Promise<MemberRevokeStatus>;
   /** POST members/{id}/recover (class A2): only the SHA-256 of the new enrolment token arrives. */
