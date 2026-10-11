@@ -22,6 +22,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "org_revoke_all")).toBe("Révocation globale d'organisation");
     expect(authAlarmKindLabel("en", "member_revoke")).toBe("Member revoke");
     expect(authAlarmKindLabel("fr-CA", "member_revoke")).toBe("Révocation de membre");
+    expect(authAlarmKindLabel("en", "credential_revoke")).toBe("Passkey revoked");
+    expect(authAlarmKindLabel("fr-CA", "credential_revoke")).toBe("Clé d'accès révoquée");
   });
 
   it("falls back to the raw kind for an unknown token", () => {
