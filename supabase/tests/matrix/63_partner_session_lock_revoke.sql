@@ -9,9 +9,9 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(12);
+SELECT plan(14);
 
-GRANT edge_partner, edge_partner_minter, private_definer, partner_session_issuer TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, edge_partner_minter, edge_actor, private_definer, partner_session_issuer, partner_reauth_verifier, partner_pin_verifier TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.partner_auth_challenge, app.partner_rp_config TO CURRENT_USER;
 CREATE POLICY zz63_cred ON app.partner_credential FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz63_sess ON app.partner_session FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
@@ -140,8 +140,14 @@ SELECT is(pg_temp.signin('s_a', 'staff', 1), 'ok', 'setup: mint session A for st
 SELECT is(pg_temp.signin('s_b', 'staff2', 1), 'ok', 'setup: mint session B (same user, other credential)');
 
 SELECT pg_temp.th('s_a') AS th_a, pg_temp.th('s_b') AS th_b \gset
-SELECT (SELECT o_session_id FROM mres WHERE label = 's_a') AS sid_a,
-       (SELECT o_session_id FROM mres WHERE label = 's_b') AS sid_b \gset
+SELECT (SELECT o_session_id::text FROM mres WHERE label = 's_a') AS sid_a,
+       (SELECT o_session_id::text FROM mres WHERE label = 's_b') AS sid_b \gset
+
+SELECT is(
+  (SELECT token_hash FROM app.partner_session WHERE id = :'sid_a'::uuid),
+  :'th_a',
+  'setup: session A token_hash matches th(s_a)'
+);
 
 SAVEPOINT lock1;
 SET LOCAL ROLE edge_partner;
@@ -162,7 +168,14 @@ SELECT is(
   true,
   'lock: another session of the same user is untouched'
 );
--- same transaction: after revoke, a fresh bind of the dead token is refused
+ROLLBACK TO SAVEPOINT lock1;
+
+-- re-bind after a real lock (separate savepoint so the binding from lock1 is gone)
+SAVEPOINT lock2;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_a');
+SELECT private.partner_session_lock_for_partner();
+RESET ROLE;
 SET LOCAL ROLE edge_partner;
 SELECT throws_ok(
   format($$SELECT private.bind_partner_session(%L)$$, :'th_a'),
@@ -171,7 +184,7 @@ SELECT throws_ok(
   'lock: re-bind of the same token is one uniform 28000'
 );
 RESET ROLE;
-ROLLBACK TO SAVEPOINT lock1;
+ROLLBACK TO SAVEPOINT lock2;
 
 SELECT * FROM finish();
 ROLLBACK;
