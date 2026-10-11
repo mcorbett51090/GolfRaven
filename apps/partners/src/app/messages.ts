@@ -28,7 +28,8 @@ export type ErrorContext =
   | "review"
   | "rollups"
   | "settlement"
-  | "credentials";
+  | "credentials"
+  | "members";
 
 /** Code-specific answers of the step-up routes (`partner-session`: pin_*, otp_refused, totp_*). A code is a closed lower-case token (ERROR_CODE_RE), never server prose. */
 function messageForCode(kind: string, code: string | null, context: ErrorContext, retryAfterSeconds: number | null): UiMessage | null {
@@ -129,6 +130,10 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "too_many") return { key: "credentials.tooMany" };
     if (code === "already_revoked" || kind === "conflict") return { key: "credentials.alreadyRevoked" };
     if (code === "not_found" || kind === "not_found") return { key: "credentials.notFound" };
+  }
+  if (context === "members") {
+    if (code === "pin_not_set" || kind === "conflict") return { key: "members.pinNotSet" };
+    if (code === "not_found" || kind === "not_found") return { key: "members.notFound" };
   }
   return null;
 }

@@ -3747,11 +3747,38 @@ Numbering: **matrix n/a (PWA only), this section 81.** Closes the §80.3 leftove
 
 ### 81.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Member PIN reset UI → §82; member recover UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 81.4 Verification
 
-Branch: `cursor/p5-credential-others-ui-8ffd` (base after #120 / `307fbd5`). Tip on PR (this slice).
+Squash-merged as `19c4733` (#121). Branch: `cursor/p5-credential-others-ui-8ffd` (base after #120 / `307fbd5`).
 
-- `@golfraven/partners` vitest (team credentials under reach); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **1015 passed** (team credentials under reach); typecheck clean; CI green; no Edge / migration change.
+
+## 82. As built: partners member PIN reset UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 82.** Closes part of the §81.3 leftover: managers / operators (and admins) reset another person's locked PIN under the reach rule via existing `POST partner-members/members/{id}/pin-reset`. No migration, no Edge change, no UI flag flips.
+
+### 82.1 What was built
+
+- **`members-routes.ts`** — `resetMemberPin(api, userId)` → `POST members/{id}/pin-reset`; maps 409 → `pin_not_set`.
+- **Work screen** — `resetMemberPin` on the §81 roster: reauth + `requirePin("A2")` then POST; notice `member-pin-reset`; client refuse for oneself.
+- **Fake partner server** — pin-reset under reach; clears lock/failures, sets `must_change`; `seedMember` creates a stub user for `seedPin`.
+- **i18n** EN + fr-CA; Vitest covers A2 order, self-refuse, and `pin_not_set`.
+
+### 82.2 Decisions and departures
+
+- **Actor's A2 + reauth** — same client order as credential revoke under reach (coworker-with-passcode); DB is A2 only.
+- **Never self** — DB raises 22023; client refuses before wire (`members.pinSelf`).
+- **Recover stays out** — `POST …/recover` (one-time `gr_enr_`) remains a later seam.
+
+### 82.3 Not built, honestly
+
+- Member recover UI; member revoke UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 82.4 Verification
+
+Branch: `cursor/p5-member-pin-reset-ui-8ffd` (base after #121 / `19c4733`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (member PIN reset A2); typecheck clean; no Edge / migration change.
 

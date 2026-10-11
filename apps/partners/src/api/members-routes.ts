@@ -1,8 +1,9 @@
 /**
- * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81).
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81 / §82).
  *
  * List + display-note PATCH (class A0); own revoke DELETE and second-credential add (class A2).
  * Org roster GET (class A0) and credentials `?userId=` under the reach rule (§79 / §80 / §81).
+ * Member PIN reset under reach (class A2, §82).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -160,6 +161,19 @@ export async function registerCredential(api: PartnerApi, challengeToken: string
   } catch (e) {
     if (isPartnerApiError(e) && (e.code === "too_many" || e.kind === "conflict")) {
       throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "too_many" });
+    }
+    throw e;
+  }
+}
+
+/** POST members/{id}/pin-reset (class A2): clear lock/counters, set must_change. 409 `pin_not_set` when unset. */
+export async function resetMemberPin(api: PartnerApi, userId: string): Promise<void> {
+  try {
+    const data = await api.call("POST", "partner-members", `members/${userId}/pin-reset`, {});
+    if (!isObject(data) || data["reset"] !== true) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "pin_not_set" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "pin_not_set" });
     }
     throw e;
   }

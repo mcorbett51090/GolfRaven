@@ -74,7 +74,8 @@ export type Notice =
         | "settlement-exported"
         | "credential-note-saved"
         | "credential-revoked"
-        | "credential-added";
+        | "credential-added"
+        | "member-pin-reset";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 

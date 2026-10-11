@@ -488,13 +488,18 @@ export const en = {
   "notice.credentialAdded": "Passkey added.",
 
   "members.title": "Team passkeys",
-  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey. Email is not shown.",
+  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, or reset a locked PIN. Email is not shown.",
   "members.load": "Load team",
   "members.empty": "No team members in your facility scope.",
   "members.role": "Role",
   "members.user": "Member",
   "members.openCredentials": "Manage passkeys",
+  "members.resetPin": "Reset PIN",
   "members.back": "Back to team",
+  "members.pinSelf": "You cannot reset your own PIN here. Use Set or change PIN on the home screen.",
+  "members.pinNotSet": "That person has no PIN to reset.",
+  "members.notFound": "That team member was not found.",
+  "notice.memberPinReset": "PIN reset. They must set a new PIN at the next sensitive action.",
 } as const;
 
 export type MessageKey = keyof typeof en;

@@ -574,3 +574,79 @@ describe("§81 team credentials under reach (manager)", () => {
     expect(s.w.server.log.some((r) => r.path.endsWith("/partner-members/members"))).toBe(false);
   });
 });
+
+describe("§82 member PIN reset under reach (manager, A2)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const managerWhoami = {
+    aal: 1,
+    requiredAal: 1,
+    isAdmin: false,
+    memberships: [{ orgId: ORG, role: "manager", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupManager() {
+    const w = makeWorld({ whoami: managerWhoami });
+    await w.server.seedPin(PIN);
+    w.server.seedMember({ userId: OTHER_USER, orgId: ORG, role: "staff", facilityId: FACILITY });
+    await w.server.seedPin("2468", { userId: OTHER_USER, locked: true, failures: 5 });
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("resets another member's locked PIN after reauth + A2 PIN", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+
+    const pending = s.controller.resetMemberPin(OTHER_USER);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for member pin-reset");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "member-pin-reset" });
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    const pinPosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/step-up/pin"));
+    expect(pinPosts).toHaveLength(1);
+    expect(JSON.parse(pinPosts[0]!.body).derived).not.toContain(PIN);
+    const resets = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/members/${OTHER_USER}/pin-reset`));
+    expect(resets).toHaveLength(1);
+    expect(JSON.parse(resets[0]!.body)).toEqual({});
+    const record = s.w.server.pinRecord(OTHER_USER);
+    expect(record).toMatchObject({ locked: false, failures: 0, mustChange: true });
+    expect(resets[0]!.body).not.toMatch(/7391|2468/);
+  });
+
+  it("refuses to reset one's own PIN without calling the server", async () => {
+    const s = await setupManager();
+    const selfId = home(s.controller).session.userId;
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+    await s.controller.resetMemberPin(selfId);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.pinSelf" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/pin-reset"))).toBe(false);
+    expect(s.w.server.log.some((r) => r.path.endsWith("/reauth/options"))).toBe(false);
+  });
+
+  it("surfaces pin_not_set when the target has no PIN", async () => {
+    const s = await setupManager();
+    const unsetUser = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    s.w.server.seedMember({ userId: unsetUser, orgId: ORG, role: "staff", facilityId: FACILITY });
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+
+    const pending = s.controller.resetMemberPin(unsetUser);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for unset pin-reset");
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.pinNotSet" } });
+    const resets = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/members/${unsetUser}/pin-reset`));
+    expect(resets).toHaveLength(1);
+  });
+});
