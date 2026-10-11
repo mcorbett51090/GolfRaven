@@ -426,7 +426,11 @@ suite("apps/partners in Chromium", () => {
       const w = await open();
       await signIn(w);
       server.killAllSessions();
-      await w.page.getByTestId("refresh").click();
+      // Click may race a render that already noticed the kill; land on signed-out either way.
+      await Promise.race([
+        w.page.getByTestId("refresh").click({ timeout: 10_000 }),
+        w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 10_000 }),
+      ]).catch(() => undefined);
       await w.page.locator('[data-screen="signed-out"]').waitFor();
       expect(await textOf(w.page.getByTestId("notice"))).toContain("session has ended");
     });

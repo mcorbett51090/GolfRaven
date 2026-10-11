@@ -4333,7 +4333,35 @@ Numbering: **migration n/a (PWA headers), this section 103.** Closes the §20.12
 
 ### 103.4 Verification
 
-Branch: `cursor/p5-pwa-nostore-all-8ffd` (base after #142 / `f0cb028`). Squash-merged as _pending_.
+Branch: `cursor/p5-pwa-nostore-all-8ffd` (base after #142 / `f0cb028`). Squash-merged as `8f7af35`.
 
 - partners `csp.test.ts` + e2e header / bfcache cells; tip unchanged `0097`.
+
+## 104. As built: credential-revoke operator alarm
+
+Numbering: **migration `0098`, matrix `76`, this section 104.** Closes the §103.3 / §21.4 leftover after `credential_add`: a successful `partner_credential_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `credential_revoke` (one row per credential id per minute) so the admin auth-alarms list surfaces passkey revokes, not only `audit_log` `partner.credential.revoke`. `not_found` / `already_revoked` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 104.1 What was built
+
+- **Kind + row CHECK** — `credential_revoke` with `credential_id` NOT NULL and `bucket_key` = credential id text (same shape as `credential_add`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_credential_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","own","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.credential_revoke` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 104.2 Decisions and departures
+
+- **ok only** — `not_found` / `already_revoked` return before audit/alarm.
+- **Bucket = credential id** — flood shape is one row per credential per UTC minute (not per owner).
+- **Detail keeps `own`** — matches the audit payload so operators can tell self-revoke from manager revoke.
+
+### 104.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 104.4 Verification
+
+Branch: `cursor/p5-credential-revoke-alarm-8ffd` (base after #143 / `8f7af35`). Squash-merged as _pending_.
+
+- pgTAP matrix `76`; tip `0098`; partners i18n / auth-alarms unit cells.
 
