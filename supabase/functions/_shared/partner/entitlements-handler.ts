@@ -22,7 +22,9 @@
 import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import { type EntitlementRef, parseCollectQuery, parseEntitlementRefBody, parseRedeemBody } from "./entitlements-shape.ts";
-import { bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+import {
+  alertMemberAnyCall,
+  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { EntitlementQueueRow, HandoverMintResult, PartnerDb, RedeemResult, VoucherResult } from "./ports.ts";
 import { newPartnerHandoverToken, sha256Hex } from "./token.ts";
@@ -60,6 +62,7 @@ export async function handlePartnerEntitlementsRequest(req: Request, deps: Partn
         if (refusal !== null) return refusal;
         const tokenHash = await bearerHash(req.headers);
         if (tokenHash === null) return unauthenticated(decision);
+        await alertMemberAnyCall(deps.db, tokenHash);
 
         switch (matched.spec.name) {
           case "collect":

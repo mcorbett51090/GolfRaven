@@ -114,6 +114,7 @@ function world(): { w: World; deps: PartnerOffersRedeemDeps } {
       }
     },
     async hitRateLimit(hash, bucket, windowSeconds, max) {
+      if (bucket === "partner-any-call") return { ok: true, retryAfterSeconds: 0 };
       w.calls.push("db.hitRateLimit");
       w.rate.push({ hash, bucket, windowSeconds, max });
       return w.rateOk ? { ok: true, retryAfterSeconds: 0 } : { ok: false, retryAfterSeconds: 3600 };

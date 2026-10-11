@@ -5,6 +5,7 @@
 // the database wrote commits with it), the rate-limit buckets, and the order of the email proof (no database transaction is ever open while GoTrue is called; the GoTrue session is closed AFTER the proof is
 // recorded, on every path). What needs a real database is supabase/tests/integration/partner-pin.deno.test.ts and supabase/tests/matrix/28_partner_pin_step_up.sql.
 
+import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
 import { describe, expect, it } from "vitest";
 import { handlePartnerSessionRequest, OTP_SEND_BUCKET, OTP_SEND_PER_MEMBER_PER_HOUR, OTP_VERIFY_BUCKET, OTP_VERIFY_PER_MEMBER_PER_HOUR } from "../../functions/_shared/partner/session-handler.ts";
 import { PartnerAuthorityRefused, PartnerConflict } from "../../functions/_shared/partner/ports.ts";
@@ -260,7 +261,7 @@ describe("POST otp-proof/start: the code goes to the member's OWN address, from 
     expect(JSON.parse(text)).toEqual({ data: { sent: true } });
     expect(text).not.toContain("staff@example.test");
     expect(f.calls).toEqual(["db.hitRateLimit", "db.withSession", "session.otpTarget", "otp.send"]);
-    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: OTP_SEND_BUCKET, windowSeconds: 3600, max: OTP_SEND_PER_MEMBER_PER_HOUR }]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { hash: await sha256Hex(SESSION_TOKEN), bucket: OTP_SEND_BUCKET, windowSeconds: 3600, max: OTP_SEND_PER_MEMBER_PER_HOUR }]);
     expect(OTP_SEND_PER_MEMBER_PER_HOUR).toBe(3);
     expect(f.otpSent).toEqual(["staff@example.test"]);
     expect(f.openTxAtOtpCall).toEqual([0]);

@@ -136,6 +136,7 @@ function makeFake(overrides: Partial<FakeReview> = {}): FakeReview {
       return await op(tx);
     },
     async hitRateLimit(_hash, bucket, _window, _max) {
+      if (bucket === "partner-any-call") return { ok: true, retryAfterSeconds: 0 };
       calls.push(`hitRateLimit:${bucket}`);
       return { ok: true, retryAfterSeconds: 0 };
     },

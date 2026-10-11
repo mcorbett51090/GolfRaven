@@ -57,6 +57,8 @@ export interface CourseQrState {
   lastSeenAt: number;
   bindRefused: boolean;
   rateLimitOk: boolean;
+  /** §70 soft-cap; default true so hard-cap call-order cells stay stable. */
+  memberAnyCallLimitOk: boolean;
   slug: string;
   nowS: number;
 }
@@ -99,6 +101,7 @@ export async function makeCourseQrWorld(over: Partial<CourseQrState> = {}): Prom
     lastSeenAt: 1_000,
     bindRefused: false,
     rateLimitOk: true,
+    memberAnyCallLimitOk: true,
     slug: "facility-x",
     nowS: 1_900_000_000,
     ...over,
@@ -203,6 +206,9 @@ export async function makeCourseQrWorld(over: Partial<CourseQrState> = {}): Prom
       if (state.printed === null) return { status: "not_printed" };
       return { status: "ok", qrKid: state.printed.kid, sig: state.printed.sig, printedAt: state.printed.printedAt, revokedAt: state.printed.revokedAt };
     },
+    async raiseMemberRateAlarm() {
+      calls.push("tx.raiseMemberRateAlarm");
+    },
   };
 
   const db: CourseQrDb = {
@@ -222,9 +228,14 @@ export async function makeCourseQrWorld(over: Partial<CourseQrState> = {}): Prom
       }
     },
     async hitRateLimit(_hash, bucket, windowSeconds, max) {
-      calls.push("db.hitRateLimit");
       rateLimitHits.push({ bucket, windowSeconds, max });
       if (state.bindRefused) throw new PartnerSessionRefused();
+      if (bucket === "partner-any-call") {
+        const ok = state.memberAnyCallLimitOk !== false;
+        if (!ok) calls.push("db.hitRateLimit");
+        return ok ? { ok: true, retryAfterSeconds: 0 } : { ok: false, retryAfterSeconds: 3600 };
+      }
+      calls.push("db.hitRateLimit");
       return state.rateLimitOk ? { ok: true, retryAfterSeconds: 0 } : { ok: false, retryAfterSeconds: 3600 };
     },
   };

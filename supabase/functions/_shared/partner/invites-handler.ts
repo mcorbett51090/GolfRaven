@@ -30,6 +30,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   assertSameOrigin,
+  alertMemberAnyCall,
   bearerHash,
   type Decision,
   mapPartnerError,
@@ -120,6 +121,7 @@ export async function handlePartnerInvitesRequest(req: Request, deps: PartnerInv
           const h = await bearerHash(req.headers);
           if (h === null) return unauthenticated(decision);
           tokenHash = h;
+          await alertMemberAnyCall(deps.db, tokenHash);
         }
 
         switch (matched.spec.name) {

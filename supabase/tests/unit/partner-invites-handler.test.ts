@@ -5,6 +5,7 @@
 // COMMIT ON EVERY STATUS, the status-to-HTTP maps, the one 403 that hides every refusal before the mailbox is proved, and that a token reaches the database only as its hash. What needs a real database is
 // supabase/tests/matrix/32_partner_invites_enrolment.sql.
 
+import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
 import { describe, expect, it } from "vitest";
 import { handlePartnerInvitesRequest, ACCEPT_START_PER_TOKEN_PER_HOUR, ACCEPT_VERIFY_PER_TOKEN_PER_HOUR, INVITE_CREATE_BUCKET, INVITE_CREATE_PER_EMAIL_PER_DAY, INVITE_CREATE_PER_MEMBER_PER_DAY } from "../../functions/_shared/partner/invites-handler.ts";
 import { uuidToBytes } from "../../functions/_shared/partner/session-shape.ts";
@@ -115,7 +116,7 @@ describe("POST invites (class A2)", () => {
   it("design 8: 20 a day per inviter (a member bucket) and 3 a day per invitee address (a system bucket keyed on the address's hash), both hit BEFORE the request transaction", async () => {
     const f = makeFakes();
     await call(f, "POST", "invites", { headers: authed(), body: createBody });
-    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: INVITE_CREATE_BUCKET, windowSeconds: 86_400, max: INVITE_CREATE_PER_MEMBER_PER_DAY }]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { hash: await sha256Hex(SESSION_TOKEN), bucket: INVITE_CREATE_BUCKET, windowSeconds: 86_400, max: INVITE_CREATE_PER_MEMBER_PER_DAY }]);
     expect(f.rec.systemHits).toEqual([{ bucket: `partner-invite-email:${await sha256Hex("new.staff@example.test")}`, windowSeconds: 86_400, max: INVITE_CREATE_PER_EMAIL_PER_DAY }]);
     expect(f.calls.indexOf("db.hitRateLimit")).toBeLessThan(f.calls.indexOf("db.hitSystemRateLimit"));
     expect(f.calls.indexOf("db.hitSystemRateLimit")).toBeLessThan(f.calls.indexOf("db.withSession"));

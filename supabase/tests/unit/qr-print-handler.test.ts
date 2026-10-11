@@ -5,6 +5,7 @@
 // bound into the signed bytes (the QR of X is useless for Y), that printing again is idempotent, that a seed that is not the registered key's writes NOTHING, and that no key material leaves in a response.
 // Class A3, the operator's scope and the public-key rows are the database's: supabase/tests/matrix/33_course_qr_staff.sql.
 
+import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
 import { describe, expect, it } from "vitest";
 import { base64UrlDecode, base64UrlEncode, parsePrintedQr, printedQrMessage, verifyPrintedQr } from "../../functions/_shared/course-qr/format.ts";
 import { signPrintedQr } from "../../functions/_shared/partner/course-qr-signer.ts";
@@ -70,7 +71,7 @@ describe("POST: sign and register the printed QR", () => {
     expect(d.link).toBe(`${LINK_ORIGIN}/q/f/facility-x#kidprt1.${sig}`);
     expect(w.state.printed).toMatchObject({ kid: "kidprt1", sig, revokedAt: null });
     expect(w.calls).toEqual(["db.hitRateLimit", "db.withCourseQr", "tx.printKey", "tx.printWrite"]);
-    expect(w.rateLimitHits).toEqual([{ bucket: PRINT_BUCKET, windowSeconds: 3600, max: PRINT_PER_MEMBER_PER_HOUR }]);
+    expect(w.rateLimitHits).toEqual([{ bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { bucket: PRINT_BUCKET, windowSeconds: 3600, max: PRINT_PER_MEMBER_PER_HOUR }]);
   });
 
   it("is BYTE-IDENTICAL to the test minter's signature under the same key and signs exactly the documented message", async () => {

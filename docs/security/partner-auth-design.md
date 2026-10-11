@@ -3411,12 +3411,36 @@ Numbering: **migration `0082`, matrix `60`, this section 69.** Closes design M1 
 
 ### 69.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits; automatic 7-day purge of `course_pin_pepper_previous`. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Member-keyed 1,200/h alert-only any-partner-call bucket → §70; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits; automatic 7-day purge of `course_pin_pepper_previous`. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 69.4 Verification
 
-Branch: `cursor/p5-pepper-rotate-8ffd` (base after #108 / `b583ab5`). Tip `35b5c19`.
+Squash-merged as `ed5692a` (#109). Branch: `cursor/p5-pepper-rotate-8ffd` (base after #108 / `b583ab5`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 60 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 - `node --test tools/db/rotate-course-pin-pepper.test.mjs` (7 passed).
+
+## 70. As built: member-keyed 1,200/h alert-only any-call bucket
+
+Numbering: **migration `0083`, matrix `61`, this section 70.** Closes design §8 / §69.3 leftover: every authenticated partner HTTP call soft-caps at 1,200/h per member (alert only; never 429). Does not replace hard per-route caps.
+
+### 70.1 What was built
+
+- **Kind `rate_member`** on `app.partner_auth_alarm` — `credential_id` NULL; `bucket_key` = bound member uid text (uuid regex CHECK).
+- **`private.partner_member_rate_alarm_raise(p_detail jsonb)`** — `SECURITY DEFINER`, `search_path=''`, owned by `private_definer`; `edge_partner` only (not minter); REQUIRES partner binding (42501 if unbound); `bucket_key` = `private.partner_binding_user()::text` (never caller-chosen); `INSERT ON CONFLICT DO NOTHING`; `audit_log` `partner.rate.rate_member` only when new. Partner-bound INSERT/SELECT policies for the writer (0048's unbound mint policies stay).
+- **Edge** — `PartnerSessionTx` / `CourseQrTx.raiseMemberRateAlarm`; shared `alertMemberAnyCall` in `handler-kit.ts` via `hitRateLimitForPartner(tokenHash, "partner-any-call", 3600, 1200)` then bound raise; wired once after successful bearer hash in every authenticated partner handler (members, invites session routes, attest, review, stock, entitlements, programme, offers-admin, sponsorships, offers-redeem, settlement, course-qr, qr-print) and once when `partner-session` enters its authenticated switch (not options/verify/pre-auth). Never 429; writer errors swallowed. `partner_rate_alarm_raise` (minter-only) untouched.
+- **pgTAP matrix 61** + PA-1 / inventory edge_partner allowlists (10 / 25) + kind_readers.
+
+### 70.2 Decisions and departures
+
+- **Alert-only soft-cap** — matches design §8 "any partner call | member | 1,200/h (alert, not block)"; hard per-route member buckets stay.
+- **Separate edge_partner writer** — rate_member cannot use minter-lane `partner_rate_alarm_raise` (refuses any binding); binding uid is the only arbiter key.
+
+### 70.3 Not built, honestly
+
+- Retire-previous purge; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 70.4 Verification
+
+Branch: `cursor/p5-member-rate-alert-8ffd` (base after #109 / `ed5692a`).
 

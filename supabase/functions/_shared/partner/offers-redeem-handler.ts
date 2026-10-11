@@ -17,7 +17,9 @@
 
 import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
-import { bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+import {
+  alertMemberAnyCall,
+  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { parseOfferRedeemBody, parseOfferRedeemOfflineBody, parseOffersQueueQuery } from "./offers-redeem-shape.ts";
 import type { OfferQueueRow, OfferRedeemResult, PartnerDb } from "./ports.ts";
@@ -54,6 +56,7 @@ export async function handlePartnerOffersRedeemRequest(req: Request, deps: Partn
         if (refusal !== null) return refusal;
         const tokenHash = await bearerHash(req.headers);
         if (tokenHash === null) return unauthenticated(decision);
+        await alertMemberAnyCall(deps.db, tokenHash);
 
         switch (matched.spec.name) {
           case "queue":

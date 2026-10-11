@@ -166,6 +166,8 @@ export interface Fakes {
     reauthCredential: ReauthCredential | null;
     reauthStatus: string;
     rateLimitOk: boolean;
+    /** §70 soft-cap; default true so hard-cap call-order cells stay stable. */
+    memberAnyCallLimitOk: boolean;
     whoami: unknown;
     throwIn: string | null;
     pinParams: PinParams;
@@ -295,6 +297,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     reauthCredential: { id: "11111111-1111-1111-1111-111111111111", userId: USER_ID, alg: -7, publicKey: bytes(77, 6), signCount: 4, rp: RP },
     reauthStatus: "ok",
     rateLimitOk: true,
+    memberAnyCallLimitOk: true,
     whoami: { userId: USER_ID, aal: 1 },
     throwIn: null,
     pinParams: { state: "ok", salt: bytes(16, 8), iterations: 600000, retryAfterSeconds: 0 },
@@ -573,6 +576,9 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       maybeThrow("credentialRevoke");
       return state.credentialRevoke;
     },
+    async raiseMemberRateAlarm(_detail) {
+      calls.push("session.raiseMemberRateAlarm");
+    },
   };
   async function runMint<T>(op: (m: PartnerMintTx & PartnerInviteMintTx) => Promise<T>): Promise<T> {
     calls.push("db.withMint");
@@ -616,9 +622,15 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     withOffersRedeem: () => Promise.reject(new Error("not used: the offers-redeem handler has its own fake (partner-offers-redeem-handler.test.ts)")),
     withSettlementExport: () => Promise.reject(new Error("not used: the settlement-export handler has its own fake (partner-settlement-handler.test.ts)")),
     async hitRateLimit(hash, bucket, windowSeconds, max) {
-      calls.push("db.hitRateLimit");
       rateLimitHits.push({ hash, bucket, windowSeconds, max });
       if (state.bindRefused) throw new PartnerSessionRefused();
+      // §70 soft-cap: under the cap stay silent in `calls` so hard-cap order cells stay stable; still recorded in rateLimitHits.
+      if (bucket === "partner-any-call") {
+        const ok = state.memberAnyCallLimitOk !== false;
+        if (!ok) calls.push("db.hitRateLimit");
+        return ok ? { ok: true, retryAfterSeconds: 0 } : { ok: false, retryAfterSeconds: 3600 };
+      }
+      calls.push("db.hitRateLimit");
       return state.rateLimitOk ? { ok: true, retryAfterSeconds: 0 } : { ok: false, retryAfterSeconds: 3600 };
     },
     async hitSystemRateLimit(bucket, windowSeconds, max) {

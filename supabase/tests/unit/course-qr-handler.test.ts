@@ -6,6 +6,7 @@
 // refusal after the PIN grant was consumed ROLLS BACK (a refused mint gives the grant back). What is decided in the database (scope, the class prerequisites, the PIN derivation, the row) is
 // supabase/tests/matrix/33_course_qr_staff.sql.
 
+import { MEMBER_ANY_CALL_BUCKET, MEMBER_ANY_CALL_PER_HOUR } from "../../functions/_shared/partner/handler-kit.ts";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -210,7 +211,7 @@ describe("POST pin/rotate", () => {
     expect(res.status).toBe(200);
     expect((await json(res)).data).toEqual({ facilityId: FACILITY, pinEpoch: 1 });
     expect(w.calls).toEqual(["db.hitRateLimit", "db.withCourseQr", "tx.pinRotate"]);
-    expect(w.rateLimitHits).toEqual([{ bucket: ROTATE_BUCKET, windowSeconds: 3600, max: 10 }]);
+    expect(w.rateLimitHits).toEqual([{ bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { bucket: ROTATE_BUCKET, windowSeconds: 3600, max: 10 }]);
   });
 
   it("A2 not satisfied (no fresh PIN or passkey) and no scope are both 403", async () => {
@@ -308,7 +309,7 @@ describe("POST tokens: Marker sold", () => {
   it("the 60-a-member-an-hour bucket is hit once per request, BEFORE the request transaction; over it is 429 with no transaction and no row", async () => {
     const w = await makeCourseQrWorld();
     await handleCourseQrRequest(post("tokens", { facilityId: FACILITY }), deps(w));
-    expect(w.rateLimitHits).toEqual([{ bucket: MINT_BUCKET, windowSeconds: 3600, max: MINT_PER_MEMBER_PER_HOUR }]);
+    expect(w.rateLimitHits).toEqual([{ bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { bucket: MINT_BUCKET, windowSeconds: 3600, max: MINT_PER_MEMBER_PER_HOUR }]);
     expect(MINT_PER_MEMBER_PER_HOUR).toBe(60);
     expect(w.calls.indexOf("db.hitRateLimit")).toBeLessThan(w.calls.indexOf("db.withCourseQr"));
     const limited = await makeCourseQrWorld({ rateLimitOk: false });
