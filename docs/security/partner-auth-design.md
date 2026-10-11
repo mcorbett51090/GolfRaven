@@ -3663,11 +3663,39 @@ Numbering: **migration `0088`, matrix `66`, this section 78.** Closes the automa
 
 ### 78.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Credential list under reach → §79; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 78.4 Verification
 
-Branch: `cursor/p5-partner-pin-pepper-purge-8ffd` (base after #117 / `2c9f43f`). Tip on PR #118.
+Squash-merged as `1ecd6fd` (#118). Branch: `cursor/p5-partner-pin-pepper-purge-8ffd` (base after #117 / `2c9f43f`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 66 ok; 20 / 30 privilege lists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 79. As built: credential list under the reach rule
+
+Numbering: **migration `0089`, matrix `67`, this section 79.** Closes the §76.2 / §78.3 leftover: GET credentials may list another person's rows when the 6.5 reach rule covers them. Class stays A0. Partners PWA for others stays later (needs a member roster pick surface).
+
+### 79.1 What was built
+
+- **`DROP` + `CREATE private.partner_credential_list_for_partner(p_user_id uuid DEFAULT NULL)`** — NULL or self → own rows; else only when `partner_reach_covers`; outside reach / unknown → empty (no list status oracle). Never key / credential-id bytes / sign counter.
+- **SELECT policy** — unchanged (`pd_read_partner_credential_bound` already own OR reach since 0054).
+- **Edge** — `GET /partner-members/credentials?userId=` (optional uuid; unknown keys refused); `PartnerMembersTx.credentialList(userId?)`.
+- **pgTAP matrix 67** + matrix 32 ACL `regprocedure` updated to `(uuid)`.
+- **function_inventory** — identity_args `''` → `p_user_id uuid`.
+
+### 79.2 Decisions and departures
+
+- **Empty, not `not_found`** — a list has no refusal status; outside reach looks like "no credentials visible" (same shape as an empty person).
+- **DEFAULT NULL** — bare `partner_credential_list_for_partner()` calls (matrix 32) keep working; catalog identity is `(uuid)`.
+- **No PWA / no member roster** — discovery of a `userId` under reach stays a later seam.
+
+### 79.3 Not built, honestly
+
+- Partners PWA for others' credentials; org member roster GET; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 79.4 Verification
+
+Branch: `cursor/p5-credential-list-reach-8ffd` (base after #118 / `1ecd6fd`). Tip on PR #119.
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 67 ok; matrix 32 ACL); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 

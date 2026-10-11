@@ -210,6 +210,22 @@ describe("credentials of a signed-in person", () => {
     const res = await call(f, "GET", "credentials", { headers: authed() });
     expect(res.status).toBe(200);
     expect(JSON.parse(await text(res)).data).toEqual({ credentials: [view] });
+    expect(f.rec.credentialListUserId).toEqual([null]);
+  });
+
+  it("GET credentials?userId= passes the target uuid (reach is the database's)", async () => {
+    const f = makeFakes({ credentialList: [] });
+    const res = await call(f, "GET", `credentials?userId=${TARGET_ID}`, { headers: authed() });
+    expect(res.status).toBe(200);
+    expect(JSON.parse(await text(res)).data).toEqual({ credentials: [] });
+    expect(f.rec.credentialListUserId).toEqual([TARGET_ID]);
+  });
+
+  it("GET credentials refuses a bad or unknown query", async () => {
+    const f = makeFakes();
+    expect((await call(f, "GET", "credentials?userId=not-a-uuid", { headers: authed() })).status).toBe(400);
+    expect((await call(f, "GET", "credentials?x=1", { headers: authed() })).status).toBe(400);
+    expect(f.rec.credentialListUserId).toEqual([]);
   });
 
   it("POST credentials/options: the member bucket first (10 an hour), then the A2 definer; options are built for THIS person with the credentials they hold excluded", async () => {

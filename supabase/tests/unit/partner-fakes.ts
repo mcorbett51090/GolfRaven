@@ -121,6 +121,7 @@ export interface Recorded {
   readonly revokeAll: Array<{ org: string; createdAfter: string | null }>;
   readonly adminEnrol: Array<{ target: string; hash: string }>;
   readonly credentialRegister: CredentialRegisterInput[];
+  readonly credentialListUserId: Array<string | null>;
   readonly credentialNote: Array<{ id: string; note: string | null }>;
   readonly credentialRevoke: string[];
 }
@@ -284,6 +285,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     revokeAll: [],
     adminEnrol: [],
     credentialRegister: [],
+    credentialListUserId: [],
     credentialNote: [],
     credentialRevoke: [],
   };
@@ -559,8 +561,9 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       maybeThrow("credentialRegister");
       return state.credentialRegister;
     },
-    async credentialList() {
+    async credentialList(userId?: string | null) {
       calls.push("session.credentialList");
+      rec.credentialListUserId.push(userId ?? null);
       maybeThrow("credentialList");
       return state.credentialList;
     },
