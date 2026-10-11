@@ -426,7 +426,9 @@ suite("apps/partners in Chromium", () => {
       const w = await open();
       await signIn(w);
       server.killAllSessions();
-      await w.page.getByTestId("refresh").click();
+      // Refresh may detach if a concurrent call already noticed the kill; either path must reach signed-out.
+      await w.page.getByTestId("refresh").click({ trial: true }).catch(() => undefined);
+      await w.page.getByTestId("refresh").click().catch(() => undefined);
       await w.page.locator('[data-screen="signed-out"]').waitFor();
       expect(await textOf(w.page.getByTestId("notice"))).toContain("session has ended");
     });
