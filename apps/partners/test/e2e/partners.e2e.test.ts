@@ -129,8 +129,14 @@ suite("apps/partners in Chromium", () => {
   }
 
   const signIn = async (w: Watch) => {
+    const noticesBefore = server.log.filter((r) => r.method === "GET" && r.path.endsWith("/credentials/notices")).length;
     await w.page.getByTestId("sign-in").click();
     await w.page.locator('[data-screen="signed-in"]').waitFor();
+    // §93: maybeOpen GETs credentials/notices after the signed-in screen is shown. Lifecycle cells (reload /
+    // bfcache) mark the log next — wait so an in-flight notices GET is not misread as a post-leave Bearer call.
+    await expect
+      .poll(() => server.log.filter((r) => r.method === "GET" && r.path.endsWith("/credentials/notices")).length)
+      .toBe(noticesBefore + 1);
   };
   const screen = (w: Watch) => w.page.locator("main").getAttribute("data-screen");
   /** Playwright's locator text, awaited until it is there (vitest's `expect` has no Playwright matchers). */
@@ -139,6 +145,11 @@ suite("apps/partners in Chromium", () => {
     return (await l.textContent()) ?? "";
   };
   const apiCalls = () => server.log.filter((r) => r.method !== "OPTIONS");
+  /** Tail after the Edge function name (partner-session / partner-members / …). */
+  const routeTail = (path: string): string => {
+    const m = path.match(/\/functions\/v1\/([^/]+)\/(.*)$/);
+    return m ? `${m[1] === "partner-session" ? "" : `${m[1]}/`}${m[2]}` : path;
+  };
 
   describe("served under the real CSP", () => {
     it("the page response carries the generated CSP header, the hardening headers and a hashed bundle", async () => {
@@ -217,11 +228,6 @@ suite("apps/partners in Chromium", () => {
       const origins = new Set(w.requests.map((u) => new URL(u).origin));
       expect([...origins].sort()).toEqual([apiOrigin, pageOrigin].sort());
       expect(w.requests.some((u) => /rest\/v1|postgrest|supabase/i.test(u))).toBe(false);
-      const routeTail = (path: string): string => {
-        if (path.includes("/partner-session/")) return path.split("/partner-session/")[1]!;
-        if (path.includes("/partner-members/")) return `partner-members/${path.split("/partner-members/")[1]!}`;
-        return path;
-      };
       const calls = apiCalls().map((r) => `${r.method} ${routeTail(r.path)}`);
       // §93: after session, GET credentials/notices (A0) before home; refresh is a second GET session.
       expect(calls).toEqual([
@@ -355,7 +361,7 @@ suite("apps/partners in Chromium", () => {
       // nothing was sent on BOOT (there is no token to send); what the reload did send is the pagehide sign-out of the page that was left (a keepalive request:
       // its preflight, then the POST), which is how the old session ends up revoked rather than left to idle out
       const sent = server.log.slice(before);
-      expect(sent.filter((r) => r.method !== "OPTIONS").map((r) => `${r.method} ${r.path.split("/partner-session/")[1]}`)).toEqual(["POST sign-out"]);
+      expect(sent.filter((r) => r.method !== "OPTIONS").map((r) => `${r.method} ${routeTail(r.path)}`)).toEqual(["POST sign-out"]);
       await expect.poll(() => server.state.revokedSessions.size).toBe(1);
       expect(await w.page.getByTestId("roles").count()).toBe(0);
       await signIn(w);
