@@ -146,7 +146,19 @@ describe("token.ts", () => {
     const t = (await newPartnerSessionToken()).token;
     expect(partnerTokenFromHeader(`Bearer ${t}`)).toBe(t);
     expect(partnerTokenFromHeader(`bearer ${t}`)).toBe(t);
-    for (const bad of [null, "", t, `Basic ${t}`, `Bearer ${t}x`, `Bearer ${t.slice(0, -1)}`, `Bearer ${t} y`, "Bearer eyJhbGciOi.e30.sig", `Bearer  ${t}`, `Bearer ${t.replace("gr_ps_", "gr_inv_")}`]) {
+    for (const bad of [
+      null,
+      "",
+      t,
+      `Basic ${t}`,
+      `Bearer ${t}x`,
+      `Bearer ${t.slice(0, -1)}`,
+      `Bearer ${t} y`,
+      "Bearer eyJhbGciOi.e30.sig",
+      `Bearer  ${t}`,
+      `Bearer ${t.replace("gr_ps_", "gr_inv_")}`,
+      `Bearer ${t.replace("gr_ps_", "gr_enr_")}`,
+    ]) {
       expect(partnerTokenFromHeader(bad), String(bad)).toBeNull();
     }
   });

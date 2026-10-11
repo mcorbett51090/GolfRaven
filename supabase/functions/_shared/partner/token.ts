@@ -4,7 +4,7 @@
 // ever reaches the database. Pure (Web Crypto only): no environment, no database, no logging. The token is returned to the client exactly once, in the body of a successful sign-in, and is never
 // stored, logged or sent anywhere else.
 
-/** The prefix of a partner session token (greppable by a secret scanner, and what `getActorFromRequest` refuses to forward to GoTrue). */
+/** The prefix of a partner session token (greppable by a secret scanner, and what `getActorFromRequest` refuses to forward to GoTrue, with `gr_inv_` / `gr_enr_`). */
 export const PARTNER_SESSION_PREFIX = "gr_ps_";
 /** `gr_ps_` followed by exactly 43 base64url characters. */
 export const PARTNER_SESSION_TOKEN_RE = /^gr_ps_[A-Za-z0-9_-]{43}$/;

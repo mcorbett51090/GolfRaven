@@ -113,8 +113,10 @@ describe("privileged.ts#getActorFromRequest runs the review-account gate", () =>
     expect(ret).toBeGreaterThan(gate);
   });
 
-  it("composes with the partner-token refusal (PA-11): gr_ps_ / gr_inv_ are refused BEFORE the environment is read, any client exists or GoTrue is asked, so before the gate", () => {
-    const prefix = body.indexOf('lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_")');
+  it("composes with the partner-token refusal (PA-11): gr_ps_ / gr_inv_ / gr_enr_ are refused BEFORE the environment is read, any client exists or GoTrue is asked, so before the gate", () => {
+    const prefix = body.indexOf(
+      'lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_") || lowered.startsWith("gr_enr_")',
+    );
     const env = body.indexOf('Deno.env.get("SUPABASE_URL")');
     const client = body.indexOf("createClient(");
     const verified = body.indexOf("auth.getUser(token)");

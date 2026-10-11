@@ -592,10 +592,10 @@ export async function getActorFromRequest(req: Request): Promise<Actor | null> {
   if (!authHeader || !authHeader.toLowerCase().startsWith("bearer ")) return null;
   const token = authHeader.slice(authHeader.indexOf(" ") + 1).trim();
   if (!token) return null;
-  // PA-11 (partner design 4.2, N5): a PARTNER session token (`gr_ps_`) or an invite token (`gr_inv_`) is never an identity of the player lane, and it must never be sent to a third party: it is refused HERE, before
+  // PA-11 (partner design 4.2, N5; §91): a PARTNER session token (`gr_ps_`), invite token (`gr_inv_`), or enrolment token (`gr_enr_`) is never an identity of the player lane, and it must never be sent to a third party: it is refused HERE, before
   // the environment is read and before any client exists, so no request to GoTrue is ever made with it. (Case-insensitively: a mangled partner token is still not a Supabase JWT.)
   const lowered = token.toLowerCase();
-  if (lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_")) return null;
+  if (lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_") || lowered.startsWith("gr_enr_")) return null;
 
   const url = Deno.env.get("SUPABASE_URL");
   const anonKey = Deno.env.get("SUPABASE_ANON_KEY");
