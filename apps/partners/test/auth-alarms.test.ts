@@ -28,6 +28,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "invite_revoke")).toBe("Invitation révoquée");
     expect(authAlarmKindLabel("en", "enrolment_issue")).toBe("Admin enrolment issued");
     expect(authAlarmKindLabel("fr-CA", "enrolment_issue")).toBe("Inscription admin émise");
+    expect(authAlarmKindLabel("en", "invite_create")).toBe("Invite created");
+    expect(authAlarmKindLabel("fr-CA", "invite_create")).toBe("Invitation créée");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

@@ -4417,7 +4417,35 @@ Numbering: **migration `0100`, matrix `78`, this section 106.** Closes the §105
 
 ### 106.4 Verification
 
-Branch: `cursor/p5-enrolment-issue-alarm-8ffd` (base after #145 / `5c0a093`). Squash-merged as _pending_.
+Branch: `cursor/p5-enrolment-issue-alarm-8ffd` (base after #145 / `5c0a093`). Squash-merged as `5d31992`.
 
 - pgTAP matrix `78`; tip `0100`; partners i18n / auth-alarms unit cells.
+
+## 107. As built: invite-create operator alarm
+
+Numbering: **migration `0101`, matrix `79`, this section 107.** Closes the §106.3 / §21.4 leftover after `invite_revoke`: a successful `partner_invite_create_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `invite_create` (one row per invite id per minute) so the admin auth-alarms list surfaces invite creates, not only `audit_log` `partner.invite.create`. `already_member` stays quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 107.1 What was built
+
+- **Kind + row CHECK** — `invite_create` with `credential_id` NULL and `bucket_key` = invite id text (same uuid shape as `invite_revoke`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_invite_create_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"invite","org","role","status"}` (`ok`); never the token hash or invitee email.
+- **Catalogue** — `review.authAlarms.kind.invite_create` (EN / fr-CA); subject prefix already reads `detail.invite` / `detail.org`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 107.2 Decisions and departures
+
+- **ok only** — `already_member` returns before audit/alarm; exception paths RAISE before audit/alarm.
+- **Bucket = invite id** — flood shape is one row per invite per UTC minute (not per org).
+- **Detail keeps `org` / `role`** — matches the audit payload without PII (no email).
+
+### 107.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 107.4 Verification
+
+Branch: `cursor/p5-invite-create-alarm-8ffd` (base after #146 / `5d31992`). Squash-merged as _pending_.
+
+- pgTAP matrix `79`; tip `0101`; partners i18n / auth-alarms unit cells.
 
