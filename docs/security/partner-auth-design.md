@@ -3634,12 +3634,40 @@ Numbering: **migration `0087`, matrix `65`, this section 77.** Closes design D4 
 
 ### 77.3 Not built, honestly
 
-- Automatic 7-day purge of `partner_pin_pepper_previous`; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Automatic 7-day purge of `partner_pin_pepper_previous` → §78; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 77.4 Verification
 
-Branch: `cursor/p5-partner-pin-pepper-8ffd` (base after #116 / `3ee503b`). Tip on PR #117.
+Squash-merged as `2c9f43f` (#117). Branch: `cursor/p5-partner-pin-pepper-8ffd` (base after #116 / `3ee503b`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 65 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 - `node --test tools/db/rotate-partner-pin-pepper.test.mjs` (7 passed).
+
+## 78. As built: partner_pin_pepper_previous retention purge
+
+Numbering: **migration `0088`, matrix `66`, this section 78.** Closes the automatic 7-day retire of Vault `partner_pin_pepper_previous` left open by 0087 / §77.3. Wired into the existing hourly `retention-purge` schedule (eighteen → nineteen steps).
+
+### 78.1 What was built
+
+- **`private.purge_partner_pin_pepper_previous() RETURNS integer`** — SECURITY DEFINER, `search_path=''`, owned by `private_definer`; calls `private.partner_pin_pepper_rotate('retire_previous')`; maps `ok` → 1, `too_early` / `previous_absent` → 0; raises only on unexpected SQL errors (unexpected status is a programming error).
+- **Grants** — REVOKE PUBLIC; GRANT EXECUTE to `edge_system` only. **Never** GRANT any edge role EXECUTE on `partner_pin_pepper_rotate` (owner / SQL-editor only, 0087).
+- **Audit** — keep existing `operator.partner_pin_pepper.rotate` from `retire_previous`; no separate `system.*` audit on this seam.
+- **Edge** — `RetentionStep` name `partner_pin_pepper_previous` after `course_pin_pepper_previous`; matrices 20 / 30 / Deno step-order updated.
+- **pgTAP matrix 66**.
+
+### 78.2 Decisions and departures
+
+- **Wrapper only** — the 7-day floor and Vault DELETE stay inside `partner_pin_pepper_rotate`; retention-purge never holds pepper bytes and never widens rotate's ACL.
+- **Reuse `retention-purge`** — no new Edge function.
+- **Status → count** — rotate's text statuses become the integer the schedule already expects (`ok` is one row of work; no-ops are zero).
+
+### 78.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 78.4 Verification
+
+Branch: `cursor/p5-partner-pin-pepper-purge-8ffd` (base after #117 / `2c9f43f`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP (matrix 66); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0087`.
 

@@ -220,9 +220,9 @@ retentionTest("E5: one run purges EACH retention class past its retention, and k
   const PARTNER_STEPS = ["partner_challenges", "partner_sessions", "partner_credentials", "partner_invites", "partner_enrolment_tokens", "partner_sign_in_failures"];
   const COURSE_QR_STEPS = ["course_qr_tokens", "course_pin_alarms", "abandoned_pending_purchases", "course_pin_epoch_log"];
   const ALARM_STEPS = ["partner_auth_alarms"];
-  const PEPPER_STEPS = ["course_pin_pepper_previous"];
+  const PEPPER_STEPS = ["course_pin_pepper_previous", "partner_pin_pepper_previous"];
   assertEquals(r.steps.map((s) => s.name), ["fix_coords", "install_link_tombstones", "signin_email_proofs", "signin_revocation_queue", "consumed_nonce", "rate_limit_buckets", ...PARTNER_STEPS, ...COURSE_QR_STEPS, ...ALARM_STEPS, ...PEPPER_STEPS]);
-  // the six player-lane classes were seeded above; the six partner classes (0054), three course-QR classes (0071), the epoch-log class (0072), the partner-auth-alarm class (0074) and the pepper-previous wrapper (0084) are proven to RUN here (edge_system holds EXECUTE on each) and are seeded in matrices 32 / 49 / 50 / 52 / 62
+  // the six player-lane classes were seeded above; the six partner classes (0054), three course-QR classes (0071), the epoch-log class (0072), the partner-auth-alarm class (0074), the course pepper-previous wrapper (0084) and the partner pepper-previous wrapper (0088) are proven to RUN here (edge_system holds EXECUTE on each) and are seeded in matrices 32 / 49 / 50 / 52 / 62 / 66
   const seeded = (name: string) => !PARTNER_STEPS.includes(name) && !COURSE_QR_STEPS.includes(name) && !ALARM_STEPS.includes(name) && !PEPPER_STEPS.includes(name);
   for (const s of r.steps.filter((x) => seeded(x.name))) assert(s.purged >= 1, `${s.name} purged something: ${JSON.stringify(s)}`);
   for (const s of r.steps.filter((x) => !seeded(x.name))) assertEquals(s.status, "done", `${s.name}: ${JSON.stringify(s)}`);

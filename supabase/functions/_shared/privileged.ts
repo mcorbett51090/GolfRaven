@@ -2701,6 +2701,8 @@ export async function refreshRollups(month: string | null): Promise<{
  *   partner_auth_alarms          `private.purge_partner_auth_alarms()`           alarms 90 days past raised_at
  * and, since 0084 (P5 §71), the course-PIN previous-pepper retire wrapper (seventeen → eighteen steps):
  *   course_pin_pepper_previous   `private.purge_course_pin_pepper_previous()`   wraps rotate(retire_previous); ok→1, too_early/previous_absent→0
+ * and, since 0088 (P5 §78), the partner-PIN previous-pepper retire wrapper (eighteen → nineteen steps):
+ *   partner_pin_pepper_previous  `private.purge_partner_pin_pepper_previous()`  wraps rotate(retire_previous); ok→1, too_early/previous_absent→0
  * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
  * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
  *
@@ -2769,6 +2771,8 @@ export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): R
     step("partner_auth_alarms", fixed, async (trx) => n(await trx`select private.purge_partner_auth_alarms() as n`)),
     // 0084 (P5 §71): course_pin_pepper_previous retire (0082 retire_previous wrapper)
     step("course_pin_pepper_previous", fixed, async (trx) => n(await trx`select private.purge_course_pin_pepper_previous() as n`)),
+    // 0088 (P5 §78): partner_pin_pepper_previous retire (0087 retire_previous wrapper)
+    step("partner_pin_pepper_previous", fixed, async (trx) => n(await trx`select private.purge_partner_pin_pepper_previous() as n`)),
   ];
 }
 
