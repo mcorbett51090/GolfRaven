@@ -459,6 +459,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.pin_locked": "NIP verrouillé",
   "review.authAlarms.kind.pin_reset": "Réinitialisation du NIP",
   "review.authAlarms.kind.member_recover": "Récupération de membre",
+  "review.authAlarms.kind.org_revoke_all": "Révocation globale d'organisation",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",
