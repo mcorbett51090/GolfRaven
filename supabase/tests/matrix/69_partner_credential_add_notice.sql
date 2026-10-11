@@ -32,27 +32,14 @@ CREATE FUNCTION pg_temp.mk_session(p_label text, p_uid uuid, p_cred uuid) RETURN
           convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'))
   RETURNING id
 $f$;
-CREATE FUNCTION pg_temp.add_second(p_sess_label text, p_cred_label text, p_uid uuid, p_via uuid) RETURNS uuid LANGUAGE plpgsql AS $f$
-DECLARE v_id uuid;
-        v_th text;
-BEGIN
-  -- Bind as edge_partner so the trigger's partner-bound INSERT policies pass; insert as the
-  -- harness role (edge_partner has no table privilege on partner_credential).
-  v_th := pg_temp.th(p_sess_label);
-  EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(v_th);
-  EXECUTE 'RESET ROLE';
+-- Insert a second credential while a partner session is already bound in this xact
+-- (trigger INSERT policies require partner binding; edge_partner has no table privilege).
+CREATE FUNCTION pg_temp.add_second(p_cred_label text, p_uid uuid, p_via uuid) RETURNS uuid LANGUAGE sql AS $f$
   INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, created_via_credential_id, aaguid)
   VALUES (p_uid, decode(md5('c69:' || p_cred_label) || md5('c69b:' || p_cred_label), 'hex'),
           decode(md5('k69:' || p_cred_label) || md5('k69b:' || p_cred_label), 'hex'), -7, p_via,
           'abababab-abab-abab-abab-abababababab'::uuid)
-  RETURNING id INTO v_id;
-  -- One partner bind per xact (PA-2 / PA-27); smudge xact so later cells can bind again.
-  EXECUTE 'SET LOCAL ROLE private_definer';
-  UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
-  EXECUTE 'RESET ROLE';
-  RETURN v_id;
-END
+  RETURNING id
 $f$;
 CREATE FUNCTION pg_temp.mine_cnt() RETURNS int LANGUAGE plpgsql AS $f$
 DECLARE n int;
@@ -81,15 +68,9 @@ BEGIN
   RETURN s;
 END
 $f$;
-CREATE FUNCTION pg_temp.reach_staff_fail() RETURNS void LANGUAGE plpgsql AS $f$
-DECLARE v_th text;
+CREATE FUNCTION pg_temp.call_reach() RETURNS void LANGUAGE plpgsql AS $f$
 BEGIN
-  v_th := pg_temp.th('sx');
-  SET LOCAL ROLE private_definer;
-  UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
-  RESET ROLE;
   SET LOCAL ROLE edge_partner;
-  PERFORM private.bind_partner_session(v_th);
   PERFORM * FROM private.partner_credential_add_notice_list_reach_for_partner();
   RESET ROLE;
 END
@@ -122,13 +103,22 @@ SELECT ok(
 SELECT tests.clear_actor();
 
 -- ----------------------------------------------------------------------------
--- 2. Behaviour: first cred no notice; second cred notice + alarm
+-- 2. First credential (no created_via) creates no notice
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.mk_cred('sx', '00000000-0000-0000-0000-1000000000a1') AS c_sx \gset
 SELECT pg_temp.mk_session('sx', '00000000-0000-0000-0000-1000000000a1', :'c_sx') AS s_sx \gset
+SELECT pg_temp.th('sx') AS th_sx \gset
 SELECT is((SELECT count(*)::int FROM app.partner_credential_add_notice), 0,
   'first credential (no created_via) creates no notice');
-SELECT pg_temp.add_second('sx', 'sx2', '00000000-0000-0000-0000-1000000000a1'::uuid, :'c_sx'::uuid) AS c_sx2 \gset
+
+-- ----------------------------------------------------------------------------
+-- 3. Second credential + list_mine + ack (one bind; SAVEPOINT clears it)
+-- ----------------------------------------------------------------------------
+SAVEPOINT mine_ack;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT pg_temp.add_second('sx2', '00000000-0000-0000-0000-1000000000a1'::uuid, :'c_sx'::uuid) AS c_sx2 \gset
 SELECT is((SELECT count(*)::int FROM app.partner_credential_add_notice WHERE credential_id = :'c_sx2'::uuid), 1,
   'second credential creates exactly one notice');
 SELECT is((SELECT count(*)::int FROM app.partner_auth_alarm WHERE kind = 'credential_add' AND credential_id = :'c_sx2'::uuid), 1,
@@ -136,31 +126,40 @@ SELECT is((SELECT count(*)::int FROM app.partner_auth_alarm WHERE kind = 'creden
 SELECT is((SELECT detail ->> 'subject' FROM app.partner_auth_alarm WHERE kind = 'credential_add' AND credential_id = :'c_sx2'::uuid),
   '00000000-0000-0000-0000-1000000000a1',
   'alarm detail names subject only');
-
-SAVEPOINT mine_ack;
-SELECT pg_temp.th('sx') AS th_sx \gset
-SET LOCAL ROLE edge_partner;
-SELECT private.bind_partner_session(:'th_sx');
-RESET ROLE;
 SELECT is(pg_temp.mine_cnt(), 1, 'list_mine: subject sees one unacked notice');
 SELECT is(pg_temp.ack((SELECT id FROM app.partner_credential_add_notice WHERE credential_id = :'c_sx2'::uuid)), 'ok', 'ack: subject ok');
 SELECT is(pg_temp.ack((SELECT id FROM app.partner_credential_add_notice WHERE credential_id = :'c_sx2'::uuid)), 'already_acked', 'ack: already_acked');
 SELECT is(pg_temp.mine_cnt(), 0, 'list_mine: empty after ack');
 ROLLBACK TO SAVEPOINT mine_ack;
 
--- reach: re-seed notice (rollback cleared ack path data for notice row still there from before savepoint? mine_ack rollback restores unacked)
+-- ----------------------------------------------------------------------------
+-- 4. Manager reach list + staff refusal (separate binds via SAVEPOINT)
+-- ----------------------------------------------------------------------------
 SAVEPOINT reach;
 SELECT pg_temp.mk_cred('mx', '00000000-0000-0000-0000-2000000000b1') AS c_mx \gset
 SELECT pg_temp.mk_session('mx', '00000000-0000-0000-0000-2000000000b1', :'c_mx') AS s_mx \gset
-SELECT pg_temp.add_second('mx', 'mx2', '00000000-0000-0000-0000-2000000000b1'::uuid, :'c_mx'::uuid) AS c_mx2 \gset
 SELECT pg_temp.th('mx') AS th_mx \gset
+-- Staff second cred under a staff bind (notice subject = staff@X); smudge xact (PA-2) then bind manager.
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT pg_temp.add_second('sx2r', '00000000-0000-0000-0000-1000000000a1'::uuid, :'c_sx'::uuid) AS c_sx2r \gset
+SET LOCAL ROLE private_definer;
+UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
+RESET ROLE;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_mx');
 RESET ROLE;
 SELECT is(pg_temp.reach_cnt(), 1, 'manager@X sees staff@X unacked notice on reach list');
-SELECT throws_ok($$SELECT pg_temp.reach_staff_fail()$$, '42501', NULL,
-  'staff cannot call list_reach (manager|operator only)');
 ROLLBACK TO SAVEPOINT reach;
+
+SAVEPOINT staff_fail;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_sx');
+RESET ROLE;
+SELECT throws_ok($$SELECT pg_temp.call_reach()$$, '42501', NULL,
+  'staff cannot call list_reach (manager|operator only)');
+ROLLBACK TO SAVEPOINT staff_fail;
 
 SELECT * FROM finish();
 ROLLBACK;
