@@ -4584,11 +4584,39 @@ Numbering: **migration `0106`, matrix `84`, this section 112.** Closes the §111
 
 ### 112.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); TOTP-enrol operator alarm → §113; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 112.4 Verification
 
-Branch: `cursor/p5-pin-set-alarm-8ffd` (base after #151 / `f13b765`). Squash-merged as _pending_.
+Branch: `cursor/p5-pin-set-alarm-8ffd` (base after #151 / `f13b765`). Squash-merged as `5a2f57a`.
 
 - pgTAP matrix `84`; tip `0106`; partners i18n / auth-alarms unit cells.
+
+## 113. As built: TOTP-enrol operator alarm
+
+Numbering: **migration `0107`, matrix `85`, this section 113.** Closes the §112.3 leftover after `pin_set` (operator/admin enrolment ceremony step after `register_first`): a successful `partner_totp_enrol_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `totp_enrol` (one row per subject uid per minute) so the admin auth-alarms list surfaces TOTP enrolments, not only `audit_log` `partner.totp.enrol`. `already_confirmed` stays quiet. Detail carries `subject` / `status` / `seed_version` only — never the seed. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 113.1 What was built
+
+- **Kind + row CHECK** — `totp_enrol` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `totp_reset` / `totp_locked`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_totp_enrol_for_partner`: after the existing audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status","seed_version"}`.
+- **Catalogue** — `review.authAlarms.kind.totp_enrol` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist twin for the two policies.
+
+### 113.2 Decisions and departures
+
+- **ok only** — `already_confirmed` writes no seed and stays quiet; flood shape is one row per person per UTC minute.
+- **Never the seed** — alarm detail mirrors the audit row's `seed_version` only; the otpauth seed stays in the function return to the enrol session.
+- **Not `totp_confirm`** — confirm is the same ceremony's second step; enrol is the operator-visible seed issuance.
+
+### 113.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 113.4 Verification
+
+Branch: `cursor/p5-totp-enrol-alarm-8ffd` (base after #152 / `5a2f57a`). Squash-merged as _pending_.
+
+- pgTAP matrix `85`; tip `0107`; partners i18n / auth-alarms unit cells.
 

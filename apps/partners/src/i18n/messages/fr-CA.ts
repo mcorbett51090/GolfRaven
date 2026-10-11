@@ -470,6 +470,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.totp_locked": "TOTP verrouillé",
   "review.authAlarms.kind.credential_register": "Première clé d'accès enregistrée",
   "review.authAlarms.kind.pin_set": "NIP défini",
+  "review.authAlarms.kind.totp_enrol": "TOTP inscrit",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",
