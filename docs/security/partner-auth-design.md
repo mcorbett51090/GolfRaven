@@ -3801,11 +3801,38 @@ Numbering: **matrix n/a (PWA only), this section 83.** Closes the §82.3 leftove
 
 ### 83.3 Not built, honestly
 
-- Member revoke UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Member revoke UI → §84; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 83.4 Verification
 
-Branch: `cursor/p5-member-recover-ui-8ffd` (base after #122 / `1f4fd9a`). Tip on PR (this slice).
+Squash-merged as `3c4806e` (#123). Branch: `cursor/p5-member-recover-ui-8ffd` (base after #122 / `1f4fd9a`).
 
-- `@golfraven/partners` vitest (member recover A2); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **1033 passed** (member recover A2); typecheck clean; CI green; no Edge / migration change.
+
+## 84. As built: partners member revoke UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 84.** Closes the §83.3 leftover: managers / operators (and admins) end **one** membership under the reach rule via existing `POST partner-members/members/{id}/revoke` with `{ orgId }` from the roster row. No migration, no Edge change, no UI flag flips.
+
+### 84.1 What was built
+
+- **`members-routes.ts`** — `revokeMember(api, userId, orgId)` → `{ revoked: true }`; maps 404 → `not_found`.
+- **Work screen** — `revokeMember` on the roster: reauth + A2 then POST; reload list; notice `member-revoked`; client refuse for oneself.
+- **UI** — organisation id shown on each row; revoke testid keyed by `userId` + `orgId` (multi-org safe).
+- **Fake partner server** — revoke under reach removes that roster row.
+- **i18n** EN + fr-CA; Vitest covers A2 order and self-refuse.
+
+### 84.2 Decisions and departures
+
+- **One membership** — body carries the row's `orgId`; a person in two in-scope orgs appears as two rows.
+- **Not recover** — membership end only; credentials/sessions are unchanged (recover remains the full wipe path).
+
+### 84.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 84.4 Verification
+
+Branch: `cursor/p5-member-revoke-ui-8ffd` (base after #123 / `3c4806e`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (member revoke A2); typecheck clean; no Edge / migration change.
 

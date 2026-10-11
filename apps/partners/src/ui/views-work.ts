@@ -314,9 +314,10 @@ export function workView(state: SignedInState, controller: AppController, locale
               ...work.rows.map((m) =>
                 h(
                   "li",
-                  { "data-testid": `member-row-${m.userId}` },
+                  { "data-testid": `member-row-${m.userId}-${m.orgId}` },
                   h("p", {}, t("members.user"), ": ", m.userId.slice(0, 8)),
                   h("p", { class: "muted" }, t("members.role"), ": ", memberRole(m.role)),
+                  h("p", { class: "muted" }, t("members.org"), ": ", m.orgId.slice(0, 8)),
                   h(
                     "div",
                     { class: "actions" },
@@ -351,6 +352,17 @@ export function workView(state: SignedInState, controller: AppController, locale
                         onclick: () => void controller.recoverMember(m.userId),
                       },
                       t("members.recover"),
+                    ),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        class: "danger",
+                        disabled: busy || isSelf(m.userId),
+                        "data-testid": `member-revoke-${m.userId}-${m.orgId}`,
+                        onclick: () => void controller.revokeMember(m.userId, m.orgId),
+                      },
+                      t("members.revoke"),
                     ),
                   ),
                 ),

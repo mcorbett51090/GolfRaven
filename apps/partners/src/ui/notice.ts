@@ -40,6 +40,7 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "credential-added": "notice.credentialAdded",
   "member-pin-reset": "notice.memberPinReset",
   "member-recovered": "notice.memberRecovered",
+  "member-revoked": "notice.memberRevoked",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {

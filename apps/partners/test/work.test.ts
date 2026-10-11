@@ -741,3 +741,65 @@ describe("§83 member recover under reach (manager, A2)", () => {
     }
   });
 });
+
+describe("§84 member revoke under reach (manager, A2)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const managerWhoami = {
+    aal: 1,
+    requiredAal: 1,
+    isAdmin: false,
+    memberships: [{ orgId: ORG, role: "manager", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupManager() {
+    const w = makeWorld({ whoami: managerWhoami });
+    await w.server.seedPin(PIN);
+    w.server.seedMember({ userId: OTHER_USER, orgId: ORG, role: "staff", facilityId: FACILITY });
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("ends one membership after reauth + A2 PIN and reloads the roster", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") expect(w.rows).toHaveLength(1);
+    }
+
+    const pending = s.controller.revokeMember(OTHER_USER, ORG);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for member revoke");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "member-revoked" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") expect(w.rows).toHaveLength(0);
+    }
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    const revokes = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/members/${OTHER_USER}/revoke`));
+    expect(revokes).toHaveLength(1);
+    expect(JSON.parse(revokes[0]!.body)).toEqual({ orgId: ORG });
+    expect(revokes[0]!.body).not.toMatch(/7391/);
+  });
+
+  it("refuses to revoke one's own membership without calling the server", async () => {
+    const s = await setupManager();
+    const selfId = home(s.controller).session.userId;
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+    await s.controller.revokeMember(selfId, ORG);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.revokeSelf" } });
+    expect(s.w.server.log.some((r) => r.path.endsWith("/revoke") && r.path.includes("/members/"))).toBe(false);
+  });
+});
