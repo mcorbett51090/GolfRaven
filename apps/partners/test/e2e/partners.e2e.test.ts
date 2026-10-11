@@ -363,7 +363,7 @@ suite("apps/partners in Chromium", () => {
   });
 
   describe("lock and sign-out clear state", () => {
-    it("lock: back to sign-in with the locked notice, nothing of the session left on screen, and the session REVOKED on the server: the old token gets 401 (design 20.4)", async () => {
+    it("lock: back to sign-in with the locked notice, nothing of the session left on screen, and the session REVOKED on the server: the old token gets 401 (design 20.4 / §73)", async () => {
       const w = await open();
       await signIn(w);
       const token = server.issuedTokens[0]!;
@@ -372,12 +372,12 @@ suite("apps/partners in Chromium", () => {
       expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked");
       expect(await w.page.getByTestId("session-fields").count()).toBe(0);
       await expect.poll(() => server.state.revokedSessions.size).toBe(1);
-      expect(server.state.lockCalls).toBe(0);
-      expect(server.state.signOutCalls).toBe(1);
+      expect(server.state.lockCalls).toBe(1);
+      expect(server.state.signOutCalls).toBe(0);
       const res = await fetch(`${apiOrigin}/functions/v1/partner-session/session`, { headers: { authorization: `Bearer ${token}`, "content-type": "application/json", origin: pageOrigin } });
       expect(res.status).toBe(401);
       const authed = apiCalls().filter((r) => r.authorization !== null);
-      expect(authed.map((r) => r.path.split("/partner-session/")[1])).toEqual(["session", "sign-out", "session"]); // the last is the direct fetch above, not the page
+      expect(authed.map((r) => r.path.split("/partner-session/")[1])).toEqual(["session", "lock", "session"]); // the last is the direct fetch above, not the page
       expect(await w.violations()).toEqual([]);
       // resuming needs a new tap
       const optionsBefore = apiCalls().filter((r) => r.path.endsWith("/options")).length;
@@ -510,18 +510,18 @@ suite("apps/partners in Chromium", () => {
   });
 
   describe("MEDIUM-2: lock and sign-out are immediate, and nothing waits forever", () => {
-    it("a POST sign-out (the lock's request) that never answers: the screen is locked and the token gone from the page's memory AT ONCE", async () => {
+    it("a POST lock that never answers: the screen is locked and the token gone from the page's memory AT ONCE", async () => {
       const w = await open();
       await signIn(w);
       const token = server.issuedTokens[0]!;
       expect(await heapContains(w.page, token)).toBe(true);
-      server.state.hang.add("sign-out");
+      server.state.hang.add("lock");
       await w.page.getByTestId("lock").click();
       await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
       expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked");
       expect(await w.page.getByTestId("session-fields").count()).toBe(0);
       // the request is still hanging (the server logged it and will never answer), and the page already holds no copy of the token
-      await expect.poll(() => server.log.some((r) => r.method === "POST" && r.path.endsWith("/sign-out") && r.authorization === `Bearer ${token}`)).toBe(true);
+      await expect.poll(() => server.log.some((r) => r.method === "POST" && r.path.endsWith("/lock") && r.authorization === `Bearer ${token}`)).toBe(true);
       expect(server.state.revokedSessions.size).toBe(0);
       expect(await heapContains(w.page, token)).toBe(false);
       // and the sign-in button is live straight away (the hung request does not hold the screen). A full second sign-in is covered by the controller's unit cell:

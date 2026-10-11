@@ -25,8 +25,8 @@
  * it and tell the listeners (the screen goes to sign-in) BEFORE a byte is sent, then send with the copy and drop the copy as
  * soon as `fetch` has been called, so a request that never answers neither keeps the screen up nor keeps the token in memory.
  * Every request carries a timeout (REQUEST_TIMEOUT_MS), and a wipe aborts every authenticated request still in flight.
- * `lock()` REVOKES the session (it is a sign-out with the "locked" wording): a copied-out token is dead at once, not at its idle
- * expiry (design 20.4).
+ * `lock()` REVOKES the session via `POST lock` (`revoke_reason = 'lock'`, §72 / §73): a copied-out token is dead at once, not at
+ * its idle expiry (design 20.4). Sign-out still uses `POST sign-out`.
  *
  * THE BEARER GOES ONLY TO PARTNER FUNCTIONS: `call()` refuses any function name that is not in `partner-functions.json`, the
  * same list the build turns into the CSP's `connect-src` entries.
@@ -115,8 +115,8 @@ export interface PartnerApi {
   /** `POST sign-out`: revokes the session on the server. The token is wiped (and the listeners told) BEFORE the request is sent, and the request uses a copy. */
   signOut(opts?: EndOptions): Promise<void>;
   /**
-   * Lock: wipes the token and tells the listeners at once, then REVOKES the session with `POST sign-out` (design 20.4: lock must revoke, so a token copied
-   * out of the page is dead immediately). The wording differs from sign-out (the reason is "locked"); the wire request is the same.
+   * Lock: wipes the token and tells the listeners at once, then REVOKES the session with `POST lock` (design 20.4 / §72 / §73: lock must revoke, so a
+   * token copied out of the page is dead immediately; `revoke_reason = 'lock'`). Same wipe-before-send ordering as sign-out; different wire route.
    */
   lock(opts?: EndOptions): Promise<void>;
   /** `POST reauth/options`. */
@@ -331,9 +331,9 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
     }
   }
 
-  /** Revokes `bearer` (a copy that is no longer held by this client) with `POST sign-out`. NOT async: see `dispatch`. */
-  function revokeCopy(bearer: string, keepalive: boolean): Promise<void> {
-    return finish(dispatch("POST", SESSION_FUNCTION, "sign-out", {}, bearer, requestSignal(timeoutMs, []), keepalive), null).then(() => undefined);
+  /** Revokes `bearer` (a copy that is no longer held by this client) with `POST sign-out` or `POST lock`. NOT async: see `dispatch`. */
+  function revokeCopy(bearer: string, keepalive: boolean, route: "sign-out" | "lock" = "sign-out"): Promise<void> {
+    return finish(dispatch("POST", SESSION_FUNCTION, route, {}, bearer, requestSignal(timeoutMs, []), keepalive), null).then(() => undefined);
   }
 
   /**
@@ -341,11 +341,11 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
    * screen is signed-out) before anything is sent; the request then uses the copy, and the copy is dropped as soon as `fetch` has been called.
    * NOT async, so no suspended frame keeps the copy. Rejects with the request's error (the wipe has happened either way).
    */
-  function endSession(reason: SessionEndReason, keepalive: boolean): Promise<void> {
+  function endSession(reason: SessionEndReason, keepalive: boolean, route: "sign-out" | "lock"): Promise<void> {
     let copy = token;
     if (copy === null) return Promise.reject(new PartnerApiError("unauthenticated"));
     wipe(reason);
-    const pending = revokeCopy(copy, keepalive);
+    const pending = revokeCopy(copy, keepalive, route);
     copy = null;
     return pending;
   }
@@ -398,9 +398,9 @@ export function createPartnerApi(config: PartnerApiConfig): PartnerApi {
       return parseWhoAmI(r.data, r.status);
     },
 
-    signOut: (opts = {}) => endSession("signed-out", opts.keepalive === true),
+    signOut: (opts = {}) => endSession("signed-out", opts.keepalive === true, "sign-out"),
 
-    lock: (opts = {}) => endSession("locked", opts.keepalive === true),
+    lock: (opts = {}) => endSession("locked", opts.keepalive === true, "lock"),
 
     async reauthOptions() {
       const r = await sendAuthed("POST", SESSION_FUNCTION, "reauth/options", {});
