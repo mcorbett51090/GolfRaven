@@ -803,3 +803,82 @@ describe("§84 member revoke under reach (manager, A2)", () => {
     expect(s.w.server.log.some((r) => r.path.endsWith("/revoke") && r.path.includes("/members/"))).toBe(false);
   });
 });
+
+describe("§85 org sessions revoke-all (manager, A2)", () => {
+  const ORG = "33333333-3333-4333-8333-333333333333";
+  const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const managerWhoami = {
+    aal: 1,
+    requiredAal: 1,
+    isAdmin: false,
+    memberships: [{ orgId: ORG, role: "manager", facilityIds: [FACILITY], trailIds: [] }],
+  };
+
+  async function setupManager() {
+    const w = makeWorld({ whoami: managerWhoami });
+    await w.server.seedPin(PIN);
+    w.server.seedMember({ userId: OTHER_USER, orgId: ORG, role: "staff", facilityId: FACILITY });
+    w.server.seedCredentialForUser(OTHER_USER);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const states: AppState[] = [];
+    controller.subscribe((s) => states.push(s));
+    await controller.signIn();
+    return { w, api, controller, states };
+  }
+
+  it("ends org sessions after reauth + A2 PIN and keeps the counts (no roster reload)", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+
+    const pending = s.controller.revokeAllOrgSessions(ORG);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for org revoke-all");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "org-revoke-all" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") {
+        expect(w.lastRevokeAll).toEqual({ orgId: ORG, sessions: 2, credentials: 0 });
+        expect(w.rows).toHaveLength(1);
+      }
+    }
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    const calls = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/orgs/${ORG}/sessions/revoke-all`));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body)).toEqual({});
+    expect(calls[0]!.body).not.toMatch(/7391/);
+  });
+
+  it("sends normalised createdAfter and counts credential revokes", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    s.controller.setOrgRevokeCreatedAfter("2020-01-01T00:00:00Z");
+    const pending = s.controller.revokeAllOrgSessions(ORG);
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for revoke-all with createdAfter");
+    s.controller.submitPin(PIN);
+    await pending;
+
+    const calls = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(`/partner-members/orgs/${ORG}/sessions/revoke-all`));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0]!.body)).toEqual({ createdAfter: "2020-01-01T00:00:00.000Z" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") expect(w.lastRevokeAll?.credentials).toBe(1);
+    }
+  });
+
+  it("refuses a bad createdAfter without calling the server", async () => {
+    const s = await setupManager();
+    s.controller.openMembers();
+    s.controller.setOrgRevokeCreatedAfter("yesterday");
+    await s.controller.revokeAllOrgSessions(ORG);
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "members.createdAfterInvalid" } });
+    expect(s.w.server.log.some((r) => r.path.includes("/sessions/revoke-all"))).toBe(false);
+  });
+});

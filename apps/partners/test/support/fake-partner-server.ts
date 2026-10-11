@@ -1489,6 +1489,58 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           enrolUrl: `${opts.pageOrigin}/enrol#${token}`,
         });
       }
+      const orgRevokeAllMatch =
+        /^orgs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/sessions\/revoke-all$/i.exec(route);
+      if (orgRevokeAllMatch !== null && req.method === "POST") {
+        if (!canListMembers()) return err(403, "forbidden");
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const orgId = orgRevokeAllMatch[1]!.toLowerCase();
+        const actorOrgs = new Set(
+          (users.get(session.userId)?.memberships ?? [])
+            .map((m) => (typeof m === "object" && m !== null ? (m as { orgId?: unknown }).orgId : null))
+            .filter((id): id is string => typeof id === "string")
+            .map((id) => id.toLowerCase()),
+        );
+        const rosterHasOrg = memberRoster.some((m) => m.orgId === orgId);
+        if (!actorOrgs.has(orgId) && !rosterHasOrg && opts.whoami?.isAdmin !== true) return err(404, "not_found");
+        const body = (await req.json()) as { createdAfter?: unknown };
+        let createdAfter: string | null = null;
+        if (body.createdAfter !== undefined && body.createdAfter !== null) {
+          const ISO_INSTANT_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?Z$/;
+          const raw = typeof body.createdAfter === "string" ? body.createdAfter : "";
+          const t = ISO_INSTANT_RE.test(raw) ? new Date(raw) : null;
+          if (t === null || Number.isNaN(t.getTime()) || t.toISOString().slice(0, 19) !== raw.slice(0, 19)) {
+            return err(400, "bad_request");
+          }
+          if (t.getTime() > Date.now() + 60_000) return err(422, "invalid_request");
+          createdAfter = t.toISOString();
+        }
+        let credentialsRevoked = 0;
+        if (createdAfter !== null) {
+          const cut = Date.parse(createdAfter);
+          for (const c of credentials.values()) {
+            if (c.userId === session.userId || c.revokedAt !== null) continue;
+            if (!reachUsers.has(c.userId)) continue;
+            if (!memberRoster.some((m) => m.userId === c.userId && m.orgId === orgId)) continue;
+            // Fake rows use a fixed createdAt in GET; treat active reach creds as after T when cut is in the past.
+            if (cut < Date.now()) {
+              c.revokedAt = new Date().toISOString();
+              credentialsRevoked += 1;
+            }
+          }
+        }
+        // Org panic ends live sessions of active members (actor included when they belong to the org).
+        const sessionMembers = new Set(memberRoster.filter((m) => m.orgId === orgId).map((m) => m.userId));
+        if (actorOrgs.has(orgId)) sessionMembers.add(session.userId);
+        const sessionsRevoked = sessionMembers.size > 0 ? sessionMembers.size : 1;
+        const auth = req.headers.get("authorization");
+        if (auth !== null && auth.startsWith("Bearer ")) {
+          state.revokedSessions.add(await sha256Hex(auth.slice("Bearer ".length)));
+        }
+        return ok(200, { revokedSessions: sessionsRevoked, revokedCredentials: credentialsRevoked });
+      }
       if (route === "credentials" && req.method === "GET") {
         const target = url.searchParams.get("userId");
         const ownerId = target === null || target === "" ? session.userId : target.toLowerCase();

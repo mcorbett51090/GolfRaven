@@ -3828,11 +3828,38 @@ Numbering: **matrix n/a (PWA only), this section 84.** Closes the §83.3 leftove
 
 ### 84.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Org sessions revoke-all UI → §85; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 84.4 Verification
 
-Branch: `cursor/p5-member-revoke-ui-8ffd` (base after #123 / `3c4806e`). Tip on PR (this slice).
+Squash-merged as `326f227` (#124). Branch: `cursor/p5-member-revoke-ui-8ffd` (base after #123 / `3c4806e`).
 
-- `@golfraven/partners` vitest (member revoke A2); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **1035 passed** (member revoke A2); typecheck clean; CI green; no Edge / migration change.
+
+## 85. As built: partners org sessions revoke-all UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 85.** Closes the §84.3 leftover: managers / operators (and admins) press the stolen-iPad button via existing `POST partner-members/orgs/{id}/sessions/revoke-all` with optional `{ createdAfter }` (UTC instant). Ends every live session of the org's active members (the actor's own included); when `createdAfter` is set, also revokes credentials of reach-covered members created after that instant (not the actor's). No migration, no Edge change, no UI flag flips.
+
+### 85.1 What was built
+
+- **`members-routes.ts`** — `revokeAllOrgSessions(api, orgId, createdAfter)` → `{ sessions, credentials }`; maps 404 → `not_found`.
+- **Work screen** — `revokeAllOrgSessions` on the §81 roster: reauth + A2 then POST; holds counts in `work.lastRevokeAll` (no roster reload — the actor's session is among those ended); optional `createdAfterDraft` for credential cut-off.
+- **UI** — panic section per manage-org; ISO `…Z` field; result block with session/credential counts.
+- **Fake partner server** — revoke-all under scope returns counts; optional credential revoke after T for reach users except self.
+- **i18n** EN + fr-CA; Vitest covers A2 order and bad `createdAfter` refuse.
+
+### 85.2 Decisions and departures
+
+- **Own session ends** — matches database 6.5; UI shows counts once and does not call GET members after success.
+- **Orgs listed** — manager/operator memberships; admins also see unique `orgId`s from the loaded roster.
+
+### 85.3 Not built, honestly
+
+- Member TOTP reset UI (A3); admin enrolment issue UI (A3); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 85.4 Verification
+
+Branch: `cursor/p5-org-revoke-all-ui-8ffd` (base after #124 / `326f227`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (org revoke-all A2); typecheck clean; no Edge / migration change.
 

@@ -19,6 +19,7 @@ import {
   recoverMember as postMemberRecover,
   registerCredential,
   resetMemberPin as postMemberPinReset,
+  revokeAllOrgSessions as postOrgRevokeAll,
   revokeCredential as deleteCredential,
   revokeMember as postMemberRevoke,
 } from "../api/members-routes";
@@ -113,6 +114,11 @@ export interface WorkScreens {
   dismissMemberRecover(): void;
   /** Class A2: reauth + PIN, then POST members/{id}/revoke `{ orgId }` for ONE membership. Never for oneself. */
   revokeMember(userId: string, orgId: string): Promise<void>;
+  /** Draft UTC instant for revoke-all credential cut-off (empty = sessions only). */
+  setOrgRevokeCreatedAfter(value: string): void;
+  /** Class A2: reauth + PIN, then POST orgs/{id}/sessions/revoke-all. Ends the actor's session for that org too. */
+  revokeAllOrgSessions(orgId: string): Promise<void>;
+  dismissOrgRevokeAll(): void;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -139,6 +145,8 @@ const FACILITY_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const HANDLE_RE = /^[a-z0-9_]{3,20}$/;
 const CODE_RE = /^[0-9]{6}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Edge `members-shape` UTC instant (optional ms, must end in Z). */
+const ISO_INSTANT_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?Z$/;
 const HANDOVER_PREFIX = "gr_ho_";
 
 /** Shape check without a regexp (same reason as the session token: V8 last-match retention). */
@@ -275,7 +283,7 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
     openMembers() {
       const s = signedIn(host);
       if (s === null || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
-      withWork(s, { kind: "members", busy: false, rows: null, recovered: null }, null);
+      withWork(s, { kind: "members", busy: false, rows: null, recovered: null, createdAfterDraft: "", lastRevokeAll: null }, null);
     },
 
     openMemberCredentials(userId) {
@@ -858,6 +866,64 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         const cur = live(host, grant);
         if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
       }
+    },
+
+    setOrgRevokeCreatedAfter(value) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, createdAfterDraft: value }, s.notice);
+    },
+
+    async revokeAllOrgSessions(orgId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const draft = s.work.createdAfterDraft.trim();
+      let createdAfter: string | null = null;
+      if (draft.length > 0) {
+        const t = ISO_INSTANT_RE.test(draft) ? new Date(draft) : null;
+        if (t === null || Number.isNaN(t.getTime()) || t.toISOString().slice(0, 19) !== draft.slice(0, 19)) {
+          host.set({ ...s, notice: { kind: "error", message: { key: "members.createdAfterInvalid" } } });
+          return;
+        }
+        if (t.getTime() > Date.now() + 60_000) {
+          host.set({ ...s, notice: { kind: "error", message: { key: "members.createdAfterFuture" } } });
+          return;
+        }
+        createdAfter = t.toISOString();
+      }
+      const org = orgId.toLowerCase();
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const counts = await postOrgRevokeAll(api, org, createdAfter);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: {
+              ...cur.work,
+              lastRevokeAll: { orgId: org, sessions: counts.sessions, credentials: counts.credentials },
+            },
+            notice: { kind: "org-revoke-all" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    dismissOrgRevokeAll() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, lastRevokeAll: null }, s.notice?.kind === "org-revoke-all" ? null : s.notice);
     },
 
     async loadCredentials() {

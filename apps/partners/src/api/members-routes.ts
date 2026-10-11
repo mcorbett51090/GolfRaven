@@ -1,9 +1,10 @@
 /**
- * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81 / §82).
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75 / §81 / §82 / §84 / §85).
  *
  * List + display-note PATCH (class A0); own revoke DELETE and second-credential add (class A2).
  * Org roster GET (class A0) and credentials `?userId=` under the reach rule (§79 / §80 / §81).
- * Member PIN reset under reach (class A2, §82).
+ * Member PIN reset / recover / revoke under reach (class A2, §82–§84).
+ * Org sessions revoke-all (stolen-iPad, class A2, §85).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -214,6 +215,39 @@ export async function revokeMember(api: PartnerApi, userId: string, orgId: strin
   try {
     const data = await api.call("POST", "partner-members", `members/${userId}/revoke`, { orgId });
     if (!isObject(data) || data["revoked"] !== true) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
+      throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
+    }
+    throw e;
+  }
+}
+
+/** Counts from POST orgs/{id}/sessions/revoke-all (class A2). */
+export interface OrgRevokeAllResult {
+  readonly sessions: number;
+  readonly credentials: number;
+}
+
+/**
+ * POST orgs/{id}/sessions/revoke-all (class A2): stolen-iPad button.
+ * `createdAfter` null/absent = sessions only; otherwise a UTC instant (credentials of reach-covered members after T).
+ * 404 → `not_found`.
+ */
+export async function revokeAllOrgSessions(
+  api: PartnerApi,
+  orgId: string,
+  createdAfter: string | null,
+): Promise<OrgRevokeAllResult> {
+  try {
+    const body = createdAfter === null ? {} : { createdAfter };
+    const data = await api.call("POST", "partner-members", `orgs/${orgId}/sessions/revoke-all`, body);
+    if (
+      !isObject(data) || typeof data["revokedSessions"] !== "number" || typeof data["revokedCredentials"] !== "number" ||
+      !Number.isInteger(data["revokedSessions"]) || !Number.isInteger(data["revokedCredentials"]) ||
+      data["revokedSessions"] < 0 || data["revokedCredentials"] < 0
+    ) malformed();
+    return { sessions: data["revokedSessions"], credentials: data["revokedCredentials"] };
   } catch (e) {
     if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
       throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
