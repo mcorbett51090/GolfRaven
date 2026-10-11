@@ -8,6 +8,9 @@ import {
   type AdminEnrolmentResult,
   type AssertionVerifier,
   type ChallengeIssue,
+  type CredentialAddNoticeAckStatus,
+  type CredentialAddNoticeReachView,
+  type CredentialAddNoticeView,
   type CredentialNoteStatus,
   type CredentialOptionsResult,
   type CredentialRegisterInput,
@@ -126,6 +129,7 @@ export interface Recorded {
   readonly credentialListUserId: Array<string | null>;
   readonly credentialNote: Array<{ id: string; note: string | null }>;
   readonly credentialRevoke: string[];
+  readonly credentialAddNoticeAck: string[];
 }
 
 export interface Fakes {
@@ -210,6 +214,9 @@ export interface Fakes {
     credentialList: CredentialView[];
     credentialNote: CredentialNoteStatus;
     credentialRevoke: CredentialRevokeStatus;
+    credentialAddNoticeListMine: CredentialAddNoticeView[];
+    credentialAddNoticeListReach: CredentialAddNoticeReachView[];
+    credentialAddNoticeAck: CredentialAddNoticeAckStatus;
     /** a bound-transaction method (`inviteCreate`, `memberRevoke` ...) that throws `PartnerAuthorityRefused` (42501) / `PartnerInvalidArgument` (22023) */
     authorityRefusedIn: string | null;
     invalidArgumentIn: string | null;
@@ -292,6 +299,7 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     credentialListUserId: [],
     credentialNote: [],
     credentialRevoke: [],
+    credentialAddNoticeAck: [],
   };
   const newTokens: Fakes["newTokens"] = { session: [], invite: [], enrolment: [] };
   const state: Fakes["state"] = {
@@ -356,6 +364,9 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
     credentialList: [],
     credentialNote: "ok",
     credentialRevoke: "ok",
+    credentialAddNoticeListMine: [],
+    credentialAddNoticeListReach: [],
+    credentialAddNoticeAck: "ok",
     authorityRefusedIn: null,
     invalidArgumentIn: null,
     ...over,
@@ -589,6 +600,22 @@ export function makeFakes(over: Partial<Fakes["state"]> = {}, allowedOrigin: str
       rec.credentialRevoke.push(id);
       maybeThrow("credentialRevoke");
       return state.credentialRevoke;
+    },
+    async credentialAddNoticeListMine() {
+      calls.push("session.credentialAddNoticeListMine");
+      maybeThrow("credentialAddNoticeListMine");
+      return state.credentialAddNoticeListMine;
+    },
+    async credentialAddNoticeAck(noticeId) {
+      calls.push("session.credentialAddNoticeAck");
+      rec.credentialAddNoticeAck.push(noticeId);
+      maybeThrow("credentialAddNoticeAck");
+      return state.credentialAddNoticeAck;
+    },
+    async credentialAddNoticeListReach() {
+      calls.push("session.credentialAddNoticeListReach");
+      maybeThrow("credentialAddNoticeListReach");
+      return state.credentialAddNoticeListReach;
     },
     async raiseMemberRateAlarm(_detail) {
       calls.push("session.raiseMemberRateAlarm");

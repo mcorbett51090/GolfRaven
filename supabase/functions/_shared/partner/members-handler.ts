@@ -18,6 +18,9 @@
 //   POST credentials                     { challengeToken, credential }: register a second credential (class A2 + reauth)
 //   DELETE credentials/{id}              revoke a credential, one's own included (class A2); another person's under the reach rule
 //   PATCH  credentials/{id}              { note }: display-only note on one's own credential (class A0); null/"" clears
+//   GET  credentials/notices             unacked credential-add notices for the signed-in subject (class A0)
+//   POST credentials/notices/{id}/ack    {}: subject ack (class A0)
+//   GET  credentials/notices/reach       unacked notices for reach-covered members (class A0; manager|operator)
 //
 // THE ORDER, for every request: (1) the Origin check, before routing and for every method; (2) `OPTIONS` is answered here, with no port touched; (3) the route and the method (404 / 405); (4) the bearer:
 // exactly `gr_ps_` + 43 characters, else the ONE 401 with no port touched; (5) the exact JSON media type (415) and the strict body (400); (6) the work.
@@ -50,7 +53,15 @@ import {
   parseMemberRevokeBody,
   parseRevokeAllBody,
 } from "./members-shape.ts";
-import { type CredentialView, type MemberView, type PartnerDb, PartnerNotConfigured, type RegistrationVerifier } from "./ports.ts";
+import {
+  type CredentialAddNoticeReachView,
+  type CredentialAddNoticeView,
+  type CredentialView,
+  type MemberView,
+  type PartnerDb,
+  PartnerNotConfigured,
+  type RegistrationVerifier,
+} from "./ports.ts";
 import { parseSecondCredentialBody } from "./registration-shape.ts";
 import { formatChallengeToken } from "./session-handler.ts";
 import { uuidToBytes } from "./session-shape.ts";
@@ -81,6 +92,9 @@ const ROUTES: readonly RouteSpec[] = [
   { name: "org-revoke-all", path: "orgs/{id}/sessions/revoke-all", methods: ["POST"], session: true },
   { name: "admin-enrolments", path: "admin/enrolments", methods: ["POST"], session: true },
   { name: "credential-options", path: "credentials/options", methods: ["POST"], session: true },
+  { name: "credential-notices-reach", path: "credentials/notices/reach", methods: ["GET"], session: true },
+  { name: "credential-notice-ack", path: "credentials/notices/{id}/ack", methods: ["POST"], session: true },
+  { name: "credential-notices", path: "credentials/notices", methods: ["GET"], session: true },
   { name: "credentials", path: "credentials", methods: ["GET", "POST"], session: true },
   { name: "credential", path: "credentials/{id}", methods: ["DELETE", "PATCH"], session: true },
 ];
@@ -131,6 +145,12 @@ export async function handlePartnerMembersRequest(req: Request, deps: PartnerMem
             return await handleAdminEnrolment(req, deps, decision, tokenHash);
           case "credential-options":
             return await handleCredentialOptions(req, deps, decision, tokenHash);
+          case "credential-notices-reach":
+            return await handleCredentialAddNoticeListReach(deps, decision, tokenHash);
+          case "credential-notice-ack":
+            return await handleCredentialAddNoticeAck(req, deps, decision, tokenHash, id);
+          case "credential-notices":
+            return await handleCredentialAddNoticeListMine(deps, decision, tokenHash);
           case "credentials":
             return req.method === "POST"
               ? await handleCredentialRegister(req, deps, decision, tokenHash)
@@ -311,4 +331,41 @@ async function handleCredentialNote(req: Request, deps: PartnerMembersDeps, deci
   if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
   const status = await deps.db.withMembers(tokenHash, (s) => s.credentialNote(credentialId, parsed.value.note));
   return status === "ok" ? partnerOk(decision, 200, { note: parsed.value.note }) : partnerError(decision, 404, "not_found", "not found");
+}
+
+function credentialAddNoticeBody(n: CredentialAddNoticeView): Record<string, unknown> {
+  return {
+    noticeId: n.noticeId,
+    credentialId: n.credentialId,
+    label: n.label,
+    createdAt: n.createdAt,
+    credentialRevokedAt: n.credentialRevokedAt,
+  };
+}
+
+function credentialAddNoticeReachBody(n: CredentialAddNoticeReachView): Record<string, unknown> {
+  return { ...credentialAddNoticeBody(n), subjectUserId: n.subjectUserId };
+}
+
+async function handleCredentialAddNoticeListMine(deps: PartnerMembersDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const notices = await deps.db.withMembers(tokenHash, (s) => s.credentialAddNoticeListMine());
+  return partnerOk(decision, 200, { notices: notices.map(credentialAddNoticeBody) });
+}
+
+async function handleCredentialAddNoticeAck(req: Request, deps: PartnerMembersDeps, decision: Decision, tokenHash: string, noticeId: string): Promise<Response> {
+  await emptyBody(req);
+  const status = await deps.db.withMembers(tokenHash, (s) => s.credentialAddNoticeAck(noticeId));
+  switch (status) {
+    case "ok":
+      return partnerOk(decision, 200, { acked: true });
+    case "already_acked":
+      return partnerError(decision, 409, "already_acked", "this notice was already acknowledged");
+    default:
+      return partnerError(decision, 404, "not_found", "not found");
+  }
+}
+
+async function handleCredentialAddNoticeListReach(deps: PartnerMembersDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const notices = await deps.db.withMembers(tokenHash, (s) => s.credentialAddNoticeListReach());
+  return partnerOk(decision, 200, { notices: notices.map(credentialAddNoticeReachBody) });
 }

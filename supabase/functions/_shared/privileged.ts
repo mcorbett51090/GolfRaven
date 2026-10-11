@@ -82,6 +82,7 @@ import {
   type CoursePinAlarmRow,
   type CourseStaticPinCapRow,
   type CoursePinShowResult,
+  type CredentialAddNoticeAckStatus,
   type CredentialLookup,
   type CredentialNoteStatus,
   type CredentialOptionsResult,
@@ -2704,6 +2705,7 @@ export async function refreshRollups(month: string | null): Promise<{
  *   course_pin_pepper_previous   `private.purge_course_pin_pepper_previous()`   wraps rotate(retire_previous); ok→1, too_early/previous_absent→0
  * and, since 0088 (P5 §78), the partner-PIN previous-pepper retire wrapper (eighteen → nineteen steps):
  *   partner_pin_pepper_previous  `private.purge_partner_pin_pepper_previous()`  wraps rotate(retire_previous); ok→1, too_early/previous_absent→0
+ *   partner_credential_add_notices  `private.purge_partner_credential_add_notices()`  acked 30d+ or credential revoked 180d+; ≤5000
  * The 72-hour EXPIRY of a pending queue row (which wipes its credential material) is NOT a purge and is not separate: it runs inside
  * `private.claim_signin_revocations`, i.e. inside `signin-revocation-drain`, whose schedule is therefore also a retention dependency.
  *
@@ -2774,6 +2776,8 @@ export function retentionPurgeSteps(batchRows: number = RETENTION_BATCH_ROWS): R
     step("course_pin_pepper_previous", fixed, async (trx) => n(await trx`select private.purge_course_pin_pepper_previous() as n`)),
     // 0088 (P5 §78): partner_pin_pepper_previous retire (0087 retire_previous wrapper)
     step("partner_pin_pepper_previous", fixed, async (trx) => n(await trx`select private.purge_partner_pin_pepper_previous() as n`)),
+    // 0091 (P5 §92): credential-add notice retention
+    step("partner_credential_add_notices", fixed, async (trx) => n(await trx`select private.purge_partner_credential_add_notices() as n`)),
   ];
 }
 
@@ -4209,6 +4213,7 @@ const INVITE_REVOKE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", 
 const INVITE_MEMBER_ACCEPT_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "locked", "email_mismatch", "email_unconfirmed", "already_member"]);
 const CREDENTIAL_REVOKE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "already_revoked"]);
 const CREDENTIAL_NOTE_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found"]);
+const CREDENTIAL_ADD_NOTICE_ACK_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "already_acked"]);
 
 /** The invite definers of the bound lane (0054 7a to 7d). */
 function buildPartnerInvitesTx(trx: TxSql): PartnerInvitesTx {
@@ -4373,6 +4378,40 @@ function buildPartnerMembersTx(trx: TxSql): Omit<PartnerMembersTx, "totpReset"> 
       const status = rows[0]?.o_status;
       if (typeof status !== "string" || !CREDENTIAL_REVOKE_STATUSES.has(status)) throw new Error("partner_credential_revoke_for_partner returned no usable status");
       return status as CredentialRevokeStatus;
+    },
+    async credentialAddNoticeListMine() {
+      const rows = await trx`
+        select o_notice_id::text as o_notice_id, o_credential_id::text as o_credential_id, o_label, o_created_at, o_credential_revoked_at
+        from private.partner_credential_add_notice_list_mine_for_partner()`;
+      return rows.map((r) => ({
+        noticeId: String(r.o_notice_id),
+        credentialId: String(r.o_credential_id),
+        label: String(r.o_label),
+        createdAt: String(isoOrNull(r.o_created_at)),
+        credentialRevokedAt: isoOrNull(r.o_credential_revoked_at),
+      }));
+    },
+    async credentialAddNoticeAck(noticeId: string) {
+      const rows = await trx`select o_status from private.partner_credential_add_notice_ack_for_partner(${noticeId}::uuid)`;
+      const status = rows[0]?.o_status;
+      if (typeof status !== "string" || !CREDENTIAL_ADD_NOTICE_ACK_STATUSES.has(status)) {
+        throw new Error("partner_credential_add_notice_ack_for_partner returned no usable status");
+      }
+      return status as CredentialAddNoticeAckStatus;
+    },
+    async credentialAddNoticeListReach() {
+      const rows = await trx`
+        select o_notice_id::text as o_notice_id, o_subject_user_id::text as o_subject_user_id, o_credential_id::text as o_credential_id,
+               o_label, o_created_at, o_credential_revoked_at
+        from private.partner_credential_add_notice_list_reach_for_partner()`;
+      return rows.map((r) => ({
+        noticeId: String(r.o_notice_id),
+        subjectUserId: String(r.o_subject_user_id),
+        credentialId: String(r.o_credential_id),
+        label: String(r.o_label),
+        createdAt: String(isoOrNull(r.o_created_at)),
+        credentialRevokedAt: isoOrNull(r.o_credential_revoked_at),
+      }));
     },
   };
 }

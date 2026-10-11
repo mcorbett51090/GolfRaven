@@ -333,6 +333,17 @@ export interface CredentialView {
 export type CredentialRevokeStatus = "ok" | "not_found" | "already_revoked";
 /** PATCH credentials/{id} display note (class A0, own only): ok | not_found. */
 export type CredentialNoteStatus = "ok" | "not_found";
+export type CredentialAddNoticeAckStatus = "ok" | "not_found" | "already_acked";
+export interface CredentialAddNoticeView {
+  readonly noticeId: string;
+  readonly credentialId: string;
+  readonly label: string;
+  readonly createdAt: string;
+  readonly credentialRevokedAt: string | null;
+}
+export interface CredentialAddNoticeReachView extends CredentialAddNoticeView {
+  readonly subjectUserId: string;
+}
 
 /** One transaction as `edge_partner` for the `partner-members` routes. Every method is a `_for_partner` definer that begins with `partner_authorize`; the reach rule (6.5) is the database's: a target outside it is a 42501. */
 export interface PartnerMembersTx extends Pick<PartnerSessionTx, "totpReset"> {
@@ -359,6 +370,12 @@ export interface PartnerMembersTx extends Pick<PartnerSessionTx, "totpReset"> {
   credentialNote(credentialId: string, note: string | null): Promise<CredentialNoteStatus>;
   /** DELETE credentials/{id} (class A2, one's own included): own, or one the reach rule covers; its sessions die with it. */
   credentialRevoke(credentialId: string): Promise<CredentialRevokeStatus>;
+  /** GET credentials/notices (class A0): unacked credential-add notices for the signed-in subject. */
+  credentialAddNoticeListMine(): Promise<CredentialAddNoticeView[]>;
+  /** POST credentials/notices/{id}/ack (class A0): subject ack. */
+  credentialAddNoticeAck(noticeId: string): Promise<CredentialAddNoticeAckStatus>;
+  /** GET credentials/notices/reach (class A0): unacked notices for reach-covered members (manager|operator). */
+  credentialAddNoticeListReach(): Promise<CredentialAddNoticeReachView[]>;
 }
 
 /** The kinds an attestation of this slice can have (0056). `offer_redemption` and `special_marker_handover` are other slices'. */

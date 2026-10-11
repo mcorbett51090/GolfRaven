@@ -31,6 +31,9 @@ const ROUTES: Array<[string, string, unknown]> = [
   ["POST", "credentials/options", {}],
   ["POST", "credentials", { challengeToken: challengeToken(), credential: registrationCredentialJson() }],
   ["GET", "credentials", undefined],
+  ["GET", "credentials/notices", undefined],
+  ["GET", "credentials/notices/reach", undefined],
+  ["POST", `credentials/notices/${CRED_ROW_ID}/ack`, {}],
   ["DELETE", `credentials/${CRED_ROW_ID}`, undefined],
   ["PATCH", `credentials/${CRED_ROW_ID}`, { note: "front desk" }],
 ];
@@ -88,7 +91,7 @@ describe("routing, Origin, bearer and body order: every route is a session route
       const res = await call(f, method, path, { headers: authed({ "content-type": "text/plain; x=application/json" }), raw: "{}" });
       expect(res.status, path).toBe(415);
     }
-    for (const path of [`members/${TARGET_ID}/recover`, `members/${TARGET_ID}/pin-reset`, `members/${TARGET_ID}/totp-reset`, "credentials/options"]) {
+    for (const path of [`members/${TARGET_ID}/recover`, `members/${TARGET_ID}/pin-reset`, `members/${TARGET_ID}/totp-reset`, "credentials/options", `credentials/notices/${CRED_ROW_ID}/ack`]) {
       expect((await post(f, path, { extra: 1 })).status, path).toBe(400);
     }
     expect(f.calls).toEqual([]);
@@ -386,6 +389,44 @@ describe("credentials of a signed-in person", () => {
       expect((await call(bad, "PATCH", `credentials/${CRED_ROW_ID}`, { headers: authed(), body: b })).status).toBe(400);
     }
     expect(bad.calls).toEqual([]);
+  });
+});
+
+describe("credential-add notices (class A0)", () => {
+  const NOTICE_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+  const notice = {
+    noticeId: NOTICE_ID,
+    credentialId: CRED_ROW_ID,
+    label: "2030-01-01 / unknown",
+    createdAt: "2030-01-01T12:00:00.000Z",
+    credentialRevokedAt: null,
+  };
+
+  it("GET credentials/notices lists mine; GET reach lists covered members; no credential rate bucket", async () => {
+    const f = makeFakes({ credentialAddNoticeListMine: [notice] });
+    const res = await call(f, "GET", "credentials/notices", { headers: authed() });
+    expect(res.status).toBe(200);
+    expect((await res.json()).data.notices).toEqual([notice]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }]);
+
+    const reach = makeFakes({
+      credentialAddNoticeListReach: [{ ...notice, subjectUserId: TARGET_ID }],
+    });
+    const reachRes = await call(reach, "GET", "credentials/notices/reach", { headers: authed() });
+    expect(reachRes.status).toBe(200);
+    expect((await reachRes.json()).data.notices[0].subjectUserId).toBe(TARGET_ID);
+  });
+
+  it("POST credentials/notices/{id}/ack: ok 200, already_acked 409, not_found 404; strict empty body", async () => {
+    for (const [status, http] of [["ok", 200], ["not_found", 404], ["already_acked", 409]] as const) {
+      const f = makeFakes({ credentialAddNoticeAck: status });
+      const res = await call(f, "POST", `credentials/notices/${NOTICE_ID}/ack`, { headers: authed(), body: {} });
+      expect(res.status, status).toBe(http);
+      expect(f.rec.credentialAddNoticeAck).toEqual([NOTICE_ID]);
+      expect(lastTx(f)).toEqual({ kind: "session", committed: true });
+    }
+    const bad = makeFakes();
+    expect((await call(bad, "POST", `credentials/notices/${NOTICE_ID}/ack`, { headers: authed(), body: { extra: 1 } })).status).toBe(400);
   });
 });
 
