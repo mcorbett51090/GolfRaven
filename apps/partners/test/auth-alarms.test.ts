@@ -12,6 +12,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "totp_reset")).toBe("Réinitialisation TOTP");
     expect(authAlarmKindLabel("en", "credential_add")).toBe("Passkey added");
     expect(authAlarmKindLabel("en", "rate_member")).toBe("Member call rate");
+    expect(authAlarmKindLabel("en", "pin_locked")).toBe("PIN locked");
+    expect(authAlarmKindLabel("fr-CA", "pin_locked")).toBe("NIP verrouillé");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

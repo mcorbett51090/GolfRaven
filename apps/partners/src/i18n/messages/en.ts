@@ -455,6 +455,7 @@ export const en = {
   "review.authAlarms.kind.rate_member": "Member call rate",
   "review.authAlarms.kind.credential_add": "Passkey added",
   "review.authAlarms.kind.totp_reset": "TOTP reset",
+  "review.authAlarms.kind.pin_locked": "PIN locked",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",
