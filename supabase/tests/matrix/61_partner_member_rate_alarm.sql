@@ -55,7 +55,7 @@ SELECT throws_ok(
 );
 SELECT lives_ok(
   $$INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket)
-    VALUES ('rate_member', NULL, '00000000-0000-0000-0000-1000000000a1', 7001)$$,
+    VALUES ('rate_member', NULL, '00000000-0000-0000-0000-1000000000ff', 7001)$$,
   'rate_member accepts NULL credential_id + uuid bucket_key'
 );
 

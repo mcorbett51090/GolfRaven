@@ -306,7 +306,8 @@ describe("POST otp-proof/verify: the proof, bound to a fresh GoTrue session, whi
     expect(f.otpProofSessionIds).toEqual(["22222222-2222-2222-2222-222222222222"]);
     expect(f.otpClosed.count).toBe(1);
     expect(f.openTxAtOtpCall).toEqual([0, 0]);
-    expect(f.rateLimitHits[0]).toMatchObject({ bucket: OTP_VERIFY_BUCKET, windowSeconds: 3600, max: OTP_VERIFY_PER_MEMBER_PER_HOUR });
+    expect(f.rateLimitHits.map((h) => h.bucket)).toEqual([MEMBER_ANY_CALL_BUCKET, OTP_VERIFY_BUCKET]);
+    expect(f.rateLimitHits[1]).toMatchObject({ bucket: OTP_VERIFY_BUCKET, windowSeconds: 3600, max: OTP_VERIFY_PER_MEMBER_PER_HOUR });
     expect(OTP_VERIFY_PER_MEMBER_PER_HOUR).toBe(5);
   });
 
