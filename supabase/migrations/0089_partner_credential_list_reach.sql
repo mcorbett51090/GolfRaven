@@ -84,11 +84,28 @@ SET expected_anon = EXCLUDED.expected_anon,
     expected_edge_partner_minter = EXCLUDED.expected_edge_partner_minter,
     note = EXCLUDED.note;
 
+-- Inventory asserts while the CURRENT_USER edit policy is still open (FORCE RLS).
+DO $assert_0089_inventory$
+BEGIN
+  IF (SELECT count(*)::int FROM private.function_inventory
+      WHERE schema_name = 'private' AND function_name = 'partner_credential_list_for_partner') <> 1 THEN
+    RAISE EXCEPTION '0089: expected exactly one function_inventory row for partner_credential_list_for_partner';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM private.function_inventory
+    WHERE schema_name = 'private' AND function_name = 'partner_credential_list_for_partner'
+      AND identity_args = 'p_user_id uuid' AND note LIKE '%reach%'
+  ) THEN
+    RAISE EXCEPTION '0089: function_inventory must list p_user_id uuid with a reach note';
+  END IF;
+END
+$assert_0089_inventory$;
+
 DROP POLICY current_user_edit_function_inventory_0089 ON private.function_inventory;
 REVOKE INSERT, UPDATE, DELETE ON private.function_inventory FROM CURRENT_USER;
 
 -- ============================================================================
--- 3. Assert
+-- 3. Assert (catalog / ACL; no inventory SELECT after FORCE RLS policy drop)
 -- ============================================================================
 DO $assert_0089$
 DECLARE
@@ -126,17 +143,6 @@ BEGIN
       AND pg_get_function_identity_arguments(p.oid) = ''
   ) THEN
     RAISE EXCEPTION '0089: zero-arg partner_credential_list_for_partner must be dropped';
-  END IF;
-  IF (SELECT count(*)::int FROM private.function_inventory
-      WHERE schema_name = 'private' AND function_name = 'partner_credential_list_for_partner') <> 1 THEN
-    RAISE EXCEPTION '0089: expected exactly one function_inventory row for partner_credential_list_for_partner';
-  END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM private.function_inventory
-    WHERE schema_name = 'private' AND function_name = 'partner_credential_list_for_partner'
-      AND identity_args = 'p_user_id uuid' AND note LIKE '%reach%'
-  ) THEN
-    RAISE EXCEPTION '0089: function_inventory must list p_user_id uuid with a reach note';
   END IF;
 END
 $assert_0089$;
