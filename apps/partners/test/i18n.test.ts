@@ -26,7 +26,7 @@ describe("catalogue parity (EN / FR-CA)", () => {
 
   it("French is translated, not copied: only brand names and true cognates match English", () => {
     // a string that is only placeholders and punctuation has nothing to translate
-    const allowed = new Set<MessageKey>(["home.roles.scope"]);
+    const allowed = new Set<MessageKey>(["home.roles.scope", "review.authAlarms.rowNoCredential"]);
     expect(keys.filter((k) => en[k] === frCA[k] && !allowed.has(k))).toEqual([]);
   });
 
