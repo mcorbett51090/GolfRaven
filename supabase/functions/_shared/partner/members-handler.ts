@@ -6,6 +6,7 @@
 // (a 403), never a returned status the caller could use to map who exists.
 //
 // ROUTES (relative to the function; `POST members/{id}/revoke` is `/partner-members/members/{id}/revoke`):
+//   GET  members                         ?orgId=: active roster in manager/operator facility scope (class A0); absent orgId = every in-scope org
 //   POST members/{id}/revoke             { orgId }: revoke ONE membership (class A2)
 //   POST members/{id}/recover            {}: revoke every credential and session of the person, set the PIN to must_change, issue a 24 h `gr_enr_` recovery token (class A2). The token is returned ONCE, to the manager
 //   POST members/{id}/pin-reset          {}: clear the lock and every failure counter, set must_change (class A2)
@@ -45,10 +46,11 @@ import {
   parseAdminEnrolmentBody,
   parseCredentialListQuery,
   parseCredentialNoteBody,
+  parseMemberListQuery,
   parseMemberRevokeBody,
   parseRevokeAllBody,
 } from "./members-shape.ts";
-import { type CredentialView, type PartnerDb, PartnerNotConfigured, type RegistrationVerifier } from "./ports.ts";
+import { type CredentialView, type MemberView, type PartnerDb, PartnerNotConfigured, type RegistrationVerifier } from "./ports.ts";
 import { parseSecondCredentialBody } from "./registration-shape.ts";
 import { formatChallengeToken } from "./session-handler.ts";
 import { uuidToBytes } from "./session-shape.ts";
@@ -71,6 +73,7 @@ export interface PartnerMembersDeps {
 }
 
 const ROUTES: readonly RouteSpec[] = [
+  { name: "members", path: "members", methods: ["GET"], session: true },
   { name: "member-revoke", path: "members/{id}/revoke", methods: ["POST"], session: true },
   { name: "member-recover", path: "members/{id}/recover", methods: ["POST"], session: true },
   { name: "member-pin-reset", path: "members/{id}/pin-reset", methods: ["POST"], session: true },
@@ -106,6 +109,8 @@ export async function handlePartnerMembersRequest(req: Request, deps: PartnerMem
         const id = matched.ids[0] ?? "";
 
         switch (matched.spec.name) {
+          case "members":
+            return await handleMemberList(req, deps, decision, tokenHash);
           case "member-revoke":
             return await handleMemberRevoke(req, deps, decision, tokenHash, id);
           case "member-recover":
@@ -148,6 +153,24 @@ export async function handlePartnerMembersRequest(req: Request, deps: PartnerMem
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Members
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+function memberBody(m: MemberView): Record<string, unknown> {
+  return {
+    userId: m.userId,
+    orgId: m.orgId,
+    role: m.role,
+    facilityId: m.facilityId,
+    invitedBy: m.invitedBy,
+    createdAt: m.createdAt,
+  };
+}
+
+async function handleMemberList(req: Request, deps: PartnerMembersDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseMemberListQuery(new URL(req.url));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const members = await deps.db.withMembers(tokenHash, (s) => s.memberList(parsed.value.orgId));
+  return partnerOk(decision, 200, { members: members.map(memberBody) });
+}
 
 async function handleMemberRevoke(req: Request, deps: PartnerMembersDeps, decision: Decision, tokenHash: string, targetUserId: string): Promise<Response> {
   const parsed = parseMemberRevokeBody(await readPartnerJsonBody(req));

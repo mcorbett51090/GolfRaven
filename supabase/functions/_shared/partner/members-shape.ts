@@ -13,6 +13,7 @@
 //   POST credentials                      { challengeToken, credential }   (registration-shape.ts)
 //   PATCH credentials/{id}                { note }                  display-only; null/"" clears; at most 40 characters
 //   GET  credentials                      ?userId?                  own (absent), or a person under the 6.5 reach rule
+//   GET  members                          ?orgId?                   active roster in manager/operator facility scope
 
 import { parseUuid } from "./invites-shape.ts";
 import { type ParseIssue, type ParseResult, plain, unknownKeys } from "./session-shape.ts";
@@ -53,6 +54,20 @@ export function parseAdminEnrolmentBody(raw: unknown): ParseResult<{ readonly us
   if (userId === null) issues.push({ path: "userId", message: "must be a uuid" });
   if (issues.length > 0 || userId === null) return { ok: false, issues };
   return { ok: true, value: { userId } };
+}
+
+/** GET members: the query string may hold `orgId` (uuid) and nothing else. Absent → every in-scope org. */
+export function parseMemberListQuery(url: URL): ParseResult<{ readonly orgId: string | null }> {
+  const issues: ParseIssue[] = [];
+  for (const k of new Set(url.searchParams.keys())) if (k !== "orgId") issues.push({ path: k, message: "unknown query parameter" });
+  const all = url.searchParams.getAll("orgId");
+  let orgId: string | null = null;
+  if (all.length > 1) issues.push({ path: "orgId", message: "given more than once" });
+  else if (all.length === 1) {
+    orgId = parseUuid(all[0]);
+    if (orgId === null) issues.push({ path: "orgId", message: "must be a uuid" });
+  }
+  return issues.length > 0 ? { ok: false, issues } : { ok: true, value: { orgId } };
 }
 
 /** GET credentials: the query string may hold `userId` (uuid) and nothing else. Absent → the signed-in person. */

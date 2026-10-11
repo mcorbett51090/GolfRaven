@@ -102,6 +102,7 @@ import {
   type InviteView,
   type MemberRecoverResult,
   type MemberRevokeStatus,
+  type MemberView,
   type MintInput,
   type MintResult,
   type OrgRevokeAllResult,
@@ -4262,6 +4263,19 @@ function buildPartnerInvitesTx(trx: TxSql): PartnerInvitesTx {
 /** The member and credential definers of the bound lane (0054 7e to 7l); `totpReset` is the session builder's (7m replaced its body, not its signature). */
 function buildPartnerMembersTx(trx: TxSql): Omit<PartnerMembersTx, "totpReset"> {
   return {
+    async memberList(orgId: string | null): Promise<MemberView[]> {
+      const rows = await trx`
+        select o_user_id::text as o_user_id, o_org_id::text as o_org_id, o_role::text as o_role, o_facility_id, o_invited_by::text as o_invited_by, o_created_at
+        from private.partner_member_list_for_partner(${orgId}::uuid)`;
+      return rows.map((r) => ({
+        userId: String(r.o_user_id),
+        orgId: String(r.o_org_id),
+        role: String(r.o_role),
+        facilityId: textOrNull(r.o_facility_id),
+        invitedBy: textOrNull(r.o_invited_by),
+        createdAt: String(isoOrNull(r.o_created_at)),
+      }));
+    },
     async memberRevoke(targetUserId: string, orgId: string): Promise<MemberRevokeStatus> {
       const rows = await trx`select o_status from private.partner_member_revoke_for_partner(${targetUserId}::uuid, ${orgId}::uuid)`;
       const status = rows[0]?.o_status;
