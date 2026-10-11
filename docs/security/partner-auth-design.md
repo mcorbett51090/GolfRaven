@@ -3667,7 +3667,7 @@ Numbering: **migration `0088`, matrix `66`, this section 78.** Closes the automa
 
 ### 78.4 Verification
 
-Branch: `cursor/p5-partner-pin-pepper-purge-8ffd` (base after #117 / `2c9f43f`).
+Branch: `cursor/p5-partner-pin-pepper-purge-8ffd` (base after #117 / `2c9f43f`). Tip on PR #118.
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP (matrix 66); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0087`.
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 66 ok; 20 / 30 privilege lists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 
