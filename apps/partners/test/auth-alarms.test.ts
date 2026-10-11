@@ -16,6 +16,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "pin_locked")).toBe("NIP verrouillé");
     expect(authAlarmKindLabel("en", "pin_reset")).toBe("PIN reset");
     expect(authAlarmKindLabel("fr-CA", "pin_reset")).toBe("Réinitialisation du NIP");
+    expect(authAlarmKindLabel("en", "member_recover")).toBe("Member recover");
+    expect(authAlarmKindLabel("fr-CA", "member_recover")).toBe("Récupération de membre");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

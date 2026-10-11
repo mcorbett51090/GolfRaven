@@ -4220,11 +4220,38 @@ Numbering: **migration n/a (Edge shared), this section 99.** Closes the §20.12 
 
 ### 99.3 Not built, honestly
 
-- Staging path probe against a live gateway (still named in §20.12); dedicated partners API host / Q1; U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Staging path probe against a live gateway (still named in §20.12); dedicated partners API host / Q1; U1 condition (3) / Q7 email notice; member-recover operator alarm → §100; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 99.4 Verification
 
-Branch: `cursor/p5-edge-path-harden-8ffd` (base after #138 / `967d666`). Squash-merged as _pending_.
+Branch: `cursor/p5-edge-path-harden-8ffd` (base after #138 / `967d666`). Squash-merged as `3b2d65d` (#139).
 
 - vitest `partner-session-handler`, `partner-members-handler`; no migration; tip remains `0094`.
+
+## 100. As built: member-recover operator alarm
+
+Numbering: **migration `0095`, matrix `73`, this section 100.** Closes the §21.4 / §98 leftover: a successful `partner_member_recover_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `member_recover` (one row per target uid per minute) so the admin auth-alarms list surfaces recovers, not only `audit_log` `partner.member.recover`. `no_email` stays quiet. PIN reset from recover still goes through `partner_pin_reset_apply` and does not raise `pin_reset`. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 100.1 What was built
+
+- **Kind + row CHECK** — `member_recover` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_member_recover_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.member_recover` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 100.2 Decisions and departures
+
+- **ok only** — `no_email` returns before any write and does not raise an alarm.
+- **Flood shape** — one alarm per target per UTC minute; a second recover in the same minute still returns `ok`.
+
+### 100.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; org revoke-all operator alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 100.4 Verification
+
+Branch: `cursor/p5-member-recover-alarm-8ffd` (base after #139 / `3b2d65d`). Squash-merged as _pending_.
+
+- pgTAP matrix `73`; tip `0095`; partners i18n / auth-alarms unit cells.
 
