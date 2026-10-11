@@ -142,6 +142,7 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "already_member") return { key: "invites.alreadyMember" };
     if (code === "invite_accepted") return { key: "invites.alreadyAccepted" };
     if (code === "invite_revoked") return { key: "invites.alreadyRevoked" };
+    if (code === "invite_refused" || kind === "forbidden") return { key: "invites.acceptRefused" };
     if (code === "not_found" || kind === "not_found") return { key: "invites.notFound" };
   }
   return null;

@@ -107,6 +107,29 @@ export async function createInvite(
   }
 }
 
+/**
+ * POST partner-invites/invites/accept `{ token }` (branch E, class A2).
+ * An existing credential holder joins another org; no new passkey. 403 when refused; 409 already_member.
+ */
+export async function acceptInvite(
+  api: PartnerApi,
+  token: string,
+): Promise<{ readonly orgId: string; readonly role: string }> {
+  try {
+    const data = await api.call("POST", "partner-invites", "invites/accept", { token });
+    if (!isObject(data) || !isString(data["orgId"]) || !isString(data["role"])) malformed();
+    return { orgId: data["orgId"], role: data["role"] };
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "already_member" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "already_member" });
+    }
+    if (isPartnerApiError(e) && (e.code === "invite_refused" || e.kind === "forbidden")) {
+      throw new PartnerApiError("forbidden", { status: e.status ?? 403, code: "invite_refused" });
+    }
+    throw e;
+  }
+}
+
 /** DELETE partner-invites/invites/{id} (class A2). 409 when already accepted or already revoked. */
 export async function revokeInvite(api: PartnerApi, inviteId: string): Promise<void> {
   try {

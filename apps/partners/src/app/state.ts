@@ -83,7 +83,9 @@ export type Notice =
         | "member-totp-reset"
         | "admin-enrolment"
         | "invite-created"
-        | "invite-revoked";
+        | "invite-revoked"
+        | "invite-accept-pending"
+        | "invite-accepted";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 
@@ -293,6 +295,8 @@ export type AppState =
       readonly panel: Panel | null;
       /** Shop-floor or manager/operator/admin work; null draws the home screen. */
       readonly work: WorkView | null;
+      /** True when a `gr_inv_` token is held for branch E accept (§89). The token itself is never in state. */
+      readonly pendingInviteAccept: boolean;
     };
 
 export type SignedInState = Extract<AppState, { screen: "signed-in" }>;

@@ -1139,3 +1139,58 @@ describe("§88 invites manage UI (manager, A0/A2)", () => {
     expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/partner-invites/invites"))).toBe(false);
   });
 });
+
+describe("§89 branch E invite accept (signed-in, A2)", () => {
+  const OTHER_ORG = "55555555-5555-4555-8555-555555555555";
+  /** Matches the fake signed-in user's mailbox so branch E email check passes. */
+  const SELF_EMAIL = "staff@partners.example.test";
+
+  async function setupSignedIn() {
+    const w = makeWorld();
+    await w.server.seedPin(PIN);
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    await controller.signIn();
+    return { w, api, controller };
+  }
+
+  it("holds a gr_inv_ from holdInviteAccept and joins after reauth + A2 PIN", async () => {
+    const s = await setupSignedIn();
+    const { token } = s.w.server.addInvite({ email: SELF_EMAIL, orgId: OTHER_ORG, role: "staff" });
+    expect(s.controller.holdInviteAccept(token)).toBe(true);
+    expect(home(s.controller).pendingInviteAccept).toBe(true);
+    expect(home(s.controller).notice).toEqual({ kind: "invite-accept-pending" });
+
+    const pending = s.controller.acceptInvite();
+    await until(() => home(s.controller).panel?.kind === "pin-prompt", "PIN prompt never opened for branch E");
+    expect(home(s.controller).panel).toMatchObject({ kind: "pin-prompt", actionClass: "A2" });
+    s.controller.submitPin(PIN);
+    await pending;
+
+    expect(home(s.controller).notice).toEqual({ kind: "invite-accepted" });
+    expect(home(s.controller).pendingInviteAccept).toBe(false);
+    expect(s.controller.hasPendingInviteAccept()).toBe(false);
+    const accepts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-invites/invites/accept"));
+    expect(accepts).toHaveLength(1);
+    expect(JSON.parse(accepts[0]!.body)).toEqual({ token });
+    expect(accepts[0]!.body).not.toMatch(/7391/);
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+  });
+
+  it("dismiss clears the pending invite without calling the server", async () => {
+    const s = await setupSignedIn();
+    const { token } = s.w.server.addInvite({ email: SELF_EMAIL, orgId: OTHER_ORG, role: "staff" });
+    s.controller.holdInviteAccept(token);
+    s.controller.dismissInviteAccept();
+    expect(home(s.controller).pendingInviteAccept).toBe(false);
+    expect(s.controller.hasPendingInviteAccept()).toBe(false);
+    expect(s.w.server.log.some((r) => r.path.endsWith("/invites/accept"))).toBe(false);
+  });
+
+  it("refuses to hold an enrolment token", async () => {
+    const s = await setupSignedIn();
+    const { token } = s.w.server.addEnrolment({ email: SELF_EMAIL });
+    expect(s.controller.holdInviteAccept(token)).toBe(false);
+    expect(home(s.controller).pendingInviteAccept).toBe(false);
+  });
+});

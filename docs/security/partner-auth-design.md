@@ -3933,11 +3933,38 @@ Numbering: **matrix n/a (PWA only), this section 88.** Closes the §87.3 leftove
 
 ### 88.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Branch E invite accept UI (signed-in `POST invites/accept`) → §89; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 88.4 Verification
 
-Branch: `cursor/p5-invites-manage-ui-8ffd` (base after #127 / `a59249a`). Tip on PR (this slice).
+Branch: `cursor/p5-invites-manage-ui-8ffd` (base after #127 / `a59249a`). Squash-merged as `fb71c09` (#128).
 
 - `@golfraven/partners` vitest (invites manage A0/A2); typecheck clean; no Edge / migration change.
+
+## 89. As built: partners branch E invite accept UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 89.** Closes the §88.3 / §24.3 leftover: a signed-in person with an existing passkey accepts a `gr_inv_` invite to join another org via existing `POST partner-invites/invites/accept` (class A2). No new credential. No migration, no Edge change, no UI flag flips.
+
+### 89.1 What was built
+
+- **`invites-routes.ts`** — `acceptInvite(api, token)` → `{ orgId, role }`.
+- **`invite-accept.ts`** — holds the token in a closure; reauth + `requirePin("A2")` then POST; refreshes whoami after join.
+- **Invite link** — while signed in, a `gr_inv_` fragment is held for branch E (not enrol); `gr_enr_` is cleared without starting enrol.
+- **Enrol flow** — on `409 existing_member_sign_in` for an invite, the token is handed to branch E so join works after sign-in.
+- **Home** — join / dismiss when `pendingInviteAccept`; i18n EN + fr-CA; Vitest covers hold, accept, dismiss, enrol hand-off.
+
+### 89.2 Decisions and departures
+
+- **Token never in AppState** — only a boolean `pendingInviteAccept` is drawn; same discipline as enrol's closure token.
+- **Enrolment tokens out of scope** — recovery / admin enrolment stay on the pre-session enrol screens.
+
+### 89.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 89.4 Verification
+
+Branch: `cursor/p5-invite-branch-e-8ffd` (base after #128 / `fb71c09`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (branch E A2 + enrol hand-off); typecheck clean; no Edge / migration change.
 

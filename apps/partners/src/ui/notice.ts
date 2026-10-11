@@ -46,6 +46,8 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "admin-enrolment": "notice.adminEnrolment",
   "invite-created": "notice.inviteCreated",
   "invite-revoked": "notice.inviteRevoked",
+  "invite-accept-pending": "notice.inviteAcceptPending",
+  "invite-accepted": "notice.inviteAccepted",
 };
 
 export function noticeText(n: Notice, locale: Locale): string {

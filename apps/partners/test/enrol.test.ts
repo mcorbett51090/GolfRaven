@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPartnerApi } from "../src/api/client";
-import { createController, type AppState } from "../src/app/controller";
+import { createController, type AppState, type SignedInState } from "../src/app/controller";
 import { extractToken } from "../src/app/enrol-flow";
 import { consumeInviteLink } from "../src/app/invite-link";
 import { installPageLifecycle } from "../src/app/lifecycle";
@@ -30,6 +30,11 @@ type Setup = ReturnType<typeof setup>;
 const enrolState = (c: Setup["controller"]) => {
   const s = c.getState();
   if (s.screen !== "enrol") throw new Error(`expected the enrol screen, got ${s.screen}`);
+  return s;
+};
+const home = (c: Setup["controller"]): SignedInState => {
+  const s = c.getState();
+  if (s.screen !== "signed-in") throw new Error(`expected signed-in, got ${s.screen}`);
   return s;
 };
 const requests = (w: World, route: string) => w.server.log.filter((r) => r.method === "POST" && r.path.endsWith(route));
@@ -164,6 +169,8 @@ describe("the invite, start to first PIN", () => {
       await s.controller.submitEnrolCode(CODE);
       expect(s.controller.getState()).toEqual({ screen: "signed-out", notice: { kind: notice } });
       expect(s.api.hasSession()).toBe(false);
+      // Branch E (§89): invite token kept only for existing_member_sign_in (not recover).
+      expect(s.controller.hasPendingInviteAccept()).toBe(outcome === "existing_member_sign_in");
     }
   });
 
@@ -328,7 +335,7 @@ describe("the invite link (token in the URL fragment)", () => {
     expect(s.controller.getState().screen).toBe("signed-out");
   });
 
-  it("a second link while one flow is open replaces it; while signed in it is cleared and ignored", async () => {
+  it("a second link while one flow is open replaces it; while signed in a gr_inv_ is held for branch E", async () => {
     const s = setup();
     const a = s.w.server.addInvite({ email: EMAIL });
     const b = s.w.server.addInvite({ email: "other@partners.example.test" });
@@ -345,6 +352,9 @@ describe("the invite link (token in the URL fragment)", () => {
     expect(consumeInviteLink(e.env, signed.controller)).toBe(true);
     expect(e.replaced).toHaveLength(1);
     expect(signed.controller.getState().screen).toBe("signed-in");
+    expect(signed.controller.hasPendingInviteAccept()).toBe(true);
+    expect(home(signed.controller).pendingInviteAccept).toBe(true);
+    expect(home(signed.controller).notice).toEqual({ kind: "invite-accept-pending" });
   });
 });
 
