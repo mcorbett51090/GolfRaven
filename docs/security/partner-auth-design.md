@@ -3527,5 +3527,5 @@ Numbering: **matrix n/a (PWA only), this section 73.** Closes the §72.3 leftove
 
 Branch: `cursor/p5-lock-ui-post-lock-8ffd` (base after #112 / `5cfd70b`).
 
-- `@golfraven/partners` unit + Playwright (lock → `POST lock`, `lockCalls === 1`, hung `POST lock` heap cell); typecheck; no Edge / migration change.
+- `@golfraven/partners` vitest **986 passed** (lock → `POST lock`, `lockCalls === 1`); typecheck clean; Playwright e2e deferred to CI (Chromium not in this agent image); no Edge / migration change.
 
