@@ -34,6 +34,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "invite_accept")).toBe("Invitation acceptée");
     expect(authAlarmKindLabel("en", "enrolment_accept")).toBe("Enrolment accepted");
     expect(authAlarmKindLabel("fr-CA", "enrolment_accept")).toBe("Inscription acceptée");
+    expect(authAlarmKindLabel("en", "totp_locked")).toBe("TOTP locked");
+    expect(authAlarmKindLabel("fr-CA", "totp_locked")).toBe("TOTP verrouillé");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

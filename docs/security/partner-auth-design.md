@@ -4499,11 +4499,39 @@ Numbering: **migration `0103`, matrix `81`, this section 109.** Closes the §108
 
 ### 109.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); TOTP-lock operator alarm → §110; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 109.4 Verification
 
-Branch: `cursor/p5-enrolment-accept-alarm-8ffd` (base after #148 / `83d456f`). Squash-merged as _pending_.
+Branch: `cursor/p5-enrolment-accept-alarm-8ffd` (base after #148 / `83d456f`). Squash-merged as `5dee723`.
 
 - pgTAP matrix `81`; tip `0103`; partners i18n / auth-alarms unit cells.
+
+## 110. As built: TOTP-lock operator alarm
+
+Numbering: **migration `0104`, matrix `82`, this section 110.** Closes the §109.3 leftover after `enrolment_accept` (pairs `pin_locked` §97): when a partner TOTP is newly locked (`retry_after = 900` from the 5th consecutive failure on verify or confirm), raise `app.partner_auth_alarm` kind `totp_locked` (one row per subject uid per minute) so the admin auth-alarms list surfaces locks, not only `audit_log` `partner.totp.locked`. Already-locked attempts (`ceil(remaining)`) stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 110.1 What was built
+
+- **Kind + row CHECK** — `totp_locked` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `pin_locked` / `totp_reset`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrappers** — `CREATE OR REPLACE partner_totp_verify_for_partner` and `partner_totp_confirm_for_partner`: after the existing audit, when newly locked (`status = locked` and `retry_after = 900`), `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","stage"}` (`verify` | `confirm`).
+- **Catalogue** — `review.authAlarms.kind.totp_locked` (EN / fr-CA).
+- **Inventories** — function notes + definer_policy_allowlist twin for the two policies.
+
+### 110.2 Decisions and departures
+
+- **Newly locked only** — apply returns `retry_after = 900` on the transition; already-locked returns `ceil(remaining)`. Matches `pin_locked`'s `o_newly_locked` without widening the apply signatures.
+- **Bucket = subject uid** — flood shape is one row per person per UTC minute.
+- **Detail keeps `stage`** — operators can tell confirm vs step-up verify without joining audit.
+
+### 110.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 110.4 Verification
+
+Branch: `cursor/p5-totp-locked-alarm-8ffd` (base after #149 / `5dee723`). Squash-merged as _pending_.
+
+- pgTAP matrix `82`; tip `0104`; partners i18n / auth-alarms unit cells.
 
