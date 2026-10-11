@@ -20,6 +20,7 @@ import {
   registerCredential,
   resetMemberPin as postMemberPinReset,
   revokeCredential as deleteCredential,
+  revokeMember as postMemberRevoke,
 } from "../api/members-routes";
 import type { WhoAmI } from "../api/types";
 import {
@@ -110,6 +111,8 @@ export interface WorkScreens {
   /** Class A2: reauth + PIN, then POST members/{id}/recover; holds plaintext once. Never for oneself. */
   recoverMember(userId: string): Promise<void>;
   dismissMemberRecover(): void;
+  /** Class A2: reauth + PIN, then POST members/{id}/revoke `{ orgId }` for ONE membership. Never for oneself. */
+  revokeMember(userId: string, orgId: string): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -825,6 +828,36 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
       const s = signedIn(host);
       if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
       withWork(s, { ...s.work, recovered: null }, s.notice?.kind === "member-recovered" ? null : s.notice);
+    },
+
+    async revokeMember(userId, orgId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId) || !UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      const org = orgId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.revokeSelf" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await postMemberRevoke(api, target, org);
+        const rows = await listMembers(api);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "member-revoked" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
     },
 
     async loadCredentials() {

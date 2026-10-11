@@ -76,7 +76,8 @@ export type Notice =
         | "credential-revoked"
         | "credential-added"
         | "member-pin-reset"
-        | "member-recovered";
+        | "member-recovered"
+        | "member-revoked";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 

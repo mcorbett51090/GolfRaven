@@ -208,3 +208,16 @@ export async function recoverMember(api: PartnerApi, userId: string): Promise<Me
     throw e;
   }
 }
+
+/** POST members/{id}/revoke (class A2): end ONE membership `{ orgId }`. 404 → `not_found`. */
+export async function revokeMember(api: PartnerApi, userId: string, orgId: string): Promise<void> {
+  try {
+    const data = await api.call("POST", "partner-members", `members/${userId}/revoke`, { orgId });
+    if (!isObject(data) || data["revoked"] !== true) malformed();
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.kind === "not_found" || e.code === "not_found")) {
+      throw new PartnerApiError("not_found", { status: e.status ?? 404, code: "not_found" });
+    }
+    throw e;
+  }
+}

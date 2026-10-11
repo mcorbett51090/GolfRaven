@@ -488,17 +488,20 @@ export const en = {
   "notice.credentialAdded": "Passkey added.",
 
   "members.title": "Team passkeys",
-  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, or recover their account. Email is not shown.",
+  "members.hint": "People in facilities you manage. Open a person to edit a display note or revoke a passkey, reset a locked PIN, recover their account, or end one membership. Email is not shown.",
   "members.load": "Load team",
   "members.empty": "No team members in your facility scope.",
   "members.role": "Role",
   "members.user": "Member",
+  "members.org": "Organisation",
   "members.openCredentials": "Manage passkeys",
   "members.resetPin": "Reset PIN",
   "members.recover": "Recover account",
+  "members.revoke": "End membership",
   "members.back": "Back to team",
   "members.pinSelf": "You cannot reset your own PIN here. Use Set or change PIN on the home screen.",
   "members.recoverSelf": "You cannot recover your own account here.",
+  "members.revokeSelf": "You cannot end your own membership here.",
   "members.pinNotSet": "That person has no PIN to reset.",
   "members.noEmail": "That person has no email address on file for recovery.",
   "members.notFound": "That team member was not found.",
@@ -507,6 +510,7 @@ export const en = {
   "members.recovered.dismiss": "I have shown it",
   "notice.memberPinReset": "PIN reset. They must set a new PIN at the next sensitive action.",
   "notice.memberRecovered": "Account recovered. Show the one-time link before you leave this screen.",
+  "notice.memberRevoked": "Membership ended for that organisation.",
 } as const;
 
 export type MessageKey = keyof typeof en;

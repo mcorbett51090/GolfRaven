@@ -1440,6 +1440,25 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         user.pin.mustChange = true;
         return ok(200, { reset: true });
       }
+      const memberRevokeMatch = /^members\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/revoke$/i.exec(route);
+      if (memberRevokeMatch !== null && req.method === "POST") {
+        if (!canListMembers()) return err(403, "forbidden");
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const target = memberRevokeMatch[1]!.toLowerCase();
+        if (target === session.userId) return err(422, "invalid_request");
+        if (!reachUsers.has(target)) return err(403, "forbidden");
+        const body = (await req.json()) as { orgId?: unknown };
+        if (typeof body.orgId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.orgId)) {
+          return err(400, "bad_request");
+        }
+        const orgId = body.orgId.toLowerCase();
+        const idx = memberRoster.findIndex((m) => m.userId === target && m.orgId === orgId);
+        if (idx < 0) return err(404, "not_found");
+        memberRoster.splice(idx, 1);
+        return ok(200, { revoked: true });
+      }
       const recoverMatch = /^members\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/recover$/i.exec(route);
       if (recoverMatch !== null && req.method === "POST") {
         if (!canListMembers()) return err(403, "forbidden");
