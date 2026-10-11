@@ -1908,7 +1908,7 @@ A later harness / Deno integration run should record file and test counts here t
 
 - **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
 - **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
-- **The out-of-band notice of a credential add** (open item U1) and **the operator alert on a TOTP reset** are `audit_log` rows only.
+- **The out-of-band notice of a credential add** (open item U1): server half → §92 (`partner_credential_add_notice` + `credential_add` alarm); PWA interstitial still open. **The operator alert on a TOTP reset** remains an `audit_log` row only.
 - The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
 
 ### 22.4 Seams left for the Edge half
@@ -3986,7 +3986,7 @@ Numbering: **matrix n/a (PWA only), this section 90.** Closes the §24.3 / §89.
 
 ### 90.3 Not built, honestly
 
-- `gr_enr_` on `getActorFromRequest` refusal list → §91; U1 credential-add interstitial; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- `gr_enr_` on `getActorFromRequest` refusal list → §91; U1 credential-add notice server → §92 / PWA interstitial open; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 90.4 Verification
 
