@@ -3604,11 +3604,42 @@ Numbering: **migration `0086`, matrix `64`, this section 76.** Closes the §65.2
 
 ### 76.3 Not built, honestly
 
-- partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- partner_pin `pepper_kid` → §77; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 76.4 Verification
 
-Branch: `cursor/p5-credential-note-reach-8ffd` (base after #115 / `70e3865`).
+Squash-merged as `3ee503b` (#116). Branch: `cursor/p5-credential-note-reach-8ffd` (base after #115 / `70e3865`).
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP (matrix 64); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0085`.
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 64); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0085`.
+
+## 77. As built: partner PIN pepper rotation + lazy rewrap
+
+Numbering: **migration `0087`, matrix `65`, this section 77.** Closes design D4 / 0052 header / §76.3: operator rotation of Vault `partner_pin_pepper` (+ optional `partner_pin_pepper_previous`) with `app.partner_pin_pepper_epoch` written only on non-compromise. Unlike course PIN (derived from pepper alone), partner verifiers cannot be rehashed without the member's derived key — so `partner_pin_core` dual-verifies and `partner_pin_attempt` lazy-rewraps on a previous match. Pepper bytes never leave the database.
+
+### 77.1 What was built
+
+- **`app.partner_pin_pepper_epoch`** — `effective_from` PK, `recorded_at`, `pepper_kid` (unique); FORCE RLS; `service_role` SELECT/INSERT; `private_definer` SELECT + INSERT (rotate); CHECK `effective_from <= recorded_at`.
+- **`private.partner_pin_core`** — DROP + CREATE: third OUT `o_pepper_kid`; HMAC under CURRENT as `o_verifier`; `o_match` under current **or** previous when previous Vault secret exists **and** an epoch row exists; on previous-only match `o_verifier` is the rewrap target. ACL unchanged (pin verifier + owner).
+- **`private.partner_pin_attempt`** — on ok, when stored verifier ≠ current `o_verifier`, rewrite `verifier` + `pepper_kid`.
+- **`private.partner_pin_set_apply`** — stores current `pepper_kid` (epoch tip, else `'v1'`) on set/change.
+- **`private.partner_pin_pepper_rotate(p_mode text) RETURNS text`** — same modes/statuses as course §69 (`non_compromise` | `compromise` | `retire_previous`); audit `operator.partner_pin_pepper.rotate` (mode + effective_from + pepper_kid on non_compromise). Owner / SQL-editor only.
+- **CLI** — `tools/db/rotate-partner-pin-pepper.mjs` (+ `rotate-partner-pin-pepper.test.mjs`).
+- **pgTAP matrix 65**.
+
+### 77.2 Decisions and departures
+
+- **Lazy rewrap, not bulk rehash** — the PIN never reaches the server; only a successful derived-key attempt can rewrite a row under the new pepper.
+- **Previous without epoch unused** — same fail-closed rule as course `course_pin_matches` (compromise leaves no standing second key).
+- **Members who never authenticate in the 7-day previous window** need a manager reset after `retire_previous` (or after compromise).
+
+### 77.3 Not built, honestly
+
+- Automatic 7-day purge of `partner_pin_pepper_previous`; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 77.4 Verification
+
+Branch: `cursor/p5-partner-pin-pepper-8ffd` (base after #116 / `3ee503b`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP (matrix 65); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0086`.
+- `node --test tools/db/rotate-partner-pin-pepper.test.mjs`.
 
