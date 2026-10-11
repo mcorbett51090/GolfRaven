@@ -3577,11 +3577,38 @@ Numbering: **matrix n/a (PWA only), this section 75.** Closes the §74.3 leftove
 
 ### 75.3 Not built, honestly
 
-- Reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Reach-rule note edits → §76; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 75.4 Verification
 
-Branch: `cursor/p5-credential-add-ui-8ffd` (base after #114 / `e53cd2a`).
+Squash-merged as `70e3865` (#115). Branch: `cursor/p5-credential-add-ui-8ffd` (base after #114 / `e53cd2a`).
 
-- `@golfraven/partners` vitest **999 passed** (credentials add A2 two-PIN + too-many refuse); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **999 passed** (credentials add A2 two-PIN + too-many refuse); typecheck clean; CI green; no Edge / migration change.
+
+## 76. As built: credential note PATCH under the reach rule
+
+Numbering: **migration `0086`, matrix `64`, this section 76.** Closes the §65.2 / §75.3 leftover: a manager (or higher) under the 6.5 reach rule may set the display-only note on another person's credential. Class stays A0. List stays own-only (no PWA for others yet).
+
+### 76.1 What was built
+
+- **`CREATE OR REPLACE private.partner_credential_note_for_partner`** — own OR `partner_reach_covers`; outside reach / unknown → `not_found` (same shape as revoke).
+- **Policy `pd_update_partner_credential_note`** — USING / WITH CHECK widened to own OR reach (DROP + CREATE).
+- **pgTAP matrix 64** — manager@X notes staff@X; staff cannot note up; staff@Y out of reach; allowlist exprs; inventory note.
+- **Fixture** `definer_policy_exprs.txt` for the widened UPDATE policy.
+
+### 76.2 Decisions and departures
+
+- **A0 unchanged** — notes are display metadata; reach widens *who*, not the authorization class.
+- **No list widen / no PWA** — GET credentials stays own-only; managers who know a credential id can PATCH (API seam). UI for others' passkeys stays later.
+- **partner_pin `pepper_kid`** stays later.
+
+### 76.3 Not built, honestly
+
+- partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 76.4 Verification
+
+Branch: `cursor/p5-credential-note-reach-8ffd` (base after #115 / `70e3865`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP (matrix 64); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0085`.
 
