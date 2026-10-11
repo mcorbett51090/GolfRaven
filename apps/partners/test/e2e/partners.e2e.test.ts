@@ -51,10 +51,13 @@ suite("apps/partners in Chromium", () => {
           "/__probe/probe-connect.js": join(here, "probe/probe-connect.js"),
         },
         {
-          // the SAME pages under other URLs, for the bfcache cells: the harness (no pagehide handler) with and without `Cache-Control: no-store`, and the real app at a URL
-          // the generated `_headers` does not mark no-store (so only the page's own pagehide/pageshow handlers stand between Back and a signed-in screen)
+          // bfcache cells: harness with/without no-store, and the real app at a URL that omits Cache-Control so only pagehide/pageshow stand between Back and a signed-in screen
+          // (`/*` is no-store in generated `_headers`; null here detaches it for the cacheable control aliases)
           alias: { "/harness-nostore.html": "/harness.html", "/harness-cacheable.html": "/harness.html", "/app-cacheable.html": "/index.html", "/invite": "/index.html" },
-          extraHeaders: { "/harness-nostore.html": { "Cache-Control": "no-store" } },
+          extraHeaders: {
+            "/harness-cacheable.html": { "Cache-Control": null },
+            "/app-cacheable.html": { "Cache-Control": null },
+          },
         },
       ),
     );
@@ -166,14 +169,15 @@ suite("apps/partners in Chromium", () => {
       expect(html).toMatch(/<script type="module" src="\.\/assets\/app-[A-Z0-9]+\.js"><\/script>/);
     });
 
-    it("the page itself is Cache-Control: no-store on / and /index.html and NOT on the hashed assets", async () => {
+    it("/* is Cache-Control: no-store (including SPA paths); hashed assets detach and stay immutable", async () => {
       const w = await open();
       const get = async (path: string) => (await w.page.request.get(`${pageOrigin}${path}`)).headers();
       expect((await get("/"))["cache-control"]).toBe("no-store");
       expect((await get("/index.html"))["cache-control"]).toBe("no-store");
+      expect((await get("/invite"))["cache-control"]).toBe("no-store");
       const asset = new URL((await (await w.page.request.get(`${pageOrigin}/`)).text()).match(/src="\.\/(assets\/app-[A-Z0-9]+\.js)"/)![1]!, `${pageOrigin}/`).pathname;
       expect((await get(asset))["cache-control"]).toBe("public, max-age=31536000, immutable");
-      expect((await get("/favicon.svg"))["cache-control"]).toBeUndefined();
+      expect((await get("/favicon.svg"))["cache-control"]).toBe("no-store");
     });
 
     it("the CSP in force really blocks what it says (a probe page under the same header attempts each): eval, new Function, a string timer, innerHTML and script text (Trusted Types), a data: script, a foreign origin, a policy, an inline style attribute", async () => {

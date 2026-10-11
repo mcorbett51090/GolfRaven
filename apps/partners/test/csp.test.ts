@@ -153,7 +153,7 @@ describe("the policy", () => {
   });
 });
 
-/** The blocks of a Cloudflare-Pages-style `_headers` text that apply to a path: `/*`, `/dir/*` (prefix) and exact paths. */
+/** The blocks of a Cloudflare-Pages-style `_headers` text that apply to a path: `/*`, `/dir/*` (prefix) and exact paths; `! Name` detaches. */
 function matching(text: string, path: string): Array<{ pattern: string; names: string[]; headers: Array<[string, string]> }> {
   const blocks: Array<{ pattern: string; names: string[]; headers: Array<[string, string]> }> = [];
   for (const line of text.split("\n")) {
@@ -161,8 +161,14 @@ function matching(text: string, path: string): Array<{ pattern: string; names: s
     if (!/^\s/.test(line)) blocks.push({ pattern: line.trim(), names: [], headers: [] });
     else {
       const t = line.trim();
-      const i = t.indexOf(":");
       const b = blocks[blocks.length - 1]!;
+      if (t.startsWith("! ")) {
+        const name = `! ${t.slice(2).trim().toLowerCase()}`;
+        b.names.push(name);
+        b.headers.push([name, ""]);
+        continue;
+      }
+      const i = t.indexOf(":");
       b.names.push(t.slice(0, i).toLowerCase());
       b.headers.push([t.slice(0, i).toLowerCase(), t.slice(i + 1).trim()]);
     }
@@ -170,7 +176,16 @@ function matching(text: string, path: string): Array<{ pattern: string; names: s
   return blocks.filter((b) => (b.pattern.endsWith("/*") ? path.startsWith(b.pattern.slice(0, -1)) : b.pattern === path));
 }
 function headersFor(text: string, path: string): Record<string, string> {
-  return Object.fromEntries(matching(text, path).flatMap((b) => b.headers));
+  const out = new Map<string, string>();
+  for (const [name, value] of matching(text, path).flatMap((b) => b.headers)) {
+    if (name.startsWith("! ")) {
+      out.delete(name.slice(2).trim());
+      continue;
+    }
+    const prev = out.get(name);
+    out.set(name, prev ? `${prev}, ${value}` : value);
+  }
+  return Object.fromEntries(out);
 }
 
 describe("the _headers file", () => {
@@ -199,24 +214,29 @@ describe("the _headers file", () => {
     expect(text).not.toContain("camera=()");
   });
 
-  it("gives no request two values for one header name (Cloudflare Pages joins repeated names across the matching blocks with a comma instead of replacing)", () => {
-    for (const path of ["/", "/index.html", "/invite", "/assets/app-X.js", "/assets/styles-X.css", "/favicon.svg", "/manifest.webmanifest"]) {
-      const names = matching(text, path).flatMap((b) => b.names);
-      expect(names.filter((n, i) => names.indexOf(n) !== i), path).toEqual([]);
+  it("resolves Cache-Control to a single value after /* no-store and asset detach (Pages would otherwise join repeats with a comma)", () => {
+    for (const path of ["/", "/index.html", "/invite", "/members", "/favicon.svg", "/manifest.webmanifest"]) {
+      expect(headersFor(text, path)["cache-control"], path).toBe("no-store");
+    }
+    for (const asset of ["/assets/app-X.js", "/assets/styles-X.css"]) {
+      expect(headersFor(text, asset)["cache-control"], asset).toBe("public, max-age=31536000, immutable");
     }
   });
 
-  it("the page itself (/ and /index.html) is no-store, so Back never serves the signed-in page from a cache or the bfcache; the assets are not", () => {
+  it("/* is no-store (SPA fallbacks included); hashed assets detach and stay immutable", () => {
     expect(headersFor(text, "/")["cache-control"]).toBe("no-store");
     expect(headersFor(text, "/index.html")["cache-control"]).toBe("no-store");
-    // an invite link (/invite#<token>) is served the same page by the host's single-page fallback, and is just as uncacheable
+    // host single-page fallback paths must not be cacheable either (§20.12 / §103)
     expect(headersFor(text, "/invite")["cache-control"]).toBe("no-store");
+    expect(headersFor(text, "/members")["cache-control"]).toBe("no-store");
     for (const asset of ["/assets/app-X.js", "/assets/styles-X.css"]) expect(headersFor(text, asset)["cache-control"], asset).toBe("public, max-age=31536000, immutable");
-    for (const other of ["/favicon.svg", "/manifest.webmanifest"]) expect(headersFor(text, other)["cache-control"], other).toBeUndefined();
+    for (const other of ["/favicon.svg", "/manifest.webmanifest"]) expect(headersFor(text, other)["cache-control"], other).toBe("no-store");
   });
 
-  it("gives only the content-hashed assets a long cache lifetime", () => {
-    expect(text).toContain("/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n");
+  it("gives only the content-hashed assets a long cache lifetime (after detaching the /* no-store)", () => {
+    expect(text).toContain("/*\n");
+    expect(text).toContain("  Cache-Control: no-store\n");
+    expect(text).toContain("/assets/*\n  ! Cache-Control\n  Cache-Control: public, max-age=31536000, immutable\n");
     expect(text.match(/max-age=31536000, immutable/g)).toHaveLength(1);
   });
 });
