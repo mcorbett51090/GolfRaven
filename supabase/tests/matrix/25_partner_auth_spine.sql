@@ -95,6 +95,7 @@ SELECT is((SELECT count(*)::int FROM pg_namespace n CROSS JOIN (VALUES ('edge_pa
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private') AND has_function_privilege('edge_partner', p.oid, 'EXECUTE')),
           ARRAY['bind_partner_session', 'course_pin_alarm_list_for_partner', 'course_pin_rotate_for_partner', 'course_pin_show_for_partner', 'course_qr_mint_for_partner', 'course_qr_print_key_for_partner', 'course_qr_print_read_for_partner', 'course_qr_print_write_for_partner', 'course_qr_refresh_for_partner', 'course_qr_static_pin_cap_list_for_partner', 'hit_partner_rate_limit', 'partner_admin_enrolment_issue_for_partner', 'partner_attest_for_partner', 'partner_auth_alarm_list_for_partner', 'partner_binding', 'partner_binding_kind',
+                'partner_credential_add_notice_ack_for_partner', 'partner_credential_add_notice_list_mine_for_partner', 'partner_credential_add_notice_list_reach_for_partner',
                 'partner_credential_list_for_partner', 'partner_credential_note_for_partner', 'partner_credential_options_for_partner', 'partner_credential_register_for_partner', 'partner_credential_revoke_for_partner',
                 'partner_entitlement_queue_for_partner', 'partner_entitlement_redeem_for_partner', 'partner_entitlement_voucher_for_partner',
                 'partner_facility_programme_list_for_partner', 'partner_facility_programme_upsert_for_partner',

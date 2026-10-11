@@ -35,14 +35,16 @@ $f$;
 CREATE FUNCTION pg_temp.add_second(p_sess_label text, p_cred_label text, p_uid uuid, p_via uuid) RETURNS uuid LANGUAGE plpgsql AS $f$
 DECLARE v_id uuid;
 BEGIN
+  -- Bind as edge_partner so the trigger's partner-bound INSERT policies pass; insert as the
+  -- harness role (edge_partner has no table privilege on partner_credential).
   EXECUTE 'SET LOCAL ROLE edge_partner';
   PERFORM private.bind_partner_session(pg_temp.th(p_sess_label));
+  EXECUTE 'RESET ROLE';
   INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, created_via_credential_id, aaguid)
   VALUES (p_uid, decode(md5('c69:' || p_cred_label) || md5('c69b:' || p_cred_label), 'hex'),
           decode(md5('k69:' || p_cred_label) || md5('k69b:' || p_cred_label), 'hex'), -7, p_via,
           'abababab-abab-abab-abab-abababababab'::uuid)
   RETURNING id INTO v_id;
-  EXECUTE 'RESET ROLE';
   RETURN v_id;
 END
 $f$;

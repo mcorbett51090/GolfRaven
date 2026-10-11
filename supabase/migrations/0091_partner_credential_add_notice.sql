@@ -66,14 +66,17 @@ CREATE POLICY pd_update_partner_credential_add_notice_ack ON app.partner_credent
     AND subject_user_id = (SELECT private.partner_binding_user())
   );
 
+-- Qualify notice.credential_id: bare `credential_id` inside FROM partner_credential
+-- resolves to the bytea WebAuthn id column (uuid = bytea).
 CREATE POLICY pd_purge_partner_credential_add_notice ON app.partner_credential_add_notice FOR DELETE TO private_definer
   USING (
     (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND (
-      subject_acked_at < pg_catalog.now() - interval '30 days'
+      subject_acked_at < now() - interval '30 days'
       OR EXISTS (
         SELECT 1 FROM app.partner_credential c
-        WHERE c.id = credential_id AND c.revoked_at < pg_catalog.now() - interval '180 days'
+        WHERE c.id = partner_credential_add_notice.credential_id
+          AND c.revoked_at < now() - interval '180 days'
       )
     )
   );
@@ -82,10 +85,11 @@ CREATE POLICY pd_purge_partner_credential_add_notice_r ON app.partner_credential
   USING (
     (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
     AND (
-      subject_acked_at < pg_catalog.now() - interval '30 days'
+      subject_acked_at < now() - interval '30 days'
       OR EXISTS (
         SELECT 1 FROM app.partner_credential c
-        WHERE c.id = credential_id AND c.revoked_at < pg_catalog.now() - interval '180 days'
+        WHERE c.id = partner_credential_add_notice.credential_id
+          AND c.revoked_at < now() - interval '180 days'
       )
     )
   );
@@ -178,11 +182,9 @@ BEGIN
 END
 $$;
 
-REVOKE ALL ON FUNCTION private.partner_credential_add_notice_on_insert() FROM PUBLIC;
-
-CREATE TRIGGER partner_credential_add_notice_trg
-  AFTER INSERT ON app.partner_credential
-  FOR EACH ROW EXECUTE FUNCTION private.partner_credential_add_notice_on_insert();
+-- Trigger is created as the migrating role after RESET ROLE (CREATE TRIGGER
+-- needs table ownership; 0054 partner_member_last_membership shape). PUBLIC
+-- still holds EXECUTE here so creation can resolve the function.
 
 CREATE FUNCTION private.partner_credential_add_notice_list_mine_for_partner()
 RETURNS TABLE (
@@ -314,9 +316,19 @@ COMMENT ON FUNCTION private.partner_credential_add_notice_list_reach_for_partner
   '0091 (§92). edge_partner only; class A0. Unacked notices for reach-covered members (never own); manager|operator; at most 100.';
 COMMENT ON FUNCTION private.purge_partner_credential_add_notices() IS
   '0091 (§92). edge_system. Deletes notices acked more than 30 days ago or tied to a credential revoked more than 180 days ago; at most 5000 per call.';
+COMMENT ON FUNCTION private.partner_credential_add_notice_on_insert() IS
+  '0091 (§92). Trigger function (AFTER INSERT on app.partner_credential): second credential → notice + credential_add alarm; never EXECUTEd directly by any role.';
 
 RESET ROLE;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
+
+-- Create the trigger as the migrating role (table owner), then strip EXECUTE.
+CREATE TRIGGER partner_credential_add_notice_trg
+  AFTER INSERT ON app.partner_credential
+  FOR EACH ROW EXECUTE FUNCTION private.partner_credential_add_notice_on_insert();
+SET ROLE private_definer;
+REVOKE EXECUTE ON FUNCTION private.partner_credential_add_notice_on_insert() FROM PUBLIC;
+RESET ROLE;
 
 COMMENT ON TABLE app.partner_auth_alarm IS
   '0048/0074/0075/0081/0083/0091. Mint refusals, alert-only rate buckets, member any-call soft-cap (rate_member), and credential-add operator signal (credential_add). UNIQUE (kind, bucket_key, minute_bucket). Operator-facing via partner_auth_alarm_list_for_partner. Retention: purge_partner_auth_alarms (90 days).';
@@ -331,6 +343,8 @@ CREATE POLICY current_user_edit_function_inventory_0091 ON private.function_inve
 INSERT INTO private.function_inventory
   (schema_name, function_name, identity_args, expected_anon, expected_authenticated, expected_service_role, expected_edge_actor, expected_edge_system, expected_edge_partner, expected_edge_partner_minter, note)
 VALUES
+  ('private', 'partner_credential_add_notice_on_insert', '', false, false, false, false, false, false, false,
+   '0091 (§92): trigger function AFTER INSERT on partner_credential; never EXECUTEd directly'),
   ('private', 'partner_credential_add_notice_list_mine_for_partner', '', false, false, false, false, false, true, false,
    '0091 (§92): edge_partner only; class A0; subject unacked credential-add notices'),
   ('private', 'partner_credential_add_notice_ack_for_partner', 'p_notice_id uuid', false, false, false, false, false, true, false,
@@ -342,6 +356,7 @@ VALUES
 ON CONFLICT (schema_name, function_name, identity_args) DO UPDATE
 SET expected_edge_partner = EXCLUDED.expected_edge_partner,
     expected_edge_system = EXCLUDED.expected_edge_system,
+    expected_edge_actor = EXCLUDED.expected_edge_actor,
     note = EXCLUDED.note;
 
 DROP POLICY current_user_edit_function_inventory_0091 ON private.function_inventory;
