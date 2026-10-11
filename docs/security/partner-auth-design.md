@@ -1908,7 +1908,7 @@ A later harness / Deno integration run should record file and test counts here t
 
 - **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
 - **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
-- **The out-of-band notice of a credential add** (open item U1): server → §92; subject interstitial → §93; manager reach inbox → §94. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** → §95 (`partner_auth_alarm` kind `totp_reset`).
+- **The out-of-band notice of a credential add** (open item U1): server → §92; subject interstitial → §93; manager reach inbox → §94. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** → §95 (`partner_auth_alarm` kind `totp_reset`). Review auth-alarms i18n polish → §96.
 - The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
 
 ### 22.4 Seams left for the Edge half
@@ -4115,11 +4115,36 @@ Numbering: **migration `0092`, matrix `70`, this section 95.** Closes the §1911
 
 ### 95.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; Review auth-alarms i18n polish → §96; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 95.4 Verification
 
-Branch: `cursor/p5-totp-reset-alarm-8ffd` (base after #134 / `200f42d`). Squash-merged as _pending_.
+Branch: `cursor/p5-totp-reset-alarm-8ffd` (base after #134 / `200f42d`). Squash-merged as `fcf44c9` (#135).
 
-- pgTAP matrix `70`; tip `0092`.
+- pgTAP matrix `70`; tip `0092`; partners e2e reload/bfcache settle §93 notices before lifecycle marks.
+
+## 96. As built: Review auth-alarms i18n polish
+
+Numbering: **matrix n/a (PWA only), this section 96.** Closes the §61 / §95 leftover: the Review auth-alarms list no longer frames every row as a refused sign-in, and closed `kind` values render as EN / fr-CA labels (raw kind fallback for unknowns). Optional `detail.subject` prefix on credential-less rows (`totp_reset`). No migration, no Edge change, no UI flag flips.
+
+### 96.1 What was built
+
+- Catalogue: broader title / hint / load / empty; `review.authAlarms.kind.*` for the eight CHECK kinds; `rowSubject` for subject-only rows.
+- `authAlarmKindLabel` / `authAlarmSubjectPrefix` helpers; Review list uses labels + optional subject.
+- Fake auth-alarms seed includes `totp_reset`; unit + admin cells cover the label path.
+
+### 96.2 Decisions and departures
+
+- **Closed over known kinds** — unknown `kind` strings stay visible as the raw token (no silent blank).
+- **Subject is a prefix only** — first 8 characters of `detail.subject`; never full uuid paste into a new surface beyond what the API already returns.
+
+### 96.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; `pin_locked` / `pin_reset` operator alarms; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 96.4 Verification
+
+Branch: `cursor/p5-auth-alarms-i18n-8ffd` (base after #135 / `fcf44c9`). Squash-merged as _pending_.
+
+- `@golfraven/partners` vitest (`auth-alarms`, `admin`, `i18n`); tip remains `0092`.
 

@@ -1,0 +1,34 @@
+/**
+ * §96 Review auth-alarms labels: closed kinds → catalogue; unknown stays raw; subject prefix from detail.
+ */
+import { describe, expect, it } from "vitest";
+import { authAlarmKindLabel, authAlarmSubjectPrefix } from "../src/ui/auth-alarms";
+
+describe("authAlarmKindLabel", () => {
+  it("maps every closed kind in EN and fr-CA", () => {
+    expect(authAlarmKindLabel("en", "signature_invalid")).toBe("Invalid signature");
+    expect(authAlarmKindLabel("fr-CA", "signature_invalid")).toBe("Signature invalide");
+    expect(authAlarmKindLabel("en", "totp_reset")).toBe("TOTP reset");
+    expect(authAlarmKindLabel("fr-CA", "totp_reset")).toBe("Réinitialisation TOTP");
+    expect(authAlarmKindLabel("en", "credential_add")).toBe("Passkey added");
+    expect(authAlarmKindLabel("en", "rate_member")).toBe("Member call rate");
+  });
+
+  it("falls back to the raw kind for an unknown token", () => {
+    expect(authAlarmKindLabel("en", "future_kind")).toBe("future_kind");
+    expect(authAlarmKindLabel("fr-CA", "future_kind")).toBe("future_kind");
+  });
+});
+
+describe("authAlarmSubjectPrefix", () => {
+  it("returns the first 8 chars of detail.subject", () => {
+    expect(authAlarmSubjectPrefix({ subject: "22222222-2222-4222-8222-222222222222", status: "ok" })).toBe("22222222");
+  });
+
+  it("returns null when subject is missing or not a string", () => {
+    expect(authAlarmSubjectPrefix(null)).toBeNull();
+    expect(authAlarmSubjectPrefix({ status: "ok" })).toBeNull();
+    expect(authAlarmSubjectPrefix({ subject: 1 })).toBeNull();
+    expect(authAlarmSubjectPrefix("nope")).toBeNull();
+  });
+});
