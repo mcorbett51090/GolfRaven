@@ -1859,7 +1859,7 @@ The partner (staff) **operator/admin TOTP factor**: `aal` 2, the five-minute MFA
 
 ### 21.4 Seams left for later slices
 
-- **S1.5, full reach / reset alerts.** Replace the admin-lite reset with the design's higher-role reach; alert on reset (and related membership events).
+- **S1.5, full reach / reset alerts.** Replace the admin-lite reset with the design's higher-role reach; alert on reset (and related membership events). Reach closed in 0054; TOTP-reset operator alarm → §95.
 - **PA-29, last-membership TOTP delete.** Revoking the last active membership of a user in `admin_user` must delete their PIN but **not** their TOTP; for a non-admin both go. Not built here.
 - **Edge public `members/{id}/totp-reset` route.** The database wrapper and the session port exist; the handler has no public path yet.
 - **PWA TOTP screens (S7).** Enrol QR, confirm, and step-up prompt; `apps/partners` still shows aal below required on the home and keeps screens closed — no TOTP UI in S7a.
@@ -1908,7 +1908,7 @@ A later harness / Deno integration run should record file and test counts here t
 
 - **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
 - **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
-- **The out-of-band notice of a credential add** (open item U1): server → §92; subject interstitial → §93; manager reach inbox → §94. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** remains an `audit_log` row only.
+- **The out-of-band notice of a credential add** (open item U1): server → §92; subject interstitial → §93; manager reach inbox → §94. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** → §95 (`partner_auth_alarm` kind `totp_reset`).
 - The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
 
 ### 22.4 Seams left for the Edge half
@@ -4089,11 +4089,37 @@ Numbering: **migration n/a (clients only), this section 94.** Closes U1 conditio
 
 ### 94.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; TOTP-reset operator alarm → §95; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 94.4 Verification
 
-Branch: `cursor/p5-credential-notice-reach-ui-8ffd` (base after #133 / `0d97b0b`). Squash-merged as _pending_.
+Branch: `cursor/p5-credential-notice-reach-ui-8ffd` (base after #133 / `0d97b0b`). Squash-merged as `200f42d` (#134).
 
 - `@golfraven/partners` vitest (`work` §94); typecheck clean; no Edge / migration change; tip remains `0091`.
+
+## 95. As built: TOTP-reset operator alarm
+
+Numbering: **migration `0092`, matrix `70`, this section 95.** Closes the §1911 / §21.4 leftover left open after §86: a successful `partner_totp_reset_for_partner` raises `app.partner_auth_alarm` kind `totp_reset` (one row per target uid per minute) so the existing admin auth-alarms list surfaces resets, not only `audit_log`. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 95.1 What was built
+
+- **Kind + row CHECK** — `totp_reset` with `credential_id` NULL and `bucket_key` = target uid text (same shape as `rate_member`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer` (bucket is the target, not the actor).
+- **Wrapper** — `CREATE OR REPLACE partner_totp_reset_for_partner`: after audit, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"target","status"}` only.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 95.2 Decisions and departures
+
+- **No extra audit** — `partner.totp.reset` already records the actor; the alarm is the operator-facing signal (list API returns all kinds).
+- **Flood shape** — one alarm per target per UTC minute; a second reset in the same minute still returns `ok` / `unset` and still revokes sessions.
+
+### 95.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 95.4 Verification
+
+Branch: `cursor/p5-totp-reset-alarm-8ffd` (base after #134 / `200f42d`). Squash-merged as _pending_.
+
+- pgTAP matrix `70`; tip `0092`.
 
