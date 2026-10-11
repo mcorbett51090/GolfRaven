@@ -158,6 +158,7 @@ SELECT is(
 
 -- ----------------------------------------------------------------------------
 -- 3. Change path: 5th wrong current key raises alarm with stage=change
+-- (smudge xact like matrix 69 so a second bind in this transaction is allowed)
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.mk_cred('sy', '00000000-0000-0000-0000-1000000000a3') AS c_sy \gset
 SELECT pg_temp.mk_session('sy', '00000000-0000-0000-0000-1000000000a3', :'c_sy') AS s_sy \gset
@@ -166,6 +167,9 @@ SELECT pg_temp.seed_pin('00000000-0000-0000-0000-1000000000a3', :'dk_ok'::bytea,
   jsonb_build_object('failed_count', 4, 'next_attempt_at', clock_timestamp() - interval '1 second'));
 SELECT pg_temp.seed_step('sy', '{"otp_s": 500}'::jsonb);
 
+SET LOCAL ROLE private_definer;
+UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
+RESET ROLE;
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sy');
 RESET ROLE;
