@@ -3382,12 +3382,41 @@ Numbering: **migration `0081`, matrix `59`, this section 68.** Closes design §8
 
 ### 68.3 Not built, honestly
 
-- Pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Pepper-rotation tooling → §69; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 68.4 Verification
 
-Branch: `cursor/p5-alert-rate-buckets-8ffd` (base after #107 / `5d760f7`). Tip `c889458`.
+Squash-merged as `b583ab5` (#108). Branch: `cursor/p5-alert-rate-buckets-8ffd` (base after #107 / `5d760f7`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 59 ok; 10 / 25 / 26 PA-8 allowlists).
 - Focused: `partner-session-handler` Vitest + Deno-unit (23); `partner-review-handler` Vitest; `@golfraven/partners` `admin.test.ts` (null credentialId cell).
+
+## 69. As built: course PIN pepper rotation tooling
+
+Numbering: **migration `0082`, matrix `60`, this section 69.** Closes design M1 / 0046 header / §68.3: operator rotation of Vault `course_pin_pepper` (+ optional `course_pin_pepper_previous`) with `app.course_pin_pepper_epoch` written only on non-compromise. Pepper bytes never leave the database.
+
+### 69.1 What was built
+
+- **`private.course_pin_pepper_rotate(p_mode text) RETURNS text`** — SECURITY DEFINER, `search_path=''`, owned by `private_definer`; REVOKE PUBLIC; no edge/client/`service_role` EXECUTE (owner / SQL-editor only via `SET LOCAL ROLE private_definer`).
+- **Modes** — `non_compromise` (CLI `non-compromise`): refuse `previous_exists` while previous secret exists; else copy current → `course_pin_pepper_previous` in-DB from `vault.decrypted_secrets`, `vault.update_secret` current with `encode(gen_random_bytes(32),'hex')`, `INSERT app.course_pin_pepper_epoch (effective_from) VALUES (now())`. `compromise`: no copy, no epoch row, replace current, DELETE previous if present. `retire_previous` (CLI `retire-previous`): DELETE previous only when latest `effective_from` ≤ now() − 7 days; else `too_early`; `previous_absent` when already gone. Operator-only in this seam (no retention-purge hook).
+- **Statuses** — `ok` | `previous_exists` | `no_pepper` | `previous_absent` | `too_early`; raise `22023` for bad mode. Optional `audit_log` `operator.course_pin_pepper.rotate` with mode + `effective_from` only (never secret material).
+- **CLI** — `tools/db/rotate-course-pin-pepper.mjs` prints `BEGIN; SET LOCAL ROLE private_definer; SELECT private.course_pin_pepper_rotate('…'); COMMIT;` to stdout (pipe to psql; Node never holds pepper bytes). Unit test: `tools/db/rotate-course-pin-pepper.test.mjs` (node:test).
+- **pgTAP matrix 60** + matrix 24 pepper inventory cells (three namers: derive / matches / rotate).
+
+### 69.2 Decisions and departures
+
+- **Definer is source of truth** — thin CLI mirrors `provision-course-qr-key.mjs` (stdout only); Vault create/update via hosted API (`[unverified]` shape; migration fail-closed if absent); delete is `DELETE FROM vault.secrets` (no `vault.delete_secret`).
+- **Refuse second non-compromise while previous exists** — one previous pepper kept (0046: two rotations inside 7 days would mis-judge older queued scans).
+- **`retire-previous` is operator-only** — not wired to retention purge.
+
+### 69.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits; automatic 7-day purge of `course_pin_pepper_previous`. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 69.4 Verification
+
+Branch: `cursor/p5-pepper-rotate-8ffd` (base after #108 / `b583ab5`). Tip `35b5c19`.
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 60 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+- `node --test tools/db/rotate-course-pin-pepper.test.mjs` (7 passed).
 
