@@ -4167,11 +4167,38 @@ Numbering: **migration `0093`, matrix `71`, this section 97.** Closes the §19.5
 
 ### 97.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; `pin_reset` operator alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; `pin_reset` operator alarm → §98; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 97.4 Verification
 
-Branch: `cursor/p5-pin-locked-alarm-8ffd` (base after #136 / `4b7bc7a`). Squash-merged as _pending_.
+Branch: `cursor/p5-pin-locked-alarm-8ffd` (base after #136 / `4b7bc7a`). Squash-merged as `2511ab0` (#137).
 
 - pgTAP matrix `71`; tip `0093`; partners i18n / auth-alarms unit cells.
+
+## 98. As built: PIN-reset operator alarm
+
+Numbering: **migration `0094`, matrix `72`, this section 98.** Closes the §97.3 / §21.4 leftover left open after §95 (TOTP) and §97 (PIN lock): a successful `partner_pin_reset_for_partner` raises `app.partner_auth_alarm` kind `pin_reset` (one row per target uid per minute) so the admin auth-alarms list surfaces PIN resets, not only `audit_log` `partner.pin.reset`. Branch-E accept and member recover call `partner_pin_reset_apply` directly and do not raise this alarm. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 98.1 What was built
+
+- **Kind + row CHECK** — `pin_reset` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_pin_reset_for_partner`: after audit, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` (`ok` | `unset`).
+- **Catalogue** — `review.authAlarms.kind.pin_reset` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 98.2 Decisions and departures
+
+- **Wrapper only** — invite-accept / recover apply paths keep their own audit actions and do not raise `pin_reset`.
+- **Flood shape** — one alarm per target per UTC minute; a second reset in the same minute still returns `ok` / `unset`.
+
+### 98.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 98.4 Verification
+
+Branch: `cursor/p5-pin-reset-alarm-8ffd` (base after #137 / `2511ab0`). Squash-merged as _pending_.
+
+- pgTAP matrix `72`; tip `0094`; partners i18n / auth-alarms unit cells.
 
