@@ -97,7 +97,7 @@ describe("the policy", () => {
 
   it("CSP3 path matching: a trailing-slash source is a PREFIX, so every URL the client builds is allowed, and a sibling path, the data API, another function and the bare function name are not", () => {
     // the exact URLs client.ts requests: `${base}/${fn}/${route}`, no trailing slash, no query
-    for (const route of ["options", "verify", "session", "sign-out", "reauth/options", "reauth"]) expect(allowedByCsp(csp, `${API}/partner-session/${route}`), route).toBe(true);
+    for (const route of ["options", "verify", "session", "sign-out", "lock", "reauth/options", "reauth"]) expect(allowedByCsp(csp, `${API}/partner-session/${route}`), route).toBe(true);
     for (const blocked of [
       `${API_ORIGIN}/rest/v1/orgs`,
       `${API_ORIGIN}/rest/v1/`,

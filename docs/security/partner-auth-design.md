@@ -1655,11 +1655,11 @@ The first real version of `apps/partners`, the staff, operator and admin portal 
 ### 20.4 Departures from sections 4.6 and 12.1, and why
 
 - **The CSP is stricter than 4.6's list in three places.** `connect-src` names **one path-scoped source per partner function** (`https://<host>/functions/v1/partner-session/`, see 20.11) and not `'self'` or the whole API origin (the page fetches nothing from its own origin; the manifest and icon load under `manifest-src` and `img-src`); `img-src` has no `data:` (nothing needs it); `worker-src` is `'none'`, not `'self'` (no service worker in S7a). Trusted Types is `require-trusted-types-for 'script'` plus `trusted-types 'none'`, so no policy can be created and none is needed.
-- **Lock revokes the session (gate ruling, Opus security gate on S7a; supersedes the "as built" lock of 20.4 and 20.10).** The page's `lock()` now **sends `POST sign-out`** (sign-out alone is enough; the server's `lock` route is not called) and shows "Locked". The UI wording is unchanged; the effect on the server is a **revoke**. Precisely:
-  - **Order (MEDIUM-2).** Lock and sign-out copy the token into a local variable, **wipe it and notify the listeners (the screen goes to sign-in) before anything is sent**, then send with the copy and drop the copy as soon as `fetch` has been called. The screen is therefore signed-out, and the page holds no copy of the token, while a revoking request that never answers is still hanging (Playwright: a `POST sign-out` that is received and never answered, then a V8 heap search for the token: absent, with the positive control that it was present while signed in). If the request fails or times out the plain notice is replaced by the honest "the server could not be told" one, and only if nothing newer has happened. Lock and Sign-out stay enabled while a refresh is busy, and a wipe aborts every authenticated request still in flight.
+- **Lock revokes the session (gate ruling, Opus security gate on S7a; supersedes the "as built" lock of 20.4 and 20.10).** The page's `lock()` **sends `POST lock`** (§73; server make-revoke in §72 / `0085`) and shows "Locked". Sign-out and `pagehide` keepalive still use `POST sign-out`. Precisely:
+  - **Order (MEDIUM-2).** Lock and sign-out copy the token into a local variable, **wipe it and notify the listeners (the screen goes to sign-in) before anything is sent**, then send with the copy and drop the copy as soon as `fetch` has been called. The screen is therefore signed-out, and the page holds no copy of the token, while a revoking request that never answers is still hanging (Playwright: a `POST lock` that is received and never answered, then a V8 heap search for the token: absent, with the positive control that it was present while signed in). If the request fails or times out the plain notice is replaced by the honest "the server could not be told" one, and only if nothing newer has happened. Lock and Sign-out stay enabled while a refresh is busy, and a wipe aborts every authenticated request still in flight.
   - **Why.** The passkey proves the device, not the person (4.1), the in-memory token is stealable by a script on the page (4.6, mitigated by the CSP and not removed), and a locked-but-live session is a valid bearer for up to its idle window, which the old lock itself restarted. Revoking closes that window at the lock. The cost, accepted: **a lock is no longer cheap to undo** (resuming is a full passkey sign-in, as it already was; it now also opens a new session rather than leaving the old one idle).
-  - **Cell.** After a lock the old token is refused by the real handler (`server.state.revokedSessions.size === 1`, the old bearer gets the uniform 401): `contract.test.ts`, `controller.test.ts` and the Playwright lock cell.
-  - **Server follow-up (closed in §72 / migration `0085`):** `private.partner_session_lock_for_partner` now **revokes** with `revoke_reason = 'lock'` (make-revoke; function kept). The PWA Lock UI still sends `POST sign-out` and does not call the `lock` route.
+  - **Cell.** After a lock the old token is refused by the real handler (`server.state.revokedSessions.size === 1`, `lockCalls === 1`, the old bearer gets the uniform 401): `contract.test.ts`, `controller.test.ts` and the Playwright lock cell.
+  - **Server (closed in §72 / migration `0085`):** `private.partner_session_lock_for_partner` **revokes** with `revoke_reason = 'lock'` (make-revoke; function kept). **PWA (closed in §73):** Lock UI calls `POST lock` (not `POST sign-out`).
   - What was here before (the old "wipe only" lock, its server-side effect on `pin_grant_until`, `reauth_until` and `otp_proof_until`, and the three options put to the gate) is kept in git history at `41cfbfd`; option (2) was chosen.
 - **The page refuses sign-in options that weaken the ceremony.** The server sets `userVerification: "required"` and an empty `allowCredentials` (6.2); the client does not trust that blindly and never calls the browser for anything else.
 - **`GET session` follows every sign-in**, so the home screen shows what the server computed rather than what the client assumed (the aal and the required aal are shown side by side).
@@ -1737,14 +1737,14 @@ The threat model the gate applied: **a shared shop iPad. The browser must never 
 | Finding | Fix | Cells |
 |---|---|---|
 | **MEDIUM-1** Chromium restored a signed-in page with a live token after Back (`pageshow.persisted`, and Refresh sent the Bearer) | `/` and `/index.html` are `Cache-Control: no-store` (not `/assets/*`); `pagehide` wipes the token and sends a keepalive sign-out; `pageshow` with `persisted` forces signed-out (`src/app/lifecycle.ts`, wired in `main.ts`) | unit: `csp.test.ts` (no-store on the page, none on assets, no request with two `Cache-Control`), `lifecycle.test.ts` (6). Playwright, in a Chromium launched **without** `--disable-back-forward-cache`: `CONTROL 1` (an unfixed page IS restored with a live token), `CONTROL 2` (no-store keeps it out), `OBSERVATION` (see below), the app is signed-out with no Bearer after Back, `DEFENCE IN DEPTH` (the app at a URL that is not no-store IS restored from the cache and is still signed-out, token-free and silent), leaving the page revokes the session |
-| **MEDIUM-2** lock and sign-out not immediate; no timeouts | copy, wipe and notify **before** sending, send with the copy and drop it; `AbortSignal.any([AbortSignal.timeout(15000), caller])` on every request with fallbacks; a wipe aborts in-flight authenticated requests; Lock and Sign-out never disabled by a busy refresh | unit: `client.test.ts` (ordering, hung request, timeout, both fallbacks, abort on wipe, a late 401 of an old session), `controller.test.ts` (the screen is signed-out synchronously with a hung request; a stale refresh cannot overwrite a new session). Playwright: a `POST sign-out` that never answers leaves the screen locked and **the token out of the V8 heap at once**; a `GET session` that never answers leaves Lock and Sign-out clickable and working; the **15 s timeout fires** in a real browser |
+| **MEDIUM-2** lock and sign-out not immediate; no timeouts | copy, wipe and notify **before** sending, send with the copy and drop it; `AbortSignal.any([AbortSignal.timeout(15000), caller])` on every request with fallbacks; a wipe aborts in-flight authenticated requests; Lock and Sign-out never disabled by a busy refresh | unit: `client.test.ts` (ordering, hung request, timeout, both fallbacks, abort on wipe, a late 401 of an old session), `controller.test.ts` (the screen is signed-out synchronously with a hung request; a stale refresh cannot overwrite a new session). Playwright: a `POST lock` that never answers leaves the screen locked and **the token out of the V8 heap at once**; a `GET session` that never answers leaves Lock and Sign-out clickable and working; the **15 s timeout fires** in a real browser |
 | **MEDIUM-3** `connect-src` named the whole API origin | one **path-scoped** source per partner function, `https://<host>/functions/v1/partner-session/`, from `src/api/partner-functions.json` | unit: the exact policy, the reference model of CSP3 path matching (a trailing-slash source is a prefix: every URL the client builds is allowed; the data API, another function, the bare function name, a lookalike prefix and dot segments are not). Playwright: a probe page under the real header: `partner-session/*` works, `/rest/v1/...`, `other-fn`, the bare name, `partner-sessionx` and dot-segment escapes are **blocked by the CSP and never reach the server** |
 | **LOW-1** `GOLFRAVEN_PARTNERS_E2E=1` accepted in production | refused by `build.mjs` and by `resolveApiBase` | `build-output.test.ts`, `csp.test.ts` |
 | **LOW-2** "every import is relative" was a regex | esbuild's `metafile.inputs`: every input under `src/` (or the e2e harness), none under `node_modules`; enforced by the build itself | `bundle-inputs.test.ts`: a side-effect `import "pkg"`, a dynamic `import("pkg")`, a re-export and a `require` each fail (and two of them are invisible to the old regex, asserted); a scratch project whose build fails |
 | **LOW-3** `call()` attached the bearer to any function name | explicit allow-list, the same list as the CSP | `client.test.ts` |
 | **LOW-4** Cancel after the passkey step kept the session | a cancel signal reaches `verify()`, which does **not** abort the request (a session the server already minted would be orphaned): on a late answer it revokes the new token with a copy and never holds it; `cancelSignIn` leaves `signing-in` at once and drops any held token | unit (3), Playwright: verify delayed, Cancel pressed, ends signed-out and `revokedSessions.size === 1` |
 | **LOW-5** verify succeeded, `GET session` failed, token forgotten but session left live | a best-effort sign-out (wipe first) before the error is shown | unit (3), Playwright |
-| **Lock ruling** | see 20.4: lock sends `POST sign-out` | `contract.test.ts`, `controller.test.ts`, Playwright (old token gets 401, `revokedSessions.size === 1`) |
+| **Lock ruling** | see 20.4: lock sends `POST lock` (§73; server §72) | `contract.test.ts`, `controller.test.ts`, Playwright (old token gets 401, `lockCalls === 1`, `revokedSessions.size === 1`) |
 | NIT 429 | the sign-in button is disabled for `retryAfterSeconds` (capped at a day) | unit (4), Playwright |
 | NIT production host | rejects a trailing dot, case variants, the bare `.example` TLD, `localhost`, `*.localhost`, loopback and every bare IP (v4 and v6) | `csp.test.ts` |
 | NIT `verify()` overwrite | throws `bad_request` / `session_exists` before sending; a second verify that finishes late revokes its own copy | `client.test.ts` |
@@ -1802,7 +1802,7 @@ The rulings:
   - The structural fix is a dedicated partners API host that proxies only `partner-*` functions, so `connect-src` can be host-scoped (ties to owner question Q1).
   - Optional hardening: the partner handlers refuse a raw path containing `%2F`, `%5C` or `%2E` with a 400.
 - **Auto-lock on `visibilitychange` is a product decision.** Should the shop iPad lock after being hidden for N seconds? A backgrounded tab or an auto-locked screen keeps a signed-in page until server idle expiry. This is not a regression; it is the owner's call.
-- **Server follow-up from 20.4:** closed in **§72** / migration `0085` — `partner_session_lock_for_partner` revokes with `revoke_reason = 'lock'`. The page still sends `POST sign-out` for Lock UI.
+- **Server follow-up from 20.4:** closed in **§72** / migration `0085` — `partner_session_lock_for_partner` revokes with `revoke_reason = 'lock'`. **PWA Lock UI:** closed in **§73** — page sends `POST lock`.
 - **NIT (S1.2 server code):** `ROUTE_METHODS[route]` is a plain object lookup, so `/partner-session/constructor` gives 405 rather than 404. Use `Object.hasOwn` or a null-prototype map the next time that code is touched.
 - **NIT:** `no-store` covers only `/` and `/index.html`. If the host falls back to `index.html` for unknown paths, those copies are covered only by the `pagehide`/`pageshow` handlers. Optionally use `/*` with `! Cache-Control` in the `/assets/*` block.
 
@@ -3487,18 +3487,45 @@ Numbering: **migration `0085`, matrix `63`, this section 72.** Closes the 20.4 /
 
 ### 72.2 Decisions and departures
 
-- **Make-revoke, not retire** — the `lock` route stays callable; the page still does not call it (20.4: `POST sign-out` alone is enough for Lock UI).
+- **Make-revoke, not retire** — the `lock` route stays callable; PWA switch to `POST lock` deferred to §73.
 - **Revoke-only body** — clearing grants on a dead session was redundant; `partner_totp_mfa_clear` remains for other callers but is no longer invoked from lock.
 - **Class stays SESSION** — lock still advances `last_seen_at` (authorize) then revokes; a non-revoking lock would have needed PEEK, but that path is gone.
 
 ### 72.3 Not built, honestly
 
-- PWA Lock UI switch from `POST sign-out` to `POST lock`; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- PWA Lock UI switch from `POST sign-out` to `POST lock` → §73; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 72.4 Verification
 
-Branch: `cursor/p5-session-lock-revoke-8ffd` (base after #111 / `21bf562`).
+Squash-merged as `5cfd70b` (#112). Branch: `cursor/p5-session-lock-revoke-8ffd` (base after #111 / `21bf562`).
 
 - `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (Files=84, Tests=5952; matrix 63 ok; 27 / 28 / 31 collateral; serialisation 9b: one revoke / three not-live / no deadlock).
 - Deno integration **390 passed** (PA-12 lock revokes with reason `lock`; post-lock sign-out 401); `verify-function-inventory: OK`; service-role-lint clean.
+
+## 73. As built: partners Lock UI uses `POST lock`
+
+Numbering: **matrix n/a (PWA only), this section 73.** Closes the §72.3 leftover: Lock button / `api.lock()` sends `POST partner-session/lock` (server already make-revokes with `revoke_reason = 'lock'` in 0085). Sign-out and `pagehide` keepalive stay on `POST sign-out`. No migration, no UI flag flips.
+
+### 73.1 What was built
+
+- **`apps/partners/src/api/client.ts`** — `endSession` takes a revoke route; `lock()` → `POST lock`; `signOut()` and orphan-session revoke still → `POST sign-out`.
+- **Fake partner server** — `tx.lock()` adds the session to `revokedSessions` (mirrors §72 make-revoke) and increments `lockCalls`.
+- **Tests** — `client.test.ts`, `controller.test.ts`, `contract.test.ts`, Playwright MEDIUM-2 / lock cells, CSP path allow for `lock`.
+- **README + design 20.4** — Lock wire route documented as `POST lock`.
+
+### 73.2 Decisions and departures
+
+- **Lock route, not sign-out** — distinct `revoke_reason = 'lock'` on the wire the page actually calls; operators can tell a Lock from a Sign-out.
+- **pagehide stays sign-out** — navigating away is not a Lock; wording and reason remain `signed-out`.
+- **No Edge / migration change** — 0085 already made the `lock` definer revoke.
+
+### 73.3 Not built, honestly
+
+- Credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 73.4 Verification
+
+Branch: `cursor/p5-lock-ui-post-lock-8ffd` (base after #112 / `5cfd70b`).
+
+- `@golfraven/partners` vitest **986 passed** (lock → `POST lock`, `lockCalls === 1`); typecheck clean; Playwright e2e deferred to CI (Chromium not in this agent image); no Edge / migration change.
 

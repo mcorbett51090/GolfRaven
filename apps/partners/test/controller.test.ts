@@ -186,14 +186,14 @@ describe("lock and sign-out clear state", () => {
     expect(JSON.stringify(controller.getState())).not.toContain("memberships");
   });
 
-  it("lock: signed-out with the 'locked' notice, the token wiped AND the session revoked on the server (design 20.4)", async () => {
+  it("lock: signed-out with the 'locked' notice, the token wiped AND the session revoked on the server (design 20.4 / §73)", async () => {
     const { controller, w, api } = setup();
     await controller.signIn();
     await controller.lock();
     expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked" } });
     expect(api.hasSession()).toBe(false);
-    expect(w.server.state.lockCalls).toBe(0);
-    expect(w.server.state.signOutCalls).toBe(1);
+    expect(w.server.state.lockCalls).toBe(1);
+    expect(w.server.state.signOutCalls).toBe(0);
     expect(w.server.state.revokedSessions.size).toBe(1);
   });
 
@@ -304,12 +304,12 @@ function gate(match: (url: string, method: string) => boolean, opts: { abortable
 }
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
-describe("lock and sign-out are immediate (MEDIUM-2) and lock revokes (design 20.4)", () => {
+describe("lock and sign-out are immediate (MEDIUM-2) and lock revokes (design 20.4 / §73)", () => {
   it.each([
-    ["lock", "locked", "lock-offline"],
-    ["signOut", "signed-out", "sign-out-offline"],
-  ] as const)("%s: a request that never answers still leaves the screen signed-out and the token gone AT ONCE, and the honest notice replaces it after the timeout", async (op, plain, offline) => {
-    const g = gate((u, m) => u.endsWith("/sign-out") && m === "POST", { abortable: true });
+    ["lock", "locked", "lock-offline", "/lock"],
+    ["signOut", "signed-out", "sign-out-offline", "/sign-out"],
+  ] as const)("%s: a request that never answers still leaves the screen signed-out and the token gone AT ONCE, and the honest notice replaces it after the timeout", async (op, plain, offline, route) => {
+    const g = gate((u, m) => u.endsWith(route) && m === "POST", { abortable: true });
     const { controller, api, states } = setup({}, (f) => g.wrap(f), { timeoutMs: 80 });
     await controller.signIn();
     states.length = 0;
@@ -323,13 +323,15 @@ describe("lock and sign-out are immediate (MEDIUM-2) and lock revokes (design 20
     expect(screens(states)).toEqual(["signed-out", "signed-out"]);
   });
 
-  it("lock sends POST sign-out with the old token, and the server revokes that session; the old token is then refused (design 20.4)", async () => {
+  it("lock sends POST lock with the old token, and the server revokes that session; the old token is then refused (design 20.4 / §73)", async () => {
     const { controller, w } = setup();
     await controller.signIn();
     const token = w.server.issuedTokens[0]!;
     await controller.lock();
     const sends = w.server.log.filter((r) => r.method !== "OPTIONS").map((r) => `${r.method} ${r.path.split("/partner-session/")[1]} ${r.authorization === `Bearer ${token}` ? "old-token" : r.authorization ?? "-"}`);
-    expect(sends.slice(-1)).toEqual(["POST sign-out old-token"]);
+    expect(sends.slice(-1)).toEqual(["POST lock old-token"]);
+    expect(w.server.state.lockCalls).toBe(1);
+    expect(w.server.state.signOutCalls).toBe(0);
     expect(w.server.state.revokedSessions.size).toBe(1);
     const raw = await w.server.handler(new Request("https://api.example.test/functions/v1/partner-session/session", { headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } }));
     expect(raw.status).toBe(401);

@@ -109,12 +109,11 @@ Errors are `PartnerApiError` with a closed `kind`: `unauthenticated` (401, the o
 - **Sign-in**: `POST options`, `navigator.credentials.get` with the server's options, `POST verify`, then `GET session`. The page **refuses
   options that weaken the ceremony**: `userVerification` must be `required` and `allowCredentials` must be empty (usernameless,
   discoverable credentials), or it never calls the browser.
-- **Lock** (gate ruling, design 20.4; server closed in §72 / 0085): wipes the token and shows sign-in with a "Locked" notice **at once**, then
-  sends `POST sign-out` with a copy of the token, so lock **revokes the session**: a token copied out of the page before the lock is dead
-  immediately, not at its idle expiry. Resuming needs a new passkey tap and opens a **new** session. The wording stays "Locked" (and, if the
-  server could not be told, "locked on this device, the server could not be reached"). The page still uses `POST sign-out` for Lock UI (this
-  slice does not change apps/partners). The server's `lock` route now also revokes with `revoke_reason = 'lock'` (0085 / §72; same SESSION
-  class; no grant/mfa clears — redundant once the row is dead).
+- **Lock** (gate ruling, design 20.4; server §72 / 0085; PWA §73): wipes the token and shows sign-in with a "Locked" notice **at once**, then
+  sends `POST lock` with a copy of the token, so lock **revokes the session** with `revoke_reason = 'lock'`: a token copied out of the page
+  before the lock is dead immediately, not at its idle expiry. Resuming needs a new passkey tap and opens a **new** session. The wording stays
+  "Locked" (and, if the server could not be told, "locked on this device, the server could not be reached"). Sign-out still uses `POST sign-out`
+  (and `pagehide` keepalive stays on sign-out).
 - **Sign-out**: the same ordering: the token is wiped and the screen leaves the session **before** `POST sign-out` is sent, and it stays that way
   if the request fails or never answers (the UI then says so honestly). Lock and Sign-out are never disabled by a busy refresh.
 - **Leaving the page**: `pagehide` wipes the token and sends a keepalive sign-out; `pageshow` with `persisted` (a back/forward-cache restore)

@@ -361,7 +361,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           state.revokedSessions.add(hash);
         },
         async lock() {
+          // §72 / §73: make-revoke — same as sign-out but counted on lockCalls (revoke_reason = 'lock' on the real DB).
           state.lockCalls += 1;
+          state.revokedSessions.add(hash);
           state.reauthUntil = null;
           session.pinGrantUntil = null;
           session.otpProofUntil = null;
