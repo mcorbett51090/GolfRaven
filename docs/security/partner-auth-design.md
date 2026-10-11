@@ -4527,11 +4527,40 @@ Numbering: **migration `0104`, matrix `82`, this section 110.** Closes the §109
 
 ### 110.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); first-credential register operator alarm → §111; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 110.4 Verification
 
-Branch: `cursor/p5-totp-locked-alarm-8ffd` (base after #149 / `5dee723`). Squash-merged as _pending_.
+Branch: `cursor/p5-totp-locked-alarm-8ffd` (base after #149 / `5dee723`). Squash-merged as `09866b8`.
 
 - pgTAP matrix `82`; tip `0104`; partners i18n / auth-alarms unit cells.
+
+## 111. As built: first-credential register operator alarm
+
+Numbering: **migration `0105`, matrix `83`, this section 111.** Closes the §110.3 leftover after `totp_locked` (completes the invite/enrolment issue→accept→register trail): when `app.partner_invite.registered_credential_id` or `app.partner_enrolment_token.registered_credential_id` first becomes non-NULL, raise `app.partner_auth_alarm` kind `credential_register` (one row per credential id per minute) so the admin auth-alarms list surfaces `partner_credential_register_first` successes. Quiet paths that never set the column stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 111.1 What was built
+
+- **Kind + row CHECK** — `credential_register` mint-shaped (`credential_id` NOT NULL and `bucket_key` = credential id text; same as `credential_add` / `credential_revoke`).
+- **Policies** — none new; `register_first` is minter-lane only (unbound). The existing 0048 binding-IS-NULL INSERT/SELECT cover the writer.
+- **Triggers** — `AFTER UPDATE OF registered_credential_id` on `partner_invite` and `partner_enrolment_token` → `private.partner_invite_credential_register_alarm_on_update` / `private.partner_enrolment_credential_register_alarm_on_update`: first set only; `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"credential","subject","source","invite"|"token",…,"status"}` (`source` = `invite` | `enrolment`); never the token hash or email.
+- **Catalogue** — `review.authAlarms.kind.credential_register` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — trigger function notes (no definer_policy_allowlist twin; no new policies).
+
+### 111.2 Decisions and departures
+
+- **Triggers, not wrapper REPLACE** — `partner_credential_register_first` is owned by `partner_session_issuer` and is large; the alarm INSERT stays on `private_definer` via triggers on the acceptance columns it already writes (same pattern as `invite_accept` / `enrolment_accept`).
+- **Mint-shaped bucket** — flood shape is one row per registered credential per UTC minute; operators can join to the credential row.
+- **No partner-bound policies** — unlike second-credential `credential_add` (bound writer), first registration is unbound; 0048 unbound policies suffice.
+- **Accept/consume stay separate kinds** — `invite_accept` / `enrolment_accept` already fire on accept/consume; this kind fires only when registration is recorded.
+
+### 111.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 111.4 Verification
+
+Branch: `cursor/p5-credential-register-alarm-8ffd` (base after #150 / `09866b8`). Squash-merged as _pending_.
+
+- pgTAP matrix `83`; tip `0105`; partners i18n / auth-alarms unit cells.
 

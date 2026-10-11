@@ -468,6 +468,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.invite_accept": "Invitation acceptée",
   "review.authAlarms.kind.enrolment_accept": "Inscription acceptée",
   "review.authAlarms.kind.totp_locked": "TOTP verrouillé",
+  "review.authAlarms.kind.credential_register": "Première clé d'accès enregistrée",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",
