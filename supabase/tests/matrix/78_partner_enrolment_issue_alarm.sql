@@ -9,7 +9,7 @@
 BEGIN;
 SELECT plan(15);
 
-GRANT edge_partner, private_definer, service_role TO CURRENT_USER WITH SET TRUE;
+GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session, app.admin_user, app.partner_auth_alarm TO CURRENT_USER;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
 ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
