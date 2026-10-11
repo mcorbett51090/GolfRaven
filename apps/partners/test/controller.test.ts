@@ -65,15 +65,28 @@ describe("sign-in", () => {
   it("cancelSignIn aborts a prompt that is waiting", async () => {
     const w = makeWorld();
     const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    // Latch until credentials.get is entered so cancel cannot race ahead of the abort listener
+    // (an already-aborted signal does not re-fire "abort"; CI load made the old 20ms sleep flake).
+    let entered!: () => void;
+    const getEntered = new Promise<void>((r) => {
+      entered = r;
+    });
     const waiting: Pick<CredentialsContainer, "get"> = {
       get: (req) =>
         new Promise((_resolve, reject) => {
-          req?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+          const fail = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          const signal = req?.signal;
+          entered();
+          if (signal?.aborted) {
+            fail();
+            return;
+          }
+          signal?.addEventListener("abort", fail, { once: true });
         }),
     };
     const controller = createController({ api, webauthn: { credentials: waiting, supported: true } });
     const p = controller.signIn();
-    await new Promise((r) => setTimeout(r, 20));
+    await getEntered;
     expect(controller.getState().screen).toBe("signing-in");
     controller.cancelSignIn();
     await p;

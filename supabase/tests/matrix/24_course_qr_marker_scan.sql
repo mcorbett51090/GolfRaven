@@ -141,9 +141,9 @@ SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polname LIKE 'pd\_marke
 -- ----------------------------------------------------------------------------
 -- 2. The pepper: readable by nobody but the one derivation function; the function posture
 -- ----------------------------------------------------------------------------
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), 3, 'the pepper: exactly THREE functions in the database name it');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), ARRAY['course_pin_derive', 'course_pin_matches', 'course_pin_pepper_rotate'],
-  'the pepper: private.course_pin_derive (current), private.course_pin_matches (current + previous), private.course_pin_pepper_rotate (operator rotation, 0082)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), 4, 'the pepper: exactly FOUR functions in the database name it');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), ARRAY['course_pin_derive', 'course_pin_matches', 'course_pin_pepper_rotate', 'purge_course_pin_pepper_previous'],
+  'the pepper: private.course_pin_derive (current), private.course_pin_matches (current + previous), private.course_pin_pepper_rotate (operator rotation, 0082), private.purge_course_pin_pepper_previous (0084 retention wrapper)');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n), (VALUES
              ('private.course_pin_derive(text, date, integer)'), ('private.course_pin_from_key(text, text, date, integer)'), ('private.course_pin_matches(text, date, integer, text, timestamptz)'),
              ('private.course_pin_epoch_at(text, timestamptz)'), ('private.course_pin_epoch_log_write()'), ('private.course_pin_proof_expire()'), ('private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)')) f(n)
