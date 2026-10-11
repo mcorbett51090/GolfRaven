@@ -342,9 +342,9 @@ export interface PartnerMembersTx extends Pick<PartnerSessionTx, "totpReset"> {
   credentialSubject(): Promise<CredentialSubject>;
   /** POST credentials (class A2 + reauth): a second credential. */
   credentialRegister(input: CredentialRegisterInput): Promise<{ readonly status: string; readonly credentialId: string | null }>;
-  /** GET credentials (class A0): the person's own. */
-  credentialList(): Promise<CredentialView[]>;
-  /** PATCH credentials/{id} (class A0): display note on the person's own credential only. */
+  /** GET credentials (class A0): the person's own, or `userId` under the 6.5 reach rule (empty outside reach). */
+  credentialList(userId?: string | null): Promise<CredentialView[]>;
+  /** PATCH credentials/{id} (class A0): display note on own or reach-covered credential. */
   credentialNote(credentialId: string, note: string | null): Promise<CredentialNoteStatus>;
   /** DELETE credentials/{id} (class A2, one's own included): own, or one the reach rule covers; its sessions die with it. */
   credentialRevoke(credentialId: string): Promise<CredentialRevokeStatus>;

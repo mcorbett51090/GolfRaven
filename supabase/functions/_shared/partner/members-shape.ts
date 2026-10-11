@@ -12,6 +12,7 @@
 //   POST credentials/options              {}
 //   POST credentials                      { challengeToken, credential }   (registration-shape.ts)
 //   PATCH credentials/{id}                { note }                  display-only; null/"" clears; at most 40 characters
+//   GET  credentials                      ?userId?                  own (absent), or a person under the 6.5 reach rule
 
 import { parseUuid } from "./invites-shape.ts";
 import { type ParseIssue, type ParseResult, plain, unknownKeys } from "./session-shape.ts";
@@ -52,6 +53,20 @@ export function parseAdminEnrolmentBody(raw: unknown): ParseResult<{ readonly us
   if (userId === null) issues.push({ path: "userId", message: "must be a uuid" });
   if (issues.length > 0 || userId === null) return { ok: false, issues };
   return { ok: true, value: { userId } };
+}
+
+/** GET credentials: the query string may hold `userId` (uuid) and nothing else. Absent → the signed-in person. */
+export function parseCredentialListQuery(url: URL): ParseResult<{ readonly userId: string | null }> {
+  const issues: ParseIssue[] = [];
+  for (const k of new Set(url.searchParams.keys())) if (k !== "userId") issues.push({ path: k, message: "unknown query parameter" });
+  const all = url.searchParams.getAll("userId");
+  let userId: string | null = null;
+  if (all.length > 1) issues.push({ path: "userId", message: "given more than once" });
+  else if (all.length === 1) {
+    userId = parseUuid(all[0]);
+    if (userId === null) issues.push({ path: "userId", message: "must be a uuid" });
+  }
+  return issues.length > 0 ? { ok: false, issues } : { ok: true, value: { userId } };
 }
 
 /** `{ note }`: string (trimmed; at most 40) or null/"" to clear. Unknown keys refused. */

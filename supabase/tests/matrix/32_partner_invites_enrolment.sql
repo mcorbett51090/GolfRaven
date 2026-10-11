@@ -207,7 +207,7 @@ SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authentic
            CROSS JOIN (VALUES ('private.partner_invite_create_for_partner(uuid, app.partner_role, text, text)'), ('private.partner_invite_list_for_partner(uuid)'), ('private.partner_invite_revoke_for_partner(uuid)'),
              ('private.partner_invite_accept_for_partner(text)'), ('private.partner_member_revoke_for_partner(uuid, uuid)'), ('private.partner_member_recover_for_partner(uuid, text)'), ('private.partner_pin_reset_for_partner(uuid)'),
              ('private.partner_org_sessions_revoke_for_partner(uuid, timestamptz)'), ('private.partner_credential_options_for_partner()'),
-             ('private.partner_credential_register_for_partner(bytea, bigint, bytea, bytea, bytea, bytea, bytea, text[])'), ('private.partner_credential_list_for_partner()'), ('private.partner_credential_revoke_for_partner(uuid)')) f(sig)
+             ('private.partner_credential_register_for_partner(bytea, bigint, bytea, bytea, bytea, bytea, bytea, text[])'), ('private.partner_credential_list_for_partner(uuid)'), ('private.partner_credential_revoke_for_partner(uuid)')) f(sig)
            WHERE has_function_privilege(r.n, f.sig::regprocedure, 'EXECUTE')), NULL::text[], 'ONLY edge_partner can execute the twelve partner-lane definers');
 SELECT is((SELECT array_agg(r.n || ':' || f.sig ORDER BY r.n, f.sig) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('partner_pin_verifier'), ('partner_totp_verifier'), ('partner_session_toucher')) r(n)
            CROSS JOIN (VALUES ('private.partner_invite_email_for_token(text)'), ('private.partner_invite_accept(text, uuid, uuid)'), ('private.partner_enrolment_token_email_for_token(text)'),
@@ -1282,7 +1282,7 @@ SAVEPOINT cred_list;
 SELECT pg_temp.bind(:'th_sx');
 SELECT is(pg_temp.call($$SELECT count(*)::text FROM private.partner_credential_list_for_partner()$$), '2', 'GET credentials: the person''s own two credentials');
 SELECT is(pg_temp.call($$SELECT count(*)::text FROM private.partner_credential_list_for_partner() WHERE o_label ~ '^[0-9]{4}-'$$), '2', '... with their database-derived labels');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.partner_credential_list_for_partner()'::regprocedure AND pg_get_function_result(p.oid) ~* 'public_key|credential_id|sign_count'), 0, 'the list never returns the key, the credential id or the counter');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid = 'private.partner_credential_list_for_partner(uuid)'::regprocedure AND pg_get_function_result(p.oid) ~* 'public_key|credential_id|sign_count'), 0, 'the list never returns the key, the credential id or the counter');
 ROLLBACK TO SAVEPOINT cred_list;
 
 -- revoke: A2 for every revoke, one's own included; the reach rule for another person's

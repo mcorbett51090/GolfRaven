@@ -12,7 +12,7 @@
 //   POST members/{id}/totp-reset         {}: reset an operator's or admin's TOTP under the reach rule (class A3)
 //   POST orgs/{id}/sessions/revoke-all   { createdAfter? }: the stolen-iPad button (class A2)
 //   POST admin/enrolments                { userId }: an admin issues an enrolment token for ANOTHER admin (class A3). Returned once
-//   GET  credentials                     the signed-in person's own credentials (class A0)
+//   GET  credentials                     the signed-in person's own credentials (class A0); `?userId=` for a person under the 6.5 reach rule (empty outside reach)
 //   POST credentials/options             {}: create options for a SECOND credential (class A2 + reauth)
 //   POST credentials                     { challengeToken, credential }: register a second credential (class A2 + reauth)
 //   DELETE credentials/{id}              revoke a credential, one's own included (class A2); another person's under the reach rule
@@ -41,7 +41,13 @@ import {
   type RouteSpec,
 } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
-import { parseAdminEnrolmentBody, parseCredentialNoteBody, parseMemberRevokeBody, parseRevokeAllBody } from "./members-shape.ts";
+import {
+  parseAdminEnrolmentBody,
+  parseCredentialListQuery,
+  parseCredentialNoteBody,
+  parseMemberRevokeBody,
+  parseRevokeAllBody,
+} from "./members-shape.ts";
 import { type CredentialView, type PartnerDb, PartnerNotConfigured, type RegistrationVerifier } from "./ports.ts";
 import { parseSecondCredentialBody } from "./registration-shape.ts";
 import { formatChallengeToken } from "./session-handler.ts";
@@ -121,7 +127,9 @@ export async function handlePartnerMembersRequest(req: Request, deps: PartnerMem
           case "credential-options":
             return await handleCredentialOptions(req, deps, decision, tokenHash);
           case "credentials":
-            return req.method === "POST" ? await handleCredentialRegister(req, deps, decision, tokenHash) : await handleCredentialList(deps, decision, tokenHash);
+            return req.method === "POST"
+              ? await handleCredentialRegister(req, deps, decision, tokenHash)
+              : await handleCredentialList(req, deps, decision, tokenHash);
           case "credential":
             return req.method === "PATCH"
               ? await handleCredentialNote(req, deps, decision, tokenHash, id)
@@ -197,8 +205,10 @@ function credentialBody(c: CredentialView): Record<string, unknown> {
   };
 }
 
-async function handleCredentialList(deps: PartnerMembersDeps, decision: Decision, tokenHash: string): Promise<Response> {
-  const credentials = await deps.db.withMembers(tokenHash, (s) => s.credentialList());
+async function handleCredentialList(req: Request, deps: PartnerMembersDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseCredentialListQuery(new URL(req.url));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const credentials = await deps.db.withMembers(tokenHash, (s) => s.credentialList(parsed.value.userId));
   return partnerOk(decision, 200, { credentials: credentials.map(credentialBody) });
 }
 

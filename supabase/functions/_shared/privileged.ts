@@ -4333,10 +4333,10 @@ function buildPartnerMembersTx(trx: TxSql): Omit<PartnerMembersTx, "totpReset"> 
       if (typeof r?.o_status !== "string") throw new Error("partner_credential_register_for_partner returned no status");
       return { status: r.o_status, credentialId: textOrNull(r.o_credential_id) };
     },
-    async credentialList(): Promise<CredentialView[]> {
+    async credentialList(userId?: string | null): Promise<CredentialView[]> {
       const rows = await trx`
         select o_id::text as o_id, o_label, o_note, o_created_at, o_last_used_at, o_revoked_at, o_backup_eligible, o_backup_state
-        from private.partner_credential_list_for_partner()`;
+        from private.partner_credential_list_for_partner(${userId ?? null}::uuid)`;
       return rows.map((r) => ({
         id: String(r.o_id),
         label: String(r.o_label),
