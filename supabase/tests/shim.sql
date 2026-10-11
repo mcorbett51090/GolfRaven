@@ -320,8 +320,10 @@ END
 $$;
 REVOKE ALL ON FUNCTION vault.create_secret(text, text, text, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION vault.create_secret(text, text, text, uuid) TO migration_owner;
-GRANT EXECUTE ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) TO migration_owner;
+-- WITH GRANT OPTION: migration 0082 grants EXECUTE onward to private_definer
+-- (same shape a real project's postgres role needs on hosted Vault).
+GRANT EXECUTE ON FUNCTION vault.create_secret(text, text, text, uuid) TO migration_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) TO migration_owner WITH GRANT OPTION;
 
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh
