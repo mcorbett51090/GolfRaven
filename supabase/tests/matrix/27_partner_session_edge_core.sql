@@ -10,7 +10,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(163);
+SELECT plan(164);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -233,9 +233,15 @@ SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_for_partner('\x0
   '14 (a) / PA-28: the reauth verification is A0_ENROL: authorize passes; malformed args raise 22023 (not the aal gate)');
 SELECT is((SELECT private.partner_whoami_for_partner() ->> 'requiredAal'), '2', '4.1: ... while GET session (PEEK) still answers an aal 1 operator, and reports the assurance it needs');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, '4.1: ... and lock (SESSION) still works at aal 1');
-SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, '4.1: ... and sign-out (SESSION) still works at aal 1');
+SELECT throws_ok($$SELECT private.partner_session_revoke_for_partner()$$, '42501', 'partner_authorize: the session is not live', '4.1: ... and sign-out after lock refuses (row already dead)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT op_aal1;
+SAVEPOINT op_aal1_out;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_op');
+SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, '4.1: ... and sign-out (SESSION) still works at aal 1');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT op_aal1_out;
 
 -- ----------------------------------------------------------------------------
 -- 3. GET session: class PEEK. It reports everything re-read, and it NEVER moves last_seen_at (4.2)

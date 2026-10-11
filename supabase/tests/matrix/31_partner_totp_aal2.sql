@@ -12,7 +12,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(84);
+SELECT plan(85);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -310,9 +310,16 @@ SELECT private.bind_partner_session(:'th_op1');
 SELECT is(private.zz31_authz_for_partner(NULL, NULL, NULL, 'SESSION'), '00000000-0000-0000-0000-3000000000c1'::uuid, 'PA-20: aal1 operator: SESSION ok');
 SELECT is(private.zz31_authz_for_partner(NULL, NULL, NULL, 'PEEK'), '00000000-0000-0000-0000-3000000000c1'::uuid, 'PA-20: aal1 operator: PEEK ok');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'PA-20: aal1 operator: lock (SESSION) ok');
-SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, 'PA-20: aal1 operator: sign-out (SESSION) ok');
+SELECT throws_ok($$SELECT private.partner_session_revoke_for_partner()$$, '42501', 'partner_authorize: the session is not live', 'PA-20: aal1 operator: sign-out after lock refuses (row already dead)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT aal1_gates;
+SAVEPOINT aal1_signout;
+SELECT pg_temp.seed_totp('00000000-0000-0000-0000-3000000000c1', 1, true, NULL);
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_op1');
+SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, 'PA-20: aal1 operator: sign-out (SESSION) ok');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT aal1_signout;
 
 SAVEPOINT aal1_classes;
 SELECT pg_temp.seed_totp('00000000-0000-0000-0000-3000000000c1', 1, true, NULL);

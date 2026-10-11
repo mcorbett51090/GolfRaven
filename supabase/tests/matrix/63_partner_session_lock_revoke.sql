@@ -60,16 +60,17 @@ $f$;
 
 CREATE FUNCTION pg_temp.signin(p_label text, p_cred text, p_counter bigint) RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE
-  c record; a record;
+  c record; a record; v_th text;
 BEGIN
   SELECT * INTO c FROM creds WHERE label = p_cred;
+  v_th := pg_temp.th(p_label);
   EXECUTE 'SET LOCAL ROLE private_definer';
   SELECT * INTO a FROM pg_temp.ps_assertion(c.d, 'partners.example.test', 'https://partners.example.test', p_counter);
   EXECUTE 'RESET ROLE';
-  INSERT INTO asr VALUES (p_label, pg_temp.th(p_label), c.cred_id, a.o_nonce, a.o_exp, a.o_mac, a.o_ad, a.o_cd, a.o_sig);
+  INSERT INTO asr VALUES (p_label, v_th, c.cred_id, a.o_nonce, a.o_exp, a.o_mac, a.o_ad, a.o_cd, a.o_sig);
   EXECUTE 'SET LOCAL ROLE edge_partner_minter';
   INSERT INTO mres SELECT p_label, m.* FROM private.partner_session_mint(
-    pg_temp.th(p_label), c.cred_id, a.o_nonce, a.o_exp, a.o_mac, a.o_ad, a.o_cd, a.o_sig) m;
+    v_th, c.cred_id, a.o_nonce, a.o_exp, a.o_mac, a.o_ad, a.o_cd, a.o_sig) m;
   EXECUTE 'RESET ROLE';
   RETURN (SELECT o_status FROM mres WHERE label = p_label ORDER BY ctid DESC LIMIT 1);
 END
