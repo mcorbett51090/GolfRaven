@@ -4556,11 +4556,39 @@ Numbering: **migration `0105`, matrix `83`, this section 111.** Closes the §110
 
 ### 111.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); PIN-set operator alarm → §112; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 111.4 Verification
 
-Branch: `cursor/p5-credential-register-alarm-8ffd` (base after #150 / `09866b8`). Squash-merged as _pending_.
+Branch: `cursor/p5-credential-register-alarm-8ffd` (base after #150 / `09866b8`). Squash-merged as `f13b765`.
 
 - pgTAP matrix `83`; tip `0105`; partners i18n / auth-alarms unit cells.
+
+## 112. As built: PIN-set operator alarm
+
+Numbering: **migration `0106`, matrix `84`, this section 112.** Closes the §111.3 leftover after `credential_register` (next staff enrolment ceremony step after `register_first`): a successful `partner_pin_set_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `pin_set` (one row per subject uid per minute) so the admin auth-alarms list surfaces first PIN sets, not only `audit_log` `partner.pin.set`. `already_set` / `locked` stay quiet. `pin_change` is deliberately not covered (routine self-service). No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 112.1 What was built
+
+- **Kind + row CHECK** — `pin_set` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `pin_reset` / `pin_locked`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_pin_set_for_partner`: after the existing audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}`.
+- **Catalogue** — `review.authAlarms.kind.pin_set` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist twin for the two policies.
+
+### 112.2 Decisions and departures
+
+- **ok only** — refusals write no PIN and stay quiet; flood shape is one row per person per UTC minute.
+- **Not `pin_change`** — a member changing their own live PIN is not an operator-facing ceremony event; reset already has `pin_reset`.
+- **Staff / manager only** — operators and admins hold no PIN (6.3); the wrapper's membership gate is unchanged.
+
+### 112.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 112.4 Verification
+
+Branch: `cursor/p5-pin-set-alarm-8ffd` (base after #151 / `f13b765`). Squash-merged as _pending_.
+
+- pgTAP matrix `84`; tip `0106`; partners i18n / auth-alarms unit cells.
 
