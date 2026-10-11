@@ -72,6 +72,21 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 0.5rem;
 }
+.totp-enrol-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+.totp-qr {
+  display: block;
+  width: min(100%, 14rem);
+  height: auto;
+  image-rendering: pixelated;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  background: #fff;
+}
 .fields dt {
   color: var(--muted);
 }

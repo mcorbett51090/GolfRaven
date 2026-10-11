@@ -9,6 +9,7 @@ import { translate, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
 import { field, form } from "./forms";
 import { noticeElement } from "./notice";
+import { totpQrCanvas } from "./totp-qr";
 
 type T = (k: MessageKey, p?: Record<string, string | number>) => string;
 type Panel = PinPromptPanel | PinSetupPanel | EmailProofPanel | TotpPanel;
@@ -139,12 +140,17 @@ function totp(p: TotpPanel, c: AppController, t: T, locale: Locale): HTMLElement
     p.enrolment === null
       ? null
       : h(
-          "dl",
-          { class: "fields", "data-testid": "totp-seed" },
-          h("dt", {}, t("totp.seed.label")),
-          h("dd", { class: "mono" }, p.enrolment.seed),
-          h("dt", {}, t("totp.uri.label")),
-          h("dd", { class: "mono" }, p.enrolment.otpauthUrl),
+          "div",
+          { class: "totp-enrol-secret", "data-testid": "totp-seed" },
+          totpQrCanvas(p.enrolment.otpauthUrl, t("totp.qr.label")),
+          h(
+            "dl",
+            { class: "fields" },
+            h("dt", {}, t("totp.seed.label")),
+            h("dd", { class: "mono" }, p.enrolment.seed),
+            h("dt", {}, t("totp.uri.label")),
+            h("dd", { class: "mono" }, p.enrolment.otpauthUrl),
+          ),
         ),
     form(
       () => void c.submitTotp(code.take()),
