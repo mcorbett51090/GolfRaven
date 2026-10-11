@@ -3472,5 +3472,6 @@ Numbering: **migration `0084`, matrix `62`, this section 71.** Closes the automa
 
 Branch: `cursor/p5-pepper-previous-purge-8ffd` (base after #110 / `6ac6ec8`).
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 62 ok; 20 / 24 / 30 privilege / pepper-namer lists).
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (Files=83, Tests=5939; matrix 62 ok; 20 / 24 / 30 privilege / pepper-namer lists).
+- Deno integration **390 passed**; `verify-function-inventory: OK`; service-role-lint clean.
 
