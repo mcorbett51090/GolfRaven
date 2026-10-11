@@ -217,8 +217,20 @@ suite("apps/partners in Chromium", () => {
       const origins = new Set(w.requests.map((u) => new URL(u).origin));
       expect([...origins].sort()).toEqual([apiOrigin, pageOrigin].sort());
       expect(w.requests.some((u) => /rest\/v1|postgrest|supabase/i.test(u))).toBe(false);
-      const calls = apiCalls().map((r) => `${r.method} ${r.path.split("/partner-session/")[1]}`);
-      expect(calls).toEqual(["POST options", "POST verify", "GET session", "GET session"]);
+      const routeTail = (path: string): string => {
+        if (path.includes("/partner-session/")) return path.split("/partner-session/")[1]!;
+        if (path.includes("/partner-members/")) return `partner-members/${path.split("/partner-members/")[1]!}`;
+        return path;
+      };
+      const calls = apiCalls().map((r) => `${r.method} ${routeTail(r.path)}`);
+      // §93: after session, GET credentials/notices (A0) before home; refresh is a second GET session.
+      expect(calls).toEqual([
+        "POST options",
+        "POST verify",
+        "GET session",
+        "GET partner-members/credentials/notices",
+        "GET session",
+      ]);
       for (const r of apiCalls()) {
         expect(r.contentType).toBe("application/json");
         expect(r.origin).toBe(pageOrigin);
@@ -376,8 +388,9 @@ suite("apps/partners in Chromium", () => {
       expect(server.state.signOutCalls).toBe(0);
       const res = await fetch(`${apiOrigin}/functions/v1/partner-session/session`, { headers: { authorization: `Bearer ${token}`, "content-type": "application/json", origin: pageOrigin } });
       expect(res.status).toBe(401);
-      const authed = apiCalls().filter((r) => r.authorization !== null);
-      expect(authed.map((r) => r.path.split("/partner-session/")[1])).toEqual(["session", "lock", "session"]); // the last is the direct fetch above, not the page
+      const authedSession = apiCalls().filter((r) => r.authorization !== null && r.path.includes("/partner-session/"));
+      // page: GET session (+ notices on partner-members, omitted here), POST lock; last GET session is the direct fetch above
+      expect(authedSession.map((r) => r.path.split("/partner-session/")[1])).toEqual(["session", "lock", "session"]);
       expect(await w.violations()).toEqual([]);
       // resuming needs a new tap
       const optionsBefore = apiCalls().filter((r) => r.path.endsWith("/options")).length;
