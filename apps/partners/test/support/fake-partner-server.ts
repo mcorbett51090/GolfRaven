@@ -115,6 +115,8 @@ export interface FakeServer {
   seedMember(input: { userId: string; orgId?: string; role?: string; facilityId?: string | null; email?: string | null }): void;
   /** Confirmed TOTP for a seedMember'd user so §86 totp-reset can succeed. */
   seedMemberTotp(userId: string): void;
+  /** Marks a user id as a platform admin for §87 admin enrolment issue. */
+  seedAdminUser(userId: string): void;
   /** Adds an active credential for another user (must be seedMember'd for reach PATCH/DELETE). */
   seedCredentialForUser(userId: string, id?: string): string;
   /** What the server stores of a user's PIN (never the digits), or null. */
@@ -208,6 +210,8 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
   }> = [];
   /** userIds whose credentials the signed-in actor may list / note / revoke under reach (seeded via seedMember). */
   const reachUsers = new Set<string>();
+  /** Platform admin user ids for §87 POST admin/enrolments. */
+  const adminUsers = new Set<string>();
   const invites = new Map<string, FakeInvite>();
   const usedGotrueSessions = new Set<string>();
   const log: LoggedRequest[] = [];
@@ -1507,6 +1511,27 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
           enrolUrl: `${opts.pageOrigin}/enrol#${token}`,
         });
       }
+      if (route === "admin/enrolments" && req.method === "POST") {
+        const a3 = needA3(session);
+        if (a3 !== null) return a3;
+        if (opts.whoami?.isAdmin !== true) return err(403, "forbidden");
+        const body = (await req.json()) as { userId?: unknown };
+        if (typeof body.userId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.userId)) {
+          return err(400, "bad_request");
+        }
+        const target = body.userId.toLowerCase();
+        if (target === session.userId) return err(422, "invalid_request");
+        if (!adminUsers.has(target)) return err(403, "forbidden");
+        const token = "gr_enr_" + toB64u(randomBytes(32));
+        const tokenId = randomUUID();
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+        return ok(201, {
+          tokenId,
+          expiresAt,
+          token,
+          enrolUrl: `${opts.pageOrigin}/enrol#${token}`,
+        });
+      }
       const orgRevokeAllMatch =
         /^orgs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/sessions\/revoke-all$/i.exec(route);
       if (orgRevokeAllMatch !== null && req.method === "POST") {
@@ -1827,6 +1852,9 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
       const user = users.get(id);
       if (user === undefined) throw new Error("fake partner server: seedMemberTotp requires seedMember first");
       user.totp = { seed: new Uint8Array(randomBytes(20)), confirmed: true, enrolSession: null };
+    },
+    seedAdminUser(userId) {
+      adminUsers.add(userId.toLowerCase());
     },
     seedCredentialForUser(userId, id = randomUUID()) {
       const owner = userId.toLowerCase();

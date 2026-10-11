@@ -3881,11 +3881,37 @@ Numbering: **matrix n/a (PWA only), this section 86.** Closes the §85.3 leftove
 
 ### 86.3 Not built, honestly
 
-- Admin enrolment issue UI (A3); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Admin enrolment issue UI → §87; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 86.4 Verification
 
-Branch: `cursor/p5-member-totp-reset-ui-8ffd` (base after #125 / `d09d5c3`). Tip on PR (this slice).
+Squash-merged as `61cce7a` (#126). Branch: `cursor/p5-member-totp-reset-ui-8ffd` (base after #125 / `d09d5c3`).
 
-- `@golfraven/partners` vitest (member TOTP reset A3); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **1061 passed** (member TOTP reset A3); typecheck clean; CI green; no Edge / migration change.
+
+## 87. As built: partners admin enrolment issue UI (A3)
+
+Numbering: **matrix n/a (PWA only), this section 87.** Closes the §86.3 leftover: an admin issues a one-time `gr_enr_` enrolment token for **another** admin via existing `POST partner-members/admin/enrolments` `{ userId }` (class A3). Show-once plaintext (recover / hand-over pattern). No migration, no Edge change, no UI flag flips.
+
+### 87.1 What was built
+
+- **`members-routes.ts`** — `issueAdminEnrolment(api, userId)` → `{ tokenId, expiresAt, token, enrolUrl }`.
+- **Work screen** — on the §81 members surface when `isAdmin`: UUID draft + issue (A3 gate); holds plaintext in `work.adminEnrolment` until dismiss / leave.
+- **Fake partner server** — `seedAdminUser`; POST `admin/enrolments` under A3 for a different admin.
+- **i18n** EN + fr-CA; Vitest covers A3 refuse, self-refuse, and happy path.
+
+### 87.2 Decisions and departures
+
+- **UUID typed by admin** — facility roster does not list platform admins; no separate admin directory in this slice.
+- **Same show-once discipline as recover** — never logged; cleared on dismiss.
+
+### 87.3 Not built, honestly
+
+- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 87.4 Verification
+
+Branch: `cursor/p5-admin-enrolment-ui-8ffd` (base after #126 / `61cce7a`). Tip on PR (this slice).
+
+- `@golfraven/partners` vitest (admin enrolment A3); typecheck clean; no Edge / migration change.
 

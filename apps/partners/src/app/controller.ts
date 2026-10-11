@@ -120,6 +120,9 @@ export interface AppController extends StepUp {
   revokeAllOrgSessions(orgId: string): Promise<void>;
   dismissOrgRevokeAll(): void;
   resetMemberTotp(userId: string): Promise<void>;
+  setAdminEnrolUserId(value: string): void;
+  issueAdminEnrolment(): Promise<void>;
+  dismissAdminEnrolment(): void;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -417,6 +420,9 @@ export function createController(deps: ControllerDeps): AppController {
     revokeAllOrgSessions: (orgId) => work.revokeAllOrgSessions(orgId),
     dismissOrgRevokeAll: () => work.dismissOrgRevokeAll(),
     resetMemberTotp: (userId) => work.resetMemberTotp(userId),
+    setAdminEnrolUserId: (value) => work.setAdminEnrolUserId(value),
+    issueAdminEnrolment: () => work.issueAdminEnrolment(),
+    dismissAdminEnrolment: () => work.dismissAdminEnrolment(),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

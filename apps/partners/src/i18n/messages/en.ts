@@ -522,11 +522,22 @@ export const en = {
   "members.totpSelf": "You cannot reset your own authenticator here.",
   "members.totpAdminOnly": "Only an admin can reset another person's authenticator.",
   "members.totpNotSet": "That person has no authenticator to reset.",
+  "members.adminEnrol.title": "Admin enrolment",
+  "members.adminEnrol.hint": "Issue a one-time enrolment link for another platform admin. They must already be listed as an admin.",
+  "members.adminEnrol.userId": "Other admin's user id",
+  "members.adminEnrol.action": "Issue enrolment link",
+  "members.adminEnrol.lead": "Show this enrolment link or token once. It is not stored again.",
+  "members.adminEnrol.until": "Expires {until}",
+  "members.adminEnrol.dismiss": "I have shown it",
+  "members.adminEnrolAdminOnly": "Only an admin can issue an admin enrolment link.",
+  "members.adminEnrolSelf": "You cannot issue an enrolment link for yourself here.",
+  "members.adminEnrolUserInvalid": "Enter the other admin's user id as a UUID.",
   "notice.memberPinReset": "PIN reset. They must set a new PIN at the next sensitive action.",
   "notice.memberRecovered": "Account recovered. Show the one-time link before you leave this screen.",
   "notice.memberRevoked": "Membership ended for that organisation.",
   "notice.orgRevokeAll": "All sessions for that organisation have ended.",
   "notice.memberTotpReset": "Authenticator reset. Their sessions have ended; they must enrol a new one.",
+  "notice.adminEnrolment": "Admin enrolment link ready. Show it once before leaving this screen.",
 } as const;
 
 export type MessageKey = keyof typeof en;

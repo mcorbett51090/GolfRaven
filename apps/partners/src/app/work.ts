@@ -14,6 +14,7 @@ import { isPartnerApiError } from "../api/errors";
 import {
   credentialOptions,
   getCredentials,
+  issueAdminEnrolment as postAdminEnrolment,
   listMembers,
   patchCredentialNote,
   recoverMember as postMemberRecover,
@@ -122,6 +123,11 @@ export interface WorkScreens {
   dismissOrgRevokeAll(): void;
   /** Class A3: admin resets another's TOTP under reach. Client gate matches printed-QR write. Never for oneself. */
   resetMemberTotp(userId: string): Promise<void>;
+  /** Draft target user id for admin enrolment issue. */
+  setAdminEnrolUserId(value: string): void;
+  /** Class A3: admin issues `gr_enr_` for another admin; holds plaintext once. */
+  issueAdminEnrolment(): Promise<void>;
+  dismissAdminEnrolment(): void;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -286,7 +292,16 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
     openMembers() {
       const s = signedIn(host);
       if (s === null || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
-      withWork(s, { kind: "members", busy: false, rows: null, recovered: null, createdAfterDraft: "", lastRevokeAll: null }, null);
+      withWork(s, {
+        kind: "members",
+        busy: false,
+        rows: null,
+        recovered: null,
+        createdAfterDraft: "",
+        lastRevokeAll: null,
+        adminEnrolUserIdDraft: "",
+        adminEnrolment: null,
+      }, null);
     },
 
     openMemberCredentials(userId) {
@@ -959,6 +974,57 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         const cur = live(host, grant);
         if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
       }
+    },
+
+    setAdminEnrolUserId(value) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, adminEnrolUserIdDraft: value }, s.notice);
+    },
+
+    async issueAdminEnrolment() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!s.session.isAdmin) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.adminEnrolAdminOnly" } } });
+        return;
+      }
+      const draft = s.work.adminEnrolUserIdDraft.trim().toLowerCase();
+      if (!UUID_RE.test(draft)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.adminEnrolUserInvalid" } } });
+        return;
+      }
+      if (draft === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.adminEnrolSelf" } } });
+        return;
+      }
+      if (s.session.aal < s.session.requiredAal || s.session.aal < 2) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.needTotp" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const adminEnrolment = await postAdminEnrolment(api, draft);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, adminEnrolment },
+            notice: { kind: "admin-enrolment" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    dismissAdminEnrolment() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, adminEnrolment: null }, s.notice?.kind === "admin-enrolment" ? null : s.notice);
     },
 
     async loadCredentials() {

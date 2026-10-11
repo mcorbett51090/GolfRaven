@@ -6,6 +6,7 @@
  * Member PIN reset / recover / revoke under reach (class A2, §82–§84).
  * Org sessions revoke-all (stolen-iPad, class A2, §85).
  * Member TOTP reset under reach (class A3, §86).
+ * Admin enrolment issue for another admin (class A3, §87).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
@@ -268,4 +269,19 @@ export async function resetMemberTotp(api: PartnerApi, userId: string): Promise<
     }
     throw e;
   }
+}
+
+/** POST admin/enrolments (class A3): issue `gr_enr_` for another admin. Plaintext shown once; never logged. */
+export async function issueAdminEnrolment(api: PartnerApi, userId: string): Promise<MemberRecovered> {
+  const data = await api.call("POST", "partner-members", "admin/enrolments", { userId });
+  if (
+    !isObject(data) || !isString(data["tokenId"]) || !isString(data["expiresAt"]) ||
+    !isString(data["token"]) || !isString(data["enrolUrl"])
+  ) malformed();
+  return {
+    tokenId: data["tokenId"],
+    expiresAt: data["expiresAt"],
+    token: data["token"],
+    enrolUrl: data["enrolUrl"],
+  };
 }
