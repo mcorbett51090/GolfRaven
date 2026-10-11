@@ -32,6 +32,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "invite_create")).toBe("Invitation créée");
     expect(authAlarmKindLabel("en", "invite_accept")).toBe("Invite accepted");
     expect(authAlarmKindLabel("fr-CA", "invite_accept")).toBe("Invitation acceptée");
+    expect(authAlarmKindLabel("en", "enrolment_accept")).toBe("Enrolment accepted");
+    expect(authAlarmKindLabel("fr-CA", "enrolment_accept")).toBe("Inscription acceptée");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

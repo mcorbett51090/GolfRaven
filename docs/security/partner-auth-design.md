@@ -4470,11 +4470,40 @@ Numbering: **migration `0102`, matrix `80`, this section 108.** Closes the §107
 
 ### 108.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); enrolment-accept operator alarm → §109; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 108.4 Verification
 
-Branch: `cursor/p5-invite-accept-alarm-8ffd` (base after #147 / `d594896`). Squash-merged as _pending_.
+Branch: `cursor/p5-invite-accept-alarm-8ffd` (base after #147 / `d594896`). Squash-merged as `83d456f`.
 
 - pgTAP matrix `80`; tip `0102`; partners i18n / auth-alarms unit cells.
+
+## 109. As built: enrolment-accept operator alarm
+
+Numbering: **migration `0103`, matrix `81`, this section 109.** Closes the §108.3 / §21.4 leftover after `invite_accept` (pairs `enrolment_issue`): when `app.partner_enrolment_token.consumed_at` first becomes non-NULL, raise `app.partner_auth_alarm` kind `enrolment_accept` (one row per token id per minute) so the admin auth-alarms list surfaces minter-lane token acceptances (`partner_enrolment_token_accept`), not only `audit_log` `partner.enrolment.accept`. Quiet statuses that never set `consumed_at` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 109.1 What was built
+
+- **Kind + row CHECK** — `enrolment_accept` with `credential_id` NULL and `bucket_key` = enrolment token id text (same uuid shape as `invite_accept`).
+- **Policies** — none new; accept is minter-lane only (unbound). The existing 0048 binding-IS-NULL INSERT/SELECT cover the writer.
+- **Trigger** — `AFTER UPDATE OF consumed_at` → `private.partner_enrolment_accept_alarm_on_update`: first consume only; `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"token","purpose","subject","status"}` (`subject` = token `user_id`); never the token hash or email.
+- **Catalogue** — `review.authAlarms.kind.enrolment_accept` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — trigger function note (no definer_policy_allowlist twin; no new policies).
+
+### 109.2 Decisions and departures
+
+- **Trigger, not wrapper REPLACE** — `partner_enrolment_token_accept` is owned by `partner_session_issuer`; the alarm INSERT stays on `private_definer` via the trigger (same pattern as `invite_accept`).
+- **ok only** — quiet statuses (`email_mismatch`, `existing_member_sign_in`, `not_found`, …) never set `consumed_at`, so the trigger stays quiet. Attempts-only updates stay quiet.
+- **Bucket = token id** — flood shape is one row per enrolment token per UTC minute.
+- **No partner-bound policies** — unlike `invite_accept` (branch E), enrolment accept has no bound writer; 0048 unbound policies suffice.
+
+### 109.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 109.4 Verification
+
+Branch: `cursor/p5-enrolment-accept-alarm-8ffd` (base after #148 / `83d456f`). Squash-merged as _pending_.
+
+- pgTAP matrix `81`; tip `0103`; partners i18n / auth-alarms unit cells.
 

@@ -466,6 +466,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.enrolment_issue": "Inscription admin émise",
   "review.authAlarms.kind.invite_create": "Invitation créée",
   "review.authAlarms.kind.invite_accept": "Invitation acceptée",
+  "review.authAlarms.kind.enrolment_accept": "Inscription acceptée",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",
