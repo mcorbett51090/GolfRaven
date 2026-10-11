@@ -20,7 +20,7 @@
 -- ============================================================================
 CREATE TABLE app.partner_credential_add_notice (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  credential_id uuid NOT NULL REFERENCES app.partner_credential (id) UNIQUE,
+  credential_id uuid NOT NULL REFERENCES app.partner_credential (id) ON DELETE CASCADE UNIQUE,
   subject_user_id uuid NOT NULL REFERENCES auth.users (id),
   label text NOT NULL CHECK (char_length(label) BETWEEN 1 AND 120),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -92,6 +92,17 @@ CREATE POLICY pd_purge_partner_credential_add_notice_r ON app.partner_credential
           AND c.revoked_at < now() - interval '180 days'
       )
     )
+  );
+
+CREATE POLICY pd_delete_partner_credential_add_notice_subject_user_id ON app.partner_credential_add_notice FOR DELETE TO private_definer
+  USING (
+    subject_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
+  );
+CREATE POLICY pd_delete_partner_credential_add_notice_subject_user_id_r ON app.partner_credential_add_notice FOR SELECT TO private_definer
+  USING (
+    subject_user_id = nullif(current_setting('app.delete_my_data.target_user_id', true), '')::uuid
+    AND (SELECT private.partner_binding_kind()) IS DISTINCT FROM 'partner'
   );
 
 -- ============================================================================
@@ -381,7 +392,11 @@ INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_na
   ('app', 'partner_credential_add_notice', 'pd_purge_partner_credential_add_notice', 'DELETE', true,
    '0091 (§92): retention purge; closed under partner binding', 'private_definer'),
   ('app', 'partner_credential_add_notice', 'pd_purge_partner_credential_add_notice_r', 'SELECT', true,
-   '0091 (§92): row-visibility companion to pd_purge_partner_credential_add_notice', 'private_definer');
+   '0091 (§92): row-visibility companion to pd_purge_partner_credential_add_notice', 'private_definer'),
+  ('app', 'partner_credential_add_notice', 'pd_delete_partner_credential_add_notice_subject_user_id', 'DELETE', true,
+   'delete_my_data''s generic pass (pii_retention_policy: partner_credential_add_notice.subject_user_id = delete_row); the 0016 GUC window, DELETE ONLY, closed under a partner binding (0047 8a, check 15)', 'private_definer'),
+  ('app', 'partner_credential_add_notice', 'pd_delete_partner_credential_add_notice_subject_user_id_r', 'SELECT', true,
+   'row-visibility companion to pd_delete_partner_credential_add_notice_subject_user_id; also delete_my_data''s post-condition count', 'private_definer');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
@@ -393,10 +408,25 @@ WHERE al.schema_name = n.nspname AND al.table_name = c.relname AND al.policy_nam
     'pd_partner_credential_add_alarm_insert', 'pd_partner_credential_add_alarm_select',
     'pd_insert_partner_credential_add_notice', 'pd_read_partner_credential_add_notice_subject',
     'pd_read_partner_credential_add_notice_reach', 'pd_update_partner_credential_add_notice_ack',
-    'pd_purge_partner_credential_add_notice', 'pd_purge_partner_credential_add_notice_r'
+    'pd_purge_partner_credential_add_notice', 'pd_purge_partner_credential_add_notice_r',
+    'pd_delete_partner_credential_add_notice_subject_user_id', 'pd_delete_partner_credential_add_notice_subject_user_id_r'
   );
 DROP POLICY current_user_seed_definer_policy_allowlist_0091 ON private.definer_policy_allowlist;
 REVOKE INSERT, UPDATE ON private.definer_policy_allowlist FROM CURRENT_USER;
+
+GRANT INSERT ON private.pii_retention_policy TO CURRENT_USER;
+CREATE POLICY current_user_seed_pii_retention_policy_0091 ON private.pii_retention_policy
+  FOR INSERT TO CURRENT_USER WITH CHECK (true);
+INSERT INTO private.pii_retention_policy (schema_name, table_name, column_name, action, reason) VALUES
+  ('app', 'partner_credential_add_notice', 'subject_user_id', 'delete_row', 'the subject''s own credential-add notices (0091): deleted with the account by delete_my_data''s generic pass (and by FK cascade with the auth user)');
+DROP POLICY current_user_seed_pii_retention_policy_0091 ON private.pii_retention_policy;
+REVOKE INSERT ON private.pii_retention_policy FROM CURRENT_USER;
+
+CREATE POLICY current_user_seed_pii_export_policy_0091 ON private.pii_export_policy
+  FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+INSERT INTO private.pii_export_policy (schema_name, table_name, action, reason) VALUES
+  ('app', 'partner_credential_add_notice', 'exclude', 'a credential-add acknowledgement artefact (pending interstitial): label and ack timestamps, not additional subject data beyond partner_credential export');
+DROP POLICY current_user_seed_pii_export_policy_0091 ON private.pii_export_policy;
 
 -- ============================================================================
 -- 5. DO asserts

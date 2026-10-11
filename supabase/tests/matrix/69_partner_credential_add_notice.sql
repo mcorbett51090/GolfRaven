@@ -34,17 +34,23 @@ CREATE FUNCTION pg_temp.mk_session(p_label text, p_uid uuid, p_cred uuid) RETURN
 $f$;
 CREATE FUNCTION pg_temp.add_second(p_sess_label text, p_cred_label text, p_uid uuid, p_via uuid) RETURNS uuid LANGUAGE plpgsql AS $f$
 DECLARE v_id uuid;
+        v_th text;
 BEGIN
   -- Bind as edge_partner so the trigger's partner-bound INSERT policies pass; insert as the
   -- harness role (edge_partner has no table privilege on partner_credential).
+  v_th := pg_temp.th(p_sess_label);
   EXECUTE 'SET LOCAL ROLE edge_partner';
-  PERFORM private.bind_partner_session(pg_temp.th(p_sess_label));
+  PERFORM private.bind_partner_session(v_th);
   EXECUTE 'RESET ROLE';
   INSERT INTO app.partner_credential (user_id, credential_id, public_key, alg, created_via_credential_id, aaguid)
   VALUES (p_uid, decode(md5('c69:' || p_cred_label) || md5('c69b:' || p_cred_label), 'hex'),
           decode(md5('k69:' || p_cred_label) || md5('k69b:' || p_cred_label), 'hex'), -7, p_via,
           'abababab-abab-abab-abab-abababababab'::uuid)
   RETURNING id INTO v_id;
+  -- One partner bind per xact (PA-2 / PA-27); smudge xact so later cells can bind again.
+  EXECUTE 'SET LOCAL ROLE private_definer';
+  UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
+  EXECUTE 'RESET ROLE';
   RETURN v_id;
 END
 $f$;
@@ -76,9 +82,14 @@ BEGIN
 END
 $f$;
 CREATE FUNCTION pg_temp.reach_staff_fail() RETURNS void LANGUAGE plpgsql AS $f$
+DECLARE v_th text;
 BEGIN
+  v_th := pg_temp.th('sx');
+  SET LOCAL ROLE private_definer;
+  UPDATE private.actor_binding SET xact = '0'::xid8 WHERE backend_pid = pg_backend_pid() AND xact = pg_current_xact_id();
+  RESET ROLE;
   SET LOCAL ROLE edge_partner;
-  PERFORM private.bind_partner_session(pg_temp.th('sx'));
+  PERFORM private.bind_partner_session(v_th);
   PERFORM * FROM private.partner_credential_add_notice_list_reach_for_partner();
   RESET ROLE;
 END
