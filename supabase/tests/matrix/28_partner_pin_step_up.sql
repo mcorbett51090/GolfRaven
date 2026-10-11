@@ -802,14 +802,14 @@ SELECT private.bind_partner_session(:'th_sx2');
 SELECT throws_ok(format($$SELECT * FROM private.partner_session_otp_proof_for_partner(%L::uuid)$$, :'g_ok'), '23505', NULL, 'otp proof: a GoTrue session that already proved another session''s proof is refused by the UNIQUE index (23505)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT otp2;
--- lock clears the proof (0049) and the proof does not outlive it
+-- lock revokes the session (0085 / §72); step-up state on a dead row is moot
 SAVEPOINT otp3;
 SELECT pg_temp.seed_step('sx', '{"otp_s": 100, "pin_grant_s": 50}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_sx');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'lock runs');
 RESET ROLE;
-SELECT is((SELECT otp_proof_until IS NULL AND pin_grant_until IS NULL FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'lock clears the OTP proof AND the PIN grant: a locked till needs a fresh PIN');
+SELECT is((SELECT revoked_at IS NOT NULL AND revoke_reason = 'lock' FROM app.partner_session WHERE token_hash = pg_temp.th('sx')), true, 'lock revokes with reason lock: the session is dead (0085 / §72)');
 ROLLBACK TO SAVEPOINT otp3;
 
 -- ----------------------------------------------------------------------------

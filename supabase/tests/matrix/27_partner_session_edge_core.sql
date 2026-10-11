@@ -10,7 +10,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(163);
+SELECT plan(164);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -233,9 +233,15 @@ SELECT throws_ok($$SELECT * FROM private.partner_session_reauth_for_partner('\x0
   '14 (a) / PA-28: the reauth verification is A0_ENROL: authorize passes; malformed args raise 22023 (not the aal gate)');
 SELECT is((SELECT private.partner_whoami_for_partner() ->> 'requiredAal'), '2', '4.1: ... while GET session (PEEK) still answers an aal 1 operator, and reports the assurance it needs');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, '4.1: ... and lock (SESSION) still works at aal 1');
-SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, '4.1: ... and sign-out (SESSION) still works at aal 1');
+SELECT throws_ok($$SELECT private.partner_session_revoke_for_partner()$$, '42501', 'partner_authorize: the session is not live', '4.1: ... and sign-out after lock refuses (row already dead)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT op_aal1;
+SAVEPOINT op_aal1_out;
+SET LOCAL ROLE edge_partner;
+SELECT private.bind_partner_session(:'th_op');
+SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, '4.1: ... and sign-out (SESSION) still works at aal 1');
+RESET ROLE;
+ROLLBACK TO SAVEPOINT op_aal1_out;
 
 -- ----------------------------------------------------------------------------
 -- 3. GET session: class PEEK. It reports everything re-read, and it NEVER moves last_seen_at (4.2)
@@ -279,7 +285,7 @@ ROLLBACK TO SAVEPOINT who3;
 UPDATE app.partner_session SET last_seen_at = now() WHERE id = :'sid_sx'::uuid;
 
 -- ----------------------------------------------------------------------------
--- 4. Sign-out revokes the BOUND session only; lock clears every step-up grant and keeps the session live
+-- 4. Sign-out revokes the BOUND session only; lock revokes with reason lock (§72 / 0085)
 -- ----------------------------------------------------------------------------
 SAVEPOINT out1;
 SET LOCAL ROLE edge_partner;
@@ -299,7 +305,7 @@ SELECT throws_ok(format($$SELECT private.bind_partner_session(%L)$$, :'th_sx'), 
 RESET ROLE;
 ROLLBACK TO SAVEPOINT out2;
 
--- lock: seed every step-up state a session can hold (the guard is switched off for the seeding: the verifiers' own definers do not exist yet), then lock
+-- lock: seed step-up state (still visible before revoke), then lock revokes the row (0085; grant clears are redundant once dead)
 SAVEPOINT lock1;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_guard_trg;
 UPDATE app.partner_session SET pin_grant_until = now() + interval '30 seconds', reauth_until = now() + interval '4 minutes', otp_proof_until = now() + interval '9 minutes', mfa_until = now() + interval '3 minutes' WHERE id = :'sid_sx'::uuid;
@@ -310,17 +316,21 @@ SELECT is((SELECT private.partner_whoami_for_partner() -> 'stepUp' ->> 'pinGrant
 SELECT is((SELECT (private.partner_whoami_for_partner() -> 'stepUp' ->> 'reauthUntil') IS NOT NULL), true, 'lock: before it, the reauth window is open');
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'lock: runs');
 RESET ROLE;
-SELECT is((SELECT (pin_grant_until IS NULL AND reauth_until IS NULL AND otp_proof_until IS NULL) FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'lock: the PIN grant, the reauth window and the OTP proof are cleared');
-SELECT ok((SELECT mfa_until IS NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock: mfa_until IS cleared (S1.4 partner_totp_mfa_clear via the totp-verifier-owned clearer)');
-SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'lock: the session stays LIVE');
+SELECT is((SELECT revoke_reason FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock', 'lock: revoke_reason = lock (§72 / 0085)');
+SELECT ok((SELECT revoked_at IS NOT NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock: revoked_at is set (session is dead)');
+SELECT is((SELECT revoked_at IS NULL FROM app.partner_session WHERE id = :'sid_sx2'::uuid), true, 'lock: ANOTHER session of the same member is untouched');
 ROLLBACK TO SAVEPOINT lock1;
 SAVEPOINT lock2;
 SET LOCAL ROLE edge_partner;
-SELECT lives_ok(format($$SELECT private.bind_partner_session(%L)$$, :'th_sx'), 'lock: after a lock the same session still binds (a locked till still reads)');
+SELECT private.bind_partner_session(:'th_sx');
+SELECT private.partner_session_lock_for_partner();
+RESET ROLE;
+SET LOCAL ROLE edge_partner;
+SELECT throws_ok(format($$SELECT private.bind_partner_session(%L)$$, :'th_sx'), '28000', 'partner_session_refused', 'lock: after a lock the same token cannot bind again (one uniform 28000)');
 RESET ROLE;
 ROLLBACK TO SAVEPOINT lock2;
 
--- the planted-GUC rerun of PA-4c (ii) for the two new session writers: with every GUC planted for ANOTHER member, sign-out and lock change only the bound session
+-- the planted-GUC rerun of PA-4c (ii) for the session writers: with every GUC planted for ANOTHER member, lock changes only the bound session
 SAVEPOINT guc1;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_guard_trg;
 UPDATE app.partner_session SET pin_grant_until = now() + interval '30 seconds', reauth_until = now() + interval '4 minutes' WHERE id = :'sid_op'::uuid;
@@ -332,11 +342,11 @@ SELECT bool_and(set_config(g, CASE WHEN g IN ('app.edge.purge_fix_coords', 'app.
 FROM unnest(ARRAY['app.delete_my_data.target_user_id', 'app.delete_my_data.target_email', 'app.delete_my_data.target_handle', 'app.delete_my_data.target_pseudonym', 'app.edge.link_attest_key', 'app.edge.link_device_id', 'app.edge.link_hash',
                   'app.edge.purge_fix_coords', 'app.guard.entitlement_id', 'app.guard.offer_code_id', 'app.guard.play_id', 'app.offline_code.target_device_id', 'app.signin.proof_id', 'app.signin.proof_purge', 'app.signin.target_user_id']) g \gset
 SELECT lives_ok($$SELECT private.partner_session_lock_for_partner()$$, 'PA-4c (ii): lock under every planted GUC runs');
-SELECT lives_ok($$SELECT private.partner_session_revoke_for_partner()$$, 'PA-4c (ii): sign-out under every planted GUC runs');
+SELECT throws_ok($$SELECT private.partner_session_revoke_for_partner()$$, '42501', 'partner_authorize: the session is not live', 'PA-4c (ii): sign-out after lock refuses (row already dead)');
 RESET ROLE;
 SELECT is((SELECT (revoked_at IS NULL AND pin_grant_until IS NOT NULL AND reauth_until IS NOT NULL) FROM app.partner_session WHERE id = :'sid_op'::uuid), true,
   'PA-4c (ii): ANOTHER member''s session (the one the GUCs name) kept its grants and stayed live: 0 rows changed');
-SELECT is((SELECT revoked_at IS NOT NULL FROM app.partner_session WHERE id = :'sid_sx'::uuid), true, 'PA-4c (ii): the bound session itself was signed out');
+SELECT is((SELECT revoke_reason FROM app.partner_session WHERE id = :'sid_sx'::uuid), 'lock', 'PA-4c (ii): the bound session itself was locked (revoked with reason lock)');
 ROLLBACK TO SAVEPOINT guc1;
 
 -- ----------------------------------------------------------------------------
