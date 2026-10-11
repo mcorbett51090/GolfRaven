@@ -73,7 +73,8 @@ export type Notice =
         | "offer-redeem-ok"
         | "settlement-exported"
         | "credential-note-saved"
-        | "credential-revoked";
+        | "credential-revoked"
+        | "credential-added";
     }
   | { readonly kind: "error"; readonly message: UiMessage };
 

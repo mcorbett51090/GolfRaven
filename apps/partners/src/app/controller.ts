@@ -108,6 +108,7 @@ export interface AppController extends StepUp {
   loadCredentials(): Promise<void>;
   saveCredentialNote(id: string, note: string): Promise<void>;
   revokeCredential(id: string): Promise<void>;
+  addCredential(): Promise<void>;
 
   /** S7d/S7 manager/operator/admin screens (see admin.ts). */
   openProgramme(trailId: string): void;
@@ -184,7 +185,13 @@ export function createController(deps: ControllerDeps): AppController {
     set: (next: AppState) => set(next),
   };
   const panels = createPanels({ api, host, nowMs });
-  const work = createWorkScreens({ api, host, stepUp: panels, webauthn: assertionDeps(deps.webauthn) });
+  const work = createWorkScreens({
+    api,
+    host,
+    stepUp: panels,
+    webauthn: assertionDeps(deps.webauthn),
+    create: creationDeps(deps.webauthn),
+  });
   const admin = createAdminScreens({ api, host });
   const enrol = createEnrolFlow({
     api,
@@ -387,6 +394,7 @@ export function createController(deps: ControllerDeps): AppController {
     loadCredentials: () => work.loadCredentials(),
     saveCredentialNote: (id, note) => work.saveCredentialNote(id, note),
     revokeCredential: (id) => work.revokeCredential(id),
+    addCredential: () => work.addCredential(),
 
     openProgramme: (trailId) => admin.openProgramme(trailId),
     openOffers: (trailId) => admin.openOffers(trailId),

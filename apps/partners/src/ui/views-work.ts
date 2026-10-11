@@ -346,6 +346,17 @@ export function workView(state: SignedInState, controller: AppController, locale
         "div",
         { class: "actions" },
         h("button", { type: "button", disabled: busy, "data-testid": "credentials-load", onclick: () => void controller.loadCredentials() }, t("credentials.load")),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            disabled: busy || active === null || active.length >= 5,
+            "data-testid": "credentials-add",
+            onclick: () => void controller.addCredential(),
+          },
+          t("credentials.add"),
+        ),
         back,
       ),
       busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
