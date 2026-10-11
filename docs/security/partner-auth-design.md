@@ -3723,7 +3723,7 @@ Numbering: **migration `0090`, matrix `68`, this section 80.** Closes the §79.3
 
 ### 80.4 Verification
 
-Branch: `cursor/p5-member-list-reach-8ffd` (base after #119 / `d02f88f`). Tip on draft PR.
+Branch: `cursor/p5-member-list-reach-8ffd` (base after #119 / `d02f88f`). Tip on PR #120.
 
-- `HARNESS_MODE=restricted tools/db/test.sh` → (pending).
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 68 ok; 10 / 25 / 28 allowlists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
 
