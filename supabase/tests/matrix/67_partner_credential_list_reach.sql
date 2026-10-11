@@ -4,7 +4,7 @@
 
 \set QUIET 1
 BEGIN;
-SELECT plan(12);
+SELECT plan(11);
 
 GRANT edge_partner, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
