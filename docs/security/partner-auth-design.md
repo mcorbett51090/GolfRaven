@@ -1800,10 +1800,10 @@ The rulings:
 
   Each must get the partner-session handler's 404 or a gateway 400; never a PostgREST or other-function response. Record the result here.
   - The structural fix is a dedicated partners API host that proxies only `partner-*` functions, so `connect-src` can be host-scoped (ties to owner question Q1).
-  - Optional hardening: the partner handlers refuse a raw path containing `%2F`, `%5C` or `%2E` with a 400.
+  - Optional hardening: closed in **§99** — partner handlers refuse a raw path containing `%2F`, `%5C` or `%2E` with a 400. **Staging path probe** (gateway vs handler) remains open until recorded against a live host.
 - **Auto-lock on `visibilitychange` is a product decision.** Should the shop iPad lock after being hidden for N seconds? A backgrounded tab or an auto-locked screen keeps a signed-in page until server idle expiry. This is not a regression; it is the owner's call.
 - **Server follow-up from 20.4:** closed in **§72** / migration `0085` — `partner_session_lock_for_partner` revokes with `revoke_reason = 'lock'`. **PWA Lock UI:** closed in **§73** — page sends `POST lock`.
-- **NIT (S1.2 server code):** `ROUTE_METHODS[route]` is a plain object lookup, so `/partner-session/constructor` gives 405 rather than 404. Use `Object.hasOwn` or a null-prototype map the next time that code is touched.
+- **NIT (S1.2 server code):** closed in **§99** — `Object.hasOwn(ROUTE_METHODS, route)` so `/partner-session/constructor` is 404, not 405.
 - **NIT:** `no-store` covers only `/` and `/index.html`. If the host falls back to `index.html` for unknown paths, those copies are covered only by the `pagehide`/`pageshow` handlers. Optionally use `/*` with `! Cache-Control` in the `/assets/*` block.
 
 Gate counts, round 2:
@@ -4198,7 +4198,33 @@ Numbering: **migration `0094`, matrix `72`, this section 98.** Closes the §97.3
 
 ### 98.4 Verification
 
-Branch: `cursor/p5-pin-reset-alarm-8ffd` (base after #137 / `2511ab0`). Squash-merged as _pending_.
+Branch: `cursor/p5-pin-reset-alarm-8ffd` (base after #137 / `2511ab0`). Squash-merged as `967d666` (#138).
 
 - pgTAP matrix `72`; tip `0094`; partners i18n / auth-alarms unit cells.
+
+## 99. As built: Edge encoded-path refuse + `ROUTE_METHODS` Object.hasOwn
+
+Numbering: **migration n/a (Edge shared), this section 99.** Closes the §20.12 optional path hardening and the S1.2 `ROUTE_METHODS` NIT: partner handlers refuse a raw URL path that still carries `%2F`, `%5C` or `%2E` (any hex case) with **400** before the closed route map runs, and `partner-session` uses `Object.hasOwn` so a prototype key such as `constructor` is **404** rather than **405**. No migration; tip remains `0094`. No UI flag flips; no CAMERA / OCR.
+
+### 99.1 What was built
+
+- **`handler-kit`** — `rawPathname`, `rawPathHasEncodedSegments`, `encodedPathRefusal` (400 `bad_request`).
+- **All partner handlers** that route via `routeOfFunction` / session `routeOf` call `encodedPathRefusal` immediately before matching.
+- **`session-handler`** — `Object.hasOwn(ROUTE_METHODS, route)` before the method check.
+- **Tests** — vitest cells on `partner-session-handler` (helpers, `%2F`/`%5C` Request URLs, `constructor` → 404) and `partner-members-handler` (one `%2F` cell).
+
+### 99.2 Decisions and departures
+
+- **Check `req.url` as the runtime presents it** — Deno/`Request` may already normalise bare `%2e%2e` segments away; those then miss the refuse and fall through to 404 from the route map (fail-closed). The helper still refuses `%2E` when it remains in the raw path string (unit-tested without `Request` normalisation).
+- **Shared helper, every partner function** — not only `partner-session`, so a probe aimed at `partner-members` / review / … gets the same 400.
+
+### 99.3 Not built, honestly
+
+- Staging path probe against a live gateway (still named in §20.12); dedicated partners API host / Q1; U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 99.4 Verification
+
+Branch: `cursor/p5-edge-path-harden-8ffd` (base after #138 / `967d666`). Squash-merged as _pending_.
+
+- vitest `partner-session-handler`, `partner-members-handler`; no migration; tip remains `0094`.
 

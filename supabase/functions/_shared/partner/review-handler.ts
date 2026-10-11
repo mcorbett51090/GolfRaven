@@ -21,7 +21,7 @@ import type { ReceiptsStoragePort } from "../receipts/ports.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { HeldQueueRow, PartnerAuthAlarmRow, PartnerDb, ResolveHeldResult, ReviewSlaSummary } from "./ports.ts";
 import { parsePreviewQuery, parseResolveBody } from "./review-shape.ts";
@@ -59,6 +59,8 @@ export async function handlePartnerReviewRequest(req: Request, deps: PartnerRevi
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, PARTNER_REVIEW_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);

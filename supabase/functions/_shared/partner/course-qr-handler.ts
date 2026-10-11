@@ -27,7 +27,7 @@ import { CourseQrKeyMismatch, signRotatingToken } from "./course-qr-signer.ts";
 import { parseFacilityBody, parseFacilityQuery, parseRefreshBody } from "./course-qr-shape.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { type CourseQrDb, PartnerNotConfigured } from "./ports.ts";
 import { toHex } from "./token.ts";
@@ -90,6 +90,8 @@ export async function handleCourseQrRequest(req: Request, deps: CourseQrDeps): P
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, COURSE_QR_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);

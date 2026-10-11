@@ -21,7 +21,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { parseOfflineAttestBody, parseOnlineAttestBody, parseShiftLogQuery, parseStaffActivityQuery } from "./attest-shape.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { AttestResult, PartnerDb, ShiftLogRow, StaffActivityRow } from "./ports.ts";
@@ -54,6 +54,8 @@ export async function handlePartnerAttestRequest(req: Request, deps: PartnerAtte
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, PARTNER_ATTEST_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);

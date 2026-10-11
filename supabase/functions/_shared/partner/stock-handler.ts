@@ -18,7 +18,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { PartnerDb, StockMoveResult, StockRow } from "./ports.ts";
 import { parseStockMoveBody, parseStockQuery } from "./stock-shape.ts";
@@ -48,6 +48,8 @@ export async function handlePartnerStockRequest(req: Request, deps: PartnerStock
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, PARTNER_STOCK_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);

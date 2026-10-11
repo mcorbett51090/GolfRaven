@@ -21,7 +21,7 @@ import { parseFacilityBody, parseFacilityQuery } from "./course-qr-shape.ts";
 import { CourseQrKeyMismatch, signPrintedQr } from "./course-qr-signer.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { type CourseQrDb, PartnerNotConfigured } from "./ports.ts";
 
@@ -63,6 +63,8 @@ export async function handleQrPrintRequest(req: Request, deps: QrPrintDeps): Pro
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, QR_PRINT_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);

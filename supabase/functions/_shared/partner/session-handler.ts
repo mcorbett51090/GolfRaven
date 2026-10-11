@@ -62,7 +62,7 @@ import {
   type VerifyRequest,
 } from "./session-shape.ts";
 import { type NewSessionToken, partnerTokenFromHeader, sha256Hex, toB64u } from "./token.ts";
-import { alertMemberAnyCall } from "./handler-kit.ts";
+import { alertMemberAnyCall, encodedPathRefusal } from "./handler-kit.ts";
 import { buildOtpauthUrl, encodeTotpSeed } from "./totp-contract.ts";
 
 export const PARTNER_SESSION_FUNCTION = "partner-session";
@@ -181,10 +181,12 @@ export async function handlePartnerSessionRequest(req: Request, deps: PartnerSes
     decision,
     async () => {
       try {
-        // (3) the route and the method
+        // (3) the route and the method (§20.12 / §99: encoded path refuse first; Object.hasOwn so prototype keys are 404 not 405)
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const route = routeOf(req.url);
-        const want = ROUTE_METHODS[route];
-        if (want === undefined) return partnerError(decision, 404, "not_found", "not found");
+        if (!Object.hasOwn(ROUTE_METHODS, route)) return partnerError(decision, 404, "not_found", "not found");
+        const want = ROUTE_METHODS[route]!;
         if (req.method !== want) return partnerError(decision, 405, "method_not_allowed", `${want} only`, { allow: want });
 
         // (4) a session route needs a gr_ps_ bearer: anything else is the one 401, and no port is touched

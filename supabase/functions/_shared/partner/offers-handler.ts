@@ -20,7 +20,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { validateOfferEligibility } from "./offer-eligibility.ts";
 import { parseOfferIdBody, parseOffersQuery, parseOfferUpsertBody } from "./offers-shape.ts";
@@ -53,6 +53,8 @@ export async function handlePartnerOffersAdminRequest(req: Request, deps: Partne
     decision,
     async () => {
       try {
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const matched = matchRoute(ROUTES, routeOfFunction(req.url, PARTNER_OFFERS_FUNCTION));
         if (matched === null) return partnerError(decision, 404, "not_found", "not found");
         const refusal = methodRefusal(decision, matched, req.method);
