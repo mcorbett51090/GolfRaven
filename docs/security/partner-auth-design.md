@@ -1943,7 +1943,7 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 - The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
 - Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
 - The PWA screens and `apps/partners` client; the out-of-band notice of a credential add (U1) is still an `audit_log` row.
-- `gr_enr_` is not on `getActorFromRequest`'s refusal list (it is never a bearer); add it if a bearer use ever appears.
+- `gr_enr_` on `getActorFromRequest`'s refusal list → closed by §91 (defence in depth with `gr_ps_` / `gr_inv_`).
 
 ## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
 
@@ -3986,11 +3986,35 @@ Numbering: **matrix n/a (PWA only), this section 90.** Closes the §24.3 / §89.
 
 ### 90.3 Not built, honestly
 
-- OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- `gr_enr_` on `getActorFromRequest` refusal list → §91; U1 credential-add interstitial; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 90.4 Verification
 
-Branch: `cursor/p5-totp-enrol-qr-8ffd` (base after #129 / `400b0d2`). Tip on PR (this slice).
+Branch: `cursor/p5-totp-enrol-qr-8ffd` (base after #129 / `400b0d2`). Squash-merged as `2a1b744` (#130).
 
 - `@golfraven/partners` vitest (QR golden + panels); typecheck clean; no Edge / migration change.
+
+## 91. As built: `gr_enr_` bearer refusal (PA-11)
+
+Numbering: **matrix n/a (Edge shared), this section 91.** Closes the §23.3 / §90.3 leftover: `getActorFromRequest` refuses `gr_enr_` the same way it already refuses `gr_ps_` and `gr_inv_` (case-insensitive, before env / GoTrue). Enrolment tokens are not session bearers today; this is defence in depth so a mistaken `Authorization` never reaches a third party. No migration, no PWA change, no UI flag flips.
+
+### 91.1 What was built
+
+- **`privileged.ts#getActorFromRequest`** — `gr_enr_` joins the prefix refusal (`gr_ps_` / `gr_inv_` / `gr_enr_`).
+- **Tests** — vitest source-order pin (`review-account-gate`); partner session / invite / enrolment shapes in the Deno PA-11 cells; session-handler wrong-prefix table; `partnerTokenFromHeader` reject list.
+
+### 91.2 Decisions and departures
+
+- **Enrolment tokens stay body/fragment, not bearers** — refusal does not invent a session use; it only blocks forwarding to GoTrue.
+- **`gr_ho_` stays out** — hand-over tokens are typed/scanned in the staff lane; not an Authorization prefix in this design.
+
+### 91.3 Not built, honestly
+
+- U1 credential-add blocking interstitial (migration + notice table + Edge + PWA); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 91.4 Verification
+
+Branch: `cursor/p5-gr-enr-refuse-8ffd` (base after #130 / `2a1b744`). Tip on PR (this slice).
+
+- `supabase/tests` vitest (`review-account-gate`, `partner-modules`, `partner-session-handler`); no migration; tip remains `0090`.
 

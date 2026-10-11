@@ -267,7 +267,14 @@ Deno.test("PA-11: a partner token sent to a PLAYER function is refused and NEVER
   Deno.env.set("SUPABASE_ANON_KEY", "anon-key-for-the-recording-fake");
   try {
     const t = (await newPartnerSessionToken()).token;
-    for (const bearerValue of [t, t.replace("gr_ps_", "gr_inv_"), "GR_PS_" + t.slice(6), "gr_ps_x"]) {
+    for (const bearerValue of [
+      t,
+      t.replace("gr_ps_", "gr_inv_"),
+      t.replace("gr_ps_", "gr_enr_"),
+      "GR_PS_" + t.slice(6),
+      "GR_ENR_" + t.slice(6),
+      "gr_ps_x",
+    ]) {
       const actor = await getActorFromRequest(new Request("https://p.example.test/", { headers: { authorization: `Bearer ${bearerValue}` } }));
       assertEquals(actor, null, bearerValue.slice(0, 10));
     }

@@ -176,7 +176,7 @@ describe("PA-11: a Supabase JWT (or any foreign bearer) is the ONE 401 on every 
   it("a JWT, a wrong-length partner token, a wrong prefix, another scheme and no header are all refused identically", async () => {
     const f = makeFakes();
     const bearers: Array<string | null> = [
-      `Bearer ${JWT}`, `Bearer gr_ps_short`, `Bearer ${SESSION_TOKEN}x`, `Bearer GR_PS_${SESSION_TOKEN.slice(6)}`, `Bearer gr_inv_${SESSION_TOKEN.slice(6)}`, `Basic ${SESSION_TOKEN}`, SESSION_TOKEN,
+      `Bearer ${JWT}`, `Bearer gr_ps_short`, `Bearer ${SESSION_TOKEN}x`, `Bearer GR_PS_${SESSION_TOKEN.slice(6)}`, `Bearer gr_inv_${SESSION_TOKEN.slice(6)}`, `Bearer gr_enr_${SESSION_TOKEN.slice(6)}`, `Basic ${SESSION_TOKEN}`, SESSION_TOKEN,
       `Bearer ${SESSION_TOKEN} extra`, "Bearer", "", null,
     ];
     const seen = new Set<string>();

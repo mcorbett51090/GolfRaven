@@ -204,10 +204,16 @@ Deno.test("a bad token is still a 401 (the gate runs only after Auth has verifie
   assertEquals(res.status, 401);
 });
 
-Deno.test("a partner session or invite token (gr_ps_ / gr_inv_) is refused before GoTrue is asked and before the gate runs (composition with PA-11)", DT, async () => {
+Deno.test("a partner session, invite or enrolment token (gr_ps_ / gr_inv_ / gr_enr_) is refused before GoTrue is asked and before the gate runs (composition with PA-11)", DT, async () => {
   const uid = await reviewUser("prefix");
   const before = stubCalls;
-  for (const t of [`gr_ps_${"a".repeat(40)}`, `GR_PS_${"a".repeat(40)}`, `gr_inv_${"b".repeat(40)}`]) {
+  for (const t of [
+    `gr_ps_${"a".repeat(40)}`,
+    `GR_PS_${"a".repeat(40)}`,
+    `gr_inv_${"b".repeat(40)}`,
+    `gr_enr_${"c".repeat(40)}`,
+    `GR_ENR_${"c".repeat(40)}`,
+  ]) {
     const res = await entry(t);
     assertEquals(res.status, 401);
   }
