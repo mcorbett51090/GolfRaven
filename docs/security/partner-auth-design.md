@@ -3549,11 +3549,39 @@ Numbering: **matrix n/a (PWA only), this section 74.** Closes part of the §73.3
 
 ### 74.3 Not built, honestly
 
-- Second-credential add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- Second-credential add UI → §75; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 74.4 Verification
 
-Branch: `cursor/p5-credential-revoke-ui-8ffd` (base after #113 / `d6ef09f`).
+Squash-merged as `e53cd2a` (#114). Branch: `cursor/p5-credential-revoke-ui-8ffd` (base after #113 / `d6ef09f`).
 
-- `@golfraven/partners` vitest **994 passed** (credentials revoke A2 + last-active refuse); typecheck clean; no Edge / migration change.
+- `@golfraven/partners` vitest **994 passed** (credentials revoke A2 + last-active refuse); typecheck clean; CI green; no Edge / migration change.
+
+## 75. As built: partners second-credential add UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 75.** Closes the §74.3 leftover: add a second (or further) passkey from the credentials screen under class A2, via existing `POST credentials/options` + `POST credentials`. Reach-rule note edits stay later. No migration, no UI flag flips.
+
+### 75.1 What was built
+
+- **`members-routes.ts`** — `credentialOptions` / `registerCredential`; 409 `too_many` mapped.
+- **Work screen `addCredential`** — reauth once; `requirePin("A2")` → options; `createCredential`; `requirePin("A2")` again → register; reload list; notice `credential-added`.
+- **Cap 5** — client refuses when five active (`credentials.tooMany`); matches DB.
+- **Fake partner server** — options + register with A2 (reauth + PIN grant each); exclude list; soft-auth create.
+- **i18n** EN + fr-CA; Vitest covers two-PIN A2 order + cap refuse.
+
+### 75.2 Decisions and departures
+
+- **Two PIN grants** — both options and register call `partner_authorize` A2 (each consumes a grant); one reauth window covers both.
+- **Create between grants** — browser ceremony runs after the first grant; second PIN is just before register.
+- **Reach-rule notes / pepper_kid** stay later.
+
+### 75.3 Not built, honestly
+
+- Reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 75.4 Verification
+
+Branch: `cursor/p5-credential-add-ui-8ffd` (base after #114 / `e53cd2a`).
+
+- `@golfraven/partners` vitest **999 passed** (credentials add A2 two-PIN + too-many refuse); typecheck clean; no Edge / migration change.
 

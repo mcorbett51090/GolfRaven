@@ -28,8 +28,9 @@ const home = (c: Awaited<ReturnType<typeof setup>>["controller"]): SignedInState
   return s;
 };
 
-async function until(cond: () => boolean, label: string): Promise<void> {
-  for (let i = 0; i < 400; i += 1) {
+async function until(cond: () => boolean, label: string, ms = 2000): Promise<void> {
+  const steps = Math.max(1, Math.ceil(ms / 5));
+  for (let i = 0; i < steps; i += 1) {
     if (cond()) return;
     await new Promise((r) => setTimeout(r, 5));
   }
@@ -396,5 +397,73 @@ describe("§74 credentials revoke (own, A2)", () => {
     expect(JSON.parse(pinPosts[0]!.body).derived).not.toContain(PIN);
     const deletes = s.w.server.log.filter((r) => r.method === "DELETE" && r.path.endsWith(`/partner-members/credentials/${EXTRA_CRED}`));
     expect(deletes).toHaveLength(1);
+  });
+});
+
+describe("§75 credentials add (second passkey, A2)", () => {
+  it("refuses when five active passkeys are already held, without calling the server", async () => {
+    const s = await setup();
+    for (let i = 2; i <= 5; i += 1) {
+      s.w.server.seedExtraCredential(`${i}${i}${i}${i}${i}${i}${i}${i}-2222-4222-8222-22222222222${i}`);
+    }
+    s.controller.openCredentials();
+    await s.controller.loadCredentials();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows).toHaveLength(5);
+    }
+    await s.controller.addCredential();
+    expect(home(s.controller).notice).toEqual({ kind: "error", message: { key: "credentials.tooMany" } });
+    expect(s.w.server.log.some((r) => r.path.endsWith("/reauth/options"))).toBe(false);
+    expect(s.w.server.log.some((r) => r.path.endsWith("/partner-members/credentials/options"))).toBe(false);
+  });
+
+  it("adds a second passkey after reauth + two A2 PIN grants (options then register)", async () => {
+    const s = await setup();
+    s.controller.openCredentials();
+    await s.controller.loadCredentials();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows).toHaveLength(1);
+    }
+
+    // auto-submit each idle A2 prompt once (two grants: options then register); avoids racing the busy first panel
+    let armed = true;
+    const stop = s.controller.subscribe((st) => {
+      if (!armed || st.screen !== "signed-in") return;
+      const p = st.panel;
+      if (p?.kind === "pin-prompt" && p.actionClass === "A2" && p.busy === false) {
+        armed = false;
+        queueMicrotask(() => {
+          s.controller.submitPin(PIN);
+          armed = true;
+        });
+      }
+    });
+    try {
+      await s.controller.addCredential();
+    } finally {
+      stop();
+    }
+
+    expect(home(s.controller).notice).toEqual({ kind: "credential-added" });
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("credentials");
+      if (w?.kind === "credentials") expect(w.rows).toHaveLength(2);
+    }
+    expect(s.w.auth.created).toHaveLength(1);
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth/options"))).toBe(true);
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/reauth"))).toBe(true);
+    const pinPosts = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/step-up/pin"));
+    expect(pinPosts).toHaveLength(2);
+    for (const p of pinPosts) expect(JSON.parse(p.body).derived).not.toContain(PIN);
+    expect(s.w.server.log.some((r) => r.method === "POST" && r.path.endsWith("/partner-members/credentials/options"))).toBe(true);
+    const registers = s.w.server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-members/credentials"));
+    expect(registers).toHaveLength(1);
+    expect(JSON.parse(registers[0]!.body).challengeToken).toMatch(/^[A-Za-z0-9_-]+\.\d+\.[A-Za-z0-9_-]+$/);
+    expect(registers[0]!.body).not.toMatch(/7391/);
   });
 });

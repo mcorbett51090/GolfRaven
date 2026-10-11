@@ -107,7 +107,7 @@ export interface FakeServer {
   };
   /** Gives a user a PIN, derived here exactly as the browser derives it (pin-contract.ts). Default user: the signed-in one. */
   seedPin(pin: string, opts?: { userId?: string; iterations?: number; mustChange?: boolean; locked?: boolean; failures?: number }): Promise<void>;
-  /** Adds a second (or further) active credential row for the signed-in user so revoke UI can be exercised (§74). */
+  /** Adds a second (or further) active credential row for the signed-in user so revoke / add-cap UI can be exercised (§74 / §75). */
   seedExtraCredential(id?: string): string;
   /** What the server stores of a user's PIN (never the digits), or null. */
   pinRecord(userId?: string): { derived: string; salt: string; iterations: number; failures: number; locked: boolean; mustChange: boolean } | null;
@@ -1426,6 +1426,84 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
         if (entry[1].revokedAt !== null) return err(409, "already_revoked");
         entry[1].revokedAt = new Date().toISOString();
         return ok(200, { revoked: true });
+      }
+      // §75: second-credential add (class A2: reauth window + PIN grant each call)
+      if (route === "credentials/options" && req.method === "POST") {
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const active = [...credentials.entries()].filter(([, c]) => c.userId === session.userId && c.revokedAt === null);
+        if (active.length >= 5) return err(409, "too_many");
+        const auth = req.headers.get("authorization")!;
+        const hash = await sha256Hex(auth.slice("Bearer ".length));
+        const ch = issue(hash, "credential-register");
+        const user = users.get(session.userId)!;
+        const userHandle = new Uint8Array(Buffer.from(session.userId.replace(/-/g, ""), "hex"));
+        const options = await registration.options({
+          rp,
+          userHandle,
+          userName: user.email ?? session.userId,
+          challenge: ch.nonce,
+          excludeCredentialIds: active.flatMap(([id]) => {
+            const b = fromB64u(id);
+            return b === null ? [] : [b];
+          }),
+        });
+        return ok(200, {
+          options,
+          challengeToken: `${toB64u(ch.nonce)}.${ch.exp}.${toB64u(ch.mac)}`,
+          expiresAt: new Date(ch.exp * 1000).toISOString(),
+        });
+      }
+      if (route === "credentials" && req.method === "POST") {
+        if (state.reauthUntil === null || Date.parse(state.reauthUntil) <= Date.now()) return err(403, "reauth_required");
+        const refused = takePinGrant(session);
+        if (refused !== null) return refused;
+        const active = [...credentials.values()].filter((c) => c.userId === session.userId && c.revokedAt === null);
+        if (active.length >= 5) return err(409, "too_many");
+        const body = (await req.json()) as { challengeToken?: unknown; credential?: unknown };
+        if (typeof body.challengeToken !== "string" || body.credential === undefined || typeof body.credential !== "object" || body.credential === null) {
+          return err(400, "bad_request");
+        }
+        const parts = body.challengeToken.split(".");
+        if (parts.length !== 3) return err(400, "bad_request");
+        const nonce = fromB64u(parts[0]!);
+        const mac = fromB64u(parts[2]!);
+        const exp = Number(parts[1]);
+        if (nonce === null || mac === null || !Number.isFinite(exp)) return err(400, "bad_request");
+        const auth = req.headers.get("authorization")!;
+        const hash = await sha256Hex(auth.slice("Bearer ".length));
+        if (!consume(nonce, exp, mac, hash, "credential-register")) return err(403, "registration_refused");
+        const cred = body.credential as { id?: unknown; response?: { clientDataJSON?: unknown; attestationObject?: unknown; transports?: unknown } };
+        if (typeof cred.id !== "string" || cred.response === undefined || typeof cred.response.clientDataJSON !== "string" || typeof cred.response.attestationObject !== "string") {
+          return err(400, "bad_request");
+        }
+        const json = {
+          id: cred.id,
+          rawId: cred.id,
+          type: "public-key" as const,
+          response: {
+            clientDataJSON: cred.response.clientDataJSON,
+            attestationObject: cred.response.attestationObject,
+            ...(Array.isArray(cred.response.transports) ? { transports: cred.response.transports.filter((t): t is string => typeof t === "string") } : {}),
+          },
+          clientExtensionResults: {},
+        };
+        const verified = await registration.verify({ rp, response: json, expectedChallenge: nonce });
+        if (!verified.ok) return err(403, "registration_refused");
+        const webauthnId = toB64u(verified.credentialId);
+        if (credentials.has(webauthnId)) return err(409, "credential_in_use");
+        const rowId = randomUUID();
+        credentials.set(webauthnId, {
+          id: rowId,
+          userId: session.userId,
+          alg: -7,
+          publicKey: verified.publicKey,
+          signCount: 0,
+          note: null,
+          revokedAt: null,
+        });
+        return ok(201, { credentialId: rowId });
       }
       return err(404, "not_found");
     }

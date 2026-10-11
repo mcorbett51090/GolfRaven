@@ -1,11 +1,12 @@
 /**
- * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74).
+ * Typed wrappers for `partner-members` credential settings (docs/security/partner-auth-design.md §65 / §67 / §74 / §75).
  *
- * List + display-note PATCH (class A0); own revoke DELETE (class A2). Second-credential add stays out of this surface.
+ * List + display-note PATCH (class A0); own revoke DELETE and second-credential add (class A2).
  * Every call goes through `PartnerApi.call`; response bodies are checked field-by-field.
  */
 
 import type { PartnerApi } from "./client";
+import type { RegistrationJson } from "./types";
 import { PartnerApiError, isPartnerApiError } from "./errors";
 
 /** Edge `CredentialView` (GET credentials). Active rows are those with `revokedAt === null`. */
@@ -79,6 +80,40 @@ export async function revokeCredential(api: PartnerApi, id: string): Promise<voi
     }
     if (isPartnerApiError(e) && (e.code === "already_revoked" || e.kind === "conflict")) {
       throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "already_revoked" });
+    }
+    throw e;
+  }
+}
+
+export interface CredentialCreateChallenge {
+  readonly options: unknown;
+  readonly challengeToken: string;
+  readonly expiresAt: string;
+}
+
+/** POST credentials/options (class A2). 409 `too_many` when five active. */
+export async function credentialOptions(api: PartnerApi): Promise<CredentialCreateChallenge> {
+  try {
+    const data = await api.call("POST", "partner-members", "credentials/options", {});
+    if (!isObject(data) || data["options"] === undefined || !isString(data["challengeToken"]) || !isString(data["expiresAt"])) malformed();
+    return { options: data["options"], challengeToken: data["challengeToken"], expiresAt: data["expiresAt"] };
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "too_many" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "too_many" });
+    }
+    throw e;
+  }
+}
+
+/** POST credentials (class A2): register a second/further passkey. */
+export async function registerCredential(api: PartnerApi, challengeToken: string, credential: RegistrationJson): Promise<string> {
+  try {
+    const data = await api.call("POST", "partner-members", "credentials", { challengeToken, credential });
+    if (!isObject(data) || !isString(data["credentialId"])) malformed();
+    return data["credentialId"];
+  } catch (e) {
+    if (isPartnerApiError(e) && (e.code === "too_many" || e.kind === "conflict")) {
+      throw new PartnerApiError("conflict", { status: e.status ?? 409, code: "too_many" });
     }
     throw e;
   }

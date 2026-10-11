@@ -11,7 +11,13 @@
 
 import type { PartnerApi } from "../api/client";
 import { isPartnerApiError } from "../api/errors";
-import { getCredentials, patchCredentialNote, revokeCredential as deleteCredential } from "../api/members-routes";
+import {
+  credentialOptions,
+  getCredentials,
+  patchCredentialNote,
+  registerCredential,
+  revokeCredential as deleteCredential,
+} from "../api/members-routes";
 import type { WhoAmI } from "../api/types";
 import {
   getCollectQueue,
@@ -45,6 +51,7 @@ import { reauthWithPasskey } from "../auth/reauth";
 import type { StepUp } from "../auth/step-up";
 import { StepUpError } from "../auth/step-up";
 import type { GetAssertionDeps } from "../webauthn/assertion";
+import { createCredential, type CreateCredentialDeps } from "../webauthn/registration";
 import { type ErrorContext, messageForError } from "./messages";
 import type { Host, Notice, SignedInState, WorkView } from "./state";
 
@@ -88,6 +95,8 @@ export interface WorkScreens {
   saveCredentialNote(id: string, note: string): Promise<void>;
   /** Class A2: reauth + PIN, then DELETE. Refuses when this is the only active passkey. */
   revokeCredential(id: string): Promise<void>;
+  /** Class A2: reauth once; PIN → options; create; PIN → register. Refuses at five active. */
+  addCredential(): Promise<void>;
 }
 
 /** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
@@ -101,6 +110,7 @@ export interface WorkDeps {
   readonly host: Host;
   readonly stepUp: StepUp;
   readonly webauthn: GetAssertionDeps;
+  readonly create: CreateCredentialDeps;
 }
 
 const FACILITY_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -154,8 +164,10 @@ function err(e: unknown, context: ErrorContext): Notice {
   return { kind: "error", message: messageForError(e, context) };
 }
 
+const MAX_ACTIVE_CREDENTIALS = 5;
+
 export function createWorkScreens(deps: WorkDeps): WorkScreens {
-  const { api, host, stepUp, webauthn } = deps;
+  const { api, host, stepUp, webauthn, create } = deps;
 
   function withWork(s: SignedInState, work: WorkView | null, notice: Notice | null = null, busy: SignedInState["busy"] = null): void {
     host.set({ ...s, work, notice, busy, panel: s.panel });
@@ -767,6 +779,35 @@ export function createWorkScreens(deps: WorkDeps): WorkScreens {
         const cur = live(host, grant);
         if (cur !== null && cur.work?.kind === "credentials") {
           host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "credential-revoked" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
+    async addCredential() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      const active = (s.work.rows ?? []).filter((c) => c.revokedAt === null);
+      if (active.length >= MAX_ACTIVE_CREDENTIALS) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "credentials.tooMany" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const challenge = await credentialOptions(api);
+        const credential = await createCredential(create, challenge.options);
+        await stepUp.requirePin("A2");
+        await registerCredential(api, challenge.challengeToken, credential);
+        const listed = await getCredentials(api);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "credential-added" } });
         }
       } catch (e) {
         const cur = live(host, grant);

@@ -170,8 +170,8 @@ export const en = {
   "home.pin.button": "Set or change PIN",
   "home.pin.hint": "Your PIN confirms sensitive actions. It is turned into a scrambled value on this device; the PIN itself is never sent.",
   "home.credentials.title": "Passkeys",
-  "home.credentials.button": "Manage passkey notes",
-  "home.credentials.hint": "List your passkeys, edit a short display note, or revoke a passkey. Notes never affect sign-in.",
+  "home.credentials.button": "Manage passkeys",
+  "home.credentials.hint": "List your passkeys, edit a short display note, add another passkey, or revoke one. Notes never affect sign-in.",
   "home.totp.title": "Second factor",
   "home.totp.enter": "Enter authenticator code",
   "home.totp.add": "Add an authenticator",
@@ -464,8 +464,9 @@ export const en = {
   "notice.settlementExported": "Settlement export ready. Download before the link expires.",
 
   "credentials.title": "Your passkeys",
-  "credentials.hint": "Edit a display note (at most 40 characters), or revoke a passkey after a fresh passkey tap and your PIN. Adding another passkey is not available here.",
+  "credentials.hint": "Edit a display note (at most 40 characters), add another passkey, or revoke one. Add and revoke ask for a fresh passkey tap and your PIN.",
   "credentials.load": "Load passkeys",
+  "credentials.add": "Add passkey",
   "credentials.empty": "No active passkeys on this account.",
   "credentials.label": "Passkey",
   "credentials.note": "Display note",
@@ -474,10 +475,12 @@ export const en = {
   "credentials.noteTooLong": "A display note can be at most 40 characters.",
   "credentials.lastActive": "You cannot revoke your only active passkey. Ask a manager to recover the account if you have lost it.",
   "credentials.lastHint": "This is your only active passkey. Revoke is disabled until you add another.",
+  "credentials.tooMany": "You already hold the most passkeys allowed (five). Revoke one before adding another.",
   "credentials.alreadyRevoked": "That passkey was already revoked.",
   "credentials.notFound": "That passkey was not found.",
   "notice.credentialNoteSaved": "Display note saved.",
   "notice.credentialRevoked": "Passkey revoked. Sessions that used it have ended.",
+  "notice.credentialAdded": "Passkey added.",
 } as const;
 
 export type MessageKey = keyof typeof en;
