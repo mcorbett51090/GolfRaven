@@ -431,6 +431,47 @@ export function workView(state: SignedInState, controller: AppController, locale
                 ),
           )
         : null,
+      work.credentialAddNotices !== null
+        ? h(
+            "section",
+            { "data-testid": "credential-add-notices-reach" },
+            h("h2", {}, t("members.credentialNotices.title")),
+            h("p", { class: "muted" }, t("members.credentialNotices.hint")),
+            work.credentialAddNotices.length === 0
+              ? h("p", { "data-testid": "credential-add-notices-empty" }, t("members.credentialNotices.empty"))
+              : h(
+                  "ul",
+                  { "data-testid": "credential-add-notices-list" },
+                  ...work.credentialAddNotices.map((n) =>
+                    h(
+                      "li",
+                      { "data-testid": `credential-add-notice-${n.noticeId}` },
+                      h("p", {}, t("members.credentialNotices.label"), ": ", n.label),
+                      h("p", { class: "muted" }, t("members.user"), ": ", n.subjectUserId.slice(0, 8)),
+                      h("p", { class: "muted" }, t("members.credentialNotices.createdAt"), ": ", n.createdAt),
+                      n.credentialRevokedAt !== null
+                        ? h("p", { class: "muted", "data-testid": `credential-add-notice-revoked-${n.noticeId}` }, t("members.credentialNotices.revoked"))
+                        : null,
+                      h(
+                        "div",
+                        { class: "actions" },
+                        h(
+                          "button",
+                          {
+                            type: "button",
+                            class: "primary",
+                            disabled: busy,
+                            "data-testid": `credential-add-notice-open-${n.noticeId}`,
+                            onclick: () => controller.openMemberCredentials(n.subjectUserId),
+                          },
+                          t("members.openCredentials"),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+          )
+        : null,
       work.rows !== null
         ? work.rows.length === 0
           ? h("p", { "data-testid": "members-empty" }, t("members.empty"))

@@ -472,6 +472,7 @@ describe("§81 team credentials under reach (manager)", () => {
   const ORG = "33333333-3333-4333-8333-333333333333";
   const OTHER_USER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const OTHER_CRED = "33333333-3333-4333-8333-333333333301";
+  const OTHER_NOTICE = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
   const managerWhoami = {
     aal: 1,
     requiredAal: 1,
@@ -492,10 +493,44 @@ describe("§81 team credentials under reach (manager)", () => {
     return { w, api, controller, states };
   }
 
+  it("§94 loadMembers also lists unacked credential-add notices under reach (never the actor's own)", async () => {
+    const s = await setupManager();
+    s.w.server.seedCredentialAddNotice({
+      noticeId: OTHER_NOTICE,
+      credentialId: OTHER_CRED,
+      subjectUserId: OTHER_USER,
+      label: "2030-01-01 / unknown",
+    });
+    // Own notice (subject = signed-in manager) must not appear on the reach list.
+    s.w.server.seedCredentialAddNotice({
+      noticeId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      credentialId: "44444444-4444-4444-8444-444444444401",
+      label: "own-should-hide",
+    });
+    s.controller.openMembers();
+    await s.controller.loadMembers();
+    {
+      const w = home(s.controller).work;
+      expect(w?.kind).toBe("members");
+      if (w?.kind === "members") {
+        expect(w.credentialAddNotices).toEqual([
+          {
+            noticeId: OTHER_NOTICE,
+            credentialId: OTHER_CRED,
+            label: "2030-01-01 / unknown",
+            createdAt: "2026-06-01T12:00:00.000Z",
+            credentialRevokedAt: null,
+            subjectUserId: OTHER_USER,
+          },
+        ]);
+      }
+    }
+  });
+
   it("opens roster, loads members, then lists and notes another member's passkey", async () => {
     const s = await setupManager();
     s.controller.openMembers();
-    expect(home(s.controller).work).toMatchObject({ kind: "members", rows: null });
+    expect(home(s.controller).work).toMatchObject({ kind: "members", rows: null, credentialAddNotices: null });
 
     await s.controller.loadMembers();
     {
@@ -504,10 +539,13 @@ describe("§81 team credentials under reach (manager)", () => {
       if (w?.kind === "members") {
         expect(w.rows).toHaveLength(1);
         expect(w.rows?.[0]).toMatchObject({ userId: OTHER_USER, role: "staff", orgId: ORG });
+        expect(w.credentialAddNotices).toEqual([]);
       }
     }
     const memberGets = s.w.server.log.filter((r) => r.method === "GET" && r.path.endsWith("/partner-members/members"));
     expect(memberGets).toHaveLength(1);
+    const noticeGets = s.w.server.log.filter((r) => r.method === "GET" && r.path.endsWith("/partner-members/credentials/notices/reach"));
+    expect(noticeGets).toHaveLength(1);
 
     s.controller.openMemberCredentials(OTHER_USER);
     expect(home(s.controller).work).toMatchObject({ kind: "credentials", targetUserId: OTHER_USER, rows: null });

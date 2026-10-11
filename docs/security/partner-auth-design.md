@@ -1908,7 +1908,7 @@ A later harness / Deno integration run should record file and test counts here t
 
 - **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
 - **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
-- **The out-of-band notice of a credential add** (open item U1): server half → §92; PWA blocking interstitial → §93. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** remains an `audit_log` row only.
+- **The out-of-band notice of a credential add** (open item U1): server → §92; subject interstitial → §93; manager reach inbox → §94. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** remains an `audit_log` row only.
 - The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
 
 ### 22.4 Seams left for the Edge half
@@ -1942,7 +1942,7 @@ The two Edge Functions and the shared modules behind them; **no migration** (005
 - `PATCH credentials/{id}` (the display note): closed by §65 / migration `0079`.
 - The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
 - Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
-- The PWA screens and `apps/partners` client; U1 credential-add notice → §92 (server) + §93 (PWA interstitial); email notice (Q7) remains open.
+- The PWA screens and `apps/partners` client; U1 credential-add notice → §92–§94; email notice (Q7) remains open.
 - `gr_enr_` on `getActorFromRequest`'s refusal list → closed by §91 (defence in depth with `gr_ps_` / `gr_inv_`).
 
 ## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
@@ -4063,11 +4063,37 @@ Numbering: **migration n/a (clients only), this section 93.** Closes U1 conditio
 
 ### 93.3 Not built, honestly
 
-- U1 condition (3) / Q7 email notice; manager reach inbox UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- U1 condition (3) / Q7 email notice; manager reach inbox UI → §94; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
 ### 93.4 Verification
 
-Branch: `cursor/p5-credential-notice-ui-8ffd` (base after #132 / `54d4413`). Squash-merged as _pending_.
+Branch: `cursor/p5-credential-notice-ui-8ffd` (base after #132 / `54d4413`). Squash-merged as `0d97b0b` (#133).
 
-- `@golfraven/partners` vitest (`credential-notice`); typecheck clean; no Edge / migration change; tip remains `0091`.
+- `@golfraven/partners` vitest (`credential-notice` + e2e sign-in/lock path pins); typecheck clean; no Edge / migration change; tip remains `0091`.
+
+## 94. As built: credential-add notice reach inbox (U1 managers)
+
+Numbering: **migration n/a (clients only), this section 94.** Closes U1 condition (2) PWA half from §802 / §93.3: managers and operators see unacked `GET partner-members/credentials/notices/reach` rows on the team-passkeys screen (loaded with the roster). View-only; ack remains subject-only (§93). Open credentials under reach to revoke. No migration; no UI flag flips; no CAMERA / OCR.
+
+### 94.1 What was built
+
+- **API** — `listCredentialAddNoticesReach` / `CredentialAddNoticeReach` on `members-routes.ts`.
+- **Work** — `members.credentialAddNotices` filled by `loadMembers` (parallel with roster GET).
+- **UI** — reach notices section on the members screen; i18n en + fr-CA.
+- **Fake + tests** — `seedCredentialAddNotice({ subjectUserId })`; §94 cell in `work.test.ts`.
+
+### 94.2 Decisions and departures
+
+- **Non-blocking** — inbox on team passkeys, not a second forced panel (subject interstitial remains the blocking gate).
+- **No manager ack** — Edge ack is subject-only; managers act by opening the person's credentials under reach.
+
+### 94.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 94.4 Verification
+
+Branch: `cursor/p5-credential-notice-reach-ui-8ffd` (base after #133 / `0d97b0b`). Squash-merged as _pending_.
+
+- `@golfraven/partners` vitest (`work` §94); typecheck clean; no Edge / migration change; tip remains `0091`.
 

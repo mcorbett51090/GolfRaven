@@ -20,7 +20,13 @@ import type {
 } from "../api/admin-routes";
 import type { EnrolmentKind } from "../api/client";
 import type { InviteCreated, InviteRole, PartnerInvite } from "../api/invites-routes";
-import type { CredentialAddNotice, MemberRecovered, PartnerCredential, PartnerMember } from "../api/members-routes";
+import type {
+  CredentialAddNotice,
+  CredentialAddNoticeReach,
+  MemberRecovered,
+  PartnerCredential,
+  PartnerMember,
+} from "../api/members-routes";
 import type {
   AttestKind,
   AttestResult,
@@ -254,6 +260,8 @@ export type WorkView =
       readonly kind: "members";
       readonly busy: boolean;
       readonly rows: readonly PartnerMember[] | null;
+      /** Unacked credential-add notices for people under reach (§94 / U1 condition 2). Null until load. */
+      readonly credentialAddNotices: readonly CredentialAddNoticeReach[] | null;
       /** Plaintext `gr_enr_…` / enrolUrl shown once after recover; cleared on dismiss or leave. Never logged. */
       readonly recovered: MemberRecovered | null;
       /** Optional UTC instant draft for revoke-all credential cut-off (`…Z`). */
