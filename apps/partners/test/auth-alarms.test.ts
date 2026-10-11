@@ -20,6 +20,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "member_recover")).toBe("Récupération de membre");
     expect(authAlarmKindLabel("en", "org_revoke_all")).toBe("Org revoke-all");
     expect(authAlarmKindLabel("fr-CA", "org_revoke_all")).toBe("Révocation globale d'organisation");
+    expect(authAlarmKindLabel("en", "member_revoke")).toBe("Member revoke");
+    expect(authAlarmKindLabel("fr-CA", "member_revoke")).toBe("Révocation de membre");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

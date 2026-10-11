@@ -4279,7 +4279,35 @@ Numbering: **migration `0096`, matrix `74`, this section 101.** Closes the §100
 
 ### 101.4 Verification
 
-Branch: `cursor/p5-org-revoke-alarm-8ffd` (base after #140 / `5fe353d`). Squash-merged as _pending_.
+Branch: `cursor/p5-org-revoke-alarm-8ffd` (base after #140 / `5fe353d`). Squash-merged as `0241cc0`.
 
 - pgTAP matrix `74`; tip `0096`; partners i18n / auth-alarms unit cells.
+
+## 102. As built: member-revoke operator alarm
+
+Numbering: **migration `0097`, matrix `75`, this section 102.** Closes the §101.3 / §21.4 leftover: a successful `partner_member_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `member_revoke` (one row per target uid per minute) so the admin auth-alarms list surfaces membership revokes, not only `audit_log` `partner.member.revoke`. `not_found` stays quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 102.1 What was built
+
+- **Kind + row CHECK** — `member_revoke` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_member_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","org","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.member_revoke` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 102.2 Decisions and departures
+
+- **ok only** — `not_found` returns before audit/alarm.
+- **Bucket = target uid** — same shape as `member_recover` / `pin_reset`; flood shape is one row per subject per UTC minute.
+- **Detail keeps both `subject` and `org`** — revoke is per-membership; the Review row still prefixes the person uid.
+
+### 102.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; PWA Cache-Control `/*` no-store NIT (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 102.4 Verification
+
+Branch: `cursor/p5-member-revoke-alarm-8ffd` (base after #141 / `0241cc0`). Squash-merged as _pending_.
+
+- pgTAP matrix `75`; tip `0097`; partners i18n / auth-alarms unit cells.
 
