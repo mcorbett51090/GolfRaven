@@ -7,6 +7,7 @@ import type { AppController } from "../app/controller";
 import { trailChoices } from "../app/admin";
 import type { SignedInState } from "../app/state";
 import { translate, type Locale, type MessageKey } from "../i18n";
+import { authAlarmKindLabel, authAlarmSubjectPrefix } from "./auth-alarms";
 import { h } from "./dom";
 import { noticeElement } from "./notice";
 
@@ -424,19 +425,21 @@ export function adminView(state: SignedInState, controller: AppController, local
           : h(
               "ul",
               { "data-testid": "review-auth-alarms" },
-              ...work.authAlarms.map((a) =>
-                h(
-                  "li",
-                  {},
-                  a.credentialId === null
-                    ? t("review.authAlarms.rowNoCredential", { kind: a.kind, at: a.raisedAt })
-                    : t("review.authAlarms.row", {
-                      kind: a.kind,
+              ...work.authAlarms.map((a) => {
+                const kind = authAlarmKindLabel(locale, a.kind);
+                const subject = a.credentialId === null ? authAlarmSubjectPrefix(a.detail) : null;
+                const text =
+                  a.credentialId !== null
+                    ? t("review.authAlarms.row", {
+                      kind,
                       credential: a.credentialId.slice(0, 8),
                       at: a.raisedAt,
-                    }),
-                ),
-              ),
+                    })
+                    : subject !== null
+                      ? t("review.authAlarms.rowSubject", { kind, subject, at: a.raisedAt })
+                      : t("review.authAlarms.rowNoCredential", { kind, at: a.raisedAt });
+                return h("li", { "data-testid": `review-auth-alarm-${a.kind}` }, text);
+              }),
             )
         : null,
       h(

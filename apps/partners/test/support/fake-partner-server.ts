@@ -1481,6 +1481,14 @@ export function createFakePartnerServer(opts: FakeServerOptions): FakeServer {
               detail: { stage: "options" },
               raisedAt: "2026-01-01T12:01:00.000Z",
             },
+            {
+              id: "a5300000-0000-0000-0000-000000000097",
+              kind: "totp_reset",
+              credentialId: null,
+              minuteBucket: 1002,
+              detail: { subject: "22222222-2222-4222-8222-222222222222", status: "ok" },
+              raisedAt: "2026-01-01T12:02:00.000Z",
+            },
           ],
         });
       }

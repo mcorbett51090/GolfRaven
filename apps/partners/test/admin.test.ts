@@ -252,7 +252,7 @@ describe("S7d review screen", () => {
     expect(logBlob).not.toMatch(/fake-preview-token|signedUrl/i);
   });
 
-  it("loads partner sign-in alarms (A0) on the review screen", async () => {
+  it("loads partner auth alarms (A0) on the review screen, including totp_reset", async () => {
     const s = await setup(adminWhoami);
     s.controller.openReview();
     await s.controller.loadAuthAlarms();
@@ -263,7 +263,7 @@ describe("S7d review screen", () => {
     {
       const w = home(s.controller).work;
       if (w?.kind === "review") {
-        expect(w.authAlarms).toHaveLength(2);
+        expect(w.authAlarms).toHaveLength(3);
         expect(w.authAlarms?.[0]).toMatchObject({
           kind: "signature_invalid",
           credentialId: "a5300000-0000-0000-0000-000000000001",
@@ -273,6 +273,12 @@ describe("S7d review screen", () => {
           kind: "rate_options_ip",
           credentialId: null,
           raisedAt: "2026-01-01T12:01:00.000Z",
+        });
+        expect(w.authAlarms?.[2]).toMatchObject({
+          kind: "totp_reset",
+          credentialId: null,
+          detail: { subject: "22222222-2222-4222-8222-222222222222", status: "ok" },
+          raisedAt: "2026-01-01T12:02:00.000Z",
         });
       }
     }
