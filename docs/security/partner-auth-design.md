@@ -5458,6 +5458,47 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 135.** �
 
 ### 135.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `5320483 / #175`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `5320483 / #175`). Merged as `614b1e7` (#176).
 
 - Per-file runs: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 136. As built: the admin-only members routes (TOTP reset, admin enrolment) are driven against the real database
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 136.** §135 named the class-A3 members routes (`totp-reset`, `admin/enrolments`) and the admin enrolment purpose as undriven. Every earlier real-stack lane file was written as a staff or manager; none exercised an _admin_ or an _operator_, and the A3 class (aal 2 **and** a live `mfa_until`) was proved only in pgTAP and against mocked ports. **No defect was found.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 136.1 What was built
+
+- **`supabase/tests/integration/partner-admin-routes.deno.test.ts`** (4 cells): the REAL `handlePartnerMembersRequest` and, for the redemption, the REAL `handlePartnerInvitesRequest`, over the REAL `privileged.ts` and the REAL partner-session mint, against the real database as `edge_partner` / `edge_partner_minter`. A real admin session is minted from the software authenticator's real assertion; its step-up state (`reauth_until`, `mfa_until`, aal) is written by the **owner** with the session-guard trigger off for that one statement, the same shortcut as the other lane files. The email OTP is the recording fake from §135 (the GoTrue adapter stays undriven).
+  1. **an admin resets an operator's TOTP:** the row goes from `seed_version` 3, failed count 2, confirmed and locked, to `seed_version` 4 with enrolment, confirmation, enrol session, replay step, failure count and lock all cleared and the factor unrevoked; the target's sessions are **revoked** (alive before, dead after); the answer is `{reset: true}`; a person with no TOTP row is 409 `totp_not_set` and **no row is invented**;
+  2. **who may:** an operator is 403 whoever the target is; a staff member as the target is 403; resetting oneself is 422; an admin at aal 1 and an admin whose second factor lapsed are each 403 — and **no refusal touched the TOTP row or signed anybody out**; the control (the same admin with the step-up) resets;
+  3. **an admin issues an enrolment token for another admin:** the database holds the SHA-256 of the `gr_enr_` token (independently computed here), purpose `admin`, issued by that admin, for the person, not consumed or revoked, expiring in 24 hours; the plaintext is in no column; the link is `<origin>/enrol#<token>` (fragment, not query); the target must be an admin (an operator is 403), oneself is 422, an operator actor is 403, aal 1 is 403, and the body is strict (`{}`, a non-uuid and an extra key are each 400); no refusal issued a token;
+  4. **the redemption:** the admin it was issued for, who has no credential yet, starts (the code goes to **their own address** through the enrolment port), verifies (the proof names `refKind: enrolment`, the token id, purpose `admin`, the person), and registers for real: the stored credential id and public key are exactly the authenticator's; the first session is **alive but 403 at aal 1** (an admin needs the second factor for every class including A0 — 403, not 401) and works once the second factor is raised; the token is consumed and points at the credential; a second verify is the one 403. A token of purpose `admin` for a person who is **not** an admin is refused and consumes nothing.
+- Design log: §135.4 now records its squash SHA.
+
+### 136.2 Measured, not assumed
+
+- **No defect found in the path.** Four of four in `superuser` and in `restricted`.
+- **The cells can fail — 5 of 5 Edge-side mutants killed** (scratch copy of the Edge through the real harness, the repo's files never touched; control 4/4):
+
+  | Mutant                                                                 | Cells that fail |
+  | ---------------------------------------------------------------------- | --------------- |
+  | M1 a TOTP reset is answered `{reset: false}`                           | 1               |
+  | M2 `totp_not_set` is answered 404, not 409                             | 1               |
+  | M3 the admin enrolment passes an UPPERCASE token hash                  | 3 and 4         |
+  | M4 the enrolment link carries the token in the query, not the fragment | 3               |
+  | M5 the admin-enrolment body accepts an extra key                       | 3               |
+
+- **Slips of my own, found by running it:** a new admin's first session is alive but 403 at aal 1 (my first assertion expected 200 — the harness was right: aal gates every class, A0 included); my "alive" helper first treated a 403 as dead (alive is "not 401"); a fixture that put the second admin in `app.admin_user` has to remove it again (the cells delete the row in a `finally`); and the helper I copied from §135 carried the `onb-` account-label prefix, which would have shared a prefix with the onboarding file — every address also carries a per-run id so no collision was possible, but the prefix is now this file's own (`adr-`). `integration-account-labels.test.ts` (§134) stays green over the new file.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **452 passed, 0 failed** in each (the 448 that were there plus these 4); `service-role-lint` clean. The unit suite is unchanged (103 files / 1925 tests) and its `integration-account-labels` pin passes over the new file.
+
+### 136.3 Not built, honestly
+
+- The last assertion of cell 4 accepts **either** 409 or 403 for an `admin`-purpose token whose person is not an admin: the database answers `existing_member_sign_in` (409) first because that person holds a credential, so the branch that would name the missing admin row is not reached with this fixture, and I did not build a second fixture for it. It does check that nothing was consumed.
+- Admin-role paths of the other lanes (what an admin may do in the members, stock, settlement, programme and sponsorship lanes) are not driven; the GoTrue adapters, the real exports adapter / Storage and the sponsor-funded consumers of approved sponsorships remain undriven.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 136.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `614b1e7 / #176`). Squash SHA recorded after merge.
+
+- Per-file runs: 4/4 in `superuser` and in `restricted`; the full harness as above; unit suite 103 files / 1925 tests green. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
