@@ -5099,6 +5099,63 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 128.** �
 
 ### 128.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eff6e34` / #168). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eff6e34` / #168). Squash-merged as `b50d058` (#169).
 
 - Per-file runs of this test as above; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 129. As built: the invites lane gets a real-stack integration test — and with it the first defect a lane test has found: an invite could not be created
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 129.** The same shape as §122 and §125 to §127, for the `partner-invites` lane: create, list, revoke, and branch E (an existing member accepts an invite to another organisation). It is the first of those tests to find a defect in the lane rather than in the test. One Edge line is fixed (`privileged.ts`), the defect class is pinned statically, and no migration, product behaviour other than that fix, UI flag or CAMERA / OCR is touched.
+
+### 129.1 The defect, and the fix
+
+- **What.** `buildPartnerInvitesTx.inviteCreate` (`supabase/functions/_shared/privileged.ts`) bound the role as `${role}::app.partner_role`. It runs as `edge_partner` (`SET LOCAL ROLE`), and `edge_partner` has **no USAGE on schema `app`** — deliberately: 0047 says so in as many words (`NO USAGE on schema app`, line 68) and grants only `USAGE ON SCHEMA private` to `edge_partner` and `edge_partner_minter`. A cast that names a type in `app` has to resolve that name, so every `POST invites` raised `42501 permission denied for schema app`, which the Edge's error mapper answers as **403 `forbidden`**, whoever asked and however fresh their step-up (the integration run below shows exactly that: 403 with `{"error":{"code":"forbidden"}}` for a manager with a live reauth and PIN grant). No invite could be created through the Edge, so none could be listed, accepted or revoked either.
+- **Observed, not inferred** (a probe run as `edge_partner` against the live cluster, in both harness modes): `select 'staff'::app.partner_role` → `42501 permission denied for schema app`; `has_schema_privilege('edge_partner','app','USAGE')` = `false`, `('edge_partner','private','USAGE')` = `true`, `('edge_partner_minter','app','USAGE')` = `false`, `('edge_actor','app','USAGE')` = `true`.
+- **Since when** (this clone was deepened to its full history to answer it): the builder entered `privileged.ts` with the cast already in it, in `4cfb5ec` (#73, 2026-10-09); `edge_partner`'s lack of `USAGE` on `app` dates from `8baa81d` (#54, 2026-10-04). The partners portal's invite action (`apps/partners/src/app/work.ts:144`, "class A2: reauth + PIN, then POST invites") posts to this route; I did not run the portal, so what a manager saw there is the 403, read from the handler, not observed.
+- **Why nothing saw it.** The unit suite hands the handler a mocked port; the pgTAP matrix calls the definers with its own SQL, not the Edge's text; and §123's call-text pin compares the cast's _type_ with the parameter's (`app.partner_role` against `app.partner_role`: equal), which is right and says nothing about whether the _role_ may name that type.
+- **Fix.** `${role}` is passed with no cast. The driver (postgres.js) sends a string as an untyped parameter, so the definer's own declared parameter type applies; the run shows the definer accepting it (the 20 creates of cell 6 among them). The comment on the line says why. The other `::app.*` casts in `privileged.ts` all sit above the partner section of the file (by position: the player and system lanes, which run as `edge_actor` / `edge_system`, and those roles do have `USAGE` on `app`, 0030), and the rule cell below finds none in a partner template.
+
+### 129.2 What was built
+
+- **`supabase/tests/integration/partner-invites.deno.test.ts`** (6 cells): the REAL `handlePartnerInvitesRequest` over the REAL `privileged.ts`, REAL manager and member sessions from the REAL partner-session mint, against the REAL database `tools/db/test.sh` builds. Effects are read back as the owner, not through the code under test.
+  1. **create + list:** 201 with a `gr_inv_…` token, an `inviteUrl` carrying it in the fragment, 72 hours; the row holds the **independent SHA-256** of the token, the **normalised** address (`"  New.Hire+Tag@Integration.TEST "` → `new.hire+tag@integration.test`), the role, the facility, the inviter, `attempts` 0, and the plaintext token nowhere; the list shows it with no token or hash in the body; a manager of an organisation at another facility (`fac_y`) sees nothing, with or without `?orgId=`; **control:** a manager of another organisation at the _same_ facility does see it (see 129.3); no bearer is 401;
+  2. **branch E round trip:** an existing staff member of another organisation, with a GoTrue-confirmed address, accepts with the token → 200 `{orgId, role}`; the membership row carries the inviter; the other membership is untouched; the invite is spent (`accepted_by`, `attempts` 1); the same token again is 403 `invite_refused` and writes no second membership;
+  3. **PA-14, a refusal commits its attempt count:** a wrong mailbox is 403 with `attempts` 0 → 1 on the row; the right mailbox still gets in (`attempts` 2); an unconfirmed address is 403 and counted, with no membership; and **ten refusals lock the invite**: the eleventh attempt, from the _right_ mailbox, is refused and `attempts` stays 10;
+  4. **`already_member` and the revoke vocabulary:** inviting an address that is already an active member is 409 `already_member` (any case; no invite written); accepting into an organisation you are already in is 409 `already_member`; revoke is 200 `{revoked: true}`, then 409 `invite_revoked`; an accepted invite is 409 `invite_accepted`; an unknown id **and another facility's invite** are the same 404; a revoked token joins nobody;
+  5. **class A2 and the role rules:** a **control** first (the same manager creates an invite); then a staff member (403), a manager inviting a manager (403, the grant must be a subset of the inviter's reach) and a manager inviting an operator (403, only an admin does) each write nothing; a create with the reauth but no PIN grant, and with the PIN grant but no reauth, are each 403 and write nothing; four malformed bodies are 400;
+  6. **the two daily caps:** three invites to one address, then 429 `rate_limited` with a `Retry-After` and no fourth invite; twenty invites from one inviter, then 429 and no twenty-first; another inviter is not slowed.
+- **`supabase/tests/unit/privileged-sql-contract.test.ts`** (19 → 24 cells): the static pin of the defect class. A **premise** cell: no migration grants `USAGE` on schema `app` to `edge_partner`, `edge_partner_minter` or `PUBLIC` (with controls that the same parser does see `edge_partner`'s `USAGE` on `private` and `edge_actor`'s on `app`). A **rule** cell: no template that calls a `private.*partner*` function names anything in schema `app`. Three synthetic cells cover the readers (multi-line grants, `ALL`, `PUBLIC`, a comment, an untyped argument, the `hit_partner_rate_limit` bucket hit).
+- Design log: §128.4 now records its squash SHA (`b50d058`, #169).
+
+### 129.3 Measured, not assumed
+
+- **Revert-and-run (the cells can fail).** Each mutant is a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** the pre-fix Edge (the cast), otherwise unmutated | **6 of 6** (0 passed) |
+  | M1 control: the fixed Edge, unmutated | none (6 passed) |
+  | M2 the invite link carries the token in the query, not the fragment | 1 |
+  | M3 branch E answers without the role | 2 |
+  | M4 an accepted invite is reported as revoked | 4 |
+  | M5 a refusal rolls its attempt count back, answer unchanged (`ROLLBACK` after the definer returns) | 3 only |
+  | M6 the per-address cap is 4, not 3 | 6 |
+  | M7 the per-inviter cap is 21, not 20 | 6 |
+  | M8 branch E sends the token hash upper-cased | 2, 3 and 4 |
+
+- **The pin's mutants** (the real `privileged.ts` or a throwaway `supabase/migrations/9999_mut.sql`, each restored or deleted; `privileged.ts` byte-identical by SHA-256 afterwards): the fix reverted (rule cell fails, naming the template's line) and an `app` table named beside a partner call (rule cell fails) are killed; a migration granting `USAGE` on `app` to `edge_partner`, and one granting it to `PUBLIC`, fail the premise cell; **controls that must pass and do:** a comment that mentions `app.partner_role`, and `USAGE` on `app` granted to some other role.
+- **Three things in my own first version, found by running it:** (1) the fixture confirmed the invitee's address with an `UPDATE` of `email_confirmed_at`, which `service_role` may not do in the shim (it may update only `last_sign_in_at`): the users are now inserted already confirmed or not, and the "once confirmed, accepted" half of the unconfirmed cell is not written (the confirmed `right` member of the same cell is its control); (2) two cells failed because both organisations sat on `fac_x`: the policies filter by **facility** scope (`pd_read_partner_invite_scope` and `pd_revoke_partner_invite` in 0054: the inviter, an admin, or a manager or operator of the invite's facility), so two organisations on one facility see _and can revoke_ each other's invites — by design, recorded here as a property and pinned as the cell-1 control, not a defect; the cross-organisation assertions use `fac_y`; (3) cell 5 **passed vacuously** on the pre-fix Edge, because its refusals expect a 403 and the bug answered 403 to everything: it now opens with a control that the same manager can create, and it fails with the rest (M0).
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **416 passed, 0 failed** in each (the 410 that were there plus these 6); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 101 files, **1916** tests, the 1911 that were there plus the 5 new pin cells) passes.
+
+### 129.4 Not built, honestly
+
+- **Branch N** (`accept/start`, `accept/verify`, `credentials`, and the enrolment variants) needs GoTrue's email OTP and a fresh GoTrue session, neither of which the harness has. It stays covered by the unit suite and the pgTAP matrix and is **not** driven here; a defect like this one could sit there too.
+- **The pin is narrow.** It reads `GRANT … ON SCHEMA … TO …` statements (no later `REVOKE` is subtracted, and role membership / inheritance is not modelled), and it looks only for a name in schema `app` inside a template that calls a `private.*partner*` function. It does not check table or column privileges, other schemas (`auth`, `storage`), or a partner template that calls no such function. The integration test is the other half: it would have failed on this defect in any lane that drives the path.
+- **Five partner lanes still have no real-stack test:** members, programme, settlement, sponsorships, stock (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites: this section). The members lane is the invites lane's sibling (same file shape, same bound transaction) and the likeliest next.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 129.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b50d058` / #169). Squash SHA recorded after merge.
+
+- Per-file runs of the invites test: 6/6 in `superuser` and in `restricted`; the unit file 24/24; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
