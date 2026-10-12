@@ -346,6 +346,7 @@ export const en = {
   "admin.badSponsor": "That organisation is not a sponsor.",
   "admin.stockShort": "Every special-marker facility must hold stock before this goes live.",
   "admin.budgetShort": "The offer cannot cover this code. Raise its budget or reject the code.",
+  "admin.noActiveStaff": "This facility has no active staff or manager, so the code cannot be issued. Add staff there or reject the code.",
   "admin.noTrailRow": "Save the trail programme before a facility programme.",
   "admin.invalidEligibility": "Eligibility failed validation.",
   "admin.notHeld": "This reward is not awaiting review.",

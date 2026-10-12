@@ -430,8 +430,12 @@ export interface PartnerAttestTx {
   staffActivity(facilityId: string, days: number): Promise<StaffActivityRow[]>;
 }
 
-/** What `partner_resolve_held_*_for_partner` answers (0057). Every status except a raise is a returned value. */
-export type ResolveHeldStatus = "ok" | "not_found" | "not_held" | "budget_short" | "not_open";
+/** What `partner_resolve_held_*_for_partner` answers (0057; `no_active_staff` since 0061). Every status except a raise is a returned value.
+ * ONE list, at runtime AND as a type: `privileged.ts` validates the database's `o_status` against it, `review-handler.ts` must map every member
+ * (its `switch` is exhaustive over the type), and `partner-review-handler.test.ts` iterates it — so a status the SQL learns but the Edge does not
+ * is a compile error or a failing cell, not a 500 an admin finds first. `supabase/tests/unit/partner-resolve-statuses.test.ts` pins the SQL side. */
+export const RESOLVE_HELD_STATUSES = ["ok", "not_found", "not_held", "budget_short", "no_active_staff", "not_open"] as const;
+export type ResolveHeldStatus = (typeof RESOLVE_HELD_STATUSES)[number];
 export interface ResolveHeldResult {
   readonly status: ResolveHeldStatus;
   /** Present only on `ok`: the resulting offer_code_state or entitlement_state. */

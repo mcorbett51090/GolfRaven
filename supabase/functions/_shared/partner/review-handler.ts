@@ -141,6 +141,8 @@ function resolveResponse(decision: Decision, r: ResolveHeldResult): Response {
       return partnerError(decision, 409, "not_open", "this review item is not open");
     case "budget_short":
       return partnerError(decision, 422, "budget_short", "the offer cannot cover this code: raise its budget or reject the code");
+    case "no_active_staff":
+      return partnerError(decision, 422, "no_active_staff", "the facility has no active staff or manager, so the code cannot be issued: add staff or reject the code");
   }
 }
 

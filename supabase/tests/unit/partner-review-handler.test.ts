@@ -10,6 +10,7 @@ import {
   PartnerAuthorityRefused,
   PartnerInvalidArgument,
   PartnerSessionRefused,
+  RESOLVE_HELD_STATUSES,
   type HeldQueueRow,
   type PartnerAuthAlarmRow,
   type PartnerDb,
@@ -339,12 +340,42 @@ describe("handlePartnerReviewRequest", () => {
       ["not_found", null, 404],
       ["not_held", null, 409],
       ["budget_short", null, 422],
+      ["no_active_staff", null, 422],
     ] as const) {
       const fake = makeFake({ resolveOc: { status, state: code } });
       const res = await call(fake, "POST", "resolve/offer-code", { id, approve: true });
       expect(res.status).toBe(http);
       if (status === "ok") expect(await res.json()).toEqual({ data: { state: "issued" } });
       else expect(((await res.json()) as { error: { code: string } }).error.code).toBe(status === "not_found" ? "not_found" : status);
+    }
+  });
+
+  it("EVERY status in RESOLVE_HELD_STATUSES is mapped on all three resolve routes: a closed 4xx with the status as its code, never a 5xx", async () => {
+    // The expected table is written out in full on purpose: adding a status to the list (or to the SQL, see partner-resolve-statuses.test.ts)
+    // without deciding its HTTP answer here fails this cell, instead of reaching an admin as a thrown 500 (the 0061 `no_active_staff` gap).
+    const expected: Record<(typeof RESOLVE_HELD_STATUSES)[number], number> = {
+      ok: 200,
+      not_found: 404,
+      not_held: 409,
+      not_open: 409,
+      budget_short: 422,
+      no_active_staff: 422,
+    };
+    expect(Object.keys(expected).sort()).toEqual([...RESOLVE_HELD_STATUSES].sort());
+    const routes = [
+      ["resolve/offer-code", "resolveOc", "70000000-0000-0000-0000-000000003501"],
+      ["resolve/entitlement", "resolveEnt", "51000000-0000-0000-0000-000000003501"],
+      ["resolve/receipt-cross-user", "resolveXu", "91000000-0000-0000-0000-000000004701"],
+    ] as const;
+    for (const status of RESOLVE_HELD_STATUSES) {
+      for (const [path, slot, id] of routes) {
+        const fake = makeFake({ [slot]: { status, state: status === "ok" ? "issued" : null } });
+        const res = await call(fake, "POST", path, { id, approve: true });
+        expect(res.status, `${path} ${status}`).toBe(expected[status]);
+        const body = (await res.json()) as { data?: { state: string }; error?: { code: string } };
+        if (status === "ok") expect(body.data).toEqual({ state: "issued" });
+        else expect(body.error?.code, `${path} ${status}`).toBe(status);
+      }
     }
   });
 
