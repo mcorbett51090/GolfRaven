@@ -18,6 +18,9 @@
 //   POST pin/change       { currentDerived, derived, salt, iterations }: replace a live PIN (needs the current one)
 //   POST otp-proof/start  {}: mails a one-time code to the member's OWN address (3 a member an hour)
 //   POST otp-proof/verify { code }: proves the mailbox through GoTrue (anon key) and records the proof on the session (5 attempts a member an hour); the GoTrue session is closed AFTER the proof is recorded
+//   POST totp/enrol       {}: enrols (or re-enrols unconfirmed) TOTP; returns base32 seed + otpauthUrl once (S1.4, PA-24). `already_confirmed` is 409; 42501 / 55000 map via PartnerAuthorityRefused / PartnerNotConfigured
+//   POST totp/confirm     { code }: confirms the unconfirmed seed in the same session that enrolled
+//   POST step-up/totp     { code }: raises aal to 2 and sets mfa_until; wrong→403, locked→403 with Retry-After, unset/unconfirmed→409
 //
 // THE ORDER, for every request: (1) the Origin check, before routing and for every method (a foreign Origin is a 403 whatever CORS does); (2) `OPTIONS` is answered here, with no port touched;
 // (3) the route and method (404 / 405); (4) for a session route, the bearer: exactly `gr_ps_` + 43 characters, else the ONE 401 with no port touched (a Supabase JWT, any other bearer and no
@@ -36,12 +39,15 @@ import {
   type ChallengeIssue,
   type EmailOtpPort,
   type PartnerDb,
+  type PartnerRateAlarmKind,
   type PinWriteResult,
   PartnerAuthorityRefused,
   PartnerConflict,
   PartnerNotConfigured,
   PartnerSessionRefused,
   type RpConfig,
+  type TotpConfirmResult,
+  type TotpVerifyResult,
 } from "./ports.ts";
 import {
   parseEmptyBody,
@@ -50,11 +56,14 @@ import {
   parsePinSetBody,
   parsePinVerifyBody,
   parseReauthBody,
+  parseTotpCodeBody,
   parseVerifyBody,
   uuidToBytes,
   type VerifyRequest,
 } from "./session-shape.ts";
 import { type NewSessionToken, partnerTokenFromHeader, sha256Hex, toB64u } from "./token.ts";
+import { alertMemberAnyCall, encodedPathRefusal } from "./handler-kit.ts";
+import { buildOtpauthUrl, encodeTotpSeed } from "./totp-contract.ts";
 
 export const PARTNER_SESSION_FUNCTION = "partner-session";
 /** Design 8: reauth is 10 attempts per member per hour (a hard, member-keyed bucket). */
@@ -65,6 +74,50 @@ export const OTP_SEND_PER_MEMBER_PER_HOUR = 3;
 export const OTP_SEND_BUCKET = "partner-otp-send:member";
 export const OTP_VERIFY_PER_MEMBER_PER_HOUR = 5;
 export const OTP_VERIFY_BUCKET = "partner-otp-verify:member";
+/** Design 8 / §68: alert-only (never 429) options + verify-failure buckets. */
+export const OPTIONS_PER_IP_PER_HOUR = 600;
+export const OPTIONS_GLOBAL_PER_HOUR = 20_000;
+export const VERIFY_FAIL_PER_IP_PER_HOUR = 100;
+export const OPTIONS_IP_BUCKET = "partner-session-options-ip";
+export const OPTIONS_GLOBAL_BUCKET = "partner-session-options-global";
+export const VERIFY_IP_BUCKET = "partner-session-verify-ip";
+
+/** First X-Forwarded-For hop, else CF-Connecting-IP, else "unknown". Never stored raw — hash before any bucket_key. */
+export function partnerClientIp(req: Request): string {
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff !== null) {
+    const first = xff.split(",")[0]?.trim() ?? "";
+    if (first.length > 0) return first;
+  }
+  const cf = req.headers.get("cf-connecting-ip");
+  if (cf !== null) {
+    const t = cf.trim();
+    if (t.length > 0) return t;
+  }
+  return "unknown";
+}
+
+async function partnerIpBucketKey(req: Request): Promise<string> {
+  return sha256Hex(partnerClientIp(req));
+}
+
+/** Alert-only: hit the system bucket; on !ok raise partner_auth_alarm. Never returns 429; writer errors are swallowed. */
+async function alertOnlyRate(
+  deps: PartnerSessionDeps,
+  systemBucket: string,
+  max: number,
+  kind: PartnerRateAlarmKind,
+  alarmBucketKey: string,
+  detail: Record<string, unknown>,
+): Promise<void> {
+  const lim = await deps.db.hitSystemRateLimit(systemBucket, 3600, max);
+  if (lim.ok) return;
+  try {
+    await deps.db.withMint((m) => m.raiseRateAlarm(kind, alarmBucketKey, detail));
+  } catch {
+    // alert-only: a writer fault must not refuse the request
+  }
+}
 
 export interface PartnerSessionDeps {
   readonly db: PartnerDb;
@@ -92,6 +145,9 @@ const ROUTE_METHODS: Readonly<Record<string, "GET" | "POST">> = {
   "pin/change": "POST",
   "otp-proof/start": "POST",
   "otp-proof/verify": "POST",
+  "totp/enrol": "POST",
+  "totp/confirm": "POST",
+  "step-up/totp": "POST",
 };
 
 /** The route of a request URL: the path after the function name (`/partner-session/verify`, `/functions/v1/partner-session/verify`) or, with no function name in the path, the whole path. */
@@ -125,10 +181,12 @@ export async function handlePartnerSessionRequest(req: Request, deps: PartnerSes
     decision,
     async () => {
       try {
-        // (3) the route and the method
+        // (3) the route and the method (§20.12 / §99: encoded path refuse first; Object.hasOwn so prototype keys are 404 not 405)
+        const encoded = encodedPathRefusal(decision, req.url);
+        if (encoded !== null) return encoded;
         const route = routeOf(req.url);
-        const want = ROUTE_METHODS[route];
-        if (want === undefined) return partnerError(decision, 404, "not_found", "not found");
+        if (!Object.hasOwn(ROUTE_METHODS, route)) return partnerError(decision, 404, "not_found", "not found");
+        const want = ROUTE_METHODS[route]!;
         if (req.method !== want) return partnerError(decision, 405, "method_not_allowed", `${want} only`, { allow: want });
 
         // (4) a session route needs a gr_ps_ bearer: anything else is the one 401, and no port is touched
@@ -137,6 +195,7 @@ export async function handlePartnerSessionRequest(req: Request, deps: PartnerSes
           const token = partnerTokenFromHeader(req.headers.get("authorization"));
           if (token === null) return unauthenticated(decision);
           tokenHash = await sha256Hex(token);
+          await alertMemberAnyCall(deps.db, tokenHash);
         }
 
         switch (route) {
@@ -170,8 +229,16 @@ export async function handlePartnerSessionRequest(req: Request, deps: PartnerSes
             return await handlePinChange(req, deps, decision, tokenHash!);
           case "otp-proof/start":
             return await handleOtpStart(req, deps, decision, tokenHash!);
-          default:
+          case "otp-proof/verify":
             return await handleOtpVerify(req, deps, decision, tokenHash!);
+          case "totp/enrol":
+            return await handleTotpEnrol(req, deps, decision, tokenHash!);
+          case "totp/confirm":
+            return await handleTotpConfirm(req, deps, decision, tokenHash!);
+          case "step-up/totp":
+            return await handleTotpVerify(req, deps, decision, tokenHash!);
+          default:
+            return partnerError(decision, 404, "not_found", "not found");
         }
       } catch (err) {
         if (err instanceof PartnerSessionRefused) return unauthenticated(decision);
@@ -195,6 +262,10 @@ type Decision = ReturnType<typeof decideOrigin>;
 
 async function handleOptions(req: Request, deps: PartnerSessionDeps, decision: Decision): Promise<Response> {
   await emptyBody(req);
+  // §68 alert-only: IP then global. Never 429 — a shared office NAT must not become a login DoS lever.
+  const ipKey = await partnerIpBucketKey(req);
+  await alertOnlyRate(deps, `${OPTIONS_IP_BUCKET}:${ipKey}`, OPTIONS_PER_IP_PER_HOUR, "rate_options_ip", ipKey, { stage: "options" });
+  await alertOnlyRate(deps, OPTIONS_GLOBAL_BUCKET, OPTIONS_GLOBAL_PER_HOUR, "rate_options_global", "global", { stage: "options" });
   const { rp, ch } = await deps.db.withMint(async (m) => {
     const rp = await m.rpConfig();
     assertSameOrigin(deps, rp);
@@ -214,6 +285,7 @@ async function handleVerify(req: Request, deps: PartnerSessionDeps, decision: De
   const { assertion, token } = body;
 
   // ONE transaction as edge_partner_minter. Every refusal below is a RETURNED value: the transaction commits whatever it holds (the failure counter, the burned nonce, the alarm rows).
+  let recordedAssertFailure = false;
   const outcome = await deps.db.withMint(async (m): Promise<Refusal | { readonly kind: "minted"; readonly aal: number; readonly expiresAt: string }> => {
     const rp = await m.rpConfig();
     assertSameOrigin(deps, rp);
@@ -232,6 +304,7 @@ async function handleVerify(req: Request, deps: PartnerSessionDeps, decision: De
     if (!verified.ok && !verified.counterOnly) {
       // a refused verification is a guess: it counts against the credential (design 8), and the count commits with this refusal
       await m.recordFailure(assertion.credentialId);
+      recordedAssertFailure = true;
       return REFUSED;
     }
     // `counterOnly`: the signature is genuine and only the counter did not advance. It goes to the mint anyway, which writes the audit_log and alarm rows (PA-12) and answers counter_regression
@@ -248,6 +321,12 @@ async function handleVerify(req: Request, deps: PartnerSessionDeps, decision: De
     if (minted.status !== "ok" || minted.aal === null || minted.expiresAt === null) return REFUSED;
     return { kind: "minted", aal: minted.aal, expiresAt: minted.expiresAt };
   });
+
+  // §68 alert-only verify-IP bucket: only when the Edge assertion failed and we recorded a failure (not counterOnly / success). Never 429.
+  if (recordedAssertFailure) {
+    const ipKey = await partnerIpBucketKey(req);
+    await alertOnlyRate(deps, `${VERIFY_IP_BUCKET}:${ipKey}`, VERIFY_FAIL_PER_IP_PER_HOUR, "rate_verify_ip", ipKey, { stage: "verify" });
+  }
 
   if (outcome.kind === "refused") return unauthenticated(decision);
   // the token leaves this function exactly once, here, in the body of the response
@@ -420,4 +499,83 @@ async function handleOtpVerify(req: Request, deps: PartnerSessionDeps, decision:
 /** Every refusal of the emailed code (wrong, expired, no session to bind, a stale or reused GoTrue session) is this ONE 403. */
 function otpRefused(decision: Decision): Response {
   return partnerError(decision, 403, "otp_refused", "that code was not accepted");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// Operator / admin TOTP (S1.4, design 6.4). The database derives the seed and evaluates codes; the Edge base32-encodes the seed once and builds the otpauth URI. Every refusal of a code is a
+// RETURNED status so the failure counter commits with it (the 0020 lesson); 42501 / 55000 throw and map to 403 / 503 via the catch above.
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function handleTotpEnrol(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  await emptyBody(req);
+  const r = await deps.db.withSession(tokenHash, (s) => s.totpEnrol());
+  if (r.status === "already_confirmed") return partnerError(decision, 409, "totp_already_confirmed", "TOTP is already confirmed: ask an admin to reset it");
+  if (r.status !== "ok" || r.seed === null || r.seedVersion === null || r.issuer === null || r.period === null || r.digits === null || r.algo === null) {
+    throw new Error("partner_totp_enrol_for_partner returned no usable ok row");
+  }
+  const seed = encodeTotpSeed(r.seed);
+  const otpauthUrl = buildOtpauthUrl({ seed: r.seed, issuer: r.issuer, period: r.period, digits: r.digits, algo: r.algo });
+  return partnerOk(decision, 200, {
+    seed,
+    seedVersion: r.seedVersion,
+    otpauthUrl,
+    issuer: r.issuer,
+    period: r.period,
+    digits: r.digits,
+    algo: r.algo,
+  });
+}
+
+function totpConfirmResponse(decision: Decision, r: TotpConfirmResult): Response {
+  switch (r.status) {
+    case "ok":
+      return partnerOk(decision, 200, { confirmed: true });
+    case "wrong":
+      return partnerError(decision, 403, "totp_wrong", "that code is not correct");
+    case "locked":
+      return partnerError(decision, 403, "totp_locked", "TOTP is locked: wait before trying again", {
+        "retry-after": String(Math.max(1, r.retryAfterSeconds)),
+      });
+    case "already_confirmed":
+      return partnerError(decision, 409, "totp_already_confirmed", "TOTP is already confirmed");
+    case "wrong_session":
+      return partnerError(decision, 409, "totp_wrong_session", "confirm in the same session that enrolled");
+    default:
+      return partnerError(decision, 409, "totp_not_set", "no TOTP enrolment is in progress");
+  }
+}
+
+async function handleTotpConfirm(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseTotpCodeBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const r = await deps.db.withSession(tokenHash, (s) => s.totpConfirm(parsed.value.code));
+  return totpConfirmResponse(decision, r);
+}
+
+function totpVerifyResponse(decision: Decision, r: TotpVerifyResult): Response {
+  switch (r.status) {
+    case "ok":
+      return partnerOk(decision, 200, { mfaUntil: r.mfaUntil, aal: 2 });
+    case "wrong":
+      return partnerError(decision, 403, "totp_wrong", "that code is not correct");
+    case "locked":
+      return partnerError(decision, 403, "totp_locked", "TOTP is locked: wait before trying again", {
+        "retry-after": String(Math.max(1, r.retryAfterSeconds)),
+      });
+    case "retry_after":
+      return partnerError(decision, 429, "totp_backoff", "too many attempts: wait before trying again", {
+        "retry-after": String(Math.max(1, r.retryAfterSeconds)),
+      });
+    case "unconfirmed":
+      return partnerError(decision, 409, "totp_unconfirmed", "TOTP is not confirmed yet");
+    default:
+      return partnerError(decision, 409, "totp_not_set", "no TOTP is set");
+  }
+}
+
+async function handleTotpVerify(req: Request, deps: PartnerSessionDeps, decision: Decision, tokenHash: string): Promise<Response> {
+  const parsed = parseTotpCodeBody(await readPartnerJsonBody(req));
+  if (!parsed.ok) throw Errors.badRequest("invalid request", parsed.issues);
+  const r = await deps.db.withSession(tokenHash, (s) => s.totpVerify(parsed.value.code));
+  return totpVerifyResponse(decision, r);
 }

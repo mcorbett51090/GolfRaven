@@ -221,7 +221,9 @@ INSERT INTO vault.secrets (id, name, secret) VALUES
   -- 0048: the partner sign-in challenge HMAC key (>= 32 bytes). Real deployments create it once with vault.create_secret(..., 'partner_challenge_key'). The test vector in 26_partner_signin_mint.sql is computed OUTSIDE the database from this constant.
   ('a0000000-1111-0000-0000-0000000000f2', 'partner_challenge_key', 'shim-test-only-partner-challenge-key-32bytes-minimum-qqqqqqqqqqqqqqqqqqqqq'),
   -- 0052: the partner step-up PIN pepper (>= 32 bytes). Real deployments create it once with vault.create_secret(..., 'partner_pin_pepper'). The verifier vector in 28_partner_pin_step_up.sql is computed OUTSIDE the database from this constant.
-  ('a0000000-1111-0000-0000-0000000000f3', 'partner_pin_pepper', 'shim-test-only-partner-pin-pepper-32bytes-minimum-wwwwwwwwwwwwwwwwwwwwwwww')
+  ('a0000000-1111-0000-0000-0000000000f3', 'partner_pin_pepper', 'shim-test-only-partner-pin-pepper-32bytes-minimum-wwwwwwwwwwwwwwwwwwwwwwww'),
+  -- 0053: the partner TOTP seed derivation key (>= 32 bytes). Real deployments create it once with vault.create_secret(..., 'partner_totp_key'). TEST-ONLY: the PA-20 oracle vectors are computed OUTSIDE the database from this constant.
+  ('a0000000-1111-0000-0000-0000000000f4', 'partner_totp_key', 'shim-test-only-partner-totp-key-32bytes-minimum-vvvvvvvvvvvvvvvvvvvvvvvv')
 ON CONFLICT (name) DO NOTHING;
 
 -- migration_owner (the pgTAP matrix's own connecting role under
@@ -259,6 +261,72 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vault.secrets TO service_role;
 -- reachable ONLY through private_definer (0018's narrow, column-level
 -- grant), which private.delete_my_data (SECURITY DEFINER) uses — never a
 -- direct read by whatever role happens to be calling it.
+
+-- Vault API stand-ins (0082 course PIN pepper rotation): real Supabase Vault
+-- ships vault.create_secret / vault.update_secret as SECURITY DEFINER writers
+-- over encrypted storage. This shim mirrors their documented signatures and
+-- writes plaintext into vault.secrets (same as the rest of this stand-in).
+-- Migration 0082 GRANTs EXECUTE to private_definer; delete of a named secret
+-- is DELETE FROM vault.secrets (no vault.delete_secret in the hosted API).
+-- INVOKER (not SECURITY DEFINER): matrix 10 forbids non-private SECURITY
+-- DEFINER outside a pinned extension list; hosted supabase_vault's real
+-- create_secret/update_secret are extension-owned and never appear in this
+-- harness. Callers need DML on vault.secrets (0082 grants private_definer
+-- INSERT/UPDATE/DELETE) — the plaintext stand-in has no encryption step.
+CREATE OR REPLACE FUNCTION vault.create_secret(
+  new_secret text,
+  new_name text DEFAULT NULL,
+  new_description text DEFAULT NULL,
+  new_key_id uuid DEFAULT NULL
+) RETURNS uuid
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+DECLARE
+  v_id uuid;
+BEGIN
+  IF new_secret IS NULL THEN
+    RAISE EXCEPTION 'vault.create_secret: secret is required' USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO vault.secrets (name, description, secret, key_id)
+  VALUES (new_name, coalesce(new_description, ''), new_secret, new_key_id)
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END
+$$;
+CREATE OR REPLACE FUNCTION vault.update_secret(
+  secret_id uuid,
+  new_secret text DEFAULT NULL,
+  new_name text DEFAULT NULL,
+  new_description text DEFAULT NULL,
+  new_key_id uuid DEFAULT NULL
+) RETURNS void
+LANGUAGE plpgsql
+SET search_path = ''
+AS $$
+BEGIN
+  IF secret_id IS NULL THEN
+    RAISE EXCEPTION 'vault.update_secret: secret_id is required' USING ERRCODE = '22023';
+  END IF;
+  UPDATE vault.secrets s
+  SET
+    secret = coalesce(new_secret, s.secret),
+    name = coalesce(new_name, s.name),
+    description = coalesce(new_description, s.description),
+    key_id = coalesce(new_key_id, s.key_id),
+    updated_at = now()
+  WHERE s.id = secret_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'vault.update_secret: secret % not found', secret_id USING ERRCODE = 'P0002';
+  END IF;
+END
+$$;
+REVOKE ALL ON FUNCTION vault.create_secret(text, text, text, uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) FROM PUBLIC;
+-- WITH GRANT OPTION: migration 0082 grants EXECUTE onward to private_definer
+-- (same shape a real project's postgres role needs on hosted Vault).
+GRANT EXECUTE ON FUNCTION vault.create_secret(text, text, text, uuid) TO migration_owner WITH GRANT OPTION;
+GRANT EXECUTE ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) TO migration_owner WITH GRANT OPTION;
 
 -- migration_owner also needs to be able to `SET ROLE
 -- service_role/anon/authenticated` (S1, gate round 3): tools/db/test.sh

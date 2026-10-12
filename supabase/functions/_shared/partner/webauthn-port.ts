@@ -10,8 +10,9 @@
 // counter forgotten (0): if THAT passes, the signature, origin, RP ID, challenge and user verification were all fine and the counter was the only fault (`counterOnly`). The handler then passes the
 // assertion to the mint, which re-verifies everything (and writes the alarm); a forged assertion never gets that far because its second verification fails too.
 
-import type { AssertionVerifier, RpConfig, VerifyAssertionRequest, VerifyOutcome } from "./ports.ts";
-import { authenticationOptions, verifyAssertion, WebAuthnRefusal } from "./webauthn.ts";
+import type { AssertionVerifier, CreationOptionsRequest, RegistrationOutcome, RegistrationVerifier, RpConfig, VerifyAssertionRequest, VerifyOutcome, VerifyRegistrationRequest } from "./ports.ts";
+import { fromB64u, toB64u } from "./token.ts";
+import { authenticationOptions, registrationOptions, verifyAssertion, verifyRegistration, WebAuthnRefusal } from "./webauthn.ts";
 
 async function verifyOnce(input: VerifyAssertionRequest, signCount: number): Promise<VerifyOutcome | "refused_by_library"> {
   try {
@@ -43,5 +44,42 @@ export const assertionVerifier: AssertionVerifier = {
       if (second !== "refused_by_library" && second.ok) return { ok: false, counterOnly: true };
     }
     return { ok: false, counterOnly: false };
+  },
+};
+
+/** What an authenticator shows next to the relying party; not an identifier. */
+const RP_DISPLAY_NAME = "GolfRaven";
+
+/**
+ * The create ceremony (6.1 step 4, S1.5). A wrapper refusal (a wrong format, a cross-origin ceremony, a mismatched challenge, a key outside the allowed algorithms) is a plain `{ ok: false }`: the closed code and the
+ * library's message stay in this file. A configuration fault is not a client refusal and propagates (a 500, a rollback). The id and the key are returned as bytes: they are what the database parses and stores.
+ */
+export const registrationVerifier: RegistrationVerifier = {
+  options(req: CreationOptionsRequest) {
+    return registrationOptions({
+      rp: req.rp,
+      rpName: RP_DISPLAY_NAME,
+      userHandle: req.userHandle,
+      userName: req.userName,
+      userDisplayName: req.userName,
+      challenge: req.challenge,
+      excludeCredentialIds: req.excludeCredentialIds.map(toB64u),
+    });
+  },
+  async verify(req: VerifyRegistrationRequest): Promise<RegistrationOutcome> {
+    try {
+      const v = await verifyRegistration({
+        rp: req.rp,
+        // the library's type is structural and identical to RegistrationJson (the handler built it from a strictly validated body)
+        response: req.response as Parameters<typeof verifyRegistration>[0]["response"],
+        expectedChallenge: req.expectedChallenge,
+      });
+      const credentialId = fromB64u(v.credentialId);
+      if (credentialId === null) return { ok: false };
+      return { ok: true, credentialId, publicKey: v.publicKey, transports: v.transports };
+    } catch (e) {
+      if (!(e instanceof WebAuthnRefusal)) throw e;
+      return { ok: false };
+    }
   },
 };

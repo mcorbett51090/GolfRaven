@@ -3,7 +3,9 @@ import { Linking } from "react-native";
 import { useApp } from "../../src/runtime/AppProvider";
 import { bookingLinks, courseName, facilityBlurb, facilityName, isSafeHttpsUrl } from "../../src/browse";
 import { markerCosignalUiAvailable } from "../../src/checkin/gate";
+import { receiptsUploadUiAvailable } from "../../src/receipts";
 import { MarkerCard } from "../../src/screens/MarkerCard";
+import { ReceiptUploadCard } from "../../src/screens/ReceiptUploadCard";
 import { Banner, Body, Button, Card, Chip, EmptyState, H1, H2, Row, Screen } from "../../src/ui/components";
 
 /** Directory entry: a facility with its courses, access, booking rail and
@@ -53,6 +55,7 @@ export default function FacilityScreen() {
       ) : null}
 
       {markerCosignalUiAvailable() && facility.courses[0] ? <MarkerCard entry={{ course: facility.courses[0], facility }} /> : null}
+      {receiptsUploadUiAvailable() ? <ReceiptUploadCard facilityId={facility.id} /> : null}
     </Screen>
   );
 }

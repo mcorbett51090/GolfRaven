@@ -1,0 +1,1314 @@
+/**
+ * The S7b/S7c/S7 work screens: attest, course-QR, stock, special-marker hand-over and offer redeem.
+ *
+ * DOM-free. Every A1 action calls `requirePin("A1")` then the action in the same turn (design 6.3 / 24.3: the grant is single-use; nothing may sit between
+ * the grant and the call). Rotate PIN is A2: passkey reauth then `requirePin("A2")` then the rotate. Printed-QR write is A3: the person must already hold
+ * `aal` 2 with a fresh TOTP (`mfaUntil`); the screen refuses before calling when they do not.
+ *
+ * The PIN's digits never appear here: only `requirePin` touches them, behind the panel. A hand-over token plaintext is held only in `work.minted` until
+ * dismissed or the screen closes; it is never logged.
+ */
+
+import type { PartnerApi } from "../api/client";
+import { isPartnerApiError } from "../api/errors";
+import {
+  createInvite as postInviteCreate,
+  listInvites,
+  revokeInvite as deleteInvite,
+  type InviteRole,
+} from "../api/invites-routes";
+import {
+  credentialOptions,
+  getCredentials,
+  issueAdminEnrolment as postAdminEnrolment,
+  listCredentialAddNoticesReach,
+  listMembers,
+  patchCredentialNote,
+  recoverMember as postMemberRecover,
+  registerCredential,
+  resetMemberPin as postMemberPinReset,
+  resetMemberTotp as postMemberTotpReset,
+  revokeAllOrgSessions as postOrgRevokeAll,
+  revokeCredential as deleteCredential,
+  revokeMember as postMemberRevoke,
+} from "../api/members-routes";
+import type { WhoAmI } from "../api/types";
+import {
+  getCollectQueue,
+  getCoursePin,
+  getCoursePinAlarms,
+  getCourseStaticPinCaps,
+  getOffersQueue,
+  getPrintedQr,
+  getShiftLog,
+  getStaffActivity,
+  getStock,
+  postHandoverMint,
+  postMintToken,
+  postOfferRedeem,
+  postOfferRedeemOffline,
+  postOfflineAttest,
+  postOnlineAttest,
+  postPrintedQr,
+  postRedeem,
+  postRefreshToken,
+  postRotatePin,
+  postStockMove,
+  postVoucher,
+  STOCK_MOVE_KINDS,
+  type AttestKind,
+  type OfferRedeemMode,
+  type RedeemMethod,
+  type StockMoveKind,
+} from "../api/work-routes";
+import { reauthWithPasskey } from "../auth/reauth";
+import type { StepUp } from "../auth/step-up";
+import { StepUpError } from "../auth/step-up";
+import type { GetAssertionDeps } from "../webauthn/assertion";
+import { createCredential, type CreateCredentialDeps } from "../webauthn/registration";
+import { type ErrorContext, messageForError } from "./messages";
+import type { Host, Notice, SignedInState, WorkView } from "./state";
+
+export interface WorkScreens {
+  openAttest(facilityId: string): void;
+  openCourseQr(facilityId: string): void;
+  openStock(facilityId: string): void;
+  openHandover(facilityId: string): void;
+  openOfferRedeem(facilityId: string): void;
+  closeWork(): void;
+  setFacility(facilityId: string): void;
+  setAttestMode(mode: "online" | "offline"): void;
+  setAttestKind(kind: AttestKind): void;
+  submitOnlineAttest(token: string): Promise<void>;
+  submitOfflineAttest(handle: string, code: string): Promise<void>;
+  loadShiftLog(): Promise<void>;
+  loadStaffActivity(days: number): Promise<void>;
+  loadCoursePin(): Promise<void>;
+  loadCoursePinAlarms(): Promise<void>;
+  loadCourseStaticPinCaps(): Promise<void>;
+  rotatePin(): Promise<void>;
+  mintToken(): Promise<void>;
+  refreshSale(): Promise<void>;
+  loadPrintedQr(): Promise<void>;
+  printQr(): Promise<void>;
+  loadStock(): Promise<void>;
+  submitStockMove(trailId: string, kind: StockMoveKind, qty: number, note: string | null): Promise<void>;
+  loadCollectQueue(): Promise<void>;
+  setRedeemMethod(method: RedeemMethod): void;
+  mintHandover(entitlementId: string): Promise<void>;
+  dismissHandoverMint(): void;
+  submitRedeem(entitlementId: string, credential: string): Promise<void>;
+  submitVoucher(entitlementId: string): Promise<void>;
+  loadOffersQueue(): Promise<void>;
+  selectOfferCode(offerCodeId: string): void;
+  setOfferRedeemMode(mode: OfferRedeemMode): void;
+  submitOfferRedeem(offerCodeId: string, credential: string): Promise<void>;
+  submitOfferRedeemOffline(offerCodeId: string, handle: string, code: string, nameConfirmed: boolean): Promise<void>;
+  openCredentials(): void;
+  loadCredentials(): Promise<void>;
+  saveCredentialNote(id: string, note: string): Promise<void>;
+  /** Class A2: reauth + PIN, then DELETE. Refuses when this is the only active passkey (own list only). */
+  revokeCredential(id: string): Promise<void>;
+  /** Class A2: reauth once; PIN → options; create; PIN → register. Own list only; refuses at five active. */
+  addCredential(): Promise<void>;
+  /** Manager / operator / admin: org roster under facility scope (§80 / §81). */
+  openMembers(): void;
+  loadMembers(): Promise<void>;
+  /** Open credentials for a roster member under reach (no add). */
+  openMemberCredentials(userId: string): void;
+  /** Class A2: reauth + PIN, then POST members/{id}/pin-reset under reach. Never for oneself. */
+  resetMemberPin(userId: string): Promise<void>;
+  /** Class A2: reauth + PIN, then POST members/{id}/recover; holds plaintext once. Never for oneself. */
+  recoverMember(userId: string): Promise<void>;
+  dismissMemberRecover(): void;
+  /** Class A2: reauth + PIN, then POST members/{id}/revoke `{ orgId }` for ONE membership. Never for oneself. */
+  revokeMember(userId: string, orgId: string): Promise<void>;
+  /** Draft UTC instant for revoke-all credential cut-off (empty = sessions only). */
+  setOrgRevokeCreatedAfter(value: string): void;
+  /** Class A2: reauth + PIN, then POST orgs/{id}/sessions/revoke-all. Ends the actor's session for that org too. */
+  revokeAllOrgSessions(orgId: string): Promise<void>;
+  dismissOrgRevokeAll(): void;
+  /** Class A3: admin resets another's TOTP under reach. Client gate matches printed-QR write. Never for oneself. */
+  resetMemberTotp(userId: string): Promise<void>;
+  /** Draft target user id for admin enrolment issue. */
+  setAdminEnrolUserId(value: string): void;
+  /** Class A3: admin issues `gr_enr_` for another admin; holds plaintext once. */
+  issueAdminEnrolment(): Promise<void>;
+  dismissAdminEnrolment(): void;
+  /** Manager / operator / admin: invite list / create / revoke (§88). */
+  openInvites(): void;
+  loadInvites(): Promise<void>;
+  setInviteOrgId(orgId: string): void;
+  setInviteEmail(email: string): void;
+  setInviteRole(role: InviteRole): void;
+  /** Class A2: reauth + PIN, then POST invites; holds plaintext once. */
+  createInvite(): Promise<void>;
+  dismissInviteCreated(): void;
+  /** Class A2: reauth + PIN, then DELETE invites/{id}. */
+  revokeInvite(inviteId: string): Promise<void>;
+}
+
+/** Staff or manager of a facility (or platform admin) may open offer redeem on the home surface. */
+export function canOpenOfferRedeem(session: WhoAmI): boolean {
+  if (session.isAdmin) return true;
+  return session.memberships.some((m) => m.role === "staff" || m.role === "manager");
+}
+
+/** Manager or operator of a facility (or platform admin) may open the team passkeys roster. */
+export function canOpenMemberCredentials(session: WhoAmI): boolean {
+  if (session.isAdmin) return true;
+  return session.memberships.some((m) => m.role === "manager" || m.role === "operator");
+}
+
+/** Same reach as team passkeys: staff cannot invite; managers / operators / admins can. */
+export function canOpenInvites(session: WhoAmI): boolean {
+  return canOpenMemberCredentials(session);
+}
+
+const INVITE_ROLES: ReadonlySet<string> = new Set(["staff", "manager", "operator"]);
+const EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function firstManageOrgId(session: WhoAmI): string {
+  for (const m of session.memberships) {
+    if ((m.role === "manager" || m.role === "operator") && UUID_RE.test(m.orgId)) return m.orgId.toLowerCase();
+  }
+  return "";
+}
+
+export interface WorkDeps {
+  readonly api: PartnerApi;
+  readonly host: Host;
+  readonly stepUp: StepUp;
+  readonly webauthn: GetAssertionDeps;
+  readonly create: CreateCredentialDeps;
+}
+
+const FACILITY_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+const HANDLE_RE = /^[a-z0-9_]{3,20}$/;
+const CODE_RE = /^[0-9]{6}$/;
+/** Edge `members-shape` UTC instant (optional ms, must end in Z). */
+const ISO_INSTANT_RE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,3})?Z$/;
+const HANDOVER_PREFIX = "gr_ho_";
+
+/** Shape check without a regexp (same reason as the session token: V8 last-match retention). */
+function isHandoverToken(v: string): boolean {
+  if (v.length !== HANDOVER_PREFIX.length + 43 || !v.startsWith(HANDOVER_PREFIX)) return false;
+  for (let i = HANDOVER_PREFIX.length; i < v.length; i += 1) {
+    const c = v.charCodeAt(i);
+    const ok = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 45 || c === 95;
+    if (!ok) return false;
+  }
+  return true;
+}
+
+function pickFacility(s: SignedInState, facilityId: string): string | undefined {
+  const facilities = facilitiesOf(s);
+  const id = FACILITY_RE.test(facilityId) && facilities.includes(facilityId) ? facilityId : facilities[0];
+  return id;
+}
+
+function signedIn(host: Host): SignedInState | null {
+  const s = host.getState();
+  return s.screen === "signed-in" ? s : null;
+}
+
+function live(host: Host, grant: SignedInState["grant"]): SignedInState | null {
+  const s = signedIn(host);
+  return s !== null && s.grant === grant ? s : null;
+}
+
+function facilitiesOf(s: SignedInState): string[] {
+  const out = new Set<string>();
+  for (const m of s.session.memberships) for (const f of m.facilityIds) if (FACILITY_RE.test(f)) out.add(f);
+  return [...out].sort();
+}
+
+function err(e: unknown, context: ErrorContext): Notice {
+  if (e instanceof StepUpError) {
+    if (e.kind === "cancelled") return { kind: "error", message: { key: "error.cancelled" } };
+    if (e.kind === "unset") return { kind: "error", message: { key: "pin.notSet" } };
+    if (e.kind === "must_change") return { kind: "error", message: { key: "pin.mustChange" } };
+    if (e.kind === "locked") return { kind: "error", message: { key: "pin.locked" } };
+    if (e.kind === "busy") return { kind: "error", message: { key: "error.generic" } };
+    return { kind: "error", message: { key: "error.generic" } };
+  }
+  return { kind: "error", message: messageForError(e, context) };
+}
+
+const MAX_ACTIVE_CREDENTIALS = 5;
+
+export function createWorkScreens(deps: WorkDeps): WorkScreens {
+  const { api, host, stepUp, webauthn, create } = deps;
+
+  function withWork(s: SignedInState, work: WorkView | null, notice: Notice | null = null, busy: SignedInState["busy"] = null): void {
+    host.set({ ...s, work, notice, busy, panel: s.panel });
+  }
+
+  async function runA1<T>(grant: SignedInState["grant"], context: ErrorContext, action: () => Promise<T>, apply: (s: SignedInState, result: T) => SignedInState): Promise<void> {
+    const start = live(host, grant);
+    if (start === null || start.busy !== null || start.panel !== null) return;
+    host.set({ ...start, busy: "work", notice: null });
+    try {
+      await stepUp.requirePin("A1");
+      const result = await action();
+      const cur = live(host, grant);
+      if (cur !== null) host.set(apply(cur, result));
+    } catch (e) {
+      const cur = live(host, grant);
+      if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, context) });
+    }
+  }
+
+  return {
+    openAttest(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      const id = pickFacility(s, facilityId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
+        return;
+      }
+      withWork(s, { kind: "attest", facilityId: id, mode: "online", attestKind: "presence", busy: false, lastResult: null, shiftLog: null, staffActivity: null }, null);
+    },
+
+    openCourseQr(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      const id = pickFacility(s, facilityId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
+        return;
+      }
+      withWork(s, { kind: "course-qr", facilityId: id, busy: false, pin: null, alarms: null, capAlerts: null, sale: null, refreshLeft: null, printed: null }, null);
+    },
+
+    openStock(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      const id = pickFacility(s, facilityId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
+        return;
+      }
+      withWork(s, { kind: "stock", facilityId: id, busy: false, rows: null, lastOnHand: null }, null);
+    },
+
+    openHandover(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      const id = pickFacility(s, facilityId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
+        return;
+      }
+      withWork(s, { kind: "handover", facilityId: id, busy: false, queue: null, minted: null, redeemMethod: "staff_scan", lastRedeem: null }, null);
+    },
+
+    openOfferRedeem(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenOfferRedeem(s.session)) return;
+      const id = pickFacility(s, facilityId);
+      if (id === undefined) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "work.noFacility" } } });
+        return;
+      }
+      withWork(s, { kind: "offer-redeem", facilityId: id, busy: false, queue: null, selectedOfferCodeId: "", mode: "staff_scan", lastRedeem: null }, null);
+    },
+
+    openCredentials() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      withWork(s, { kind: "credentials", busy: false, rows: null, lastSavedId: null, targetUserId: null }, null);
+    },
+
+    openMembers() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      withWork(s, {
+        kind: "members",
+        busy: false,
+        rows: null,
+        credentialAddNotices: null,
+        recovered: null,
+        createdAfterDraft: "",
+        lastRevokeAll: null,
+        adminEnrolUserIdDraft: "",
+        adminEnrolment: null,
+      }, null);
+    },
+
+    openMemberCredentials(userId) {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      withWork(s, {
+        kind: "credentials",
+        busy: false,
+        rows: null,
+        lastSavedId: null,
+        targetUserId: userId.toLowerCase(),
+      }, null);
+    },
+
+    closeWork() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null) return;
+      withWork(s, null, null);
+    },
+
+    setFacility(facilityId) {
+      const s = signedIn(host);
+      if (s === null || s.work === null || s.busy !== null || s.panel !== null || !FACILITY_RE.test(facilityId)) return;
+      if (s.work.kind === "attest") withWork(s, { ...s.work, facilityId, lastResult: null, shiftLog: null, staffActivity: null });
+      else if (s.work.kind === "course-qr") withWork(s, { ...s.work, facilityId, pin: null, alarms: null, capAlerts: null, sale: null, refreshLeft: null, printed: null });
+      else if (s.work.kind === "stock") withWork(s, { ...s.work, facilityId, rows: null, lastOnHand: null });
+      else if (s.work.kind === "handover") withWork(s, { ...s.work, facilityId, queue: null, minted: null, lastRedeem: null });
+      else if (s.work.kind === "offer-redeem") withWork(s, { ...s.work, facilityId, queue: null, selectedOfferCodeId: "", lastRedeem: null });
+    },
+
+    setAttestMode(mode) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "attest" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, mode });
+    },
+
+    setAttestKind(kind) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "attest" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, attestKind: kind });
+    },
+
+    async submitOnlineAttest(token) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "attest" || s.work.mode !== "online") return;
+      const trimmed = token.trim();
+      if (!UUID_RE.test(trimmed)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "attest.tokenInvalid" } } });
+        return;
+      }
+      const { facilityId, attestKind } = s.work;
+      const grant = s.grant;
+      await runA1(grant, "attest", () => postOnlineAttest(api, { facilityId, kind: attestKind, token: trimmed.toLowerCase() }), (cur, result) => {
+        const work = cur.work?.kind === "attest" ? { ...cur.work, busy: false, lastResult: result } : cur.work;
+        return { ...cur, busy: null, work, notice: { kind: "attest-ok" } };
+      });
+    },
+
+    async submitOfflineAttest(handle, code) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "attest" || s.work.mode !== "offline") return;
+      const h = handle.trim().toLowerCase();
+      if (!HANDLE_RE.test(h) || !CODE_RE.test(code)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "attest.offlineInvalid" } } });
+        return;
+      }
+      const { facilityId, attestKind } = s.work;
+      const grant = s.grant;
+      await runA1(grant, "attest", () => postOfflineAttest(api, { facilityId, kind: attestKind, handle: h, code }), (cur, result) => {
+        const work = cur.work?.kind === "attest" ? { ...cur.work, busy: false, lastResult: result } : cur.work;
+        return { ...cur, busy: null, work, notice: { kind: "attest-ok" } };
+      });
+    },
+
+    async loadShiftLog() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "attest" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const entries = await getShiftLog(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "attest") host.set({ ...cur, busy: null, work: { ...cur.work, shiftLog: entries } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "attest") });
+      }
+    },
+
+    async loadStaffActivity(days) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "attest" || s.busy !== null || s.panel !== null) return;
+      const d = Number.isInteger(days) && days >= 1 && days <= 90 ? days : 7;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const activity = await getStaffActivity(api, facilityId, d);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "attest") host.set({ ...cur, busy: null, work: { ...cur.work, staffActivity: activity } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "attest") });
+      }
+    },
+
+    async loadCoursePin() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const pin = await getCoursePin(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, pin } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async loadCoursePinAlarms() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const alarms = await getCoursePinAlarms(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, alarms } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async loadCourseStaticPinCaps() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const capAlerts = await getCourseStaticPinCaps(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, capAlerts } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async rotatePin() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const rotated = await postRotatePin(api, facilityId);
+        const pin = await getCoursePin(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, pin: { ...pin, pinEpoch: rotated.pinEpoch } }, notice: { kind: "pin-rotated" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async mintToken() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr") return;
+      const facilityId = s.work.facilityId;
+      const grant = s.grant;
+      await runA1(grant, "course-qr", () => postMintToken(api, facilityId), (cur, sale) => {
+        const work = cur.work?.kind === "course-qr" ? { ...cur.work, busy: false, sale, refreshLeft: null } : cur.work;
+        return { ...cur, busy: null, work, notice: { kind: "token-minted" } };
+      });
+    },
+
+    async refreshSale() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.work.sale === null || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const { facilityId, sale } = s.work;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const r = await postRefreshToken(api, facilityId, sale.nonceHash);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, refreshLeft: r.secondsLeft } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async loadPrintedQr() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const printed = await getPrintedQr(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, printed } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) {
+          // 404 not_printed is an empty state, not an error strip
+          if (isPartnerApiError(e) && (e.code === "not_printed" || e.kind === "not_found")) {
+            host.set({ ...cur, busy: null, work: cur.work?.kind === "course-qr" ? { ...cur.work, printed: null } : cur.work, notice: { kind: "error", message: { key: "courseQr.notPrinted" } } });
+          } else host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+        }
+      }
+    },
+
+    async printQr() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "course-qr" || s.busy !== null || s.panel !== null) return;
+      if (s.session.aal < s.session.requiredAal || s.session.aal < 2) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "courseQr.needTotp" } } });
+        return;
+      }
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const printed = await postPrintedQr(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "course-qr") host.set({ ...cur, busy: null, work: { ...cur.work, printed }, notice: { kind: "printed-ok" } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "course-qr") });
+      }
+    },
+
+    async loadStock() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "stock" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const rows = await getStock(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "stock") host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "stock") });
+      }
+    },
+
+    async submitStockMove(trailId, kind, qty, note) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "stock") return;
+      if (!FACILITY_RE.test(trailId) || !(STOCK_MOVE_KINDS as readonly string[]).includes(kind) || !Number.isSafeInteger(qty) || qty === 0) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "stock.moveInvalid" } } });
+        return;
+      }
+      if (kind !== "count_adjustment" && qty < 0) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "stock.moveInvalid" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      await runA1(
+        grant,
+        "stock",
+        () => postStockMove(api, { facilityId, trailId, kind, qty, note }),
+        (cur, result) => {
+          const work = cur.work?.kind === "stock" ? { ...cur.work, busy: false, lastOnHand: result.onHand, rows: null } : cur.work;
+          return { ...cur, busy: null, work, notice: { kind: "stock-moved" } };
+        },
+      );
+    },
+
+    async loadCollectQueue() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "handover" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const queue = await getCollectQueue(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "handover") host.set({ ...cur, busy: null, work: { ...cur.work, queue } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "handover") });
+      }
+    },
+
+    setRedeemMethod(method) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "handover" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, redeemMethod: method });
+    },
+
+    async mintHandover(entitlementId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "handover") return;
+      if (!UUID_RE.test(entitlementId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "handover.entitlementInvalid" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = entitlementId.toLowerCase();
+      await runA1(grant, "handover", () => postHandoverMint(api, facilityId, id), (cur, minted) => {
+        const work = cur.work?.kind === "handover" ? { ...cur.work, busy: false, minted } : cur.work;
+        return { ...cur, busy: null, work, notice: { kind: "handover-minted" } };
+      });
+    },
+
+    dismissHandoverMint() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "handover" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, minted: null }, s.notice?.kind === "handover-minted" ? null : s.notice);
+    },
+
+    async submitRedeem(entitlementId, credential) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "handover") return;
+      if (!UUID_RE.test(entitlementId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "handover.entitlementInvalid" } } });
+        return;
+      }
+      const method = s.work.redeemMethod;
+      const cred = credential.trim();
+      if (method === "staff_scan" && !UUID_RE.test(cred)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "handover.credentialInvalid" } } });
+        return;
+      }
+      if (method === "hand_over_token" && !isHandoverToken(cred)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "handover.credentialInvalid" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = entitlementId.toLowerCase();
+      const wireCred = method === "staff_scan" ? cred.toLowerCase() : cred;
+      await runA1(
+        grant,
+        "handover",
+        () => postRedeem(api, { facilityId, entitlementId: id, method, credential: wireCred }),
+        (cur, lastRedeem) => {
+          const work = cur.work?.kind === "handover"
+            ? { ...cur.work, busy: false, lastRedeem, minted: null, queue: null }
+            : cur.work;
+          return { ...cur, busy: null, work, notice: { kind: "redeem-ok" } };
+        },
+      );
+    },
+
+    async submitVoucher(entitlementId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "handover") return;
+      if (!UUID_RE.test(entitlementId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "handover.entitlementInvalid" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = entitlementId.toLowerCase();
+      await runA1(grant, "handover", () => postVoucher(api, facilityId, id), (cur) => {
+        const work = cur.work?.kind === "handover" ? { ...cur.work, busy: false, queue: null } : cur.work;
+        return { ...cur, busy: null, work, notice: { kind: "voucher-ok" } };
+      });
+    },
+
+    async loadOffersQueue() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const facilityId = s.work.facilityId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const queue = await getOffersQueue(api, facilityId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "offer-redeem") host.set({ ...cur, busy: null, work: { ...cur.work, queue } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "offer-redeem") });
+      }
+    },
+
+    selectOfferCode(offerCodeId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.busy !== null || s.panel !== null) return;
+      if (!UUID_RE.test(offerCodeId)) return;
+      withWork(s, { ...s.work, selectedOfferCodeId: offerCodeId.toLowerCase() });
+    },
+
+    setOfferRedeemMode(mode) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, mode });
+    },
+
+    async submitOfferRedeem(offerCodeId, credential) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.work.mode !== "staff_scan") return;
+      if (!UUID_RE.test(offerCodeId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.codeInvalid" } } });
+        return;
+      }
+      const cred = credential.trim();
+      if (!UUID_RE.test(cred)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.credentialInvalid" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = offerCodeId.toLowerCase();
+      const wireCred = cred.toLowerCase();
+      await runA1(
+        grant,
+        "offer-redeem",
+        () => postOfferRedeem(api, { facilityId, offerCodeId: id, method: "staff_scan", credential: wireCred }),
+        (cur, lastRedeem) => {
+          const work = cur.work?.kind === "offer-redeem"
+            ? { ...cur.work, busy: false, lastRedeem, queue: null, selectedOfferCodeId: "" }
+            : cur.work;
+          return { ...cur, busy: null, work, notice: { kind: "offer-redeem-ok" } };
+        },
+      );
+    },
+
+    async submitOfferRedeemOffline(offerCodeId, handle, code, nameConfirmed) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "offer-redeem" || s.work.mode !== "offline") return;
+      if (!UUID_RE.test(offerCodeId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.codeInvalid" } } });
+        return;
+      }
+      const h = handle.trim().toLowerCase();
+      if (!HANDLE_RE.test(h) || !CODE_RE.test(code)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.offlineInvalid" } } });
+        return;
+      }
+      if (nameConfirmed !== true) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "offerRedeem.nameUnconfirmed" } } });
+        return;
+      }
+      const { facilityId } = s.work;
+      const grant = s.grant;
+      const id = offerCodeId.toLowerCase();
+      await runA1(
+        grant,
+        "offer-redeem",
+        () => postOfferRedeemOffline(api, { facilityId, offerCodeId: id, handle: h, code, nameConfirmed: true }),
+        (cur, lastRedeem) => {
+          const work = cur.work?.kind === "offer-redeem"
+            ? { ...cur.work, busy: false, lastRedeem, queue: null, selectedOfferCodeId: "" }
+            : cur.work;
+          return { ...cur, busy: null, work, notice: { kind: "offer-redeem-ok" } };
+        },
+      );
+    },
+
+    async loadMembers() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const [rows, credentialAddNotices] = await Promise.all([listMembers(api), listCredentialAddNoticesReach(api)]);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows, credentialAddNotices } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    async resetMemberPin(userId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.pinSelf" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await postMemberPinReset(api, target);
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: { kind: "member-pin-reset" } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    async recoverMember(userId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.recoverSelf" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const recovered = await postMemberRecover(api, target);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, recovered },
+            notice: { kind: "member-recovered" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    dismissMemberRecover() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, recovered: null }, s.notice?.kind === "member-recovered" ? null : s.notice);
+    },
+
+    async revokeMember(userId, orgId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(userId) || !UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      const org = orgId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.revokeSelf" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await postMemberRevoke(api, target, org);
+        const rows = await listMembers(api);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "member-revoked" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    setOrgRevokeCreatedAfter(value) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, createdAfterDraft: value }, s.notice);
+    },
+
+    async revokeAllOrgSessions(orgId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const draft = s.work.createdAfterDraft.trim();
+      let createdAfter: string | null = null;
+      if (draft.length > 0) {
+        const t = ISO_INSTANT_RE.test(draft) ? new Date(draft) : null;
+        if (t === null || Number.isNaN(t.getTime()) || t.toISOString().slice(0, 19) !== draft.slice(0, 19)) {
+          host.set({ ...s, notice: { kind: "error", message: { key: "members.createdAfterInvalid" } } });
+          return;
+        }
+        if (t.getTime() > Date.now() + 60_000) {
+          host.set({ ...s, notice: { kind: "error", message: { key: "members.createdAfterFuture" } } });
+          return;
+        }
+        createdAfter = t.toISOString();
+      }
+      const org = orgId.toLowerCase();
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const counts = await postOrgRevokeAll(api, org, createdAfter);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: {
+              ...cur.work,
+              lastRevokeAll: { orgId: org, sessions: counts.sessions, credentials: counts.credentials },
+            },
+            notice: { kind: "org-revoke-all" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    dismissOrgRevokeAll() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, lastRevokeAll: null }, s.notice?.kind === "org-revoke-all" ? null : s.notice);
+    },
+
+    async resetMemberTotp(userId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!s.session.isAdmin) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.totpAdminOnly" } } });
+        return;
+      }
+      if (!UUID_RE.test(userId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const target = userId.toLowerCase();
+      if (target === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.totpSelf" } } });
+        return;
+      }
+      if (s.session.aal < s.session.requiredAal || s.session.aal < 2) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.needTotp" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await postMemberTotpReset(api, target);
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: { kind: "member-totp-reset" } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    setAdminEnrolUserId(value) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, adminEnrolUserIdDraft: value }, s.notice);
+    },
+
+    async issueAdminEnrolment() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null || !canOpenMemberCredentials(s.session)) return;
+      if (!s.session.isAdmin) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.adminEnrolAdminOnly" } } });
+        return;
+      }
+      const draft = s.work.adminEnrolUserIdDraft.trim().toLowerCase();
+      if (!UUID_RE.test(draft)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.adminEnrolUserInvalid" } } });
+        return;
+      }
+      if (draft === s.session.userId.toLowerCase()) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.adminEnrolSelf" } } });
+        return;
+      }
+      if (s.session.aal < s.session.requiredAal || s.session.aal < 2) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "members.needTotp" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const adminEnrolment = await postAdminEnrolment(api, draft);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "members") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, adminEnrolment },
+            notice: { kind: "admin-enrolment" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "members") });
+      }
+    },
+
+    dismissAdminEnrolment() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "members" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, adminEnrolment: null }, s.notice?.kind === "admin-enrolment" ? null : s.notice);
+    },
+
+    openInvites() {
+      const s = signedIn(host);
+      if (s === null || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      withWork(s, {
+        kind: "invites",
+        busy: false,
+        rows: null,
+        orgIdDraft: firstManageOrgId(s.session),
+        emailDraft: "",
+        roleDraft: "staff",
+        created: null,
+      }, null);
+    },
+
+    setInviteOrgId(orgId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, orgIdDraft: orgId, rows: null }, s.notice);
+    },
+
+    setInviteEmail(email) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, emailDraft: email }, s.notice);
+    },
+
+    setInviteRole(role) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      if (!INVITE_ROLES.has(role)) return;
+      withWork(s, { ...s.work, roleDraft: role }, s.notice);
+    },
+
+    async loadInvites() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      const orgId = s.work.orgIdDraft.trim().toLowerCase();
+      if (orgId !== "" && !UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "invites.orgInvalid" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const rows = await listInvites(api, orgId === "" ? null : orgId);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "invites") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "invites") });
+      }
+    },
+
+    async createInvite() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      const orgId = s.work.orgIdDraft.trim().toLowerCase();
+      if (!UUID_RE.test(orgId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "invites.orgInvalid" } } });
+        return;
+      }
+      const email = s.work.emailDraft.trim().toLowerCase();
+      if (email.length < 3 || email.length > 254 || !EMAIL_RE.test(email) || /\s/.test(email)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "invites.emailInvalid" } } });
+        return;
+      }
+      if (!INVITE_ROLES.has(s.work.roleDraft)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const grant = s.grant;
+      const role = s.work.roleDraft;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const created = await postInviteCreate(api, { orgId, role, email });
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "invites") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, created, emailDraft: "", rows: null },
+            notice: { kind: "invite-created" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "invites") });
+      }
+    },
+
+    dismissInviteCreated() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null) return;
+      withWork(s, { ...s.work, created: null }, s.notice?.kind === "invite-created" ? null : s.notice);
+    },
+
+    async revokeInvite(inviteId) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "invites" || s.busy !== null || s.panel !== null || !canOpenInvites(s.session)) return;
+      if (!UUID_RE.test(inviteId)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const id = inviteId.toLowerCase();
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await deleteInvite(api, id);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "invites") {
+          const rows = cur.work.rows === null
+            ? null
+            : cur.work.rows.map((r) => (r.id === id ? { ...r, revokedAt: new Date().toISOString() } : r));
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "invite-revoked" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "invites") });
+      }
+    },
+
+    async loadCredentials() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      const grant = s.grant;
+      const targetUserId = s.work.targetUserId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        const listed = await getCredentials(api, targetUserId);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") host.set({ ...cur, busy: null, work: { ...cur.work, rows } });
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
+    async saveCredentialNote(id, note) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      if (!UUID_RE.test(id)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const trimmed = note.trim();
+      if (trimmed.length > 40) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "credentials.noteTooLong" } } });
+        return;
+      }
+      const wireNote = trimmed.length === 0 ? null : trimmed;
+      const grant = s.grant;
+      const credId = id.toLowerCase();
+      const targetUserId = s.work.targetUserId;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await patchCredentialNote(api, credId, wireNote);
+        const listed = await getCredentials(api, targetUserId);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") {
+          host.set({
+            ...cur,
+            busy: null,
+            work: { ...cur.work, rows, lastSavedId: credId },
+            notice: { kind: "credential-note-saved" },
+          });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
+    async revokeCredential(id) {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      if (!UUID_RE.test(id)) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "error.generic" } } });
+        return;
+      }
+      const targetUserId = s.work.targetUserId;
+      const active = (s.work.rows ?? []).filter((c) => c.revokedAt === null);
+      // Own list only: refuse the last active passkey client-side. Under reach, sole-credential revoke is allowed (recovery path).
+      if (targetUserId === null && active.length <= 1) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "credentials.lastActive" } } });
+        return;
+      }
+      const grant = s.grant;
+      const credId = id.toLowerCase();
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        await deleteCredential(api, credId);
+        const listed = await getCredentials(api, targetUserId);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "credential-revoked" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+
+    async addCredential() {
+      const s = signedIn(host);
+      if (s === null || s.work?.kind !== "credentials" || s.busy !== null || s.panel !== null) return;
+      if (s.work.targetUserId !== null) return;
+      const active = (s.work.rows ?? []).filter((c) => c.revokedAt === null);
+      if (active.length >= MAX_ACTIVE_CREDENTIALS) {
+        host.set({ ...s, notice: { kind: "error", message: { key: "credentials.tooMany" } } });
+        return;
+      }
+      const grant = s.grant;
+      host.set({ ...s, busy: "work", notice: null });
+      try {
+        await reauthWithPasskey(api, webauthn);
+        await stepUp.requirePin("A2");
+        const challenge = await credentialOptions(api);
+        const credential = await createCredential(create, challenge.options);
+        await stepUp.requirePin("A2");
+        await registerCredential(api, challenge.challengeToken, credential);
+        const listed = await getCredentials(api);
+        const rows = listed.filter((c) => c.revokedAt === null);
+        const cur = live(host, grant);
+        if (cur !== null && cur.work?.kind === "credentials") {
+          host.set({ ...cur, busy: null, work: { ...cur.work, rows }, notice: { kind: "credential-added" } });
+        }
+      } catch (e) {
+        const cur = live(host, grant);
+        if (cur !== null) host.set({ ...cur, busy: null, notice: err(e, "credentials") });
+      }
+    },
+  };
+}
+
+/** Facility ids the signed-in person may act at (union of membership scopes), for the UI picker. */
+export function facilityChoices(session: SignedInState["session"]): readonly string[] {
+  const out = new Set<string>();
+  for (const m of session.memberships) for (const f of m.facilityIds) if (FACILITY_RE.test(f)) out.add(f);
+  return [...out].sort();
+}

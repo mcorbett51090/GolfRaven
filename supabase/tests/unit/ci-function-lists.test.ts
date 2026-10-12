@@ -101,9 +101,34 @@ describe("CI runs deno check and deno cache --frozen over EVERY Edge Function en
 
   // Partner auth S1.2: the new function is an entrypoint, so the loops above already require it in all three lists; this cell names it so a future edit that drops it fails with its own message, and
   // the pure handler suite (the real wrapper and the software authenticator, no network) is cached by the same step that runs it.
+  // Partner auth S1.5: the two functions of the Edge half of 0054 are named the same way.
   for (const step of STEPS) {
-    it(`"${step}" lists the partner-session entrypoint`, () => {
-      expect(listedPaths(step)).toContain("supabase/functions/partner-session/index.ts");
+    it(`"${step}" lists the partner-session, partner-invites, partner-members, partner-attest, partner-review, stock-admin, partner-entitlements, programme-config, offers-admin, sponsorships-admin, partner-offers-redeem, settlement-export, exports-purge, rollups-refresh and receipts-purge entrypoints`, () => {
+      const listed = listedPaths(step);
+      for (const fn of [
+        "partner-session",
+        "partner-invites",
+        "partner-members",
+        "partner-attest",
+        "partner-review",
+        "stock-admin",
+        "partner-entitlements",
+        "programme-config",
+        "offers-admin",
+        "sponsorships-admin",
+        "partner-offers-redeem",
+        "settlement-export",
+        "exports-purge",
+        "rollups-refresh",
+        "receipts-purge",
+      ]) expect(listed).toContain(`supabase/functions/${fn}/index.ts`);
+    });
+  }
+  // Partner auth S2b (0055): the staff lane of the course QR is two more entrypoints; named here so a future edit that drops one fails with its own message.
+  for (const step of STEPS) {
+    it(`"${step}" lists the course-qr and qr-print entrypoints`, () => {
+      const listed = listedPaths(step);
+      for (const fn of ["course-qr", "qr-print"]) expect(listed).toContain(`supabase/functions/${fn}/index.ts`);
     });
   }
   it("the pure Deno suite step caches the partner session handler suite before running with --cached-only", () => {

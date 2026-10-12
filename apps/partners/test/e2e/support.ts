@@ -16,7 +16,7 @@ interface Block {
   readonly headers: Array<[string, string]>;
 }
 
-/** Cloudflare Pages `_headers` semantics for the subset this build emits: every block whose pattern matches applies, in file order; a repeated name is joined with ", ". */
+/** Cloudflare Pages `_headers` semantics for the subset this build emits: every block whose pattern matches applies, in file order; a repeated name is joined with ", "; `! Name` detaches. */
 export function parseHeaders(text: string): Block[] {
   const blocks: Block[] = [];
   for (const raw of text.split("\n")) {
@@ -24,6 +24,10 @@ export function parseHeaders(text: string): Block[] {
     if (!/^\s/.test(raw)) blocks.push({ path: raw.trim(), headers: [] });
     else {
       const t = raw.trim();
+      if (t.startsWith("! ")) {
+        blocks[blocks.length - 1]!.headers.push([`! ${t.slice(2).trim()}`, ""]);
+        continue;
+      }
       const i = t.indexOf(":");
       if (i > 0) blocks[blocks.length - 1]!.headers.push([t.slice(0, i).trim(), t.slice(i + 1).trim()]);
     }
@@ -37,6 +41,10 @@ export function headersFor(blocks: Block[], pathname: string): Record<string, st
     const hit = b.path === "/*" || (b.path.endsWith("/*") ? pathname.startsWith(b.path.slice(0, -1)) : pathname === b.path);
     if (!hit) continue;
     for (const [name, value] of b.headers) {
+      if (name.startsWith("! ")) {
+        out.delete(name.slice(2).trim().toLowerCase());
+        continue;
+      }
       const k = name.toLowerCase();
       const prev = out.get(k);
       out.set(k, [name, prev ? `${prev[1]}, ${value}` : value]);
@@ -63,8 +71,8 @@ export async function listen(server: Server): Promise<Listening> {
 export interface StaticOptions {
   /** pathname -> a file of `dist` served in its place (e.g. a second URL for the same page), under the headers that match the ALIAS pathname */
   readonly alias?: Record<string, string>;
-  /** pathname -> headers added on top (a header listed here replaces the generated one of the same name) */
-  readonly extraHeaders?: Record<string, Record<string, string>>;
+  /** pathname -> headers added on top (replaces the generated one of the same name; `null` omits it) */
+  readonly extraHeaders?: Record<string, Record<string, string | null>>;
 }
 
 /** A static server for `dist()`, resolved on every request (the port must be known before the bundle is built, because the API origin is baked into it). */
@@ -93,7 +101,11 @@ export function staticServer(dist: () => string | null, extra: Record<string, st
         const blocks = parseHeaders(await readFile(join(root, "_headers"), "utf8"));
         const generated = headersFor(blocks, url.pathname);
         const over = opts.extraHeaders?.[url.pathname] ?? {};
-        const merged = Object.fromEntries([...Object.entries(generated).filter(([k]) => !Object.keys(over).some((o) => o.toLowerCase() === k.toLowerCase())), ...Object.entries(over)]);
+        // null/undefined in extraHeaders omits the generated header (bfcache control cells need a URL that is not no-store under /*).
+        const merged = Object.fromEntries([
+          ...Object.entries(generated).filter(([k]) => !Object.keys(over).some((o) => o.toLowerCase() === k.toLowerCase())),
+          ...Object.entries(over).filter((entry): entry is [string, string] => entry[1] != null),
+        ]);
         res.writeHead(200, { "Content-Type": MIME[extname(file)] ?? "application/octet-stream", ...merged });
         res.end(body);
       } catch {
@@ -112,7 +124,16 @@ export function staticServer(dist: () => string | null, extra: Record<string, st
  *     `channel: "chromium"` runs the full Chromium in its new headless mode, where the cache works.
  */
 export async function launchWithBackForwardCache(): Promise<Browser> {
-  return await chromium.launch({ channel: "chromium", args: ["--no-sandbox"], ignoreDefaultArgs: ["--disable-back-forward-cache"] });
+  return await chromium.launch({ ...browserChoice({ channel: "chromium" }), args: ["--no-sandbox"], ignoreDefaultArgs: ["--disable-back-forward-cache"] });
+}
+
+/**
+ * Which browser to launch: Playwright's pinned Chromium (PLAYWRIGHT_BROWSERS_PATH) by default, or the executable named by `GOLFRAVEN_E2E_CHROME` (a machine that has a
+ * Chrome but not the pinned build; the suite then runs against that browser, which is the only difference). CI never sets it.
+ */
+function browserChoice(pinned: { channel?: "chromium"; headless?: boolean }): { channel?: "chromium"; headless?: boolean; executablePath?: string } {
+  const exe = process.env["GOLFRAVEN_E2E_CHROME"];
+  return exe === undefined || exe === "" ? pinned : { headless: true, executablePath: exe };
 }
 
 /** Launches Chromium, or explains why it could not. Under CI a launch failure is a failure; elsewhere it is a skip (the repo's rule, apps/site/scripts/run-e2e.mjs). */
@@ -120,7 +141,7 @@ export async function launchOrSkip(): Promise<{ browser: Browser | null; reason:
   if (process.env["GOLFRAVEN_E2E_SKIP"] === "1") return { browser: null, reason: "GOLFRAVEN_E2E_SKIP=1" };
   const inCi = process.env["CI"] === "true" || process.env["CI"] === "1";
   try {
-    return { browser: await chromium.launch({ headless: true, args: ["--no-sandbox"] }), reason: null };
+    return { browser: await chromium.launch({ ...browserChoice({ headless: true }), args: ["--no-sandbox"] }), reason: null };
   } catch (e) {
     const reason = e instanceof Error ? (e.message.split("\n")[0] ?? "launch failed") : String(e);
     if (inCi) throw new Error(`Chromium could not be launched under CI (${reason}); CI installs the pinned browser, so this is a failure. Set GOLFRAVEN_E2E_SKIP=1 to opt out deliberately.`);

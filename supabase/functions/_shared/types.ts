@@ -26,6 +26,9 @@
 
 import type { AttestKeyRepo, RewardsRepo } from "./rewards/types.ts";
 import type { SigninRepo } from "./signin/types.ts";
+import type { ReceiptIntakeInput, ReceiptIntakeResult, ReceiptIntakeStatus } from "./receipts/ports.ts";
+
+export type { ReceiptIntakeInput, ReceiptIntakeResult, ReceiptIntakeStatus, ReceiptDedupe, ReceiptPurchaseRow } from "./receipts/ports.ts";
 
 export type ActorRole = "authenticated" | "staff" | "manager" | "operator" | "admin";
 
@@ -630,6 +633,30 @@ export interface Repo {
     record(input: MarkerScanRecordInput): Promise<MarkerScanRecordResult>;
     /** The co-signal intake: ties a qualifying fix to the player's own pending purchase at that facility whose window holds it (the seam S3's offline-code row plugs into). */
     attachCosignal(input: MarkerCosignalAttachInput): Promise<MarkerCosignalAttachResult>;
+    /** 0063: clears `offline_confirm_by` on the bound player's own redeemed_offline offer codes at this facility whose offline_step window holds the fix. */
+    confirmOfferOffline(input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult>;
+    /**
+     * 0076 (plan §8.3 / P5 §62): facility-wide count of `credited` `marker_credit` rows whose
+     * purchase is `course_qr` / `static_pin` on `localDate` (`private.course_qr_static_pin_credit_count_for_actor`).
+     * Not a table SELECT for edge_actor.
+     */
+    staticPinCreditCount(facilityId: string, localDate: string): Promise<number>;
+  };
+
+  /** 0064: player-lane receipt upload (`receipt_intake_for_actor`). */
+  receipts: {
+    intake(input: ReceiptIntakeInput): Promise<ReceiptIntakeResult>;
+  };
+
+  /** P5 §44: feed `scorePlay`'s `ctx.purchases` from `purchase_evidence` (§4.6), not `app.evidence`. */
+  purchases: {
+    /**
+     * Distinct `(facilityId, localDate)` of the BOUND actor's own `valid` purchases at `facilityId`
+     * whose `local_date` is within ±`CORROBORATION_WINDOW_DAYS` (7) of `aroundLocalDate`
+     * (`private.list_valid_purchases_around_for_actor`, migration 0066 — not a direct table SELECT).
+     * SELECT via existing `pd_marker_scan_purchase_select` (`user_id = private.actor_uid()`).
+     */
+    listValidAround(facilityId: string, aroundLocalDate: string): Promise<{ facilityId: string; localDate: string }[]>;
   };
 }
 
@@ -699,6 +726,10 @@ export interface MarkerCosignalAttachInput {
 }
 
 export type MarkerCosignalAttachResult = { status: "attached"; purchases: MarkerPurchaseView[] } | { status: "no_pending_purchase" | "cosignal_invalid" | "cosignal_used" | "review_account" };
+
+export type OfferOfflineConfirmResult =
+  | { status: "confirmed"; cleared: number }
+  | { status: "none_awaiting" | "cosignal_invalid" | "cosignal_used" | "review_account"; cleared: number };
 
 /** What `Repo#offlineCode.provisionSeed` returns: the raw 32-byte seed, its version, and the database clock at issue (ISO-8601). */
 export interface OfflineSeedProvision {
@@ -859,7 +890,27 @@ export type DelegateRef = { kind: "queued_evidence"; evidenceId: string } | { ki
  * (`_shared/retention/purge-handler.ts`) runs them, so the handler never sees a connection.
  */
 export interface RetentionStep {
-  name: "fix_coords" | "install_link_tombstones" | "signin_email_proofs" | "signin_revocation_queue" | "consumed_nonce" | "rate_limit_buckets";
+  name:
+    | "fix_coords"
+    | "install_link_tombstones"
+    | "signin_email_proofs"
+    | "signin_revocation_queue"
+    | "consumed_nonce"
+    | "rate_limit_buckets"
+    | "partner_challenges"
+    | "partner_sessions"
+    | "partner_credentials"
+    | "partner_invites"
+    | "partner_enrolment_tokens"
+    | "partner_sign_in_failures"
+    | "course_qr_tokens"
+    | "course_pin_alarms"
+    | "abandoned_pending_purchases"
+    | "course_pin_epoch_log"
+    | "partner_auth_alarms"
+    | "course_pin_pepper_previous"
+    | "partner_pin_pepper_previous"
+    | "partner_credential_add_notices";
   /** The most rows one batch removes (the definer's own `limit`, or its own constant bound); `null` = one unbatched pass (the definer has no row bound; no step is unbatched since 0040). The runner
    * repeats a batched step while a batch comes back FULL, up to its own per-run cap, so a backlog drains faster than one batch per run. */
   batchLimit: number | null;

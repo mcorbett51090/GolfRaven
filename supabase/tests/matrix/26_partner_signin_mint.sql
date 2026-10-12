@@ -128,11 +128,11 @@ SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authentic
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_signin_minter'), ('edge_partner'), ('edge_partner_minter')) r(n)
            WHERE has_function_privilege(r.n, 'private.partner_challenge_issue_sign_in()'::regprocedure, 'EXECUTE')), ARRAY['edge_partner_minter'],
   'PA-8: ... and ONLY edge_partner_minter can issue a sign-in challenge');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname::text COLLATE "C") FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
            WHERE n.nspname IN ('app', 'api', 'private', 'public') AND p.prokind IN ('f', 'p') AND has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
-  'PA-8: the minter can execute NOTHING ELSE in app, api or private but the three minter-lane definers of 0049 (S1.2: the credential lookup, the failure counter and the relying-party read; the pgTAP and extension functions of public aside)');
+             AND NOT (n.nspname = 'public' AND p.proname ~ '^(is|isnt|ok|plan|diag|finish|no_plan|throws_ok|lives_ok|pass|fail|like|unlike|matches|doesnt_match|cmp_ok|isa_ok|is_empty|isnt_empty|results_eq|set_eq|bag_eq|has_|hasnt_|col_|todo|skip|runtests|_)')), ARRAY['partner_challenge_issue_sign_in', 'partner_credential_lookup', 'partner_credential_register_first', 'partner_enrolment_token_accept', 'partner_enrolment_token_email_for_token', 'partner_invite_accept', 'partner_invite_email_for_token', 'partner_rate_alarm_raise', 'partner_rp_config_read', 'partner_session_mint', 'partner_sign_in_failure_record'],
+  'PA-8: the minter can execute NOTHING ELSE in app, api or private but the three minter-lane definers of 0049 (S1.2: the credential lookup, the failure counter and the relying-party read) and the five of 0054 (S1.5: matrix 32 proves them); the pgTAP and extension functions of public aside');
 SELECT is((SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
            WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\_toast%' AND n.nspname NOT LIKE 'pg\_temp%'
              AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
@@ -513,7 +513,9 @@ SELECT is((pg_temp.side('sig') ->> 'alarms')::int || ':' || (pg_temp.side('sig')
 SELECT is((SELECT (a.minute_bucket = pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint) FROM app.partner_auth_alarm a JOIN creds c ON c.cred_row = a.credential_id WHERE c.label = 'sig' AND a.kind = 'signature_invalid'), true,
   'the alarm''s bucket is the current clock minute (floor(epoch / 60); the cells above ran inside one minute), so one alarm per credential, kind and MINUTE');
 -- ... and an alarm of ANOTHER minute neither suppresses nor is suppressed by it: with a row already present for the previous minute, the next refusal still writes its own row
-INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket) SELECT 'counter_regression', c.cred_row, pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint - 1 FROM creds c WHERE c.label = 'sig';
+INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket)
+SELECT 'counter_regression', c.cred_row, c.cred_row::text, pg_catalog.floor(extract(epoch FROM clock_timestamp()) / 60)::bigint - 1
+FROM creds c WHERE c.label = 'sig';
 SELECT is(pg_temp.go('sig_cnt', 'sig', 1), 'counter_regression', 'setup: a counter regression on the same credential (counter 1 is not above the stored 1)');
 SELECT is((SELECT count(*)::int FROM app.partner_auth_alarm a JOIN creds c ON c.cred_row = a.credential_id WHERE c.label = 'sig' AND a.kind = 'counter_regression'), 2, 'a counter_regression row of the PREVIOUS minute does not suppress this minute''s: two rows, two minutes');
 SELECT pg_temp.newcred('sig2') IS NOT NULL AS sig2_cred \gset
@@ -595,11 +597,12 @@ SELECT is((SELECT array_agg(role_name ORDER BY policy_name) FROM private.definer
                                                                                                                          'psi_insert_partner_auth_challenge', 'psi_read_partner_auth_challenge')),
           ARRAY['private_definer', 'private_definer', 'partner_session_issuer', 'partner_session_issuer', 'partner_session_issuer', 'partner_session_issuer'], 'and each names the role it is for');
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name LIKE 'partner\_sig\_%' OR function_name IN ('partner_cbor_head', 'partner_cose_parse', 'partner_challenge_core', 'partner_challenge_issue_sign_in', 'partner_challenge_verify',
-                                                                                                                              'partner_mint_alarm_write', 'partner_session_mint')), 27, 'every function of 0048 has a function_inventory row (27)');
+                                                                                                                              'partner_mint_alarm_write', 'partner_session_mint')), 29, 'every function of 0048 has a function_inventory row (27, plus the two 8-argument overloads 0054 adds of partner_challenge_core / _verify)');
 SELECT is((SELECT count(*)::int FROM private.partner_owner_privilege WHERE role_name = 'partner_session_issuer' AND (object_name LIKE '%partner_credential' AND column_name IN ('public_key', 'alg', 'sign_count', 'last_used_at'))), 5, 'the issuer''s new column privileges on partner_credential are in the owner-privilege registry');
-SELECT is((SELECT array_agg(o.privilege || ':' || o.object_name ORDER BY o.object_name) FROM private.partner_owner_privilege o WHERE o.role_name = 'partner_session_issuer' AND o.object_kind = 'function'),
+SELECT is((SELECT array_agg(o.privilege || ':' || o.object_name ORDER BY o.object_name) FROM private.partner_owner_privilege o WHERE o.role_name = 'partner_session_issuer' AND o.object_kind = 'function'
+             AND o.object_name IN ('private.partner_binding_kind()', 'private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea)', 'private.partner_mint_alarm_write(text,uuid,jsonb)', 'private.partner_session_policy(uuid)', 'private.partner_sig_verify(smallint,bytea,bytea,bytea)')),
           ARRAY['EXECUTE:private.partner_binding_kind()', 'EXECUTE:private.partner_challenge_verify(smallint,bigint,bytea,uuid,bytea)', 'EXECUTE:private.partner_mint_alarm_write(text,uuid,jsonb)', 'EXECUTE:private.partner_session_policy(uuid)', 'EXECUTE:private.partner_sig_verify(smallint,bytea,bytea,bytea)'],
-          'and the issuer''s function privileges are exactly those five');
+          'and the issuer''s function privileges of 0048 are still exactly those five (0054 adds its own, listed in matrix 32)');
 SELECT tests.clear_actor();
 -- the alarm writer is refused under any binding (a partner- or user-bound definer cannot use it as a noise lever)
 SAVEPOINT sp_alarm;
@@ -613,7 +616,7 @@ RESET ROLE;
 SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('anything_else', gen_random_uuid(), '{}'::jsonb)$$, '22023', NULL, 'the alarm writer takes only its two kinds');
 SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; SELECT private.partner_mint_alarm_write('signature_invalid', NULL, '{}'::jsonb)$$, '22023', NULL, 'the alarm writer refuses a NULL credential with the argument error (22023), not a NOT NULL violation from the table');
 RESET ROLE;
-SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; INSERT INTO app.partner_auth_alarm (kind, credential_id, minute_bucket) VALUES ('signature_invalid', gen_random_uuid(), 1)$$, '42501', NULL, 'the issuer cannot insert alarm rows itself (no privilege): only through the writer');
+SELECT throws_ok($$SET LOCAL ROLE partner_session_issuer; INSERT INTO app.partner_auth_alarm (kind, credential_id, bucket_key, minute_bucket) VALUES ('signature_invalid', gen_random_uuid(), 'x', 1)$$, '42501', NULL, 'the issuer cannot insert alarm rows itself (no privilege): only through the writer');
 RESET ROLE;
 
 -- ----------------------------------------------------------------------------

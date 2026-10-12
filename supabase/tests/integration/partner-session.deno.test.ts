@@ -154,8 +154,21 @@ Deno.test("PA-10: OPTIONS never opens a database connection (a counting database
   let calls = 0;
   const counting: PartnerDb = {
     withMint: (op) => (calls++, partnerDb.withMint(op)),
+    withInviteMint: (op) => (calls++, partnerDb.withInviteMint(op)),
     withSession: (h, op) => (calls++, partnerDb.withSession(h, op)),
+    withInvites: (h, op) => (calls++, partnerDb.withInvites(h, op)),
+    withMembers: (h, op) => (calls++, partnerDb.withMembers(h, op)),
+    withAttest: (h, op) => (calls++, partnerDb.withAttest(h, op)),
+    withReview: (h, op) => (calls++, partnerDb.withReview(h, op)),
+    withStock: (h, op) => (calls++, partnerDb.withStock(h, op)),
+    withEntitlements: (h, op) => (calls++, partnerDb.withEntitlements(h, op)),
+    withProgramme: (h, op) => (calls++, partnerDb.withProgramme(h, op)),
+    withOffersAdmin: (h, op) => (calls++, partnerDb.withOffersAdmin(h, op)),
+    withSponsorships: (h, op) => (calls++, partnerDb.withSponsorships(h, op)),
+    withOffersRedeem: (h, op) => (calls++, partnerDb.withOffersRedeem(h, op)),
+    withSettlementExport: (h, op) => (calls++, partnerDb.withSettlementExport(h, op)),
     hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
+    hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
   };
   const deps = baseDeps({ db: counting });
   for (const method of ["GET", "POST", "PATCH", "DELETE"]) {
@@ -209,7 +222,24 @@ Deno.test("PA-10: loadPartnerCorsOrigin reads GR_PARTNER_ORIGIN: unset is null, 
 
 Deno.test("PA-11: a Supabase JWT sent to the partner function is 401 on every session route (and nothing opens a transaction)", DT, async () => {
   let calls = 0;
-  const counting: PartnerDb = { withMint: (op) => (calls++, partnerDb.withMint(op)), withSession: (h, op) => (calls++, partnerDb.withSession(h, op)), hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)) };
+  const counting: PartnerDb = {
+    withMint: (op) => (calls++, partnerDb.withMint(op)),
+    withInviteMint: (op) => (calls++, partnerDb.withInviteMint(op)),
+    withSession: (h, op) => (calls++, partnerDb.withSession(h, op)),
+    withInvites: (h, op) => (calls++, partnerDb.withInvites(h, op)),
+    withMembers: (h, op) => (calls++, partnerDb.withMembers(h, op)),
+    withAttest: (h, op) => (calls++, partnerDb.withAttest(h, op)),
+    withReview: (h, op) => (calls++, partnerDb.withReview(h, op)),
+    withStock: (h, op) => (calls++, partnerDb.withStock(h, op)),
+    withEntitlements: (h, op) => (calls++, partnerDb.withEntitlements(h, op)),
+    withProgramme: (h, op) => (calls++, partnerDb.withProgramme(h, op)),
+    withOffersAdmin: (h, op) => (calls++, partnerDb.withOffersAdmin(h, op)),
+    withSponsorships: (h, op) => (calls++, partnerDb.withSponsorships(h, op)),
+    withOffersRedeem: (h, op) => (calls++, partnerDb.withOffersRedeem(h, op)),
+    withSettlementExport: (h, op) => (calls++, partnerDb.withSettlementExport(h, op)),
+    hitRateLimit: (...a) => (calls++, partnerDb.hitRateLimit(...a)),
+    hitSystemRateLimit: (...a) => (calls++, partnerDb.hitSystemRateLimit(...a)),
+  };
   // built at run time (a literal token-shaped string trips the secret scanner)
   const b64u = (v: string) => btoa(v).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
   const jwt = [b64u(JSON.stringify({ alg: "HS256", typ: "JWT" })), b64u(JSON.stringify({ sub: "test-subject", role: "authenticated" })), b64u("not-a-real-signature")].join(".");
@@ -237,7 +267,14 @@ Deno.test("PA-11: a partner token sent to a PLAYER function is refused and NEVER
   Deno.env.set("SUPABASE_ANON_KEY", "anon-key-for-the-recording-fake");
   try {
     const t = (await newPartnerSessionToken()).token;
-    for (const bearerValue of [t, t.replace("gr_ps_", "gr_inv_"), "GR_PS_" + t.slice(6), "gr_ps_x"]) {
+    for (const bearerValue of [
+      t,
+      t.replace("gr_ps_", "gr_inv_"),
+      t.replace("gr_ps_", "gr_enr_"),
+      "GR_PS_" + t.slice(6),
+      "GR_ENR_" + t.slice(6),
+      "gr_ps_x",
+    ]) {
       const actor = await getActorFromRequest(new Request("https://p.example.test/", { headers: { authorization: `Bearer ${bearerValue}` } }));
       assertEquals(actor, null, bearerValue.slice(0, 10));
     }
@@ -261,7 +298,7 @@ Deno.test("PA-11: a partner token sent to a PLAYER function is refused and NEVER
 // PA-12: sign in, GET session through PEEK, sign out
 // =============================================================================================================================================================
 
-Deno.test("PA-12: a valid assertion mints (ES256 and RS256); the token comes back once and only its hash is stored; GET session (PEEK) does not move last_seen_at; sign-out revokes", DT, async () => {
+Deno.test("PA-12: a valid assertion mints (ES256 and RS256); the token comes back once and only its hash is stored; GET session (PEEK) does not move last_seen_at; lock revokes with reason lock", DT, async () => {
   for (const alg of ["ES256", "RS256"] as const) {
     const auth = await enrol(STAFF, alg);
     const token = await signIn(auth);
@@ -280,13 +317,17 @@ Deno.test("PA-12: a valid assertion mints (ES256 and RS256); the token comes bac
       assert(info.memberships[0]!.facilityIds.includes("fac_x"));
     }
     assertEquals(((await sessionRow(hash))!.last_seen_at as Date).getTime(), before.getTime(), `${alg}: GET session did NOT move last_seen_at`);
-    // lock (a SESSION-class call) DOES move it: the control that makes the check above evidence
+    // lock (SESSION) revokes with reason lock (0085 / §72); also advances last_seen_at before the revoke (control vs PEEK)
     const lock = await call("POST", "lock", { headers: bearer(token), body: {} });
     assertEquals(lock.status, 200);
-    assert(((await sessionRow(hash))!.last_seen_at as Date).getTime() > before.getTime(), `${alg}: lock advanced last_seen_at (control)`);
+    const locked = await sessionRow(hash);
+    assert(((locked!.last_seen_at as Date).getTime() > before.getTime()), `${alg}: lock advanced last_seen_at (SESSION control)`);
+    assertEquals(locked!.revoke_reason, "lock", `${alg}: lock revokes with reason lock`);
+    assert(locked!.revoked_at != null, `${alg}: lock sets revoked_at`);
+    // same token is dead: post-lock sign-out must not succeed
     const out = await call("POST", "sign-out", { headers: bearer(token), body: {} });
-    assertEquals(out.status, 200);
-    assertEquals((await sessionRow(hash))!.revoke_reason, "sign_out");
+    assertEquals(out.status, 401, `${alg}: post-lock sign-out on the same token is refused`);
+    assertEquals((await sessionRow(hash))!.revoke_reason, "lock", `${alg}: revoke_reason stays lock (not overwritten by sign-out)`);
     const after = await call("GET", "session", { headers: bearer(token) });
     assertEquals(after.status, 401);
     assertEquals(await after.text(), UNIFORM_401);
@@ -412,19 +453,23 @@ Deno.test("section 8: an assertion under a credential id nobody holds is the uni
 // 4.1: an aal 1 operator session; reauth (PA-27); the member rate limit
 // =============================================================================================================================================================
 
-Deno.test("4.1: an aal 1 OPERATOR session can GET session (reporting the aal it needs), lock and sign out; reauth is refused (class A0 needs the required aal)", DT, async () => {
+Deno.test("4.1 / PA-28: an aal 1 OPERATOR with no confirmed TOTP can GET session, lock, and reauth/options (A0_ENROL); normal A0 stays refused", DT, async () => {
   const auth = await enrol(OPERATOR);
   const token = await signIn(auth);
+  const hash = await sha256Hex(token);
   const who = await call("GET", "session", { headers: bearer(token) });
   assertEquals(who.status, 200);
   const info = (await who.json()).data as { requiredAal: number; aal: number };
   assertEquals([info.aal, info.requiredAal], [1, 2]);
-  assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 403);
+  // S1.4: reauth is A0_ENROL — reachable at aal 1 only while TOTP is unconfirmed (matrix 31 proves the post-confirm refusal).
+  assertEquals((await call("POST", "reauth/options", { headers: bearer(token), body: {} })).status, 200);
   assertEquals((await call("POST", "lock", { headers: bearer(token), body: {} })).status, 200);
-  assertEquals((await call("POST", "sign-out", { headers: bearer(token), body: {} })).status, 200);
+  assertEquals((await sessionRow(hash))!.revoke_reason, "lock");
+  // lock revokes: post-lock sign-out on the same token is refused (do not expect 200)
+  assertEquals((await call("POST", "sign-out", { headers: bearer(token), body: {} })).status, 401);
 });
 
-Deno.test("reauth: the session's own credential sets reauth_until (5 minutes); lock clears it; PA-27: another person's valid passkey is refused and nothing is written", DT, async () => {
+Deno.test("reauth: the session's own credential sets reauth_until (5 minutes); lock revokes; PA-27: another person's valid passkey is refused and nothing is written", DT, async () => {
   const auth = await enrol(STAFF);
   const other = freshUuid();
   await createTestUser(other, "reauth-other-" + other.slice(0, 8));
@@ -469,10 +514,10 @@ Deno.test("reauth: the session's own credential sets reauth_until (5 minutes); l
   const body = { challengeToken: ch.challengeToken, credential: await assertion(auth, ch) };
   assertEquals((await call("POST", "reauth", { headers: bearer(token), body })).status, 200);
   assertEquals((await call("POST", "reauth", { headers: bearer(token), body })).status, 403, "a replay");
-  // lock clears the window and keeps the session live
+  // lock revokes the session (0085 / §72); the old token is dead
   assertEquals((await call("POST", "lock", { headers: bearer(token), body: {} })).status, 200);
-  assertEquals((await sessionRow(hash))!.reauth_until, null, "lock cleared the reauth window");
-  assertEquals((await call("GET", "session", { headers: bearer(token) })).status, 200, "the session is still live");
+  assertEquals((await sessionRow(hash))!.revoke_reason, "lock", "lock revokes with reason lock");
+  assertEquals((await call("GET", "session", { headers: bearer(token) })).status, 401, "the session is dead after lock");
 });
 
 Deno.test("reauth / 17.8: a signature the Edge passed and the database refuses writes an audit_log row that COMMITS (the verifier-owned writer sets nothing)", DT, async () => {
@@ -544,7 +589,7 @@ Deno.test("PA-13b: inside a real partner transaction the role is edge_partner an
   );
   assertEquals(
     names[0]!.n,
-    "bind_partner_session,hit_partner_rate_limit,partner_binding,partner_binding_kind,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_whoami_for_partner",
+    "bind_partner_session,course_pin_alarm_list_for_partner,course_pin_rotate_for_partner,course_pin_show_for_partner,course_qr_mint_for_partner,course_qr_print_key_for_partner,course_qr_print_read_for_partner,course_qr_print_write_for_partner,course_qr_refresh_for_partner,course_qr_static_pin_cap_list_for_partner,hit_partner_rate_limit,partner_admin_enrolment_issue_for_partner,partner_attest_for_partner,partner_auth_alarm_list_for_partner,partner_binding,partner_binding_kind,partner_credential_add_notice_ack_for_partner,partner_credential_add_notice_list_mine_for_partner,partner_credential_add_notice_list_reach_for_partner,partner_credential_list_for_partner,partner_credential_note_for_partner,partner_credential_options_for_partner,partner_credential_register_for_partner,partner_credential_revoke_for_partner,partner_entitlement_queue_for_partner,partner_entitlement_redeem_for_partner,partner_entitlement_voucher_for_partner,partner_facility_programme_list_for_partner,partner_facility_programme_upsert_for_partner,partner_handover_mint_for_partner,partner_held_queue_for_partner,partner_invite_accept_for_partner,partner_invite_create_for_partner,partner_invite_list_for_partner,partner_invite_revoke_for_partner,partner_member_list_for_partner,partner_member_rate_alarm_raise,partner_member_recover_for_partner,partner_member_revoke_for_partner,partner_offer_approve_for_partner,partner_offer_end_for_partner,partner_offer_upsert_for_partner,partner_offers_list_for_partner,partner_offers_queue_for_partner,partner_offers_redeem_for_partner,partner_offers_redeem_offline_for_partner,partner_offline_attest_for_partner,partner_operator_rollup_for_partner,partner_org_sessions_revoke_for_partner,partner_pin_change_for_partner,partner_pin_params_for_partner,partner_pin_reset_for_partner,partner_pin_set_for_partner,partner_pin_verify_for_partner,partner_receipt_cross_user_preview_for_partner,partner_resolve_held_entitlement_for_partner,partner_resolve_held_offer_code_for_partner,partner_resolve_receipt_cross_user_match_for_partner,partner_review_sla_for_partner,partner_session_lock_for_partner,partner_session_otp_proof_for_partner,partner_session_otp_target_for_partner,partner_session_reauth_credential_for_partner,partner_session_reauth_for_partner,partner_session_reauth_options_for_partner,partner_session_revoke_for_partner,partner_settlement_export_for_partner,partner_shift_log_for_partner,partner_sponsor_rollup_for_partner,partner_sponsorship_approve_for_partner,partner_sponsorship_upsert_for_partner,partner_sponsorships_list_for_partner,partner_staff_activity_for_partner,partner_stock_move_for_partner,partner_stock_read_for_partner,partner_totp_confirm_for_partner,partner_totp_enrol_for_partner,partner_totp_reset_for_partner,partner_totp_verify_for_partner,partner_trail_programme_read_for_partner,partner_trail_programme_upsert_for_partner,partner_whoami_for_partner",
   );
 });
 

@@ -966,12 +966,14 @@ export async function handleEvidenceIntake(rawBody: unknown, repo: Repo, options
   const priorRows = await repo.evidence.listForPlay(resolvedFacilityId, resolvedCourseId, submission.localDate);
   const disambiguation = await repo.play.disambiguation(resolvedCourseId, submission.localDate);
   const evidenceForScoring = reconstructEvidenceForScoring(priorRows, inserted.id, submission, derivedFixesByFixId, resolvedFacilityId, resolvedCourseId, holes, disambiguation.effective);
+  const purchases = await repo.purchases.listValidAround(resolvedFacilityId, submission.localDate);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: resolvedFacilityId,
     playLocalDate: submission.localDate,
     playCourseId: resolvedCourseId,
     facilityTz,
+    ...(purchases.length > 0 ? { purchases } : {}),
   });
 
   if (!outcome.ok) {
@@ -1090,12 +1092,14 @@ export async function finalizeScoringForKey(repo: Repo, facilityId: string, cour
   const rows = await repo.evidence.listForPlay(facilityId, courseId, localDate);
   const disambiguation = await repo.play.disambiguation(courseId, localDate);
   const evidenceForScoring = reconstructEvidenceFromStoredRows(rows, disambiguation.effective);
+  const purchases = await repo.purchases.listValidAround(facilityId, localDate);
 
   const outcome = scorePlay(evidenceForScoring, {
     playFacilityId: facilityId,
     playLocalDate: localDate,
     playCourseId: courseId,
     facilityTz,
+    ...(purchases.length > 0 ? { purchases } : {}),
   });
 
   if (!outcome.ok) {

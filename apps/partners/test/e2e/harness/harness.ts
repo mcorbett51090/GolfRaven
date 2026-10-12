@@ -4,6 +4,9 @@
  * Results are written as text into `#out`: `{ ok: true, ... }` or `{ ok: false, kind, status, code }`.
  */
 import { createPartnerApi } from "../../../src/api/client";
+import { createController } from "../../../src/app/controller";
+import { resolveLocale } from "../../../src/i18n";
+import { render } from "../../../src/ui/render";
 import { isPartnerApiError } from "../../../src/api/errors";
 import { reauthWithPasskey } from "../../../src/auth/reauth";
 import { signInWithPasskey } from "../../../src/auth/sign-in";
@@ -29,4 +32,30 @@ on("session", async () => ({ aal: (await api.session()).aal }));
 on("forget", async () => {
   api.forgetSession();
   return { hasSession: api.hasSession() };
+});
+
+/**
+ * The real app screens inside this page, mounted on demand (so every other harness cell is unchanged), with a button that stands in for the first A1 screen:
+ * it calls `controller.requirePin("A1")` exactly as a screen would and writes the outcome (a grant, or why not) into `#out`.
+ */
+let controller: ReturnType<typeof createController> | null = null;
+on("mount-app", async () => {
+  const appRoot = document.getElementById("app") as HTMLElement;
+  const appApi = createPartnerApi({ baseUrl: __GR_PARTNERS_API_BASE__ });
+  const c = createController({ api: appApi, webauthn: { credentials: navigator.credentials } });
+  controller = c;
+  const env = { locale: resolveLocale(navigator.languages ?? [navigator.language]), setLocale() {} };
+  const draw = () => render(appRoot, c.getState(), c, env);
+  c.subscribe(draw);
+  draw();
+  return { mounted: true };
+});
+on("request-pin-a1", async () => {
+  if (controller === null) throw new Error("mount-app first");
+  try {
+    const grant = await controller.requirePin("A1");
+    return { granted: grant.actionClass };
+  } catch (e) {
+    return { stepUp: e instanceof Error && "kind" in e ? String((e as { kind: unknown }).kind) : "other" };
+  }
 });

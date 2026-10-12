@@ -229,10 +229,20 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     if (!qualifies) throw Errors.unprocessable("not_a_cosignal", "this location fix does not qualify as a presence co-signal");
     const counted = await countCoSignal(repo, deps, body, facilityId, tz);
     if (counted === null) throw Errors.conflict("fix_not_consumable", "this location fix could not be counted; capture a new one");
-    const attached = await repo.markerScan.attachCosignal({ facilityId, at, cosignal: { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId } });
-    if (attached.status === "no_pending_purchase") throw Errors.unprocessable("no_pending_purchase", "no pending marker purchase at this facility is waiting for this location fix");
-    if (attached.status !== "attached") throw mapRecordRefusal(attached.status);
-    return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, attached.purchases) };
+    const cosignal = { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId };
+    // Confirm BEFORE attach: attach writes purchase_evidence.cosignal.evidenceId, after which
+    // marker_cosignal_check returns cosignal_used and offline clear would miss. Confirm does not
+    // consume the fix (§37), so a pending marker purchase still attaches afterward.
+    const confirmed = await repo.markerScan.confirmOfferOffline({ facilityId, at, cosignal });
+    const attached = await repo.markerScan.attachCosignal({ facilityId, at, cosignal });
+    if (attached.status === "attached") {
+      return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, attached.purchases) };
+    }
+    if (attached.status === "no_pending_purchase") {
+      if (confirmed.status === "confirmed") return { kind: "ok", status: 200, body: toResponse(facilityId, null, counted, []) };
+      throw Errors.unprocessable("no_pending_purchase", "no pending marker purchase at this facility is waiting for this location fix");
+    }
+    throw mapRecordRefusal(attached.status);
   }
 
   // 2. Verify the QR's signature BEFORE anything is consumed. A forged one is an attack signal: it writes a fraud_signal and COMMITS.
@@ -301,5 +311,27 @@ export async function handleMarkerScan(body: MarkerScanBody, repo: Repo, deps: M
     cosignal: counted === null ? null : { grade: counted.grade, fixId: counted.fixId, evidenceId: counted.evidenceId },
   });
   if (recorded.status !== "accepted") throw mapRecordRefusal(recorded.status);
+
+  // 6. Plan §8.3 / P5 §62: static-PIN daily cap is a SIGNAL, not a block. After an accepted
+  // printed-QR scan, count facility-wide credited static_pin credits for the purchase's local
+  // date; at or above 25 write one fraud_signal (idempotent via open unique index — covers a
+  // multi-trail jump that skips exactly 25). Failures here must not fail the scan or change
+  // the HTTP response.
+  if (body.qr.variant === "static_pin" && recorded.localDate !== null) {
+    try {
+      const n = await repo.markerScan.staticPinCreditCount(facilityId, recorded.localDate);
+      if (n >= 25) {
+        await repo.fraudSignal.insert("course_qr_static_pin_cap", {
+          facilityId,
+          localDate: recorded.localDate,
+          count: n,
+        });
+      }
+    } catch {
+      // Cap alert is best-effort: never fail or change the accepted scan.
+      // Player-lane modules must not console.* (marker-scan-entrypoint pin).
+    }
+  }
+
   return { kind: "ok", status: 201, body: toResponse(facilityId, recorded.localDate, counted, recorded.purchases) };
 }

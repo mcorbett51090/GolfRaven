@@ -19,10 +19,22 @@
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.SYSTEM_ALERT_WINDOW"
       ],
-      "allowBackup": false
+      "allowBackup": false,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "category": ["BROWSABLE", "DEFAULT"],
+          "data": [
+            { "scheme": "https", "host": "golfraven.app", "pathPrefix": "/q/m" },
+            { "scheme": "https", "host": "golfraven.app", "pathPrefix": "/q/f" }
+          ]
+        }
+      ]
     },
     "ios": {
-      "bundleIdentifier": "com.golfraven.app"
+      "bundleIdentifier": "com.golfraven.app",
+      "associatedDomains": ["applinks:golfraven.app"]
     },
     "plugins": [
       "expo-router",
@@ -42,6 +54,14 @@
           "isIosBackgroundLocationEnabled": false,
           "isAndroidBackgroundLocationEnabled": false,
           "isAndroidForegroundServiceEnabled": false
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "GolfRaven uses your photo library only when you tap “Choose receipt photo”, to upload a green-fee receipt for this facility. It does not access your camera.",
+          "cameraPermission": false,
+          "microphonePermission": false
         }
       ],
       "react-native-health-connect",

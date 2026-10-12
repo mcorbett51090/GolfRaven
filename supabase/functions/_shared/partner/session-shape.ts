@@ -11,6 +11,9 @@
 //   POST pin/change                                  { currentDerived, derived, salt, iterations }
 //   POST otp-proof/start                             {}
 //   POST otp-proof/verify                            { code }                                                   (the emailed one-time code: 6 to 10 digits)
+//   POST totp/enrol                                  {}
+//   POST totp/confirm                                { code }                                                   (exactly 6 digits)
+//   POST step-up/totp                                { code }                                                   (exactly 6 digits)
 //
 //   challengeToken  `<nonce b64u, 43>.<exp, epoch seconds>.<mac b64u, 43>`: what POST options returned
 //   credential      the browser's `PublicKeyCredential.toJSON()` of a `navigator.credentials.get`: { id, rawId, type: "public-key", response: { clientDataJSON, authenticatorData, signature, userHandle? },
@@ -59,11 +62,11 @@ const MIN_CREDENTIAL_ID = 16;
 const MAX_USER_HANDLE = 64;
 const MAX_POP_JKT = 64;
 
-function plain(v: unknown): v is Record<string, unknown> {
+export function plain(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-function unknownKeys(obj: Record<string, unknown>, known: ReadonlySet<string>, prefix: string, issues: ParseIssue[]): void {
+export function unknownKeys(obj: Record<string, unknown>, known: ReadonlySet<string>, prefix: string, issues: ParseIssue[]): void {
   for (const k of Object.keys(obj)) if (!known.has(k)) issues.push({ path: prefix + k, message: "unknown field" });
 }
 
@@ -205,6 +208,7 @@ export function parsePinChangeBody(raw: unknown): ParseResult<PinChangeInput> {
 }
 
 const OTP_CODE_RE = /^[0-9]{6,10}$/;
+const TOTP_CODE_RE = /^[0-9]{6}$/;
 
 /** POST otp-proof/verify: `{ code }`, the emailed one-time code (6 to 10 digits). */
 export function parseOtpVerifyBody(raw: unknown): ParseResult<{ readonly code: string }> {
@@ -212,6 +216,16 @@ export function parseOtpVerifyBody(raw: unknown): ParseResult<{ readonly code: s
   const issues: ParseIssue[] = [];
   unknownKeys(raw, new Set(["code"]), "", issues);
   if (typeof raw.code !== "string" || !OTP_CODE_RE.test(raw.code)) issues.push({ path: "code", message: "must be 6 to 10 digits" });
+  if (issues.length > 0) return { ok: false, issues };
+  return { ok: true, value: { code: raw.code as string } };
+}
+
+/** POST totp/confirm and POST step-up/totp: exactly `{ code }` with 6 digits; unknown keys rejected. */
+export function parseTotpCodeBody(raw: unknown): ParseResult<{ readonly code: string }> {
+  if (!plain(raw)) return { ok: false, issues: [{ path: "", message: "expected a JSON object" }] };
+  const issues: ParseIssue[] = [];
+  unknownKeys(raw, new Set(["code"]), "", issues);
+  if (typeof raw.code !== "string" || !TOTP_CODE_RE.test(raw.code)) issues.push({ path: "code", message: "must be exactly 6 digits" });
   if (issues.length > 0) return { ok: false, issues };
   return { ok: true, value: { code: raw.code as string } };
 }

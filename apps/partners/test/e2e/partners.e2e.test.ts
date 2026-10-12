@@ -51,10 +51,13 @@ suite("apps/partners in Chromium", () => {
           "/__probe/probe-connect.js": join(here, "probe/probe-connect.js"),
         },
         {
-          // the SAME pages under other URLs, for the bfcache cells: the harness (no pagehide handler) with and without `Cache-Control: no-store`, and the real app at a URL
-          // the generated `_headers` does not mark no-store (so only the page's own pagehide/pageshow handlers stand between Back and a signed-in screen)
-          alias: { "/harness-nostore.html": "/harness.html", "/harness-cacheable.html": "/harness.html", "/app-cacheable.html": "/index.html" },
-          extraHeaders: { "/harness-nostore.html": { "Cache-Control": "no-store" } },
+          // bfcache cells: harness with/without no-store, and the real app at a URL that omits Cache-Control so only pagehide/pageshow stand between Back and a signed-in screen
+          // (`/*` is no-store in generated `_headers`; null here detaches it for the cacheable control aliases)
+          alias: { "/harness-nostore.html": "/harness.html", "/harness-cacheable.html": "/harness.html", "/app-cacheable.html": "/index.html", "/invite": "/index.html" },
+          extraHeaders: {
+            "/harness-cacheable.html": { "Cache-Control": null },
+            "/app-cacheable.html": { "Cache-Control": null },
+          },
         },
       ),
     );
@@ -129,8 +132,14 @@ suite("apps/partners in Chromium", () => {
   }
 
   const signIn = async (w: Watch) => {
+    const noticesBefore = server.log.filter((r) => r.method === "GET" && r.path.endsWith("/credentials/notices")).length;
     await w.page.getByTestId("sign-in").click();
     await w.page.locator('[data-screen="signed-in"]').waitFor();
+    // §93: maybeOpen GETs credentials/notices after the signed-in screen is shown. Lifecycle cells (reload /
+    // bfcache) mark the log next — wait so an in-flight notices GET is not misread as a post-leave Bearer call.
+    await expect
+      .poll(() => server.log.filter((r) => r.method === "GET" && r.path.endsWith("/credentials/notices")).length)
+      .toBe(noticesBefore + 1);
   };
   const screen = (w: Watch) => w.page.locator("main").getAttribute("data-screen");
   /** Playwright's locator text, awaited until it is there (vitest's `expect` has no Playwright matchers). */
@@ -139,6 +148,11 @@ suite("apps/partners in Chromium", () => {
     return (await l.textContent()) ?? "";
   };
   const apiCalls = () => server.log.filter((r) => r.method !== "OPTIONS");
+  /** Tail after the Edge function name (partner-session / partner-members / …). */
+  const routeTail = (path: string): string => {
+    const m = path.match(/\/functions\/v1\/([^/]+)\/(.*)$/);
+    return m ? `${m[1] === "partner-session" ? "" : `${m[1]}/`}${m[2]}` : path;
+  };
 
   describe("served under the real CSP", () => {
     it("the page response carries the generated CSP header, the hardening headers and a hashed bundle", async () => {
@@ -155,14 +169,15 @@ suite("apps/partners in Chromium", () => {
       expect(html).toMatch(/<script type="module" src="\.\/assets\/app-[A-Z0-9]+\.js"><\/script>/);
     });
 
-    it("the page itself is Cache-Control: no-store on / and /index.html and NOT on the hashed assets", async () => {
+    it("/* is Cache-Control: no-store (including SPA paths); hashed assets detach and stay immutable", async () => {
       const w = await open();
       const get = async (path: string) => (await w.page.request.get(`${pageOrigin}${path}`)).headers();
       expect((await get("/"))["cache-control"]).toBe("no-store");
       expect((await get("/index.html"))["cache-control"]).toBe("no-store");
+      expect((await get("/invite"))["cache-control"]).toBe("no-store");
       const asset = new URL((await (await w.page.request.get(`${pageOrigin}/`)).text()).match(/src="\.\/(assets\/app-[A-Z0-9]+\.js)"/)![1]!, `${pageOrigin}/`).pathname;
       expect((await get(asset))["cache-control"]).toBe("public, max-age=31536000, immutable");
-      expect((await get("/favicon.svg"))["cache-control"]).toBeUndefined();
+      expect((await get("/favicon.svg"))["cache-control"]).toBe("no-store");
     });
 
     it("the CSP in force really blocks what it says (a probe page under the same header attempts each): eval, new Function, a string timer, innerHTML and script text (Trusted Types), a data: script, a foreign origin, a policy, an inline style attribute", async () => {
@@ -217,8 +232,15 @@ suite("apps/partners in Chromium", () => {
       const origins = new Set(w.requests.map((u) => new URL(u).origin));
       expect([...origins].sort()).toEqual([apiOrigin, pageOrigin].sort());
       expect(w.requests.some((u) => /rest\/v1|postgrest|supabase/i.test(u))).toBe(false);
-      const calls = apiCalls().map((r) => `${r.method} ${r.path.split("/partner-session/")[1]}`);
-      expect(calls).toEqual(["POST options", "POST verify", "GET session", "GET session"]);
+      const calls = apiCalls().map((r) => `${r.method} ${routeTail(r.path)}`);
+      // §93: after session, GET credentials/notices (A0) before home; refresh is a second GET session.
+      expect(calls).toEqual([
+        "POST options",
+        "POST verify",
+        "GET session",
+        "GET partner-members/credentials/notices",
+        "GET session",
+      ]);
       for (const r of apiCalls()) {
         expect(r.contentType).toBe("application/json");
         expect(r.origin).toBe(pageOrigin);
@@ -343,7 +365,7 @@ suite("apps/partners in Chromium", () => {
       // nothing was sent on BOOT (there is no token to send); what the reload did send is the pagehide sign-out of the page that was left (a keepalive request:
       // its preflight, then the POST), which is how the old session ends up revoked rather than left to idle out
       const sent = server.log.slice(before);
-      expect(sent.filter((r) => r.method !== "OPTIONS").map((r) => `${r.method} ${r.path.split("/partner-session/")[1]}`)).toEqual(["POST sign-out"]);
+      expect(sent.filter((r) => r.method !== "OPTIONS").map((r) => `${r.method} ${routeTail(r.path)}`)).toEqual(["POST sign-out"]);
       await expect.poll(() => server.state.revokedSessions.size).toBe(1);
       expect(await w.page.getByTestId("roles").count()).toBe(0);
       await signIn(w);
@@ -363,7 +385,7 @@ suite("apps/partners in Chromium", () => {
   });
 
   describe("lock and sign-out clear state", () => {
-    it("lock: back to sign-in with the locked notice, nothing of the session left on screen, and the session REVOKED on the server: the old token gets 401 (design 20.4)", async () => {
+    it("lock: back to sign-in with the locked notice, nothing of the session left on screen, and the session REVOKED on the server: the old token gets 401 (design 20.4 / §73)", async () => {
       const w = await open();
       await signIn(w);
       const token = server.issuedTokens[0]!;
@@ -372,12 +394,13 @@ suite("apps/partners in Chromium", () => {
       expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked");
       expect(await w.page.getByTestId("session-fields").count()).toBe(0);
       await expect.poll(() => server.state.revokedSessions.size).toBe(1);
-      expect(server.state.lockCalls).toBe(0);
-      expect(server.state.signOutCalls).toBe(1);
+      expect(server.state.lockCalls).toBe(1);
+      expect(server.state.signOutCalls).toBe(0);
       const res = await fetch(`${apiOrigin}/functions/v1/partner-session/session`, { headers: { authorization: `Bearer ${token}`, "content-type": "application/json", origin: pageOrigin } });
       expect(res.status).toBe(401);
-      const authed = apiCalls().filter((r) => r.authorization !== null);
-      expect(authed.map((r) => r.path.split("/partner-session/")[1])).toEqual(["session", "sign-out", "session"]); // the last is the direct fetch above, not the page
+      const authedSession = apiCalls().filter((r) => r.authorization !== null && r.path.includes("/partner-session/"));
+      // page: GET session (+ notices on partner-members, omitted here), POST lock; last GET session is the direct fetch above
+      expect(authedSession.map((r) => r.path.split("/partner-session/")[1])).toEqual(["session", "lock", "session"]);
       expect(await w.violations()).toEqual([]);
       // resuming needs a new tap
       const optionsBefore = apiCalls().filter((r) => r.path.endsWith("/options")).length;
@@ -403,7 +426,11 @@ suite("apps/partners in Chromium", () => {
       const w = await open();
       await signIn(w);
       server.killAllSessions();
-      await w.page.getByTestId("refresh").click();
+      // Click may race a render that already noticed the kill; land on signed-out either way.
+      await Promise.race([
+        w.page.getByTestId("refresh").click({ timeout: 10_000 }),
+        w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 10_000 }),
+      ]).catch(() => undefined);
       await w.page.locator('[data-screen="signed-out"]').waitFor();
       expect(await textOf(w.page.getByTestId("notice"))).toContain("session has ended");
     });
@@ -510,18 +537,18 @@ suite("apps/partners in Chromium", () => {
   });
 
   describe("MEDIUM-2: lock and sign-out are immediate, and nothing waits forever", () => {
-    it("a POST sign-out (the lock's request) that never answers: the screen is locked and the token gone from the page's memory AT ONCE", async () => {
+    it("a POST lock that never answers: the screen is locked and the token gone from the page's memory AT ONCE", async () => {
       const w = await open();
       await signIn(w);
       const token = server.issuedTokens[0]!;
       expect(await heapContains(w.page, token)).toBe(true);
-      server.state.hang.add("sign-out");
+      server.state.hang.add("lock");
       await w.page.getByTestId("lock").click();
       await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
       expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked");
       expect(await w.page.getByTestId("session-fields").count()).toBe(0);
       // the request is still hanging (the server logged it and will never answer), and the page already holds no copy of the token
-      await expect.poll(() => server.log.some((r) => r.method === "POST" && r.path.endsWith("/sign-out") && r.authorization === `Bearer ${token}`)).toBe(true);
+      await expect.poll(() => server.log.some((r) => r.method === "POST" && r.path.endsWith("/lock") && r.authorization === `Bearer ${token}`)).toBe(true);
       expect(server.state.revokedSessions.size).toBe(0);
       expect(await heapContains(w.page, token)).toBe(false);
       // and the sign-in button is live straight away (the hung request does not hold the screen). A full second sign-in is covered by the controller's unit cell:
@@ -681,6 +708,156 @@ suite("apps/partners in Chromium", () => {
       server.state.reauthLimit = 0;
       const r = await click(w, "reauth");
       expect(r).toMatchObject({ ok: false, kind: "rate_limited", status: 429, retryAfterSeconds: 1800 });
+    });
+  });
+
+  describe("S7a: invite acceptance and the PIN, in a real browser under the real CSP", () => {
+    const EMAIL = "new.hire@partners.example.test";
+    const PIN = "7391";
+    const fill = async (w: Watch, id: string, value: string) => w.page.locator(`#${id}`).fill(value);
+    const wire = () => server.log.filter((r) => r.method !== "OPTIONS");
+
+    it("an invite link opens the enrolment screen and its fragment is removed from the address bar; nothing is sent until the person asks for a code", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open(`/invite#${token}`);
+      expect(await screen(w)).toBe("enrol");
+      expect(w.page.url()).toBe(`${pageOrigin}/invite`);
+      expect(await w.page.evaluate(() => location.hash)).toBe("");
+      expect(server.log).toEqual([]);
+      expect(await w.page.content()).not.toContain(token);
+      expect(await w.violations()).toEqual([]);
+    });
+
+    it("link -> emailed code -> a real passkey created by the browser -> the forced PIN -> home; zero violations, a clean console, no PIN digits on the wire, nothing in storage", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open(`/invite#${token}`);
+      await w.page.getByTestId("enrol-send-code").click();
+      await w.page.locator('#enrol-code').waitFor();
+      expect(server.state.mailed).toEqual([EMAIL]);
+      await fill(w, "enrol-code", server.state.otpCode);
+      await w.page.locator("#enrol-code").press("Enter"); // the form submits on Enter
+      await w.page.getByTestId("enrol-create-passkey").waitFor();
+      expect(await w.auth.credentials()).toHaveLength(1); // only the preloaded one: nothing is created until the button
+      await w.page.getByTestId("enrol-create-passkey").click();
+      await w.page.locator('[data-screen="pin-setup"]').waitFor();
+      expect(await w.auth.credentials()).toHaveLength(2); // the browser's authenticator made the new resident credential
+      expect(server.credentialsOf(server.userByEmail(EMAIL)!.id)).toHaveLength(1);
+      expect(server.sessions()).toHaveLength(1);
+
+      // the forced first PIN: no way to leave, a refused PIN is explained and sends nothing, a good one is saved
+      expect(await w.page.getByTestId("panel-cancel").count()).toBe(0);
+      await fill(w, "pin-new", "1234");
+      await fill(w, "pin-confirm", "1234");
+      await w.page.getByTestId("pin-save").click();
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("run of digits");
+      expect(wire().filter((r) => r.path.endsWith("/pin/set"))).toHaveLength(0);
+      await fill(w, "pin-new", PIN);
+      await fill(w, "pin-confirm", PIN);
+      await w.page.getByTestId("pin-save").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("PIN is set");
+      expect(server.pinRecord(server.userByEmail(EMAIL)!.id)).not.toBeNull();
+
+      const set = wire().find((r) => r.path.endsWith("/pin/set"))!;
+      expect(Object.keys(JSON.parse(set.body) as object).sort()).toEqual(["derived", "iterations", "salt"]);
+      for (const r of server.log) {
+        expect(r.body, `${r.method} ${r.path}`).not.toContain(`"${PIN}"`);
+        expect(r.path).not.toContain(PIN);
+      }
+      expect(w.requests.filter((u) => u.includes(PIN))).toEqual([]);
+      expect(w.requests.some((u) => /rest\/v1|postgrest|supabase/i.test(u))).toBe(false);
+      expect([...new Set(w.requests.map((u) => new URL(u).origin))].sort()).toEqual([apiOrigin, pageOrigin].sort());
+      expect(await w.violations()).toEqual([]);
+      expect(w.pageErrors).toEqual([]);
+      expect(w.console).toEqual([]);
+
+      const stores = await w.page.evaluate(async () => ({ local: Object.entries(localStorage), session: Object.entries(sessionStorage), idb: (await indexedDB.databases()).map((d) => d.name), cookie: document.cookie, caches: await caches.keys() }));
+      expect(stores).toEqual({ local: [], session: [], idb: [], cookie: "", caches: [] });
+      const state = JSON.stringify(await w.context.storageState({ indexedDB: true }));
+      expect(state).not.toContain(token);
+      expect(state).not.toContain(server.issuedTokens[0]!);
+      expect(state).not.toContain("gr_inv_");
+    });
+
+    it("a pasted token works from the plain page, and a wrong emailed code is refused with the one message", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open("/");
+      await w.page.getByTestId("have-invite").click();
+      expect(await screen(w)).toBe("enrol");
+      await fill(w, "enrol-token", `https://partners.example.test/invite#${token}`);
+      await w.page.getByTestId("enrol-send-code").click();
+      await w.page.locator("#enrol-code").waitFor();
+      await fill(w, "enrol-code", "000000");
+      await w.page.getByTestId("enrol-submit-code").click();
+      await w.page.getByTestId("notice").filter({ hasText: "was not accepted" }).waitFor();
+      expect(await screen(w)).toBe("enrol");
+      expect(await w.violations()).toEqual([]);
+    });
+
+    it("the enrolment screen is keyboard-first: the code field takes focus on arrival, and the screens are in French on request", async () => {
+      const { token } = server.addInvite({ email: EMAIL });
+      const w = await open(`/invite#${token}`);
+      await w.page.getByTestId("enrol-send-code").click();
+      await w.page.locator("#enrol-code").waitFor();
+      expect(await w.page.evaluate(() => document.activeElement?.id)).toBe("enrol-code");
+      await w.page.getByTestId("lang-toggle").click();
+      expect(await textOf(w.page.getByTestId("heading"))).toBe("Accepter votre invitation");
+    });
+
+    it("the PIN prompt an A1 screen would open: masked numeric input, a refused PIN is explained, a wrong one is counted, the right one resolves with a grant; only { derived } is sent", async () => {
+      await server.seedPin(PIN, { iterations: 210_000 });
+      const w = await open("/harness.html");
+      await w.page.locator("#mount-app").click();
+      await w.page.getByTestId("sign-in").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      await w.page.locator("#request-pin-a1").click();
+      await w.page.locator('[data-screen="pin-prompt"]').waitFor();
+      const attrs = await w.page.locator("#pin").evaluate((el) => ({ type: el.getAttribute("type"), mode: el.getAttribute("inputmode"), max: el.getAttribute("maxlength"), complete: el.getAttribute("autocomplete"), focused: document.activeElement === el }));
+      expect(attrs).toEqual({ type: "password", mode: "numeric", max: "4", complete: "off", focused: true });
+
+      await fill(w, "pin", "1234");
+      await w.page.locator("#pin").press("Enter");
+      await w.page.getByTestId("notice").filter({ hasText: "run of digits" }).waitFor();
+      expect(wire().filter((r) => r.path.endsWith("/step-up/pin"))).toHaveLength(0);
+      await fill(w, "pin", "7392");
+      await w.page.getByTestId("pin-submit").click();
+      await w.page.getByTestId("notice").filter({ hasText: "not correct" }).waitFor();
+      expect(server.pinRecord()!.failures).toBe(1);
+      await fill(w, "pin", PIN);
+      await w.page.getByTestId("pin-submit").click();
+      await w.page.waitForFunction(() => (document.querySelector('[data-testid="out"]')?.textContent ?? "").includes("granted"));
+      expect(JSON.parse((await w.page.getByTestId("out").textContent())!)).toMatchObject({ ok: true, granted: "A1" });
+      expect(server.pinRecord()!.failures).toBe(0);
+      expect(server.state.pinGrantsIssued).toBe(1);
+
+      const bodies = wire().filter((r) => r.path.endsWith("/step-up/pin")).map((r) => JSON.parse(r.body) as Record<string, unknown>);
+      expect(bodies).toHaveLength(2);
+      for (const b of bodies) expect(Object.keys(b)).toEqual(["derived"]);
+      for (const r of server.log) {
+        expect(r.body).not.toContain(`"${PIN}"`);
+        expect(r.body).not.toContain('"7392"');
+        expect(r.path).not.toContain(PIN);
+      }
+      expect(w.requests.filter((u) => u.includes(PIN) || u.includes("7392"))).toEqual([]);
+      expect(await w.violations()).toEqual([]);
+      expect(w.pageErrors).toEqual([]);
+      // the browser's own network log of the wrong PIN's 403 (and the harness page's missing favicon) is all the console holds: the page itself logs nothing
+      expect(w.console.filter((m) => !m.startsWith("error: Failed to load resource"))).toEqual([]);
+    });
+
+    it("Cancel on the prompt rejects the caller with 'cancelled' and closes the prompt", async () => {
+      await server.seedPin(PIN, { iterations: 210_000 });
+      const w = await open("/harness.html");
+      await w.page.locator("#mount-app").click();
+      await w.page.getByTestId("sign-in").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      await w.page.locator("#request-pin-a1").click();
+      await w.page.locator('[data-screen="pin-prompt"]').waitFor();
+      await w.page.getByTestId("panel-cancel").click();
+      await w.page.locator('[data-screen="signed-in"]').waitFor();
+      await w.page.waitForFunction(() => (document.querySelector('[data-testid="out"]')?.textContent ?? "").includes("stepUp"));
+      expect(JSON.parse((await w.page.getByTestId("out").textContent())!)).toMatchObject({ ok: true, stepUp: "cancelled" });
+      expect(wire().filter((r) => r.path.endsWith("/step-up/pin"))).toHaveLength(0);
     });
   });
 });

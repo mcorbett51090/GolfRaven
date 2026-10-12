@@ -4,12 +4,13 @@ import { CspParser } from "csp_evaluator/dist/parser.js";
 import { describe, expect, it } from "vitest";
 import { PARTNER_FUNCTIONS as CLIENT_FUNCTIONS } from "../src/api/client";
 import { DEFAULT_API_BASE, isLocalOrIpHost, isPlaceholderHost, resolveApiBase } from "../scripts/lib/config.mjs";
-import { buildCsp, buildHeadersFile, connectSources, PARTNER_FUNCTIONS } from "../scripts/lib/csp.mjs";
+import { buildCsp, buildHeadersFile, connectSources, PARTNER_FUNCTIONS, storageImgSource } from "../scripts/lib/csp.mjs";
 
 const API_ORIGIN = "https://abc123.example.test";
 const API = `${API_ORIGIN}/functions/v1`;
 /** One connect-src entry per partner function: path-scoped, trailing slash (a prefix match). */
 const CONNECT = PARTNER_FUNCTIONS.map((fn) => `${API}/${fn}/`);
+const STORAGE_IMG = storageImgSource(API);
 
 /**
  * A reference model of CSP Level 3 host-source matching for a URL, enough for connect-src: scheme, host and port must match; an EMPTY source path
@@ -44,8 +45,15 @@ describe("the policy", () => {
 
   it("is exactly the documented directive set", () => {
     expect(csp).toBe(
-      `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src ${CONNECT.join(" ")}; manifest-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`,
+      `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' ${STORAGE_IMG}; connect-src ${CONNECT.join(" ")}; manifest-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'`,
     );
+  });
+
+  it("img-src allows 'self' and the API host Storage path for receipt preview signed URLs", () => {
+    expect(d.get("img-src")).toEqual(["'self'", STORAGE_IMG]);
+    expect(STORAGE_IMG).toBe(`${API_ORIGIN}/storage/v1/`);
+    expect(cspAllows(STORAGE_IMG, `${API_ORIGIN}/storage/v1/object/sign/receipts/x.jpg?token=t`)).toBe(true);
+    expect(cspAllows(STORAGE_IMG, `${API_ORIGIN}/rest/v1/orgs`)).toBe(false);
   });
 
   it("starts from default-src 'none' and allows scripts and styles from 'self' only", () => {
@@ -61,6 +69,26 @@ describe("the policy", () => {
     for (const src of d.get("connect-src")!) expect(src).toMatch(/\/functions\/v1\/[a-z][a-z0-9-]*\/$/);
   });
 
+  it("connect-src names the partner functions of partner-functions.json (session, invites, members, attest, course-qr, qr-print, stock-admin, partner-entitlements, programme-config, offers-admin, sponsorships-admin, partner-review, partner-offers-redeem, settlement-export), each path-scoped", () => {
+    expect(d.get("connect-src")).toEqual([
+      `${API}/partner-session/`,
+      `${API}/partner-invites/`,
+      `${API}/partner-members/`,
+      `${API}/partner-attest/`,
+      `${API}/course-qr/`,
+      `${API}/qr-print/`,
+      `${API}/stock-admin/`,
+      `${API}/partner-entitlements/`,
+      `${API}/programme-config/`,
+      `${API}/offers-admin/`,
+      `${API}/sponsorships-admin/`,
+      `${API}/partner-review/`,
+      `${API}/partner-offers-redeem/`,
+      `${API}/settlement-export/`,
+    ]);
+    expect(d.get("connect-src")!.join(" ")).not.toMatch(/rest\/v1|auth\/v1|exports-purge/);
+  });
+
   it("the CSP list and the client's bearer allow-list are the SAME list (partner-functions.json)", () => {
     expect([...CLIENT_FUNCTIONS]).toEqual([...PARTNER_FUNCTIONS]);
     expect(connectSources(API, ["a-fn", "b-fn"])).toEqual([`${API}/a-fn/`, `${API}/b-fn/`]);
@@ -69,7 +97,7 @@ describe("the policy", () => {
 
   it("CSP3 path matching: a trailing-slash source is a PREFIX, so every URL the client builds is allowed, and a sibling path, the data API, another function and the bare function name are not", () => {
     // the exact URLs client.ts requests: `${base}/${fn}/${route}`, no trailing slash, no query
-    for (const route of ["options", "verify", "session", "sign-out", "reauth/options", "reauth"]) expect(allowedByCsp(csp, `${API}/partner-session/${route}`), route).toBe(true);
+    for (const route of ["options", "verify", "session", "sign-out", "lock", "reauth/options", "reauth"]) expect(allowedByCsp(csp, `${API}/partner-session/${route}`), route).toBe(true);
     for (const blocked of [
       `${API_ORIGIN}/rest/v1/orgs`,
       `${API_ORIGIN}/rest/v1/`,
@@ -125,7 +153,7 @@ describe("the policy", () => {
   });
 });
 
-/** The blocks of a Cloudflare-Pages-style `_headers` text that apply to a path: `/*`, `/dir/*` (prefix) and exact paths. */
+/** The blocks of a Cloudflare-Pages-style `_headers` text that apply to a path: `/*`, `/dir/*` (prefix) and exact paths; `! Name` detaches. */
 function matching(text: string, path: string): Array<{ pattern: string; names: string[]; headers: Array<[string, string]> }> {
   const blocks: Array<{ pattern: string; names: string[]; headers: Array<[string, string]> }> = [];
   for (const line of text.split("\n")) {
@@ -133,8 +161,14 @@ function matching(text: string, path: string): Array<{ pattern: string; names: s
     if (!/^\s/.test(line)) blocks.push({ pattern: line.trim(), names: [], headers: [] });
     else {
       const t = line.trim();
-      const i = t.indexOf(":");
       const b = blocks[blocks.length - 1]!;
+      if (t.startsWith("! ")) {
+        const name = `! ${t.slice(2).trim().toLowerCase()}`;
+        b.names.push(name);
+        b.headers.push([name, ""]);
+        continue;
+      }
+      const i = t.indexOf(":");
       b.names.push(t.slice(0, i).toLowerCase());
       b.headers.push([t.slice(0, i).toLowerCase(), t.slice(i + 1).trim()]);
     }
@@ -142,7 +176,16 @@ function matching(text: string, path: string): Array<{ pattern: string; names: s
   return blocks.filter((b) => (b.pattern.endsWith("/*") ? path.startsWith(b.pattern.slice(0, -1)) : b.pattern === path));
 }
 function headersFor(text: string, path: string): Record<string, string> {
-  return Object.fromEntries(matching(text, path).flatMap((b) => b.headers));
+  const out = new Map<string, string>();
+  for (const [name, value] of matching(text, path).flatMap((b) => b.headers)) {
+    if (name.startsWith("! ")) {
+      out.delete(name.slice(2).trim());
+      continue;
+    }
+    const prev = out.get(name);
+    out.set(name, prev ? `${prev}, ${value}` : value);
+  }
+  return Object.fromEntries(out);
 }
 
 describe("the _headers file", () => {
@@ -166,25 +209,34 @@ describe("the _headers file", () => {
   });
 
   it("withholds the powerful features the app never uses", () => {
-    for (const f of ["camera=()", "microphone=()", "geolocation=()", "payment=()", "usb=()"]) expect(text).toContain(f);
+    expect(text).toContain("camera=(self)");
+    for (const f of ["microphone=()", "geolocation=()", "payment=()", "usb=()"]) expect(text).toContain(f);
+    expect(text).not.toContain("camera=()");
   });
 
-  it("gives no request two values for one header name (Cloudflare Pages joins repeated names across the matching blocks with a comma instead of replacing)", () => {
-    for (const path of ["/", "/index.html", "/assets/app-X.js", "/assets/styles-X.css", "/favicon.svg", "/manifest.webmanifest"]) {
-      const names = matching(text, path).flatMap((b) => b.names);
-      expect(names.filter((n, i) => names.indexOf(n) !== i), path).toEqual([]);
+  it("resolves Cache-Control to a single value after /* no-store and asset detach (Pages would otherwise join repeats with a comma)", () => {
+    for (const path of ["/", "/index.html", "/invite", "/members", "/favicon.svg", "/manifest.webmanifest"]) {
+      expect(headersFor(text, path)["cache-control"], path).toBe("no-store");
+    }
+    for (const asset of ["/assets/app-X.js", "/assets/styles-X.css"]) {
+      expect(headersFor(text, asset)["cache-control"], asset).toBe("public, max-age=31536000, immutable");
     }
   });
 
-  it("the page itself (/ and /index.html) is no-store, so Back never serves the signed-in page from a cache or the bfcache; the assets are not", () => {
+  it("/* is no-store (SPA fallbacks included); hashed assets detach and stay immutable", () => {
     expect(headersFor(text, "/")["cache-control"]).toBe("no-store");
     expect(headersFor(text, "/index.html")["cache-control"]).toBe("no-store");
+    // host single-page fallback paths must not be cacheable either (§20.12 / §103)
+    expect(headersFor(text, "/invite")["cache-control"]).toBe("no-store");
+    expect(headersFor(text, "/members")["cache-control"]).toBe("no-store");
     for (const asset of ["/assets/app-X.js", "/assets/styles-X.css"]) expect(headersFor(text, asset)["cache-control"], asset).toBe("public, max-age=31536000, immutable");
-    for (const other of ["/favicon.svg", "/manifest.webmanifest"]) expect(headersFor(text, other)["cache-control"], other).toBeUndefined();
+    for (const other of ["/favicon.svg", "/manifest.webmanifest"]) expect(headersFor(text, other)["cache-control"], other).toBe("no-store");
   });
 
-  it("gives only the content-hashed assets a long cache lifetime", () => {
-    expect(text).toContain("/assets/*\n  Cache-Control: public, max-age=31536000, immutable\n");
+  it("gives only the content-hashed assets a long cache lifetime (after detaching the /* no-store)", () => {
+    expect(text).toContain("/*\n");
+    expect(text).toContain("  Cache-Control: no-store\n");
+    expect(text).toContain("/assets/*\n  ! Cache-Control\n  Cache-Control: public, max-age=31536000, immutable\n");
     expect(text.match(/max-age=31536000, immutable/g)).toHaveLength(1);
   });
 });

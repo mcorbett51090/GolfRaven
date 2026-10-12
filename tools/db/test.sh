@@ -288,6 +288,9 @@ run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAM
 echo "tools/db/test.sh: partner serialisation check (P5.1a S1.1a, 0047, PA-4 / PA-4c two-connection half; a real edge_gateway action session against a second connection, run with $DBUSER as the change role)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-partner-serialisation.sh'"
 
+echo "tools/db/test.sh: partner stock concurrency check (P5.1a S5, 0058, AT(8) / AT(21): the race for the last unit, the same entitlement twice, the 0017 play guard at a real commit; real edge_gateway sessions, run with $DBUSER as the seeding role)"
+run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-partner-stock-concurrency.sh'"
+
 echo "tools/db/test.sh: review-account owner tool check (0051; tools/review-account/review-account.sh against this cluster, run as $DBUSER)"
 run_as_pg "PGHOST='$PGSOCK' PGPORT='$PGPORT' PGUSER='$DBUSER' PGDATABASE='$DBNAME' PATH=\"$PG_BIN_DIR:\$PATH\" bash '$ROOT_DIR/tools/db/test-review-account-tool.sh'"
 

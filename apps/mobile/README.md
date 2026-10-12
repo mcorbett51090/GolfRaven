@@ -331,6 +331,14 @@ The screen, the flow and their tests are done. What remains is a field test, a c
 
 - [ ] **An earned-rewards listing endpoint exists.** No server endpoint lists a player's earned rewards: `listEarnedRewards` answers `[]` without a request, so the card has nothing to show and nothing to activate. Wire it in `src/api/http-client.ts` in the change that flips the flag. The Wallet tab itself is still a placeholder.
 
+**`RECEIPTS_UPLOAD_UI_ENABLED` (facility page → Upload a receipt; P5 §50)**
+
+The card, library-only picker (`expo-image-picker`, CAMERA blocked) and `POST receipts` service are built. What remains cannot be checked from this repository:
+
+- [ ] **Store privacy declarations for photo library:** Play Console Data safety and App Store Connect App Privacy — photos/media used for app functionality (green-fee receipt upload), not for tracking. CAMERA is not used and stays blocked.
+- [ ] **Permission copy reviewed** (English `photosPermission` in `app.json`, French `NSPhotoLibraryUsageDescription` in `locales/fr-CA.json`, in-app `receipt.*` strings).
+- [ ] **Real-device field test:** library pick → upload on iOS and Android; JPEG/PNG/HEIC under 5 MB; refusals (`no_programme`, too large, unsupported media) show the right Banner.
+
 ## Offline code (P4.2b-3b)
 
 Build plan §7.6 "Offline staff path" (G-P1-07): a 6-digit TOTP (RFC 6238, **10-minute step**, **HMAC-SHA-256**, 6 digits) computed on the device from a 32-byte per-(account, device) seed the server provisions while the device is online. Staff enter the player's **handle** plus the code; the server accepts the step before and the step after its own. The server side is `me-offline-seed` + `_shared/offline-code/` (migration 0045); the staff verification endpoint is P5.

@@ -181,6 +181,8 @@ if [ "$H2_MODE" = "approximation" ]; then
     GRANT ALL ON SCHEMA vault TO $APPROX_ROLE WITH GRANT OPTION;
     GRANT ALL ON vault.secrets TO $APPROX_ROLE WITH GRANT OPTION;
     GRANT ALL ON vault.decrypted_secrets TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT EXECUTE ON FUNCTION vault.create_secret(text, text, text, uuid) TO $APPROX_ROLE WITH GRANT OPTION;
+    GRANT EXECUTE ON FUNCTION vault.update_secret(uuid, text, text, text, uuid) TO $APPROX_ROLE WITH GRANT OPTION;
   \""
   MIGRATE_USER="$APPROX_ROLE"
 fi

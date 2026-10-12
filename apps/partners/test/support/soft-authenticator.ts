@@ -6,6 +6,7 @@
  */
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign, type KeyObject } from "node:crypto";
 import { encodeBase64Url } from "../../src/webauthn/base64url";
+import { type Cbor, cborEncode } from "./cbor";
 
 export interface SoftCredential {
   readonly credentialId: Uint8Array;
@@ -50,7 +51,13 @@ export interface AssertionKnobs {
 
 export interface SoftAuthenticator {
   readonly credential: SoftCredential;
-  readonly credentials: Pick<CredentialsContainer, "get">;
+  readonly credentials: Pick<CredentialsContainer, "get" | "create">;
+  /** Every credential `create` made, in order (each with its own key pair): sign in with one by building a second authenticator around it. */
+  readonly created: SoftCredential[];
+  /** Every `create` request it served. */
+  readonly createRequests: CredentialCreationOptions[];
+  /** The next `create` rejects with this error name; consumed once. */
+  failNextCreateWith: string | null;
   /** Every `get` request it served, for assertions about what the page asked for. */
   readonly requests: CredentialRequestOptions[];
   knobs: AssertionKnobs;
@@ -71,7 +78,41 @@ export function createSoftAuthenticator(opts: { origin: string; rpId: string; cr
     knobs: {},
     failNextWith: null,
     returnNullNext: false,
+    created: [],
+    createRequests: [],
+    failNextCreateWith: null,
     credentials: {
+      async create(request?: CredentialCreationOptions): Promise<Credential | null> {
+        const pk = request?.publicKey;
+        if (pk === undefined) throw new Error("soft authenticator: publicKey options required");
+        self.createRequests.push(request!);
+        if (self.failNextCreateWith !== null) {
+          const name = self.failNextCreateWith;
+          self.failNextCreateWith = null;
+          throw Object.assign(new Error(name), { name });
+        }
+        const fresh = newSoftCredential(new Uint8Array(pk.user.id as ArrayBuffer));
+        self.created.push(fresh);
+        const rpId = pk.rp.id ?? new URL(opts.origin).hostname;
+        const clientDataJSON = Buffer.from(JSON.stringify({ type: "webauthn.create", challenge: encodeBase64Url(pk.challenge as ArrayBuffer), origin: self.knobs.origin ?? opts.origin, crossOrigin: false }));
+        const spki = Buffer.from(fresh.publicKeySpki);
+        // an uncompressed P-256 point sits at the end of the SPKI: 0x04 || x(32) || y(32)
+        const x = spki.subarray(spki.length - 64, spki.length - 32);
+        const y = spki.subarray(spki.length - 32);
+        const cose = new Map<Cbor, Cbor>([[1, 2], [3, -7], [-1, 1], [-2, new Uint8Array(x)], [-3, new Uint8Array(y)]]);
+        const idLen = Buffer.alloc(2);
+        idLen.writeUInt16BE(fresh.credentialId.length);
+        // UP | UV | AT
+        const authData = Buffer.concat([sha256(rpId), Buffer.from([0x45]), Buffer.alloc(4), Buffer.alloc(16), idLen, Buffer.from(fresh.credentialId), Buffer.from(cborEncode(cose))]);
+        const attestationObject = cborEncode(new Map<Cbor, Cbor>([["fmt", "none"], ["attStmt", new Map()], ["authData", new Uint8Array(authData)]]));
+        const ab = (b: Uint8Array): ArrayBuffer => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer;
+        return {
+          id: encodeBase64Url(fresh.credentialId),
+          rawId: ab(fresh.credentialId),
+          type: "public-key",
+          response: { clientDataJSON: ab(clientDataJSON), attestationObject: ab(attestationObject), getTransports: () => ["internal"] },
+        } as unknown as Credential;
+      },
       async get(request?: CredentialRequestOptions): Promise<Credential | null> {
         if (request?.publicKey === undefined) throw new Error("soft authenticator: publicKey options required");
         self.requests.push(request);

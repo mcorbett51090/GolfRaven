@@ -21,6 +21,8 @@ import type {
   MarkerScanResult,
   OfflineSeedRequest,
   OfflineSeedResult,
+  ReceiptUploadRequest,
+  ReceiptUploadResult,
   ExportResult,
   LinkSignInRequest,
   LinkSignInResult,
@@ -55,6 +57,7 @@ export type MockCall =
   | { op: "push"; req: PushTokenRequest }
   | { op: "offline_seed"; req: OfflineSeedRequest }
   | { op: "marker_scan"; req: MarkerScanRequest }
+  | { op: "receipt_upload"; req: ReceiptUploadRequest }
   | { op: "activate"; req: ActivateRewardInput }
   | { op: "list" };
 
@@ -165,6 +168,17 @@ export function createMockApi(guard: DevOnly, options: MockApiOptions = {}): Moc
       calls.push({ op: "marker_scan", req });
       maybeFail();
       return Promise.resolve({ outcome: "pending", facilityId: req.facilityId, localDate: "2026-01-01", cosignal: "none", purchases: [{ purchaseId: "demo-purchase", trailId: "demo-trail", status: "pending", credit: { id: "demo-credit", status: "pending" } }] });
+    },
+    // The demo answers an obviously fake `ok` intake (no Storage, no fingerprint).
+    uploadReceipt(req: ReceiptUploadRequest): Promise<ReceiptUploadResult> {
+      calls.push({ op: "receipt_upload", req });
+      maybeFail();
+      return Promise.resolve({
+        status: "ok",
+        localDate: req.localDate ?? "2026-01-01",
+        dedupe: "clean",
+        purchases: [{ purchaseId: "demo-purchase", trailId: "demo-trail", purchaseStatus: "pending", creditId: "demo-credit", creditStatus: "pending" }],
+      });
     },
     listEarnedRewards: (): Promise<EarnedReward[]> => Promise.resolve([]),
     activateReward(req: ActivateRewardInput): Promise<ActivationAnswer> {

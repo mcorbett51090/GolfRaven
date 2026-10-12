@@ -83,6 +83,9 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
       m.statuses.push("counter_regression");
       return { status: "counter_regression", aal: null, expiresAt: null };
     },
+    raiseRateAlarm: async () => {
+      // alert-only path is covered by the vitest / handler suite; this model never trips the soft caps
+    },
   };
   const db: PartnerDb = {
     withMint: async (op) => {
@@ -90,8 +93,22 @@ async function model(alg: "ES256" | "RS256", storedCount = 0): Promise<Model> {
       m.committed += 1;
       return r;
     },
+    withInviteMint: () => Promise.reject(new Error("not used")),
     withSession: () => Promise.reject(new Error("not used")),
+    withInvites: () => Promise.reject(new Error("not used")),
+    withMembers: () => Promise.reject(new Error("not used")),
+    withAttest: () => Promise.reject(new Error("not used")),
+    withReview: () => Promise.reject(new Error("not used")),
+    withStock: () => Promise.reject(new Error("not used")),
+    withEntitlements: () => Promise.reject(new Error("not used")),
+    withProgramme: () => Promise.reject(new Error("not used")),
+    withOffersAdmin: () => Promise.reject(new Error("not used")),
+    withSponsorships: () => Promise.reject(new Error("not used")),
+    withOffersRedeem: () => Promise.reject(new Error("not used")),
+    withSettlementExport: () => Promise.reject(new Error("not used")),
     hitRateLimit: () => Promise.reject(new Error("not used")),
+    // options / verify alert-only buckets always under the soft cap in this suite
+    hitSystemRateLimit: () => Promise.resolve({ ok: true, retryAfterSeconds: 0 }),
   };
   m.deps = { db, allowedOrigin: RP.origin, webauthn: assertionVerifier, otp: NO_OTP, nowMs: () => NOW, newSessionToken: newPartnerSessionToken };
   return m;

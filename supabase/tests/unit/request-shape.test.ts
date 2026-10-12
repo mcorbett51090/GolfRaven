@@ -78,6 +78,11 @@ describe("parseEvidenceSubmission", () => {
     expect(REJECTED_SOURCES.has("file_import")).toBe(true);
   });
 
+  // P5 §46: receipt_green_fee is written only by receipt intake — never via POST /v1/evidence.
+  it("receipt_green_fee stays in REJECTED_SOURCES (own path is POST /v1/receipts)", () => {
+    expect(REJECTED_SOURCES.has("receipt_green_fee")).toBe(true);
+  });
+
   it("rejects an unrecognized source", () => {
     const result = parseEvidenceSubmission({ ...baseBody(), source: "not_a_real_source" });
     expect(result.ok).toBe(false);

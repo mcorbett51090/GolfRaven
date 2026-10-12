@@ -1,13 +1,13 @@
 // supabase/tests/unit/fake-marker-scan-repo.ts
 //
-// An in-memory `Repo["markerScan"]` (migration 0046): the same OBSERVABLE contract as the four player-lane definers (private.course_qr_public_key_for_actor,
-// course_pin_attempt_for_actor, marker_scan_for_actor, marker_cosignal_attach_for_actor), small enough to read and faithful where the Edge handler depends on it: the order of the
+// An in-memory `Repo["markerScan"]` (migration 0046 + 0076 cap count): the same OBSERVABLE contract as the player-lane definers (private.course_qr_public_key_for_actor,
+// course_pin_attempt_for_actor, marker_scan_for_actor, marker_cosignal_attach_for_actor, course_qr_static_pin_credit_count_for_actor), small enough to read and faithful where the Edge handler depends on it: the order of the
 // token checks, single use, the 120 s rule against the fix time, the PIN counters, the pending window and the 7-day deadline. It is NOT the database: the database-side truth (FORCE RLS,
-// the policies, concurrency, the Vault pepper, the real SQL) is the pgTAP matrix 24_* and the Deno integration suite supabase/tests/integration/marker-scan.deno.test.ts.
+// the policies, concurrency, the Vault pepper, the real SQL) is the pgTAP matrix 24_* / 54 and the Deno integration suite supabase/tests/integration/marker-scan.deno.test.ts.
 //
 // The state also records every call (`calls`), so a test can prove ORDER: e.g. that a wrong PIN never reaches `record`, or that a forged QR never reaches `attemptPin`.
 
-import type { MarkerPurchaseView, MarkerScanRecordInput, MarkerScanRecordResult, MarkerCosignalAttachInput, MarkerCosignalAttachResult, PinAttemptResult, Repo, CourseQrPublicKey } from "../../functions/_shared/types.ts";
+import type { MarkerPurchaseView, MarkerScanRecordInput, MarkerScanRecordResult, MarkerCosignalAttachInput, MarkerCosignalAttachResult, OfferOfflineConfirmResult, PinAttemptResult, Repo, CourseQrPublicKey } from "../../functions/_shared/types.ts";
 import { HttpError } from "../../functions/_shared/http.ts";
 import type { FakeState } from "./fake-repo.ts";
 
@@ -64,6 +64,13 @@ export interface FakeMarkerScanState {
   /** Force the database's answer (e.g. `cosignal_invalid`) for the next `record` / `attachCosignal`. */
   recordOverride: MarkerScanRecordResult | null;
   attachOverride: MarkerCosignalAttachResult | null;
+  /** Force the next `confirmOfferOffline` answer (0063). Default: `none_awaiting`. */
+  confirmOverride: OfferOfflineConfirmResult | null;
+  /**
+   * 0076: override for `staticPinCreditCount`. When null, the fake counts credited
+   * static_pin purchases already in `purchases` for the facility+localDate.
+   */
+  staticPinCreditCountOverride: number | null;
 }
 
 const states = new WeakMap<FakeState, FakeMarkerScanState>();
@@ -71,7 +78,7 @@ const states = new WeakMap<FakeState, FakeMarkerScanState>();
 export function markerScanState(state: FakeState): FakeMarkerScanState {
   let s = states.get(state);
   if (!s) {
-    s = { keys: new Map(), tokens: new Map(), facilityQr: new Map(), pins: new Map(), programme: new Map(), qrMode: new Map(), pinFailures: new Map(), purchases: [], calls: [], pinOverride: null, pepperProvisioned: true, attemptAts: [], recordInputs: [], recordOverride: null, attachOverride: null };
+    s = { keys: new Map(), tokens: new Map(), facilityQr: new Map(), pins: new Map(), programme: new Map(), qrMode: new Map(), pinFailures: new Map(), purchases: [], calls: [], pinOverride: null, pepperProvisioned: true, attemptAts: [], recordInputs: [], recordOverride: null, attachOverride: null, confirmOverride: null, staticPinCreditCountOverride: null };
     states.set(state, s);
   }
   return s;
@@ -180,6 +187,25 @@ export function makeFakeMarkerScanRepo(state: FakeState, uid: string): Repo["mar
         p.awaiting = null;
       }
       return { status: "attached", purchases: group.map(view) };
+    },
+
+    async confirmOfferOffline(_input: MarkerCosignalAttachInput): Promise<OfferOfflineConfirmResult> {
+      m.calls.push("confirmOfferOffline");
+      if (m.confirmOverride) return m.confirmOverride;
+      return { status: "none_awaiting", cleared: 0 };
+    },
+
+    async staticPinCreditCount(facilityId: string, localDate: string): Promise<number> {
+      m.calls.push(`staticPinCreditCount:${facilityId}:${localDate}`);
+      if (m.staticPinCreditCountOverride !== null) return m.staticPinCreditCountOverride;
+      return m.purchases.filter(
+        (p) =>
+          p.facilityId === facilityId &&
+          p.localDate === localDate &&
+          p.method === "course_qr" &&
+          p.qrVariant === "static_pin" &&
+          p.creditStatus === "credited",
+      ).length;
     },
   };
 }

@@ -72,6 +72,14 @@ describe("a real production-shaped build", () => {
     expect([...origins]).toEqual([API_ORIGIN]);
   });
 
+  it("the shipped bundle derives the PIN in the browser (PBKDF2 over Web Crypto, from the shared contract), and calls the invite and enrolment routes", async () => {
+    const js = await readFile(join(dist, "assets", (await files(join(dist, "assets"))).find((n) => n.endsWith(".js"))!), "utf8");
+    expect(js).toContain("PBKDF2");
+    expect(js).toContain("deriveBits");
+    for (const route of ["step-up/pin", "pin/set", "pin/change", "otp-proof/verify", "/accept/", "enrolments", "credentials"]) expect(js, route).toContain(route);
+    expect(js).toContain("partner-invites");
+  });
+
   it("ships no source map, no service worker and no test harness", async () => {
     for (const n of await files(dist)) {
       expect(n).not.toMatch(/\.map$/);

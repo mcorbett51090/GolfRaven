@@ -80,13 +80,26 @@ describe("AT 5 — no Always / background location: app.json", () => {
     expect(String(entry![1]["locationWhenInUsePermission"])).toMatch(/never tracks you in the background/i);
   });
 
-  it("P4.2c: the iOS usage description has a fr-CA translation that says the same two things", () => {
+  it("P4.2c / P5 §50: the iOS usage descriptions have fr-CA translations that say the same things", () => {
     const locales = (appJson.expo as { locales?: Record<string, string> }).locales ?? {};
     expect(locales["fr-CA"]).toBe("./locales/fr-CA.json");
     const fr = JSON.parse(readFileSync(here("../locales/fr-CA.json"), "utf8")) as Record<string, string>;
-    expect(Object.keys(fr)).toEqual(["NSLocationWhenInUseUsageDescription"]);
+    expect(Object.keys(fr).sort()).toEqual(["NSLocationWhenInUseUsageDescription", "NSPhotoLibraryUsageDescription"]);
     expect(fr["NSLocationWhenInUseUsageDescription"]).toMatch(/seulement lorsque l'app est ouverte/);
     expect(fr["NSLocationWhenInUseUsageDescription"]).toMatch(/jamais en arrière-plan/);
+    expect(fr["NSPhotoLibraryUsageDescription"]).toMatch(/photothèque/);
+    expect(fr["NSPhotoLibraryUsageDescription"]).toMatch(/caméra|camera/i);
+  });
+
+  it("P5 §50: expo-image-picker is library-only (camera and microphone blocked) with an honest photos usage string", () => {
+    const blocked = appJson.expo?.android?.blockedPermissions ?? [];
+    expect(blocked).toContain("android.permission.CAMERA");
+    const entry = (appJson.expo?.plugins ?? []).find((p) => Array.isArray(p) && p[0] === "expo-image-picker") as [string, Record<string, unknown>] | undefined;
+    expect(entry, "expo-image-picker must be configured").toBeDefined();
+    expect(entry![1]["cameraPermission"]).toBe(false);
+    expect(entry![1]["microphonePermission"]).toBe(false);
+    expect(String(entry![1]["photosPermission"])).toMatch(/photo library/i);
+    expect(String(entry![1]["photosPermission"])).toMatch(/does not access your camera/i);
   });
 
   it("the real app.json turns Android backup off (the device-local under-age flag must not be copied off the device)", () => {
@@ -337,14 +350,33 @@ describe("P4.2b-2 — a native module means a new prebuild: the allow-lists it m
   const SIWA = "<key>com.apple.developer.applesignin</key><array><string>Default</string></array>";
   const ATTEST = (v: string): string => `<key>com.apple.developer.devicecheck.appattest-environment</key><string>${v}</string>`;
 
-  it("the entitlement scanner accepts exactly the two allow-listed entitlements, and the App Attest value only as development | production", () => {
-    expect(scanEntitlements(plist(SIWA + ATTEST("production")))).toEqual([]);
+  const APPLINKS = "<key>com.apple.developer.associated-domains</key><array><string>applinks:golfraven.app</string></array>";
+
+  it("the entitlement scanner accepts exactly the allow-listed entitlements, and the App Attest value only as development | production", () => {
+    expect(scanEntitlements(plist(SIWA + ATTEST("production") + APPLINKS))).toEqual([]);
     expect(scanEntitlements(plist(SIWA + ATTEST("development")))).toEqual([]);
     expect(scanEntitlements(plist(ATTEST("staging"))).map((v) => v.rule)).toEqual(["ios-entitlement-value"]);
     expect(scanEntitlements(plist(SIWA + "<key>aps-environment</key><string>production</string>")).map((v) => v.rule)).toEqual(["ios-entitlement"]);
     expect(scanEntitlements(plist(SIWA + "<key>com.apple.developer.healthkit</key><true/>")).map((v) => v.rule)).toEqual(["ios-entitlement"]);
     expect(scanEntitlements(plist(`<key>com.apple.developer.applesignin</key><array><string>Other</string></array>`)).map((v) => v.rule)).toEqual(["ios-entitlement-value"]);
-    expect(Object.keys(ALLOWED_IOS_ENTITLEMENTS).sort()).toEqual(["com.apple.developer.applesignin", "com.apple.developer.devicecheck.appattest-environment"]);
+    expect(scanEntitlements(plist(`<key>com.apple.developer.associated-domains</key><array><string>applinks:evil.example</string></array>`)).map((v) => v.rule)).toEqual([
+      "ios-entitlement-value",
+    ]);
+    expect(Object.keys(ALLOWED_IOS_ENTITLEMENTS).sort()).toEqual([
+      "com.apple.developer.applesignin",
+      "com.apple.developer.associated-domains",
+      "com.apple.developer.devicecheck.appattest-environment",
+    ]);
+  });
+
+  it("app.json claims course-QR App Links for golfraven.app only (P5 §54)", () => {
+    const ios = appJson.expo?.ios as { associatedDomains?: string[] } | undefined;
+    const android = appJson.expo?.android as { intentFilters?: unknown[] } | undefined;
+    expect(ios?.associatedDomains).toEqual(["applinks:golfraven.app"]);
+    const filters = android?.intentFilters ?? [];
+    expect(JSON.stringify(filters)).toContain("golfraven.app");
+    expect(JSON.stringify(filters)).toContain("/q/m");
+    expect(JSON.stringify(filters)).toContain("/q/f");
   });
 
   it("PR #42 gate LOW-2: the entitlement scan FAILS CLOSED: an unknown key is a violation whatever its value element is (integer, empty string, data, date, real, dict, array, boolean), and an allow-listed key must hold a string or an array of strings", () => {

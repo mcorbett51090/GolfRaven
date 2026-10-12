@@ -9,7 +9,8 @@
  *   default-src 'none'            nothing is allowed unless a directive below names it
  *   script-src 'self'             our own bundle only: no inline script, no eval, no third-party origin
  *   style-src 'self'              an external stylesheet only: no `<style>`, no `style=""` attribute
- *   img-src 'self'                the favicon (no `data:`: nothing in the page needs it)
+ *   img-src 'self' <storage>      the favicon, plus short-lived Supabase Storage signed URLs for receipt review previews (§51):
+ *                                 `${origin}/storage/v1/` derived from the same API host as connect-src (path-scoped prefix; no `data:` / `blob:`).
  *   connect-src <fn URL prefixes> one source PER PARTNER FUNCTION, scoped by path: `https://<host>/functions/v1/partner-session/` (a source whose path
  *                                 ends in `/` matches every URL under that prefix; CSP3 "path-part match"). Not the whole API origin: the same
  *                                 host serves /rest/v1 (PostgREST) and every other edge function, and this page may reach none of them (design 4.6).
@@ -23,7 +24,7 @@
  *                                 so none can: the code uses `textContent` only. Chromium enforces this today; Safari's support is [unverified]
  *                                 and an unsupporting browser simply ignores both directives.
  *
- * Departures from the design's section 4.6 list, all STRICTER: `connect-src` drops 'self'; `img-src` drops `data:`; `worker-src` is 'none', not 'self'.
+ * Departures from the design's section 4.6 list, all STRICTER: `connect-src` drops 'self'; `img-src` drops `data:` (Storage host added for §51); `worker-src` is 'none', not 'self'.
  */
 
 import { readFileSync } from "node:fs";
@@ -45,6 +46,16 @@ export function connectSources(apiBase, functions = PARTNER_FUNCTIONS) {
 }
 
 /**
+ * Path-scoped Storage host for receipt preview `<img>` (signed URLs under `/storage/v1/...` on the same origin as the functions root).
+ *
+ * @param {string} apiBase
+ * @returns {string}
+ */
+export function storageImgSource(apiBase) {
+  return `${new URL(apiBase).origin}/storage/v1/`;
+}
+
+/**
  * @param {string} apiBase the functions root the page may connect to (`https://<host>/functions/v1`); only the partner functions under it are allowed
  * @param {{ meta?: boolean, functions?: readonly string[] }} [opts]
  */
@@ -53,7 +64,7 @@ export function buildCsp(apiBase, opts = {}) {
     `default-src 'none'`,
     `script-src 'self'`,
     `style-src 'self'`,
-    `img-src 'self'`,
+    `img-src 'self' ${storageImgSource(apiBase)}`,
     `connect-src ${connectSources(apiBase, opts.functions).join(" ")}`,
     `manifest-src 'self'`,
     `worker-src 'none'`,
@@ -68,15 +79,13 @@ export function buildCsp(apiBase, opts = {}) {
 }
 
 /**
- * The generated `_headers` file (Cloudflare Pages syntax, as apps/site). One `/*` block carries the security headers; the hashed assets add a long cache
- * lifetime in their own block (no header name is repeated across blocks: Pages joins repeated names with a comma instead of replacing them).
+ * The generated `_headers` file (Cloudflare Pages syntax, as apps/site). One `/*` block carries the security headers and `Cache-Control: no-store`
+ * so every HTML-shaped path the host may fall back to `index.html` for (`/invite`, `/members`, …) is uncacheable — not only `/` and `/index.html`
+ * (design §20.12 NIT / §103). The hashed `/assets/*` detach that header (`! Cache-Control`) and set a long immutable lifetime; Pages joins repeated
+ * names with a comma instead of replacing them, so the detach is required before the asset value.
  *
- * `/` and `/index.html` (the page itself) are `no-store`, so a back/forward navigation never serves the signed-in page from the HTTP cache or, in
- * Chromium, from the back/forward cache (a page whose main resource is no-store is not bfcache-eligible there). The hashed `/assets/*` stay immutable.
- * They are separate blocks from `/assets/*` and match disjoint paths, so no request gets two `Cache-Control` values.
- *
- * Permissions-Policy: `camera=()` is deliberate for S7a, which scans nothing. S7b (the course-QR scan screen) must change it to `camera=(self)`: a camera
- * that stays `()` makes `getUserMedia` fail silently, and the generated header is the only place that policy lives.
+ * Permissions-Policy: `camera=(self)` from S7b (the attest / course-QR / redeem screens). The shop-floor scan field calls `getUserMedia` on the
+ * same origin; paste remains the fallback when BarcodeDetector or the camera is unavailable.
  *
  * @param {string} apiBase the functions root (see buildCsp)
  */
@@ -88,18 +97,14 @@ export function buildHeadersFile(apiBase) {
     `  Strict-Transport-Security: max-age=31536000; includeSubDomains\n` +
     `  X-Content-Type-Options: nosniff\n` +
     `  Referrer-Policy: no-referrer\n` +
-    `  Permissions-Policy: publickey-credentials-get=(self), publickey-credentials-create=(self), camera=(), microphone=(), geolocation=(), payment=(), usb=()\n` +
+    `  Permissions-Policy: publickey-credentials-get=(self), publickey-credentials-create=(self), camera=(self), microphone=(), geolocation=(), payment=(), usb=()\n` +
     `  Cross-Origin-Opener-Policy: same-origin\n` +
     `  Cross-Origin-Resource-Policy: same-origin\n` +
     `  X-Robots-Tag: noindex, nofollow\n` +
-    `\n` +
-    `/\n` +
-    `  Cache-Control: no-store\n` +
-    `\n` +
-    `/index.html\n` +
     `  Cache-Control: no-store\n` +
     `\n` +
     `/assets/*\n` +
+    `  ! Cache-Control\n` +
     `  Cache-Control: public, max-age=31536000, immutable\n`
   );
 }

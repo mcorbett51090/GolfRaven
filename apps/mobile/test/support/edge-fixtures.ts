@@ -79,11 +79,12 @@ export function scriptedFetch(...steps: Step[]): { fetch: HttpFetch; seen: SeenR
   const seen: SeenRequest[] = [];
   let i = 0;
   const fetch: HttpFetch = (url, init) => {
+    const rawBody = init.body;
     seen.push({
       url,
       method: init.method,
       headers: init.headers,
-      body: init.body === undefined ? undefined : JSON.parse(init.body),
+      body: rawBody === undefined ? undefined : typeof rawBody === "string" ? JSON.parse(rawBody) : rawBody,
       redirect: init.redirect,
       credentials: init.credentials,
     });

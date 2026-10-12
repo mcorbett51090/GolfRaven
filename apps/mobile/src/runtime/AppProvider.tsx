@@ -127,6 +127,8 @@ function Ready({ services, children }: { services: AppServices; children: ReactN
 
   const syncOutbox = useCallback(async () => {
     await services.outboxRunner.run();
+    // Marker co-signal drain (P5 §52): redeem held challenges + POST marker-scan. Runs after outbox so shared challenge-pool accounting sees freed slots.
+    await services.drainMarkerCosignals();
     await reloadOutbox();
     // After the send, not before: redeeming a challenge at send time frees the server's cap of 10 open prefetched ones, which a top-up needs.
     void prefetchChallenges(services.challenges);

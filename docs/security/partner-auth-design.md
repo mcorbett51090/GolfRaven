@@ -237,7 +237,7 @@ PWA --Authorization: Bearer gr_ps_<43 chars>--> Edge function (verify_jwt = fals
 
 `bind_partner_session` accepts a session only if **all** hold: the hash exists; `revoked_at` is null; idle and absolute expiry have not passed; the bound credential exists and is not revoked; the user is not a demo account; the user holds at least one non-revoked membership whose role is not `sponsor`, or is in `app.admin_user`. Every failure raises the **same** SQLSTATE and message and the handler answers one constant `401` body, so there is no oracle between unknown, expired and revoked.
 
-**Idle is extended only by user-initiated calls.** `last_seen_at` advances at most once a minute and **only on routes the server classifies as interactive**. Routes the server marks keep-alive-exempt (the course-QR token refresh that runs every 30 s while a sale screen is shown, `GET session` polling) never advance it. The classification is server-side, by route, never a client flag. The refresh route is class A0, bound to a nonce that an A1 mint created, and cannot create new authority (S2b specifies it).
+**Idle is extended only by user-initiated calls.** `last_seen_at` advances at most once a minute and **only on routes the server classifies as interactive**. Routes the server marks keep-alive-exempt (the course-QR token refresh that runs every 30 s while a sale screen is shown, `GET session` polling) never advance it. The classification is server-side, by route, never a client flag. The refresh route is class A0, bound to a nonce that an A1 mint created, and cannot create new authority (S2b specifies it; as built, section 24: it reads the state of the person's own token, class `A0_KEEPALIVE`).
 
 `openScopedTx` needs a small extension (S1.2): today an actor kind must know the expected uid before it binds (`privileged.ts:317`, `:413`). The partner bind returns no uid to the handler's authority: the handler never supplies one. `getActorFromRequest` (`privileged.ts:486`) must **reject** a bearer that starts `gr_ps_` or `gr_inv_` before sending it to GoTrue, so a partner token is never forwarded to a third party (PA-11).
 
@@ -705,7 +705,7 @@ Each slice is one or more PRs, each independently gateable and each with an "as 
 | **S1.5** | **Invites, enrolment, members.** `partner-invites` (create, list, revoke, branches N and E), `partner-members` (list, revoke, credential add and revoke, recover, revoke-all), `enrolments/*`, server-side OTP, first-credential registration; purge definers for challenges, sessions, invites, enrolment tokens | S1.4 |
 | **S1.6** | **MOOT (S0 gate ruling, 16.4).** ~~**Assertion re-verifier.** Definers `partner_reverify_batch` and `partner_reverify_flag`, the login `partner_audit`, the system-lane enforcement step, and the out-of-runtime job with its runbook (4.4; open item U2, decided at the S1.6 gate); skipped if the S0 spike shows database-side verification is practical~~ The spike passed; the verifier is in the mint (S1.1b) | S1.1 |
 | **S2a** | **Player lane** (parallel; no staff dependency). `marker-scan` and the player's co-signal intake: accept `{facilityId, fix, jti}` and tie it to the purchase evidence row (plan §7.6 G2-03, §4.6(q)): `pending` without a qualifying fix, `valid` within 7 days of one, the 120 s rule judged against the fix's time | P3 |
-| **S2b** | **Staff lane.** `course-qr` (rotating token on "Marker sold", today's PIN and "Rotate PIN", hand-over token, the A0 refresh route), `qr-print`, the Ed25519 signing key in Vault, `facility_qr` and `course_qr_token` writers; their reads | S1.3, S1.5, S2a |
+| **S2b** | **Staff lane.** `course-qr` (rotating token on "Marker sold", today's PIN and "Rotate PIN", hand-over token, the A0 refresh route), `qr-print`, the Ed25519 signing key in Vault, `facility_qr` and `course_qr_token` writers; their reads | S1.3, S1.5, S2a. **Built (section 24; the hand-over token is not)** |
 | **S3** | **Attest and redeem.** `partner-attest` (online token and the offline code with the money doc's verify-and-record definer, superseding the recorder), `partner-offers-redeem`, self-attest, same-device rule, cold-start caps, `staff_activity`, `attestation_shift_log`, their Edge reads | S1.3, S1.5 |
 | **S4** | **Receipts and review.** `receipts`, the review and `held_review` queue (wrapping `resolve_held_*`, E20), SLA alerts | S1.4, S3 |
 | **S5** | **Hand-over and stock.** `partner-entitlements-redeem`, `entitlements-collect`, `stock-admin`, vouchers, the availability projection, the stock reads | S3 |
@@ -729,7 +729,7 @@ Each slice is one or more PRs, each independently gateable and each with an "as 
 - PA-4: **serialisation binds**: with an action transaction open, a member revoke and a **scope DELETE** issued from a second connection each **wait** (seen in `pg_locks`) and complete only after the action commits; a revoke issued while the revoker already holds the session lock makes the action wait and then see the revoke. Staff at A acting at B is `403`; a revoked member's next call is `403` on a live session; **reactivation, a membership DELETE then re-INSERT, an org-delete cascade and an `admin_user` delete then insert do not revive old sessions**; deleting the scope row refuses the next call (AT 1, authentication half).
 - PA-4c: **the OR rule and the planted GUC.** (i) With **all** existing `private_definer` policies and grants installed (the `0016:255` and `0016:341` pair included), an UPDATE of the bound user's `partner_member` row under a partner binding, `SET revoked_at = NULL, role = 'manager', invited_by = NULL` in particular, is refused or affects 0 rows. (ii) **As `edge_partner`, plant every GUC the repository uses** (the retired `app.partner.authority_touch`, `app.delete_my_data.target_user_id`, `app.offline_code.target_device_id`, the sign-in proof purge window and the fix-coordinate purge window), then call **each partner definer that writes `partner_session`** (the eight writers above) against **another user's session**: expect **0 rows** every time. (iii) Re-run (i) and (ii) **on every policy S1.5 adds** on `partner_member`, `partner_scope`, `partner_session`, `admin_user` or `partner_credential`; a failing planted-GUC case is a gate failure.
 - PA-4d: **the guard trigger (R4-L1), one cell per row of its table.** Each of `user_id`, `credential_id`, `token_hash`, `created_at`, each `mint_*` column, `mint_kind` and `enrolment_until` cannot be changed by a partner-bound definer on its own session (including `SET user_id = <other>, aal = 2`, which the author showed succeeds under the bare policy); `expires_at` cannot increase; `revoked_at` cannot go back to NULL; `aal` 2 and `mfa_until` are refused without a same-transaction TOTP verification and accepted with one; `pin_grant_until` is refused without a same-transaction correct PIN verification, refused above now + 60 s, and clearing is accepted; `reauth_until` is refused without a same-transaction `reauth` challenge row for this session; `otp_proof_until` is refused without a fresh GoTrue session for this user; `last_seen_at` cannot decrease.
-- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included. **(As built: S1.3 enabled A2, so the cell now reads "A3 is refused for every actor, admin included, and A2 is refused without its prerequisites": `25_partner_auth_spine.sql` PA-4b and `28_partner_pin_step_up.sql` section 5. A3 stays fail-closed until S1.4.)**
+- PA-4b: before S1.3 and S1.4 land, an A2 or A3 call is refused for every actor, admin included. **(As built: S1.3 enabled A2; S1.4 enabled A3. The cell now reads that A2 and A3 are refused without their prerequisites, not that the classes themselves are closed: `25_partner_auth_spine.sql` PA-4b, `28_partner_pin_step_up.sql` section 5, and `31_partner_totp_aal2.sql`.)**
 - PA-5: a facility org with a second scope row, or a non-facility scope, is refused by the trigger; a `sponsor` role in a facility org, or `staff` in an operator org, is refused.
 - PA-6: every view and table in 5.5 answers "denied" to `authenticated` for every actor, including `staff@X` with a valid JWT; `api.offer` and `api.my_offers()` return only live offers with NULL budget and eligibility columns **to a scoped member too**; a draft offer is invisible to a scoped member through every PostgREST path.
 - PA-7: the same signed challenge presented to 12 concurrent mints succeeds once (primary-key refusal); an expired, wrong-purpose, wrong-binding or tampered-HMAC challenge is refused; the HMAC encoding is pinned by a vector computed outside the database (as 0045's derivation is); `session/options` called 10,000 times leaves the `partner_auth_challenge` row count unchanged.
@@ -966,7 +966,7 @@ A purchase with no qualifying fix yet is `pending` with `purchase_evidence.cosig
 3. **The PIN is derived for the date, epoch and pepper in effect at the scan's instant (the fix's capture time when the fix qualifies as a co-signal, else now); the failure counters run on the facility-local date of the attempt.** An offline scan is uploaded days later, so its PIN is that day's, under the epoch that was live then. Counting by the fix's date would hand a client a fresh five tries for each of the last seven dates it could claim. The printed-QR `ref_id` is `pin:<facility>:<local date>` with **no epoch** (a rotation must not allow a second same-day purchase by the same player); the earlier text that put the epoch in it is superseded.
 4. **A qualifying fix on a purchase becomes a facility-level `foreground_checkin` evidence row, and that row IS presence-qualifying and money-eligible** (CORRECTED at the S2a re-gate; an earlier draft of this item said the opposite, and an earlier design paragraph said the marker-scan fix was no better than the evidence endpoint's check-in). The two differ in one thing the scorer reads. The **evidence endpoint's** facility-level check-in (`evidence/handler.ts`, around line 829) does no geometry match, so its fix does not satisfy `isQualityCoSignalFix` (a polygon geometry kind, a `play-verified` tier, inside the buffer) and is never a presence fact. **`marker-scan`** derives its fix with `matchFacilityFix` (`privileged.ts`, around line 726), a geometry match against the facility's play-verified polygon, so the row it writes **does** satisfy it: it is `foreground_checkin` with weight 0.3, it counts as the presence fact (`presence_signal`), and with a hard round (a sensor round of 0.85, say) on the same facility-local date it makes `money` true. That is what plan §9.2 sanctions (a purchase's fix is presence at the facility), and it is true for a round on **any** course of the facility, because the row carries no course anchor. It is by design (the fix is the fix), it means a purchase-time fix can lift a later same-day play's corroboration, and the purchase itself still never scores a play. Pinned by `packages/rules/test/marker-scan-presence.test.ts` (a marker-scan fix plus a Garmin round on another course of the same facility and date gives `money`; the same round alone does not; a fix on another date, at another facility, or with no geometry match gives nothing), so a change to the scorer that stopped honouring it fails a test instead of silently starving purchases.
 5. **No per-facility daily cap on purchases is built, and nothing blocks one.** The caps are the 20 scans a user a day and the PIN caps; the rest of the abuse model is the credit rule (one credit per player per shop). Plan §8.3's cap (25 static-PIN course-QR credits per facility per day) is a **signal and an alert, not a block**, and is named for S2b below (departure 13).
-6. **No purge or retention** for `course_qr_token`, `course_pin_alarm` or abandoned `pending` rows yet (a follow-up: S2b reads the alarm, and `pending` rows past their 7-day deadline stay `pending` forever today; they can no longer be completed, which is harmless but untidy).
+6. **No purge or retention** for `course_qr_token`, `course_pin_alarm` or abandoned `pending` rows at S2a ship (closed later by §57 / migration `0071`: tokens 7 days past `expires_at`, alarms 90 days past `raised_at`, pending purchases past `cosignal.awaiting.until`).
 7. **`no_pending_purchase` is 422**, not 409: it is not a state conflict the client can retry into. A repeat of an already-counted fix is the 409 (`fix_already_used`).
 8. **A facility on two trails gives two purchase rows and two credits** (one per eligible trail) from one scan; `outcome` is the worst of them.
 9. **The request also carries `deviceId` and `jti`** (the plan's `{facilityId, fix, jti}` shape was extended): the check-in token is bound to the device that redeemed it, and the Edge has to prove the fix is the one the token was issued for.
@@ -1269,7 +1269,7 @@ Slice S1.1b (the **database side of partner sign-in minting**: the SQL signature
 4. **The key is read from the table, never an argument**, and the counter is read **from the signed authenticator data** (there is no argument to differ from it).
 5. **The COSE parser is stricter than the wrapper.** It refuses a key that carries any parameter beyond the exact set (WebAuthn: the credential public key "MUST NOT contain any other OPTIONAL parameters"). The wrapper (`assertKeyAllowed`) reads only the fields it needs, so **a credential with extra COSE parameters would pass registration and then never sign in.** No conforming authenticator emits them, but the registration slice must either make the wrapper refuse them or store a re-encoded canonical key. **Ruling (S1.1b gate): accepted as a seam, with a BLOCKING S1.5 condition: `partner_credential_register_first` must call `partner_cose_parse` on the key it is about to store, so a credential with extra parameters is refused at registration.** S1.5 does not pass its own gate without it.
 6. **The Deno integration test speaks to the database directly** (`SET LOCAL ROLE edge_partner_minter` as `edge_gateway`): `privileged.ts` has no partner transaction kind until S1.2. It is the one suite that signs with a signer the database did not write (Web Crypto, 17.7).
-7. **The 60-per-hour limit is counted from `partner_session`**, not from a counter table, so it adds no table and cannot drift from the sessions it counts. Eviction beyond three live sessions (4.1) is not built. **Ruling (S1.1b gate): eviction (S1.5) must REVOKE sessions and never DELETE them**, because the limit is counted from `partner_session` rows and a DELETE would reset the 60-per-hour count.
+7. **The 60-per-hour limit is counted from `partner_session`**, not from a counter table, so it adds no table and cannot drift from the sessions it counts. Eviction beyond three live sessions (4.1) was not built in 0048; `register_first` closed it for first-credential mint (0054) and the sign-in mint closed it in §64 / `0078`. **Ruling (S1.1b gate): eviction must REVOKE sessions and never DELETE them**, because the limit is counted from `partner_session` rows and a DELETE would reset the 60-per-hour count.
 8. **`partner_auth_alarm` has no purge definer yet** (nor does `partner_auth_challenge`): section 9 lists both; the alarm table grows by at most one row per (kind, credential, minute).
 9. **The 0040 retention backlog test (`retention-purge.deno.test.ts`, an earlier slice's file) now `ANALYZE`s the four tables it bulk-loads.** Found by the full harness, not by any single suite: once this slice's longer concurrency steps moved when autovacuum ran, a vacuum that could not truncate `private.signin_email_proof` (a concurrent session held the xmin horizon) left `pg_class` saying 148 pages and 1 tuple; the planner then estimated the test's 5,003 new rows as one row and ran `purge_signin_email_proofs()` as an O(n^2) nested loop past the 10 s statement timeout. The base tree has the same latent dependence (it passes while autovacuum happens to leave that table truncated: with autovacuum off the base passes and this tree fails; with the `ANALYZE` both pass, checked on a clone of the failing harness template). The fix is in the test, not in the purge: the definer is 0040's and a production table that has been loaded for a while has been analyzed by autovacuum.
 
@@ -1411,7 +1411,7 @@ The partner (staff) auth **Edge core**: the first Edge Function a staff member's
 
 ### 18.5 Alert-only buckets (IP and global)
 
-Section 8's IP and global buckets are **alert-only**: they must never refuse a request (a refusal keyed on an address is a denial-of-service lever against a shared office NAT), so they only produce a signal. The sink for such a signal is `app.partner_auth_alarm`, whose `kind` values 0048 fixed by a CHECK; a new kind is a migration change in a file that is frozen for this slice, and the Edge cannot write the table at all (no privilege; no partner-bound writer). They are therefore **not built**, and nothing in this slice pretends otherwise. The failure counter (D1) is the only bound on failed verifications, and the member-keyed reauth bucket the only rate limit that refuses. Follow-up for S1.5: add the alarm kinds, then a minter-lane writer.
+Section 8's IP and global buckets are **alert-only**: they must never refuse a request (a refusal keyed on an address is a denial-of-service lever against a shared office NAT), so they only produce a signal. **Built in §68** (`0081`): kinds `rate_options_ip` / `rate_options_global` / `rate_verify_ip`, minter-lane `partner_rate_alarm_raise`, Edge soft-caps that never 429. The failure counter (D1) remains the only hard bound on failed verifications among pre-auth paths; the member-keyed reauth bucket is the authenticated refuse path.
 
 ### 18.6 Mutation pass
 
@@ -1655,11 +1655,11 @@ The first real version of `apps/partners`, the staff, operator and admin portal 
 ### 20.4 Departures from sections 4.6 and 12.1, and why
 
 - **The CSP is stricter than 4.6's list in three places.** `connect-src` names **one path-scoped source per partner function** (`https://<host>/functions/v1/partner-session/`, see 20.11) and not `'self'` or the whole API origin (the page fetches nothing from its own origin; the manifest and icon load under `manifest-src` and `img-src`); `img-src` has no `data:` (nothing needs it); `worker-src` is `'none'`, not `'self'` (no service worker in S7a). Trusted Types is `require-trusted-types-for 'script'` plus `trusted-types 'none'`, so no policy can be created and none is needed.
-- **Lock revokes the session (gate ruling, Opus security gate on S7a; supersedes the "as built" lock of 20.4 and 20.10).** The page's `lock()` now **sends `POST sign-out`** (sign-out alone is enough; the server's `lock` route is not called) and shows "Locked". The UI wording is unchanged; the effect on the server is a **revoke**. Precisely:
-  - **Order (MEDIUM-2).** Lock and sign-out copy the token into a local variable, **wipe it and notify the listeners (the screen goes to sign-in) before anything is sent**, then send with the copy and drop the copy as soon as `fetch` has been called. The screen is therefore signed-out, and the page holds no copy of the token, while a revoking request that never answers is still hanging (Playwright: a `POST sign-out` that is received and never answered, then a V8 heap search for the token: absent, with the positive control that it was present while signed in). If the request fails or times out the plain notice is replaced by the honest "the server could not be told" one, and only if nothing newer has happened. Lock and Sign-out stay enabled while a refresh is busy, and a wipe aborts every authenticated request still in flight.
+- **Lock revokes the session (gate ruling, Opus security gate on S7a; supersedes the "as built" lock of 20.4 and 20.10).** The page's `lock()` **sends `POST lock`** (§73; server make-revoke in §72 / `0085`) and shows "Locked". Sign-out and `pagehide` keepalive still use `POST sign-out`. Precisely:
+  - **Order (MEDIUM-2).** Lock and sign-out copy the token into a local variable, **wipe it and notify the listeners (the screen goes to sign-in) before anything is sent**, then send with the copy and drop the copy as soon as `fetch` has been called. The screen is therefore signed-out, and the page holds no copy of the token, while a revoking request that never answers is still hanging (Playwright: a `POST lock` that is received and never answered, then a V8 heap search for the token: absent, with the positive control that it was present while signed in). If the request fails or times out the plain notice is replaced by the honest "the server could not be told" one, and only if nothing newer has happened. Lock and Sign-out stay enabled while a refresh is busy, and a wipe aborts every authenticated request still in flight.
   - **Why.** The passkey proves the device, not the person (4.1), the in-memory token is stealable by a script on the page (4.6, mitigated by the CSP and not removed), and a locked-but-live session is a valid bearer for up to its idle window, which the old lock itself restarted. Revoking closes that window at the lock. The cost, accepted: **a lock is no longer cheap to undo** (resuming is a full passkey sign-in, as it already was; it now also opens a new session rather than leaving the old one idle).
-  - **Cell.** After a lock the old token is refused by the real handler (`server.state.revokedSessions.size === 1`, the old bearer gets the uniform 401): `contract.test.ts`, `controller.test.ts` and the Playwright lock cell.
-  - **Server follow-up, NOT in this slice (no database or migration change here):** retire `private.partner_session_lock_for_partner` (0049) **or** make it revoke with `revoke_reason = 'lock'`; and **any non-revoking lock that remains must authorize as PEEK** (a lock that clears grants but keeps a live session must not count as activity and restart the idle clock, as the 0049 function does today). Until then the `lock` route stays callable by a future client but this page does not call it.
+  - **Cell.** After a lock the old token is refused by the real handler (`server.state.revokedSessions.size === 1`, `lockCalls === 1`, the old bearer gets the uniform 401): `contract.test.ts`, `controller.test.ts` and the Playwright lock cell.
+  - **Server (closed in §72 / migration `0085`):** `private.partner_session_lock_for_partner` **revokes** with `revoke_reason = 'lock'` (make-revoke; function kept). **PWA (closed in §73):** Lock UI calls `POST lock` (not `POST sign-out`).
   - What was here before (the old "wipe only" lock, its server-side effect on `pin_grant_until`, `reauth_until` and `otp_proof_until`, and the three options put to the gate) is kept in git history at `41cfbfd`; option (2) was chosen.
 - **The page refuses sign-in options that weaken the ceremony.** The server sets `userVerification: "required"` and an empty `allowCredentials` (6.2); the client does not trust that blindly and never calls the browser for anything else.
 - **`GET session` follows every sign-in**, so the home screen shows what the server computed rather than what the client assumed (the aal and the required aal are shown side by side).
@@ -1737,14 +1737,14 @@ The threat model the gate applied: **a shared shop iPad. The browser must never 
 | Finding | Fix | Cells |
 |---|---|---|
 | **MEDIUM-1** Chromium restored a signed-in page with a live token after Back (`pageshow.persisted`, and Refresh sent the Bearer) | `/` and `/index.html` are `Cache-Control: no-store` (not `/assets/*`); `pagehide` wipes the token and sends a keepalive sign-out; `pageshow` with `persisted` forces signed-out (`src/app/lifecycle.ts`, wired in `main.ts`) | unit: `csp.test.ts` (no-store on the page, none on assets, no request with two `Cache-Control`), `lifecycle.test.ts` (6). Playwright, in a Chromium launched **without** `--disable-back-forward-cache`: `CONTROL 1` (an unfixed page IS restored with a live token), `CONTROL 2` (no-store keeps it out), `OBSERVATION` (see below), the app is signed-out with no Bearer after Back, `DEFENCE IN DEPTH` (the app at a URL that is not no-store IS restored from the cache and is still signed-out, token-free and silent), leaving the page revokes the session |
-| **MEDIUM-2** lock and sign-out not immediate; no timeouts | copy, wipe and notify **before** sending, send with the copy and drop it; `AbortSignal.any([AbortSignal.timeout(15000), caller])` on every request with fallbacks; a wipe aborts in-flight authenticated requests; Lock and Sign-out never disabled by a busy refresh | unit: `client.test.ts` (ordering, hung request, timeout, both fallbacks, abort on wipe, a late 401 of an old session), `controller.test.ts` (the screen is signed-out synchronously with a hung request; a stale refresh cannot overwrite a new session). Playwright: a `POST sign-out` that never answers leaves the screen locked and **the token out of the V8 heap at once**; a `GET session` that never answers leaves Lock and Sign-out clickable and working; the **15 s timeout fires** in a real browser |
+| **MEDIUM-2** lock and sign-out not immediate; no timeouts | copy, wipe and notify **before** sending, send with the copy and drop it; `AbortSignal.any([AbortSignal.timeout(15000), caller])` on every request with fallbacks; a wipe aborts in-flight authenticated requests; Lock and Sign-out never disabled by a busy refresh | unit: `client.test.ts` (ordering, hung request, timeout, both fallbacks, abort on wipe, a late 401 of an old session), `controller.test.ts` (the screen is signed-out synchronously with a hung request; a stale refresh cannot overwrite a new session). Playwright: a `POST lock` that never answers leaves the screen locked and **the token out of the V8 heap at once**; a `GET session` that never answers leaves Lock and Sign-out clickable and working; the **15 s timeout fires** in a real browser |
 | **MEDIUM-3** `connect-src` named the whole API origin | one **path-scoped** source per partner function, `https://<host>/functions/v1/partner-session/`, from `src/api/partner-functions.json` | unit: the exact policy, the reference model of CSP3 path matching (a trailing-slash source is a prefix: every URL the client builds is allowed; the data API, another function, the bare function name, a lookalike prefix and dot segments are not). Playwright: a probe page under the real header: `partner-session/*` works, `/rest/v1/...`, `other-fn`, the bare name, `partner-sessionx` and dot-segment escapes are **blocked by the CSP and never reach the server** |
 | **LOW-1** `GOLFRAVEN_PARTNERS_E2E=1` accepted in production | refused by `build.mjs` and by `resolveApiBase` | `build-output.test.ts`, `csp.test.ts` |
 | **LOW-2** "every import is relative" was a regex | esbuild's `metafile.inputs`: every input under `src/` (or the e2e harness), none under `node_modules`; enforced by the build itself | `bundle-inputs.test.ts`: a side-effect `import "pkg"`, a dynamic `import("pkg")`, a re-export and a `require` each fail (and two of them are invisible to the old regex, asserted); a scratch project whose build fails |
 | **LOW-3** `call()` attached the bearer to any function name | explicit allow-list, the same list as the CSP | `client.test.ts` |
 | **LOW-4** Cancel after the passkey step kept the session | a cancel signal reaches `verify()`, which does **not** abort the request (a session the server already minted would be orphaned): on a late answer it revokes the new token with a copy and never holds it; `cancelSignIn` leaves `signing-in` at once and drops any held token | unit (3), Playwright: verify delayed, Cancel pressed, ends signed-out and `revokedSessions.size === 1` |
 | **LOW-5** verify succeeded, `GET session` failed, token forgotten but session left live | a best-effort sign-out (wipe first) before the error is shown | unit (3), Playwright |
-| **Lock ruling** | see 20.4: lock sends `POST sign-out` | `contract.test.ts`, `controller.test.ts`, Playwright (old token gets 401, `revokedSessions.size === 1`) |
+| **Lock ruling** | see 20.4: lock sends `POST lock` (§73; server §72) | `contract.test.ts`, `controller.test.ts`, Playwright (old token gets 401, `lockCalls === 1`, `revokedSessions.size === 1`) |
 | NIT 429 | the sign-in button is disabled for `retryAfterSeconds` (capped at a day) | unit (4), Playwright |
 | NIT production host | rejects a trailing dot, case variants, the bare `.example` TLD, `localhost`, `*.localhost`, loopback and every bare IP (v4 and v6) | `csp.test.ts` |
 | NIT `verify()` overwrite | throws `bad_request` / `session_exists` before sending; a second verify that finishes late revokes its own copy | `client.test.ts` |
@@ -1761,7 +1761,7 @@ The threat model the gate applied: **a shared shop iPad. The browser must never 
 
 - **The target device is an iPad, so Safari/WebKit matters, and no WebKit was available here.** Whether WebKit enters the page into its page cache, whether it honours `Cache-Control: no-store` for that, and whether the keepalive sign-out is delivered when the page is hidden are all `[unverified]`. What does not depend on any of that: the in-memory wipe in `pagehide` and the forced signed-out in `pageshow` are synchronous and local, so a restored page shows sign-in and holds no token; the server-side revoke is the best-effort part.
 - A full second passkey sign-in after a V8 heap snapshot in the same page failed once with "The passkey could not be used" in the Playwright harness (cause not isolated), so the hung-lock cell does not repeat a sign-in after its heap checks; the second sign-in while an old revoke hangs is a controller unit cell instead.
-- The server follow-up in 20.4 (retire or make revoking `partner_session_lock_for_partner`; any non-revoking lock authorizes as PEEK) is **not** in this slice.
+- The server follow-up in 20.4 (make-revoke `partner_session_lock_for_partner` with `revoke_reason = 'lock'`) is closed in **§72** / migration `0085`.
 
 **Verification (this round)**
 
@@ -1800,11 +1800,11 @@ The rulings:
 
   Each must get the partner-session handler's 404 or a gateway 400; never a PostgREST or other-function response. Record the result here.
   - The structural fix is a dedicated partners API host that proxies only `partner-*` functions, so `connect-src` can be host-scoped (ties to owner question Q1).
-  - Optional hardening: the partner handlers refuse a raw path containing `%2F`, `%5C` or `%2E` with a 400.
+  - Optional hardening: closed in **§99** — partner handlers refuse a raw path containing `%2F`, `%5C` or `%2E` with a 400. **Staging path probe** (gateway vs handler) remains open until recorded against a live host.
 - **Auto-lock on `visibilitychange` is a product decision.** Should the shop iPad lock after being hidden for N seconds? A backgrounded tab or an auto-locked screen keeps a signed-in page until server idle expiry. This is not a regression; it is the owner's call.
-- **Server follow-up from 20.4:** retire `partner_session_lock_for_partner`, or make it revoke with `revoke_reason = 'lock'`. Any lock that does not revoke must authorize as PEEK. The page no longer calls it.
-- **NIT (S1.2 server code):** `ROUTE_METHODS[route]` is a plain object lookup, so `/partner-session/constructor` gives 405 rather than 404. Use `Object.hasOwn` or a null-prototype map the next time that code is touched.
-- **NIT:** `no-store` covers only `/` and `/index.html`. If the host falls back to `index.html` for unknown paths, those copies are covered only by the `pagehide`/`pageshow` handlers. Optionally use `/*` with `! Cache-Control` in the `/assets/*` block.
+- **Server follow-up from 20.4:** closed in **§72** / migration `0085` — `partner_session_lock_for_partner` revokes with `revoke_reason = 'lock'`. **PWA Lock UI:** closed in **§73** — page sends `POST lock`.
+- **NIT (S1.2 server code):** closed in **§99** — `Object.hasOwn(ROUTE_METHODS, route)` so `/partner-session/constructor` is 404, not 405.
+- **NIT:** closed in **§103** — `/*` is `Cache-Control: no-store`; `/assets/*` uses `! Cache-Control` then the immutable lifetime.
 
 Gate counts, round 2:
 - partners: vitest 13 files / 369; Playwright 38.
@@ -1812,3 +1812,2821 @@ Gate counts, round 2:
 - DB harness, both modes: 41 files / 4164 pgTAP, Deno 349 passed / 0 failed.
 - gitleaks clean.
 - Mutants: 21 of 22 valid killed; 1 equivalent survivor.
+
+## 21. As built: S1.4
+
+### 21.1 What was built
+
+The partner (staff) **operator/admin TOTP factor**: `aal` 2, the five-minute MFA window, and class **A3** enabled.
+
+- **migration `0053_partner_totp_aal2.sql`** (all `CREATE` plus `CREATE OR REPLACE` of `partner_authorize`, `partner_session_lock_for_partner`, and the otp-proof / reauth / `GET pin` wrappers reclassed to `A0_ENROL`; 0001–0052 untouched):
+  - **`private.hotp`** (RFC 4226 over `public.hmac`, IMMUTABLE) and **`private.partner_totp_seed_derive`** (Vault secret `partner_totp_key`, fixed-width label `golfraven/partner-totp/v1` ‖ 0x00 ‖ user id ‖ `int4send(seed_version)`; the 0045 / 0052 derive shape). The seed is **derived, never stored**.
+  - **`app.partner_totp`**: one row per person (`user_id` PK), `seed_version`, enrolment / confirm state, `last_step` (replay), lockout counters. FORCE RLS; every privilege revoked from PUBLIC, `anon`, `authenticated` and `service_role`; **no Edge or client grant**. Written only by definers owned by **`partner_totp_verifier`** (R5-L1: the only role that may write `aal` / `mfa_until`).
+  - **Verifier-owned cores**: `partner_totp_attempt` / `verify_apply` / `enrol_apply` / `confirm_apply` / `mfa_clear` / `reset_apply`. Every counter outcome is a **returned status**, never a RAISE (0020). **`verify_apply` is the only code that sets `aal = 2` and `mfa_until = now + 5 min`.**
+  - **`partner_authorize`**: classes **`A0_MFA`** (always reachable at `aal` 1 so an operator/admin can step up) and **`A0_ENROL`** (reachable at `aal` 1 **only while** the person has no confirmed TOTP — PA-20 / PA-28); **A3 enabled** (`aal` 2 and `mfa_until > now()`); A1 / A2 accept A3 as the substitute for a PIN-less elevated member (6.3).
+  - **`_for_partner` family**: `totp` enrol / confirm / verify / reset; `partner_admin_enrolment_issue_for_partner` (A3); lock clears `mfa_until` through `partner_totp_mfa_clear`; otp-proof, reauth and `GET pin` reclassed to `A0_ENROL`.
+  - **Admin bootstrap (M4):** `private.partner_admin_bootstrap_token` (EXECUTE for nobody: ops SQL session as owner after inserting `admin_user`) and the A3 admin-issue wrapper.
+  - **`otp_proof` spend on TOTP enrol/confirm** (19.5 / MEDIUM-1 shape): each wrapper clears `otp_proof_until` in the same transaction on the `ok` outcome only.
+- **Edge**, `_shared/partner/`: **`totp-contract.ts`** (HOTP-SHA-1, base32 seed, otpauth URI; Web Crypto only); `ports.ts`, `session-shape.ts` and `session-handler.ts` carry the three routes. The Edge builds the otpauth URI from the seed bytea + params the database returns once; it never sees the Vault key.
+- **Routes** on `partner-session` (all POST; a dead session is the one 401 before any work):
+
+| Route | Class | Body | Answers |
+|---|---|---|---|
+| `POST totp/enrol` | A0_ENROL | `{}` | 200 `{ seed` (unpadded base32), `seedVersion`, `otpauthUrl`, `issuer`, `period`, `digits`, `algo` `}`; 409 `totp_already_confirmed`; 403 without enrolment window or email proof; 503 when Vault key missing |
+| `POST totp/confirm` | A0_ENROL | `{ code }` (exactly 6 digits) | 200 `{ confirmed: true }`; 403 `totp_wrong` / `totp_locked` (+ `Retry-After`); 409 `totp_not_set` / `totp_already_confirmed` / `totp_wrong_session` |
+| `POST step-up/totp` | A0_MFA | `{ code }` (exactly 6 digits) | 200 `{ mfaUntil, aal: 2 }`; 403 `totp_wrong` / `totp_locked`; 429 `totp_backoff`; 409 `totp_not_set` / `totp_unconfirmed` |
+
+  Every body is length-and-encoding only; unknown keys are 400 before any database work. Refusals the database returns **commit** (failure counters and lockout persist).
+- **pgTAP** `supabase/tests/matrix/31_partner_totp_aal2.sql` (plan 84): PA-20, PA-24, PA-28 against an independent seed / HOTP oracle.
+
+### 21.2 Brief item, fix, test
+
+| ID | Fix | Test |
+|---|---|---|
+| **PA-20** (HOTP, aal, A3) | SQL `private.hotp` = RFC 4226; `verify_apply` sets aal 2 + `mfa_until`; A0_MFA always / A0_ENROL while unconfirmed; A3 needs aal2 + fresh MFA; PIN-less A1/A2 substitution | matrix 31 (RFC / independent oracle, replay, ±1 step, lockout as status, aal 1 refusals, A3 cells); unit `partner-totp-vectors.test.ts` (RFC 6238 Appendix B SHA-1 → 6-digit truncation) |
+| **PA-24** (enrol / confirm / reset) | enrol refused once confirmed; first enrol needs enrolment or OTP proof; unconfirmed re-enrol bumps seed; confirm same session only; reset admin-only lite | matrix 31; unit `partner-totp-handler.test.ts` (enrol body, already_confirmed 409, confirm session statuses) |
+| **PA-28** (aal 1 enrol window) | A0_ENROL at aal 1 only with no confirmed TOTP; after confirm the same calls refuse at aal 1 | matrix 31 |
+| **HOTP RFC vector** | TypeScript `hotpSha1` matches node:crypto reference and the six Appendix B counters | `partner-totp-vectors.test.ts` |
+| **Lock clears `mfa_until`** | was 0053: `partner_session_lock_for_partner` called `partner_totp_mfa_clear`; **superseded by §72 / 0085** — lock revokes the row (`revoke_reason = 'lock'`), so `mfa_until` is moot | matrix 31 (revoked row); matrix 63 |
+| **`otp_proof` spend on enrol/confirm** | wrappers clear `otp_proof_until` on `ok` only (same transaction) | matrix 31 |
+| **Edge routes** | strict bodies, status→HTTP map, COMMIT on every status, otpauth assembly, Origin refusal | `partner-totp-handler.test.ts` |
+
+### 21.3 Departures from sections 4 to 6, and why
+
+- **D1. TOTP reset reach is admin-only lite (intentional).** Section 6.4's full higher-role reach rule (which admin may reset which operator/admin, and alerts) is **S1.5**. This slice's `partner_totp_reset_for_partner` is class A3, **admin-only**, target must be a different operator or admin; sessions of the target are revoked. The Edge **port** exists; no public `members/{id}/totp-reset` route is wired on `partner-session` yet (21.4).
+- **D2. The Edge assembles otpauth; the database returns seed + params.** Section 6.4's QR is a client concern. The migration returns `seed` bytea once plus issuer / period / digits / algo; `totp-contract.ts` builds the URI. No departure of substance.
+- **No other intentional departures** from §4.1 (aal gates / the aal 1 enrol exception), §5.1 (`partner_totp` derived seed) or §6.3–6.4 (HOTP, confirm-in-enrolling-session, A3, admin bootstrap) for what this slice built.
+
+### 21.4 Seams left for later slices
+
+- **S1.5, full reach / reset alerts.** Replace the admin-lite reset with the design's higher-role reach; alert on reset (and related membership events). Reach closed in 0054; TOTP-reset operator alarm → §95.
+- **PA-29, last-membership TOTP delete.** Revoking the last active membership of a user in `admin_user` must delete their PIN but **not** their TOTP; for a non-admin both go. Not built here.
+- **Edge public `members/{id}/totp-reset` route.** The database wrapper and the session port exist; the handler has no public path yet.
+- **PWA TOTP screens (S7).** Enrol QR, confirm, and step-up prompt; `apps/partners` still shows aal below required on the home and keeps screens closed — no TOTP UI in S7a.
+- **Fixture regen** if check / allow-list snapshots need a fresh catalog pass after merge (same pattern as 0050 / 0052).
+- **Operator steps at deploy:** provision Vault secret `partner_totp_key` (at least 32 random bytes; without it every TOTP route answers 503) and keep it in the secrets backup; first admin via `partner_admin_bootstrap_token` after `admin_user` insert.
+
+### 21.5 Verification run for this slice
+
+**Honest limit:** the full DB harness (`tools/db/test.sh`, both modes) and matrix 31 were **not** run end-to-end in this documentation pass. Matrix 31 (`plan(84)`) and migration 0053 are on the branch; do not treat pgTAP counts as observed here.
+
+What **did** pass in this environment (Node 24, vitest against the supabase unit config):
+
+| Suite | Result |
+|---|---|
+| `partner-totp-handler.test.ts` | pass (with `partner-totp-vectors`) |
+| `partner-totp-vectors.test.ts` | pass (RFC 6238 Appendix B SHA-1 vectors + otpauth assembly) |
+| **Combined** | **2 files, 22 tests, all pass** |
+
+A later harness / Deno integration run should record file and test counts here the way 19.7 and 18.7 do; until then only the unit figures above are claimed.
+
+## 22. As built: S1.5 (database half)
+
+### 22.1 What was built
+
+**Migration `0054_partner_invites_enrolment.sql`** and **matrix `32_partner_invites_enrolment.sql`** (plan 483). 0001-0053 are untouched. The Edge handlers (`partner-invites`, `partner-members`, `enrolments/*`, `credentials`) and the PWA are **not** part of this slice's database half; the seams are in 22.4.
+
+- **Register challenge (5.1).** `partner_challenge_core` / `partner_challenge_verify` gain an 8-argument overload (`ref_kind` 1 byte, `ref_id` 16 bytes, `accepted_at_us` `int8send`, for purpose 2; refs refused for any other purpose). The 5-argument signatures are untouched. The only producer of a register challenge is `partner_challenge_issue_register` (EXECUTE for `partner_session_issuer` alone), called inside the accept definers after every check passed.
+- **Reach rule (6.5).** `partner_reach_covers(actor, target)` is conditions (1) to (5) exactly; `partner_reach_covers_org(actor, target, org)` is the same rule for one membership (the member revoke). Neither is executable by any edge role. Registered policies call them: `pst_revoke_partner_member` (the toucher's `UPDATE revoked_at` ONLY, keyed on the binding and the per-membership rule), `ppv_*_partner_pin_reach` (PIN reset), `pd_*_partner_enrolment_token_recover`, `pd_read_partner_credential_bound`.
+- **Minter lane** (`edge_partner_minter`, unbound; owned by `partner_session_issuer`): `partner_invite_email_for_token`, `partner_invite_accept`, `partner_enrolment_token_email_for_token`, `partner_enrolment_token_accept`, `partner_credential_register_first`. Every attempt / mismatch outcome is a **status** (PA-14); the order is 6.1's. `register_first` makes the R4-L2 checks from raw bytes (the attestation object is parsed in SQL; `partner_cose_parse` parses the key), refuses an active credential and, for an invite, any other-org membership, records one registration per acceptance, mints the first session (`mint_kind register`, no signature, `enrolment_until` now + 15 min) and evicts beyond three live sessions with `partner_sessions_evict_oldest` (a REVOKE).
+- **Partner lane** (`edge_partner`): invite create / list / revoke / branch-E accept; member revoke / recover; PIN reset; org revoke-all (with "every credential created after T"); credential options / register (second) / list / revoke; and `partner_totp_reset_for_partner` under the full reach rule.
+- **Last membership (PA-29).** An `AFTER UPDATE OF revoked_at` / `AFTER DELETE` trigger deletes the PIN and, unless the person is an admin, the TOTP. The rule is also in the delete policies, derived from data (no binding, no setting).
+- **Purges (9).** Six `purge_partner_*` definers, the 0050 shape (`= ANY (ARRAY(SELECT key ... LIMIT 5000))`), each floor repeated in a policy closed under a partner binding, EXECUTE for `edge_system`.
+- **Immutability guards.** `BEFORE UPDATE` triggers on `partner_invite` and `partner_enrolment_token` (an acceptance, a consumption and a revocation are final; the token and expiry never move; attempts never fall; one registration per acceptance). Permissive policies are OR-ed, and an UPDATE passes when the OLD row matches any policy's USING and the NEW row any policy's WITH CHECK; the matrix proved a policy-only design let an accepted invite be rewritten.
+
+### 22.2 Departures from sections 4 to 6, and why
+
+- **The accept definers are owned by `partner_session_issuer`, not `private_definer`.** Matrix 25 M1 (a S1.1a gate finding) says `private_definer` sees no invite without a binding, and an unbound minter transaction has no binding. Owning them as the issuer (like the 0048 mint and the 0049 minter-lane definers) keeps M1 and puts the writes under role-specific `psi_*` policies. The issuer therefore gained registered privileges on the invite, token and membership tables (columns only), the COSE parser, the register challenge verifier / issuer, the audit writer and the eviction (all in `partner_owner_privilege` and its fixture). `auth` stays unreachable for it: `partner_auth_identity` (a `private_definer` helper) reads the email, the confirmed flag, the GoTrue session's freshness and the admin flag; `private_definer` gained `SELECT (email_confirmed_at)` on `auth.users`.
+- **Membership activation is the issuer's, and only against an accepted invite.** `psi_insert_partner_member` / `psi_update_partner_member` admit a row only when an invite accepted by that user for that org and role (same inviter) within the last two minutes exists. A bound `private_definer` still cannot touch a membership row (PA-4c (i)); matrix 25's "no lock policy on `partner_member`" cell now names these two policies as the only exceptions.
+- **The member revoke is the toucher's** (`UPDATE (revoked_at)` ONLY, so a revoke cannot move a role or an org), keyed on the binding and the reach rule.
+- **Adding a second credential uses the reauth-purpose challenge** (purpose 3, bound to the bound session id), because 5.1's register challenge carries `ref_kind` 1 or 2 only. A challenge issued for one session cannot be used from another.
+- **`partner_pin_reset_apply`** (owned by `partner_pin_verifier`, policies keyed on the reach rule) also resets the PIN of the person's own row on a branch-E reactivation.
+- **Two S1.4 defects were fixed here** (found by the matrix): `partner_admin_bootstrap_token` and `partner_admin_enrolment_issue_for_partner` could never insert (`INSERT ... RETURNING` met no SELECT policy for the new row, and `expires_at = clock_timestamp() + 24 h` violated `expires_at <= created_at + 24 h` against the transaction-start `created_at`). Same signatures, owners and grants; a SELECT policy and explicit `created_at` replace them.
+- **Matrix 30 / 20 / 25 / 26 / 27 / 28 / 31** cells that pinned exact lists (the purge set, the `edge_partner` and minter EXECUTE sets, the policies on `partner_pin` and the failure counter, the issuer's function privileges, the `A0` wrappers, the reset message) were updated for the new objects; none was weakened.
+
+### 22.3 Not built here, honestly
+
+- **Single use under concurrency and counter survival after a real COMMIT** are by construction (a row lock, a status, no RAISE) and proved inside one transaction (a second accept is `not_found`; the count is there after a mismatch). A two-connection script in the style of `tools/db/test-partner-serialisation.sh` is not written.
+- **Eviction beyond three live sessions** originally ran at `register_first` only; the sign-in mint (0048) did not. Closed by §64 / migration `0078` (same helper, keep=3).
+- **The out-of-band notice of a credential add** (open item U1): server → §92; subject interstitial → §93; manager reach inbox → §94. Email transport (Q7 / U1 condition 3) remains open. **The operator alert on a TOTP reset** → §95 (`partner_auth_alarm` kind `totp_reset`). Review auth-alarms i18n polish → §96.
+- The create ceremony's key is checked for shape by `partner_cose_parse`, not for being a point on the curve (the sign-in verifier's check): a wrong key would fail every later sign-in, not widen access.
+
+### 22.4 Seams left for the Edge half
+
+`partner-invites`: `POST invites` (`partner_invite_create_for_partner`), `GET invites`, `DELETE invites/{id}`, `POST invites/accept/start` (`partner_invite_email_for_token`), `accept/verify` (`partner_invite_accept`, then close the GoTrue session AFTER it returns), `POST invites/accept` (branch E). `partner-members`: `members/{id}/revoke` (`partner_member_revoke_for_partner(target, org)`), `recover`, `pin-reset`, `totp-reset`, `orgs/{id}/sessions/revoke-all`, `credentials` (options / register / list / revoke). `enrolments/accept/*` (`partner_enrolment_token_*`), `POST credentials` in enrolment mode (`partner_credential_register_first`; the Edge passes the challenge from `accept/verify`, the attestation object and client data as raw bytes, the credential id and the COSE key). `retention-purge` gains six steps. Every status above is committed by the handler.
+
+## 23. As built: S1.5 (Edge half)
+
+### 23.1 What was built
+
+The two Edge Functions and the shared modules behind them; **no migration** (0054 is untouched). `privileged.ts` stays the one database site.
+
+- **`partner-invites`** (`_shared/partner/invites-handler.ts`): `POST invites`, `GET invites`, `DELETE invites/{id}`, `POST invites/accept/start`, `.../accept/verify`, `POST invites/accept` (branch E), `POST enrolments/accept/start`, `.../accept/verify`, and `POST credentials` in enrolment mode (the first credential and the first session).
+- **`partner-members`** (`_shared/partner/members-handler.ts`): `POST members/{id}/revoke | recover | pin-reset | totp-reset`, `POST orgs/{id}/sessions/revoke-all`, `POST admin/enrolments`, `GET | POST credentials`, `POST credentials/options`, `GET credentials/notices`, `POST credentials/notices/{id}/ack`, `GET credentials/notices/reach`, `DELETE credentials/{id}`. Every route is a session route.
+- **Shared**: `handler-kit.ts` (route table with `{id}` uuid segments, the one port-error map, the registration-refusal map), `invites-shape.ts`, `members-shape.ts`, `registration-shape.ts` (strict bodies, canonical base64url, unknown keys refused), `token.ts` (`gr_inv_` and `gr_enr_` tokens beside `gr_ps_`), `ports.ts` (`PartnerInviteMintTx`, `PartnerInvitesTx`, `PartnerMembersTx`, `RegistrationVerifier`, `PartnerInvalidArgument`), `webauthn-port.ts` (`registrationVerifier` over the S0 wrapper's `verifyRegistration` / `registrationOptions`).
+- **`privileged.ts`**: every new method is a `select private.*(...)` in 0054's argument order. The minter transaction and the bound transaction carry more methods, not more kinds: `withPartnerMint` and `withPartnerSession` remain the only callers of their kinds (the `privileged-mint-scope` allow-list is unchanged). `retentionPurgeSteps` gains the six `purge_partner_*` steps.
+- `supabase/config.toml` (`verify_jwt = false` for both), the three CI function lists, and the unit suites that enumerate partner functions.
+
+### 23.2 Decisions and departures
+
+- **The invite OTP may create the account** (`shouldCreateUser: true`, `partnerInviteEmailOtp`). 6.1 branch N is for a person with no account, and `partner_auth_identity` needs an `auth.users` row, so the plain proof sender (`shouldCreateUser: false`) cannot reach them. The address sent to is always the invite row's, never a client's, so a token holder cannot make an account for an address of their choosing. Enrolment tokens use `partnerEmailOtp` (the person exists).
+- **Pre-authentication buckets are `edge_system` buckets** (design 8), through a new `PartnerDb.hitSystemRateLimit` over the existing `hitSystemRateLimit`: 3 sends and 10 code attempts per token an hour, and 3 invites a day per invitee address (a hash). A bucket is hit only for a token that EXISTS, so made-up tokens cannot grow the table. A wrong emailed code never reaches the database, so the 10-attempt counter in 0054 does not see it; the verify bucket is what bounds code guessing beyond GoTrue's own limits.
+- **`accept/verify` answers one 403** for an unknown or dead token, a wrong code, a limited token, a GoTrue session without an id and every refusal of the definer; only `existing_member_sign_in` and `recover_required` (reachable by the owner of the mailbox alone) are 409. `accept/start` answers one constant body, including when the mailer fails.
+- **`POST credentials` lives in both functions**: enrolment mode (no bearer, minter lane) in `partner-invites`, second credential (session, A2 + reauth) in `partner-members`.
+- **The relying party for a second credential is read through the minter** (`withMint(rpConfig)`), because `edge_partner` cannot execute `partner_rp_config_read`; the ceremony is verified with no session transaction open, and only then does the A2 definer run, so its 30-second PIN grant is not spent waiting on the wrapper.
+- **`PartnerInvalidArgument`** (22023) maps to 422: an action on oneself or a time in the future is not a 500.
+- **`credentials/options` reads the person** (`credentialSubject`: the session's user id for the WebAuthn user handle, and the address for the authenticator's label), because the definer returns neither.
+
+### 23.3 Not built, honestly
+
+- `PATCH credentials/{id}` (the display note): closed by §65 / migration `0079`.
+- The per-target "5 failed OTP proofs an hour" counter of 8 (the 0035 reserve / release pair): the per-token verify bucket stands in.
+- Deno integration tests against a cluster for these routes (the handlers are proved with fakes; the definers by matrix 32). The retention integration test now expects twelve steps and checks the six partner ones run (`done`), not that they purged a seeded row (matrix 32 seeds those).
+- The PWA screens and `apps/partners` client; U1 credential-add notice → §92–§94; email notice (Q7) remains open; TOTP-reset operator alarm → §95.
+- `gr_enr_` on `getActorFromRequest`'s refusal list → closed by §91 (defence in depth with `gr_ps_` / `gr_inv_`).
+
+## 24. As built: S7a, second half (PIN step-up, invite and enrolment acceptance; `apps/partners`)
+
+Closes the seams 20.5 left for S1.3, S1.4 and S1.5, now that their Edge routes exist. **No server, database or migration change**: the page is the only thing that moved.
+
+### 24.1 What was built
+
+- **PIN step-up** (`src/auth/pin.ts`, `step-up.ts`, `pin-setup.ts`). The browser derives with the shared contract (19.4): `pin-contract.ts`, `pin-deny-list.ts` and, for the base64url helpers it imports, `token.ts` are imported **by relative path** (not copied), so the browser cannot drift from what the Edge and the database tests run. `scripts/lib/inputs.mjs` allows exactly those three files outside `src/` (an exact-path list; a fourth fails the build; `node_modules` is still refused) and `tsconfig.json` gains `allowImportingTsExtensions` for their `./token.ts` import. `createStepUp` is the real `StepUp`: `GET pin` (a locked, unset or must-change PIN ends the call before any prompt), the prompt, the rule and deny-list check **before** any derivation, PBKDF2 with the stored salt and iteration count, `POST step-up/pin { derived }`. The controller exposes it as `requirePin(actionClass)`; `unavailableStepUp` stays exported.
+- **Set, change and the email proof**: `pin/set`, `pin/change`, `otp-proof/start`, `otp-proof/verify` (6.3), with a fresh CSPRNG salt and the contract's default 600,000 iterations. The first PIN after an enrolment is forced (6.1 step 5).
+- **Invite and enrolment acceptance** (6.1 branch N): client methods `acceptStart`, `acceptVerify`, `registerFirst` beside `signInOptions`; `src/webauthn/registration.ts` (`navigator.credentials.create` for the server's options, refused if they weaken the ceremony; serialised into exactly the strict shape `registration-shape.ts` accepts); the enrolment flow (token, emailed code, passkey, first session, forced PIN); the invite link (`/invite#<token>`, the fragment removed from the address bar on load).
+- **TOTP** (6.4), the nice-to-have: enter a code (`step-up/totp`) or add an authenticator (`totp/enrol`, `totp/confirm`) when `aal < requiredAal`. The seed is shown once as text (and the `otpauth://` link); there is no QR renderer, because no dependency may be added.
+- **CSP and client allow-list**: `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, so `connect-src` carries three path-scoped sources (the same list is the bearer allow-list of `call()`); `_headers` marks `/invite` no-store. Error kinds `conflict` (409), `gone` (410) and `unprocessable` (422) join the client's closed set (the new routes answer them).
+
+### 24.2 Decisions and departures
+
+- **A PIN the rules refuse is refused at a verify too**, not only at a set. The server cannot tell a denied PIN from another (it sees derived bytes), and 19.4 puts the rules where the PIN is typed. A refused PIN at a verify cannot be a PIN this page ever set; refusing it sends nothing and costs the member no failure against the lockout of 5. The cost: a PIN set by a custom client to a denied value cannot be used through this page until a manager resets it.
+- **A hostile or broken server cannot choose the work factor.** `GET pin` iterations outside `[210000, 1000000]`, or a salt that is not 16 canonical bytes, end the call with `bad_params` before anything is derived (a floor below the contract weakens the member's verifier; a ceiling above it is a denial of service on the page).
+- **`GET pin` is read before the prompt**, on every loop, so a locked PIN is never asked for and the prompt can show the server's back-off; the deny-list runs before the derivation and the POST.
+- **No "check my PIN" button.** A grant that nothing consumes would leave a 60-second window in which whoever holds the iPad could run an A1 action without a PIN. The prompt is reachable only from `requirePin`, i.e. from a screen that makes the action call straight after.
+- **`registerFirst` holds the first session's token exactly as `verify` does** (one closure variable, never returned, revoked with a copy if the flow was cancelled while the request was on the wire); the invite token and the emailed code are in the flow's closure only, never in the state, never drawn.
+- **The create ceremony starts from a button**, not automatically after the code, so Safari's user-activation rule holds and the options (good for a few minutes) are used on the person's tap.
+
+### 24.3 Not built, honestly
+
+- No screen consumes a PIN grant yet (S7b onward); `requirePin("A2")` does not also run the passkey reauth (`reauthWithPasskey` exists; the A2 screens compose the two).
+- Invite create / list / revoke, branch E (`invites/accept` for an existing member), `members/*` and the credential screens are not built; their CSP origins and the `call()` allow-list are in place.
+- No QR for the TOTP seed (text only) → closed by §90 (canvas QR, vendored encoder).
+- A JavaScript string cannot be wiped: the four digits stay in the page's heap until collected (measured: a V8 heap snapshot after a set still finds them; the invite token and the session token are gone once their flow ends). The guarantee is the one the design needs: the digits are in no request, URL, header, storage, console or controller state.
+- `[unverified]`: PBKDF2 at 600,000 iterations on a low-end iPad (S0 owns the measurement), and the French strings (not reviewed by a native fr-CA speaker).
+
+### 24.4 Tests
+
+`pin.test.ts` (the four shared vectors, node's PBKDF2 as an independent oracle, every deny-list entry refused with no key derived, the work-factor and salt bounds), `step-up.test.ts` and `pin-setup.test.ts` (the real `partner-session` handler over the fake: the request body is exactly `{ derived }`, the PIN's digits in no request, wrong, back-off, lock, unset, must-change, hostile parameters), `registration.test.ts` (options strength; the serialised ceremony accepted by the server's own `parseEnrolCredentialBody`), `client-enrol.test.ts`, `enrol.test.ts` (token, code, passkey, first session, forced PIN, and the credential the page created **signs in afterwards**), `panels.test.ts` (prompt, set / change, proof, TOTP), plus source-scan, CSP, build-output and bundle-input cells. The Playwright suite adds six cells in real Chromium under the real CSP (invite link to first PIN, the PIN prompt, zero violations, nothing in storage, no PIN digits on the wire). `fake-partner-server.ts` now runs the real `partner-invites` handler with working in-memory PIN, email proof, TOTP, enrolment and a registration verifier that parses the attestation object.
+
+## 25. As built: S2b (the staff lane of the course QR)
+
+Slice S2b of P5.1a: the staff half of a marker purchase. The player half is S2a (`marker-scan`, migration 0046); this slice **mints** what S2a verifies, shows and rotates the PIN S2a judges, and signs and registers the printed QR. Migration `0055_course_qr_staff.sql` is the database half; `course-qr` and `qr-print` are the Edge half. Migrations 0001 to 0054 are untouched (`tools/db/check-migrations-immutable.sh`).
+
+### 25.1 What was built
+
+**Database (0055).** Seven `edge_partner` `_for_partner` definers (each begins with `private.partner_authorize`, check 14; none has a dollar sign, double quote or backslash in its body: check 14 (a0)) and one internal reader:
+
+| Definer | Class | What it does |
+|---|---|---|
+| `course_pin_show_for_partner(facility)` | A0, staff or manager **at that facility** | Calls `private.course_pin_derive` and nothing else derives: the facility-local date of now and `private.course_pin_epoch_at(facility, now)`, exactly the arguments `course_pin_attempt_for_actor` judges a scan made now under. `ok` / `no_facility` / `no_programme` (no accepted, active, `any_purchase` row that takes the printed QR: there is no PIN to show) |
+| `course_pin_rotate_for_partner(facility)` | A2, staff, manager or operator at the facility | `UPDATE app.facility_programme SET pin_epoch = pin_epoch + 1` for the facility and nothing else; the 0046 trigger writes `app.course_pin_epoch_log` (this function never names the table: a pgTAP cell reads its source). One `audit_log` row (`partner.course_pin.rotate`, the new epoch, no PIN) |
+| `course_qr_mint_for_partner(facility, nonce_hash)` | A1, staff or manager | Consumes the single-use PIN grant, INSERTs `app.course_qr_token (nonce_hash, facility_id, issued_by_staff, kid, issued_at, expires_at)` with `issued_at` **truncated to the second** (so the row's instant is the token's `iat`; the player lane judges the 120 s rule against the row) and `expires_at = issued_at + 120 s`, and returns the kid, the Vault seed and the registered public key **with the row**. `no_programme` (no accepted active `any_purchase` row that takes the rotating token) is a returned status; a missing, malformed, unregistered or revoked key is `55000` |
+| `course_qr_refresh_for_partner(facility, nonce_hash)` | **A0_KEEPALIVE**, staff or manager | Reads the state (`live` / `used` / `expired` / `unknown`, with the seconds left) of a token **this person's own mint** created at this facility; any other nonce is `unknown` (one answer: no oracle). Writes nothing, creates no token, and never advances `last_seen_at` (PA-26) |
+| `course_qr_print_key_for_partner(facility)` | A3, operator at the facility or admin | Releases the printed-QR kid, the Vault seed and the facility slug to the authorized call. `ok` / `no_facility` / `key_revoked` |
+| `course_qr_print_write_for_partner(facility, qr_kid, sig, public_key)` | A3 | Ensures the **public** key row in `app.course_qr_key` (inserted when absent, never replaced: a different key is `key_mismatch`), refuses a kid that is not the Vault key's (`kid_mismatch`) or a revoked key, then writes `app.facility_qr` (a reprint replaces the kid and signature and clears `revoked_at`; the same kid and signature is a no-op and writes no audit row). One `audit_log` row (`partner.course_qr.print`, the kid) |
+| `course_qr_print_read_for_partner(facility)` | A0, operator or admin | The registered printed QR: `ok` / `no_facility` / `not_printed` |
+| `private.course_qr_signing_key_read(purpose)` | **EXECUTE for nobody but its owner** | The **only** reader of the Vault secrets `course_qr_signing_key_rotating_token` and `course_qr_signing_key_printed_qr` (each `<kid>:<32-byte Ed25519 seed, base64url>`) and of the registered public key. Reached only from the A1 mint and the two A3 print definers, after `partner_authorize` |
+
+Ten new `private_definer` policies, all keyed on `private.partner_binding_kind()` / `partner_binding_user()` (never a settable GUC, never `actor_uid()`), all registered in `private.definer_policy_allowlist` and `supabase/tests/fixtures/definer_policy_exprs.txt`; the 0046 policies (`actor_uid() IS NOT NULL`) never apply under a partner binding and the new ones never apply under a user binding. The column grants are narrow: `INSERT` of the six issue columns of a token (never `used_by_user` / `used_at`), `INSERT` of `(purpose, kid, public_key_b64url)` of a key (never `revoked_at`, no `UPDATE` at all: a revoked key stays revoked), `INSERT` and `UPDATE` of the four reprint columns of `facility_qr` (not its key). No role gained a privilege on a relation except `private_definer`; the six owner roles and `private.partner_owner_privilege` are unchanged.
+
+**Edge.**
+
+| Route | Class | Body or query | Answer |
+|---|---|---|---|
+| `GET /v1/course-qr/pin?facilityId=` | A0 | the query is strict | 200 `{ facilityId, pin, localDate, validUntil, pinEpoch }`; 403 (no scope), 404 (unknown facility, an admin's question), 409 `no_programme` |
+| `POST /v1/course-qr/pin/rotate` | A2 | `{ facilityId }` | 200 `{ facilityId, pinEpoch }`; 403 without a fresh PIN **and** passkey; 409 `no_programme`; 429 (10 an hour) |
+| `POST /v1/course-qr/tokens` | A1 | `{ facilityId }` | 201 `{ facilityId, token, link, nonceHash, kid, issuedAt, expiresAt }`; 403; 409 `no_programme`; 429 (**60 a member an hour**, `hit_partner_rate_limit`, before the transaction); 503 (a deploy fault) |
+| `POST /v1/course-qr/tokens/refresh` | A0_KEEPALIVE | `{ facilityId, nonceHash }` | 200 `{ state, secondsLeft }`; 403; 429 (1000 an hour) |
+| `GET /v1/qr-print?facilityId=` | A0 | strict | 200 `{ facilityId, qrKid, sig, printedAt, revoked, revokedAt }`; 404 `not_printed` |
+| `POST /v1/qr-print` | A3 | `{ facilityId }` | 201 (written) or 200 (unchanged) `{ facilityId, qrKid, sig, link, changed }`; 403; 404; 429 (30 an hour); 503 |
+
+`supabase/functions/course-qr/index.ts` and `qr-print/index.ts` are thin; the rules are in `_shared/partner/course-qr-handler.ts`, `qr-print-handler.ts`, `course-qr-shape.ts` (strict, unknown keys refused, no field for a PIN, key, kid or signature: the client chooses nothing the server signs) and `course-qr-signer.ts` (WebCrypto Ed25519). The ports are a **separate** `CourseQrDb` in `ports.ts` (so no existing `PartnerDb` fake changed); `privileged.ts` builds it from the same bound transaction as `withPartnerSession` (`buildCourseQrTx`, `courseQrDb`) and adds `loadCourseQrLinkOrigin()` (`GR_COURSE_QR_LINK_ORIGIN`, an exact https origin: `https://golfraven.<tld>`; unset means the responses carry `link: null`). `supabase/config.toml` has `verify_jwt = false` for both, and the three CI function lists name them.
+
+**The mint, in order.** (1) The member's 60-an-hour bucket, in its own short transaction. (2) 16 random bytes; their SHA-256 is the nonce hash the database stores (never the nonce). (3) **One** bound transaction: the A1 definer consumes the PIN grant, INSERTs the row and releases the seed; the Edge signs the compact JWS exactly as `_shared/course-qr/format.ts` defines (header `{alg, kid, typ}` and payload `{exp, fac, iat, kid, nonce}` in alphabetical order) and **verifies its own signature under the registered public key, inside the transaction**. Any failure (no programme, a seed that is not the registered key's, a throw) rolls the row and the PIN grant back together (a unit test and a Deno test each prove it through the real driver). (4) The token goes to the client once; the seed is a local of step 3, in no response, header, error or log.
+
+**The Vault key, and how it is provisioned.** The private key lives **only in Vault**, one secret per purpose, named `course_qr_signing_key_rotating_token` and `course_qr_signing_key_printed_qr`, value `<kid>:<seed>` (`kid` `[A-Za-z0-9_-]{1,64}`, seed the 32 raw bytes as 43 unpadded base64url characters). `tools/db/provision-course-qr-key.mjs <purpose> <kid>` generates a key pair and **prints the SQL** (`vault.create_secret` plus the `INSERT INTO app.course_qr_key` of the public half) to stdout, to be piped into `psql` as the project's owner role; it writes no file. `--rotate` uses `vault.update_secret` and a new kid. `qr-print` also ensures the printed-QR public row itself, so for `printed_qr` only the Vault secret is strictly required; for `rotating_token` the public row **must** exist before the first mint (the mint refuses with `55000`, a bare 503, otherwise). The public key is never taken from a client. A compromise revocation is `UPDATE app.course_qr_key SET revoked_at = now() WHERE purpose = ... AND kid = ...`; a revoked kid mints nothing at once and is `qr_revoked` in the player lane; after a printed-key rotation, `qr-print` registers each facility under the new kid. In tests the private key is generated at run time (`makeSeed`, never a literal) and, for the Deno suite, written to the Vault stand-in the way an operator would; no test harness injection of a key exists in production code.
+
+### 25.2 Decisions and departures
+
+1. **The refresh does not re-issue.** The design said "bound to a nonce that an A1 mint created, and cannot create new authority". Re-issuing a token on every 30 s heartbeat would create a new single-use authority per heartbeat from one PIN; so the refresh **reads** the state of the person's own token (live, used, expired, unknown, seconds left) and the sale screen tells the cashier when the player has scanned or the 120 s has run out. A new sale is a new A1 mint and a new PIN (X8: PIN per action). If the product wants a continuously-rotating QR, that needs a mint-chain column and a bound on its length and is a separate decision; nothing here prevents it.
+2. **Roles.** Show the PIN: staff and manager of that facility (an operator does not read the shop's PIN; an admin does). Rotate: staff, manager or operator (A2: PIN in the last 30 s and a passkey in the last 5 minutes; a PIN-less operator or admin satisfies it with the A3 substitution of 6.3). Mint: staff or manager (an admin with a fresh TOTP may; an operator may not sell a marker). qr-print: operator at the facility or admin, class A3 (a manager cannot print).
+3. **A returned `no_programme` rolls back.** A status that commits would spend the PIN grant on a facility that cannot sell a marker, so the handler throws inside the transaction callback and answers 409 outside it. The pgTAP cell documents that the **definer** alone does consume the grant on that path; the rollback is the handler's, proved with the real driver.
+4. **The mint requires a registered rotating-token key; qr-print registers the printed-QR key.** Asymmetric on purpose: the A1 call is made by shop staff and must not be able to introduce a verification key, the A3 call is an operator's. The database never verifies an Ed25519 signature (it has none), so `course_qr_print_write_for_partner` records what the Edge signed; the Edge verifies under the public key derived from the Vault seed before calling and the database cross-checks the kid and any existing key row.
+5. **Idempotent printing.** Ed25519 is deterministic, so printing again is a no-op (`changed: false`, no audit row, `printed_at` kept); only a new Vault kid replaces a registration.
+6. **No change to the session or class machinery.** `partner_authorize` is untouched; `A0_KEEPALIVE` already skipped the idle bump (0047). PA-26 is proved at the database (matrix 33) and through a real commit (Deno).
+7. **`service_role` keeps its 0009 DML on `course_qr_token` and `facility_qr`.** Pre-existing and not an Edge path (the Edge never holds the service-role key since PR4b); noted so the cell that says "no edge or client role can write them" is not read as covering it.
+8. **The dropped explicit filter that survived mutation.** `course_qr_refresh_for_partner` filters the token by `issued_by_staff = v_uid` **and** the read policy keys on the same; removing the filter from the function is unobservable (the policy still scopes), kept as defence in depth like S2a's explicit actor filter.
+
+### 25.3 Not built, and honest limits
+
+- **The hand-over token** (plan 9.4, `entitlements-collect`) and everything in S5. The `typ` and the key purpose of format.ts keep it apart when it comes.
+- **The plan 8.3 cap alert** (25 static-PIN credits per facility per day): still S3's hook after `Repo#markerScan.record`; nothing here reads or counts credits.
+- **Scheduled pepper rotation tooling**, a **purge** for `course_qr_token` / `course_pin_alarm` (S2a departure 6 stands), and **a UI** for the PIN alarm.
+- **`[unverified]` on a real Supabase project**: that Vault accepts the two new secret names and `vault.create_secret` / `vault.update_secret` as the tool prints them; that `private_definer` can read `vault.decrypted_secrets` for them as it does for the pepper (the harness proves the shim); that the hosted Edge runtime imports an Ed25519 PKCS#8 key and signs (this repository's pinned Deno 2.5.2 does, every test here runs under it); that `GR_COURSE_QR_LINK_ORIGIN` is set (the tool and the runbook do not set it).
+- **The seed is on the wire between Postgres and the Edge process for the length of one call**, by the decision to sign in the Edge; it is never stored, logged or returned. A Vault-resident signer (Ed25519 in the database) was not built: PL/pgSQL has no Ed25519, and the S0 spike measured only verification.
+- **The PWA screens** (S7b) and a mobile scanner/sender for the rotating token are not built; `MARKER_COSIGNAL_UI_ENABLED` stays `false`.
+
+### 25.4 Tests and verification
+
+Each line is a command run on the final tree.
+
+- **pgTAP, both harness modes, one at a time** (`HARNESS_MODE=restricted tools/db/test.sh`, then `HARNESS_MODE=superuser tools/db/test.sh`, each a full initdb, migrate, seed, pgTAP, concurrency scripts, Deno integration suite, `verify-function-inventory`, `service-role-lint`, teardown): `Files=54, Tests=5262, Result: PASS` in **both**, the Deno integration suite `384 passed | 0 failed` in both (8 of them `course-qr.deno.test.ts`), exit 0. New file `supabase/tests/matrix/33_course_qr_staff.sql` (197 cells): structure and ACLs, the key reader's whole ACL, check 14 (a) behavioural cells for all seven definers (no binding and a user binding), the PIN (independent HMAC, the player lane's gate accepts it, the facility-local date on the far side of the date line, the other facility's, an operator, an admin, a missing pepper), rotation (every programme row, only `pin_epoch` changed, the trigger logged it once, no audit when nothing moved, single-use grant, too-old grant, the old PIN still right for a scan before the rotation and wrong at or after it), mint (grant consumed, rolled-back mint gives it back, `issued_at` on the second, the exact row the player lane's scan accepts then refuses a second time as `qr_used`, scope, programme, each key fault, a duplicate nonce), refresh (own, other's, other facility, used, expired, a planted delete-my-data GUC, **PA-26 with a control that an A0 call does advance idle**, an idle-expired session), qr-print (A3 window, aal 1, scope, public key insertion, reprint, `kid_mismatch`, `key_mismatch`, `key_revoked`, malformed arguments, admin on an unknown facility). Pinned lists updated: matrices 10, 25 and 28 (the `edge_partner` EXECUTE set, the A0 set), 24 (the PIN derivation now has two callers) and the Deno cell PA-13b.
+- `tools/db/check-migrations-immutable.sh --base origin/main`: all 52 existing migrations byte-identical, `0055` added. `deno check --frozen` and `deno cache --frozen` over the CI entrypoint list (22 files, the two new entrypoints in all three CI lists) exit 0 and `supabase/tests/deno.lock` is unchanged (WebCrypto only, no new dependency); `deno test supabase/tests/deno-unit/` with `--cached-only --deny-net`: 78 passed. `supabase/tests` vitest: 78 files, 1556 tests, 1553 passed; the 3 failures are `rules-vendor-freshness` (it needs `pnpm -r build` for `packages/rules/dist`, absent in this checkout) and are identical with this slice stashed.
+- **Mutants run against the migration** (each: rebuild, run matrix 33): `A0_KEEPALIVE` to `A0`, the mint at `A0`, `issued_at` not truncated, `pin_epoch + 2`, the kid check removed, the show roles widened to operator, a revoked key accepted, the programme check widened to the printed QR: **8 of 8 killed**; the explicit `issued_by_staff` filter removed in the refresh survived (the policy duplicates it, decision 8).
+- **Unit** (`pnpm --filter @golfraven/rules exec vitest run --config ../../supabase/tests/vitest.config.ts`): `course-qr-handler` (32), `qr-print-handler` (17), `course-qr-shape` and the enumeration suites (`partner-modules`, `ci-function-lists`, `review-account-gate`). A token minted by the handler is **byte-identical** to `course-qr-test-keys.ts#mintRotatingToken` under the same key (Ed25519 is deterministic), and a printed-QR signature to `mintPrintedQrSig`; the same tokens verify in `format.ts`. A source scan proves no non-test file under `supabase/functions` carries the PIN derivation's label.
+- **Deno integration** (`supabase/tests/integration/course-qr.deno.test.ts`, 8 tests, real `privileged.ts`, real sessions, real Ed25519 keys in the Vault stand-in): the committed token verifies under the database's own key row; the player lane's scan consumes the committed row; refused mints roll back through the real driver; scope at fac_y is 403 on every route; PA-26 after a real commit; the PIN equals an independent HMAC and a rotation logs the epoch; qr-print registers a signature `verifyPrintedQr` accepts under the key the database inserted.
+
+## 26. As built: S3 (attest; the offers-redeem half is a documented seam)
+
+Numbering: **migration `0056`, matrix `34`, this section 26.** S2b (the parallel slice, branch `cursor/p5-s2b-course-qr-staff-8ffd`) claims `0055`, matrix `33` and section 25, and S7 claims section 24; this slice takes the next free number of each so the branches merge without a rename. Nothing from 0001-0054 is edited.
+
+### 26.1 What was built
+
+**Migration `0056_partner_attest_redeem.sql`** (database half) and **matrix `34_partner_attest_redeem.sql`** (112 cells; both harness modes), then the Edge function **`partner-attest`**.
+
+- **`private.partner_attest_for_partner(facility, kind, token)`**, class **A1**, roles staff and manager. The ONLINE path. The token is the player's own `checkin_token.jti` (the existing `checkin-token` endpoint issues it: server-graded, 15 minutes, challenge-bound). **The player is the owner of the token and is never named by the caller.** One attestation per token (an advisory lock on the jti, then the 0017 tombstone), a returned `replayed` for the second. `kind` is `presence` or `marker_purchase`.
+- **`private.partner_offline_attest_for_partner(facility, kind, handle, code)`**, class **A1**. The money doc's **verify-and-record definer** (step 3, X9): the handle and the six typed digits go in; every candidate (the player's **5 most recently seen devices of the last 90 days**, steps -1, 0, +1: 15 codes a guess) is derived with `private.offline_seed_derive` (executable by nobody), computed with `private.hotp` (SHA-256, 600 s, 6 digits) and compared as a **double HMAC under a per-call random key**, **every candidate evaluated, no early exit**; the match is recorded with 0045's atomic `INSERT ... ON CONFLICT DO NOTHING` on `app.offline_code_step`. **It returns only `(o_status, o_attestation_id, o_held)`: never a seed, an expected code, a device or a step** (a matrix cell pins the result type; a unit test and the Deno suite scan the response). 0045's recorder stays owner-only (0047), and 0056 asserts at apply time that no edge role can execute it.
+- **Failure counters (money doc step 2), written before a verdict can leak and committed**: 5 per staff member an hour, 10 per target player an hour and 30 a day across all staff (`rate_limit_bucket`, under advisory locks taken staff-then-target, so parallel guesses are counted, not raced). Every failed verification counts: malformed code or handle, unknown handle, wrong code, a replayed step. They are **statuses, never a RAISE** (the 0020 lesson); `supabase/tests/integration/partner-attest.deno.test.ts` reads them back from a second connection after a real commit.
+- **Self-attest (AT(16) part one)**: `22023 self_attestation_refused`, per **account** (6.5), on both paths; the Edge maps it to 422. The `attestation` CHECK and 0045's recorder compare accounts too.
+- **Same-device rule (plan A2-21)**: if a device of the staff member shares an install link, an App Attest key id or a DeviceCheck token hash with the player's device, the attest **completes**, the purchase and credit go to `held_review` (no co-signal window), a `same_device_attest` `fraud_signal` opens for the player, and the staff member's `staff_activity.anomalies` records it.
+- **Cold-start cap**: a member whose earliest active membership is under 7 days old may write 30 attestations in any rolling 24 hours (`cold_start_cap`, a status, 429).
+- **`partner_shift_log_for_partner(facility)`** (A0, staff or manager) and **`partner_staff_activity_for_partner(facility, days)`** (A0, manager or operator; **staff cannot**, plan line 843). These replace `api.staff_shift_log` and `api.staff_activity` now that D12 (0047) revoked the PostgREST path. The shift log returns the old view's rows (the facility's, newest first, 90 days) and **a subset of its columns** (id, facility, time, kind, player handle snapshot, staff handle): the keyed player pseudonym the old view's `SELECT *` carried is not returned.
+- **Writes** (`private.partner_attest_write`, EXECUTE for nobody but its owner): `app.attestation` (both pseudonyms through `private.account_pseudonyms`), `attestation_shift_log`, `staff_activity` (upsert, the facility-local day), and for `marker_purchase` one `purchase_evidence` (`method staff_scan`, `offline` true on the offline path) plus one `marker_credit` per eligible trail (accepted programme row on a `pilot` or `live` `any_purchase` trail). **A purchase is `pending` with `cosignal.awaiting = {from, to, until}`** exactly as the S2a seam paragraph says (online: now -10 min to now +20 min; offline: the code's step start -10 min to +20 min; `until` 7 days), so `marker_cosignal_attach_for_actor` completes it unchanged. A staff scan writes no `play` (AT(4) holds). The App Store review account is never written for (the writer calls `private.is_demo_account`, as 0051 requires of every minter).
+- **Binding-keyed policies (S1.1a LOW-3)**: 22 `private_definer` policies, all keyed on `private.partner_binding_kind() = 'partner'` plus `private.partner_bound_staff_at(facility)` / `_manager_at` / `_any()` (new predicates in the 14(c) reader list, the partner twins of 0045's `offline_code_bound_staff()`); **none reads a GUC**. They replace the windows 0047 8c closed: `offline_code_step` (insert, select, prune), and add the rows the writer needs (attestation, shift log, staff_activity, profile, checkin_token, device, facility, trail programme, staff_scan purchase and credit, fraud signal, the attestation nonce tombstone). Each is in `definer_policy_allowlist` and `supabase/tests/fixtures/definer_policy_exprs.txt`. A lesson recorded: `INSERT ... ON CONFLICT DO NOTHING` is checked against the SELECT policies too (the new row must be one the role may see), hence `pd_partner_offline_step_select`.
+
+**Edge** (`supabase/functions/partner-attest/`, `_shared/partner/attest-handler.ts`, `attest-shape.ts`, `ports.ts` `PartnerAttestTx` / `PartnerDb.withAttest`, `privileged.ts` `buildPartnerAttestTx`). Routes (all session routes, `verify_jwt = false`):
+
+| Route | Class | Body or query | Answers |
+|---|---|---|---|
+| `POST attest` | A1 | `{facilityId, kind, token}` | 201 `{attestationId, held}`; 409 `replayed`; 422 `token_invalid` (unknown, expired, another facility, the review account: one answer), `no_programme`, 422 for a self-attest; 429 `cold_start_cap`; 403 no scope or no PIN grant |
+| `POST attest/offline` | A1 | `{facilityId, kind, handle, code}` | 201; 409 `replayed` (AT(13)); 422 `verification_failed` (one answer for every way the code can be wrong); 429 after the counters; the same refusals |
+| `GET shift-log` | A0 | `?facilityId=` | 200 `{entries}` |
+| `GET staff-activity` | A0 | `?facilityId=&days=` (1-90, default 7) | 200 `{activity}` |
+
+The order is the members handler's (Origin, preflight, route and method, bearer, strict body or query, the per-member bucket `partner-attest:member` at 240 an hour `[inference]`, then the work). Every returned status commits; a 42501 and a 22023 throw and roll back. Entrypoint enumerations updated: `config.toml`, the three CI function lists, `partner-modules.test.ts`, `review-account-gate.test.ts`, the Deno and partners fakes.
+
+### 26.2 Decisions and departures, and why
+
+- **The online "token" is `checkin_token.jti`.** The build plan (not in this repository) names a staff-scanned player token without a definition here, and no player endpoint issues one. Reusing the existing check-in token costs the player lane nothing, and it is already server-graded and challenge-bound. A shoulder-surfed jti lets a staff member attest a player only for a facility the token allows; it cannot be used to read or spend anything of the player's. If the plan's attest token is a different object, `partner_attest_for_partner`'s token lookup is the one seam to change.
+- **AT numbering.** The AT(n) list is the build plan's and is not in this repository. The mapping used here, so the cells can be re-pointed: AT(1) staff at X cannot attest at Y (and an operator cannot); AT(2) the online token path; AT(12) the offline code verified in the database, window and secrecy; AT(13) a replayed code step is 409; AT(15) the same-device rule and the cold-start cap; AT(16) part one self-attest. Each cell's message carries its AT number.
+- **No `app.evidence` `staff_presence` row is written.** The money doc says "write the evidence"; the scoring union that would read a staff-created evidence row for a player's play is not wired to attestations, and an evidence row needs a matcher `input_hash`, a `local_date` and a course. The durable record is the `attestation` row (already exported to its subject, 0022) plus, for a marker purchase, the pending purchase. `cosignal_ok` stays `false` until a player fix arrives; nothing sets it yet.
+- **The cold-start numbers (7 days, 30 a day) and the 240 an hour bucket are `[inference]`**: the plan's 8.3 is not in the repository. They are one literal each (`partner_attest_write`; `ATTEST_PER_MEMBER_PER_HOUR`).
+- **Handles only on the offline path.** The staff member types the player's handle (money doc step 1); the database resolves it. An unknown handle, a review-account handle and a player with no recent device are the same status as a wrong code, and the handle lookup cannot be used to enumerate (the staff counter counts it).
+- **The staff counter is read under a lock and written on failure** rather than reserved and released (the 0035 pair): the lock serialises one staff member's verifications, which is what makes "5 an hour" exact, and the definer knows the outcome itself, so no release is needed.
+
+### 26.3 Not built, honestly
+
+- **`partner-offers-redeem` and the offer-redemption attestation kind.** Redeeming an `offer_code` moves `offer.budget_reserved` into `budget_used` (0027's header: "a redeemed code's reservation was consumed into budget_used"), which is the settlement P5.1b owns, and it trips the 0017 play guards (`pd_offer_code_guard_read`, a GUC window closed under a partner binding by 0047 8c). It needs its own binding-keyed guard policies and the settlement accounting; shipping a redeem that skips either would be the half-built route this slice was told not to leave. `kind = offer_redemption` is therefore refused (22023) by both attest definers, and the offline-code redemption rules (needs the step-up PIN and the profile-card name check; `fraud_signal` / `unconfirmed` mark after 24 hours with no co-signal) are the same slice's. **Seam**: a `partner_offers_redeem_for_partner(facility, offer_code, ...)` A1 definer in the next migration, calling `partner_attest_write` with kind `offer_redemption` (the writer already takes the kind; the 0056 policy CHECK on `attestation.kind` must widen), plus `pd_*` guard-read policies keyed on the binding.
+- **Special-marker hand-over** (`special_marker_handover`): S5.
+- **The `staff_presence` evidence projection and `cosignal_ok`** (26.2).
+- **A two-connection script in the style of `tools/db/test-partner-serialisation.sh`** for the attest race: the 4-way parallel verification is proved in the Deno suite instead.
+- **No mutation pass was run for this slice.**
+- **Merge notes**: `0055` / matrix `33` / section 25 belong to S2b; both slices edit `privileged.ts`, `ports.ts`, `ci.yml`, the entrypoint enumerations and the `partner_kind_readers.txt` / `definer_policy_exprs.txt` fixtures, so the merge is a textual (not semantic) conflict in those lists. The lists in matrices 10, 25 and 28 pin exact `edge_partner` and class-A0 sets and will need both slices' names.
+
+### 26.4 Verification run for this slice
+
+Run in this environment (PostgreSQL 16, Deno 2.5.2 from the CI-pinned release):
+
+- `HARNESS_MODE=restricted tools/db/test.sh`: pgTAP **Files=54, Tests=5177, PASS** (baseline before this slice: 53 / 5065); the Deno integration suite **382 passed, 0 failed** (six of them are `partner-attest.deno.test.ts`: the online and offline paths through the real handler and `privileged.ts`, the failure counters read from a second connection after a real commit, four staff verifying one code at once recording it once); the replay, money-path, sign-in-proof, partner-serialisation and review-account checks pass. Deno 2.5.2 was installed from the CI-pinned release for this run.
+- `HARNESS_MODE=superuser tools/db/test.sh`, run on the final tree: pgTAP **Files=54, Tests=5177, PASS**, Deno **382 passed, 0 failed**, inventory OK, lint clean.
+- `tools/db/verify-function-inventory.mjs`: OK (checks 1-15, including check 14 clauses (a) to (e) and the 14 (a) behavioural-cell rule for the four new functions); `service-role-lint` clean; `tools/db/check-migrations-immutable.sh --base edc5020`: all 54 existing migrations byte-identical.
+- vitest (`supabase/tests/unit`): the new `partner-attest-handler.test.ts` (shapes, route order, the status map, commit-versus-rollback, no seed or code in any response) and the updated enumerations pass; the files that fail in this environment fail for reasons outside this slice (`mint-siwa-client-secret` and `rules-vendor-freshness` need a build or network; `review-account-minters` failed on a first draft of the writer and is fixed here by the demo-account refusal). `apps/partners` typechecks (the fake `PartnerDb` gained `withAttest`).
+
+## 27. As built: S4 (held-review queue and resolve; receipts upload is a documented seam)
+
+Numbering: **migration `0057`, matrix `35`, this section 27.** S2b claims `0055` / matrix `33` / section 25; S3 claims `0056` / matrix `34` / section 26; S7 claims section 24. This slice takes the next free number of each so the branches merge without a rename. Nothing from 0001-0056 is edited.
+
+### 27.1 What was built
+
+**Migration `0057_partner_review_queue.sql`** (database half) and **matrix `35_partner_review_queue.sql`** (44 cells; both harness modes), then the Edge function **`partner-review`**.
+
+- **`private.partner_resolve_held_offer_code_for_partner(code_id, approve)`** and **`private.partner_resolve_held_entitlement_for_partner(entitlement_id, approve)`**, class **A3**, **ADMIN only** (an operator with a fresh TOTP window still cannot). They wrap `app.resolve_held_*` (0027, E20) so the Edge never reaches those functions: `edge_partner` (and every other edge role) still has no EXECUTE on them. The bound admin is `p_resolved_by`. Outcomes are **status rows** (`ok | not_found | not_held | budget_short` for offer codes; no `budget_short` for entitlements), so an expected refusal commits; only a missing authority (`42501`) or a malformed argument (`22023`) raises. Apply helpers (`partner_resolve_held_*_apply`, EXECUTE for nobody but their owner) translate the SQLSTATEs of `resolve_held_*` (`P0002`, `55000`, `23514`) so the `_for_partner` bodies stay free of `EXCEPTION` blocks (check 14).
+- **`private.partner_held_queue_for_partner()`**, class **A0**, ADMIN only. The open `held_review` offer codes and entitlements plus open `review_item` rows, with an SLA-breach flag (held / open longer than **48 hours**; `[inference]`: the plan's §9.2 SLA number is not in the repository). No plaintext code, no DeviceCheck hash, no ledger row. Newest-breach-first, capped at 500.
+- **`private.partner_review_sla_for_partner()`**, class **A0**, ADMIN only. Counts of open held rewards and open review items, and of those past the SLA (the portal / ops alert surface).
+- **Binding-keyed policies (S1.1a LOW-3)**: `private.partner_bound_admin()` (EXECUTE for nobody but the owner; in the 14(c) reader list) and **11** `private_definer` policies on `offer_code`, `entitlement`, `offer`, `device_reward_ledger`, `review_item` and `profile`, all keyed on that predicate — **none reads a GUC**. Each is in `definer_policy_allowlist` and `supabase/tests/fixtures/definer_policy_exprs.txt`. `GRANT EXECUTE` on `app.resolve_held_*` to `private_definer` only; apply-time asserts no edge role can execute them.
+
+**Edge** (`supabase/functions/partner-review/`, `_shared/partner/review-handler.ts`, `review-shape.ts`, `ports.ts` `PartnerReviewTx` / `PartnerDb.withReview`, `privileged.ts` `buildPartnerReviewTx`). Routes (all session routes, `verify_jwt = false`):
+
+| Route | Class | Body | Answers |
+|---|---|---|---|
+| `GET queue` | A0 | (none) | 200 `{items}`; 403 not admin |
+| `GET sla` | A0 | (none) | 200 counts + `slaHours: 48`; 403 not admin |
+| `POST resolve/offer-code` | A3 | `{id, approve}` | 200 `{state}`; 404 `not_found`; 409 `not_held`; 422 `budget_short`; 403 no A3 / not admin |
+| `POST resolve/entitlement` | A3 | `{id, approve}` | 200 `{state}`; 404 / 409 as above |
+
+The order is the members handler's (Origin, preflight, route and method, bearer, strict body on POST, the per-member bucket `partner-review:member` at 120 an hour `[inference]`, then the work). Entrypoint enumerations updated: `config.toml`, the three CI function lists, `partner-modules.test.ts`, `review-account-gate.test.ts`, the Deno and partners fakes. Matrices 10, 25 and 28 pin the four new `edge_partner` names and the two new class-A0 names.
+
+### 27.2 Decisions and departures, and why
+
+- **A3 wrappers around `app.resolve_held_*`, not a rewrite.** 0027's state machine, budget reservation, audit and ledger writes stay; S4 only makes them reachable under a partner binding with an admin and a fresh TOTP window (E20 / F7). Status translation lives in apply helpers so check 14 stays clean.
+- **Admin only, not operator.** The money doc and 0027 already require `p_resolved_by` to be an admin; the wrappers re-check `private.is_admin` after `partner_authorize` with an operator role array (the same shape as `partner_admin_enrolment_issue_for_partner`).
+- **48 h SLA is `[inference]`.** One literal in each of the queue and SLA definers; change both together if the plan's number lands.
+- **Queue GETs take no query string.** The list is global for the admin (held rewards are not facility-scoped today); facility filtering stays a portal concern until a filter is specified.
+
+### 27.3 Not built, honestly
+
+- **Player-lane `POST /v1/receipts` upload** — **built in §40** (migration `0064`, matrix `42`).
+- **Resolving a held PLAY** (`resolve_held_*` moves the reward row, not the play). Clearing a `fraud_signal`. The contract-reviewer staffing trigger of `roles-table.md`.
+- **Partners PWA review screens** (S7d). This slice is the Edge + database half the portal will call.
+- **No mutation pass was run for this slice.**
+- **Merge notes**: S2b edits the same enumeration files (`privileged.ts`, `ports.ts`, `ci.yml`, `partner_kind_readers.txt`, `definer_policy_exprs.txt`, matrices 10/25/28). The lists here include S3's names and S4's; merging S2b is a textual (not semantic) conflict in those lists.
+
+### 27.4 Verification run for this slice
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 35's **44/44** cells; all other pgTAP matrices; partner serialisation and review-account tool checks; Deno integration **382/382** (every `PartnerDb` fake implements `withReview`; PA-13b includes the four 0057 wrappers). `definer_policy_exprs.txt` matches live `pg_get_expr` for the eleven review policies (INSERT on `review_item` uses the catalog's AND-chain form). Vitest `partner-review-handler` + `partner-attest-handler` (60) and `apps/partners` typecheck pass locally. Remaining: CI on PR #68.
+
+## 28. As built: S5 (hand-over and stock)
+
+Numbering: **migration `0058`, matrix `36`, this section 28.** S2b claims `0055` / matrix `33` / section 25; S3–S4 claim 0056–0057 / 34–35 / 26–27. Nothing from 0001–0057 is edited.
+
+### 28.1 What was built
+
+**Migration `0058_partner_handover_stock.sql`** and **matrix `36_partner_stock_handover.sql`** (65 cells), then Edge functions **`stock-admin`** and **`partner-entitlements`**.
+
+- **Stock (A0/A1, staff or manager):** `partner_stock_read_for_partner`, `partner_stock_move_for_partner` (delivered / transfer_in / transfer_out / count_adjustment / damaged; never `redeemed` / `voucher_redeemed`), `partner_stock_availability_refresh` (owner-only). Statuses `ok | no_stock_row | short | over_cap`.
+- **Collect queue (A0):** `partner_entitlement_queue_for_partner` — redeemable of trails the facility stocks, and vouchered owed here; player by handle only.
+- **Hand-over token:** `app.partner_handover_token` (hash only, FORCE RLS, no edge grants); `partner_handover_mint_for_partner` (A1) stores SHA-256 of an Edge-generated `gr_ho_…` token for 15 minutes.
+- **Redeem (A1, AT(8)/AT(21)):** `partner_entitlement_redeem_for_partner` — `staff_scan` (check-in jti) or `hand_over_token` (hash); `offline_code` is 22023. Stock `FOR UPDATE`; `out_of_stock` changes nothing (voucher separately). Movement `redeemed` or `voucher_redeemed`; one `special_marker_handover` attestation (`token_jti` = `smh:<credential ref>` so it does not collide with the entitlement_redeem nonce). Self-redeem 22023.
+- **Voucher (A1):** `partner_entitlement_voucher_for_partner` — redeemable → vouchered at this facility.
+- **Binding-keyed policies:** 17 `private_definer` policies on stock, movement, availability, entitlement, play guard read, hand-over token, `consumed_nonce` (`entitlement_redeem`), and attestation (`special_marker_handover`). No GUC windows.
+
+**Edge**
+
+| Function | Routes |
+|---|---|
+| `stock-admin` | `GET stock`, `POST stock/move` |
+| `partner-entitlements` | `GET collect`, `POST handover/mint` (plaintext once), `POST redeem`, `POST voucher` |
+
+`out_of_stock` and `replayed` → 409; cold-start → 429; expected refusals → 422; missing scope/PIN → 403.
+
+### 28.2 Decisions and departures
+
+- **Attestation jti is `smh:` + credential ref**, not the entitlement id: the 0017 tombstone and the staff_scan `entitlement_redeem` nonce must not share a primary key, and a later redeem of a reset row must not collide.
+- **Status gates read entitlements without `FOR UPDATE` first:** `SELECT FOR UPDATE` also applies UPDATE RLS, which only opens redeemable/vouchered rows, so a re-redeem of a redeemed row would otherwise look like `not_found`.
+- **Race for the last unit** is proved twice: in matrix 36 by sequential redeems at `on_hand = 1` (CHECK + row lock), and with real concurrency by `tools/db/test-partner-stock-concurrency.sh` (run by `tools/db/test.sh`): two real `edge_gateway` sessions are parked on the contested row (seen waiting in `pg_locks`) and released together, six rounds each giving exactly one `ok` and one `out_of_stock`, `on_hand` 0, the loser's entitlement and hand-over token untouched; the same entitlement redeemed twice at once (one `ok`, one refusal, one unit); and a play-backed entitlement redeemed and COMMITTED (the deferred 0017 guard re-reads the play at a real commit through `pd_partner_handover_play_guard_read`). Removing `FOR UPDATE` from the redeem's stock read makes the script fail (the CHECK is the backstop that turns the lost race into an error rather than a negative stock).
+
+- **The hand-over token is the Edge's.** `POST handover/mint` generates 32 random bytes (`gr_ho_` + 43 base64url characters), hands the port only the SHA-256 and returns the plaintext once in the 201 body. `POST redeem` with `method: "hand_over_token"` takes the plaintext as `credential` and hashes it before the port; a bare SHA-256 or a uuid is a 400 for that method, so the hash is never a credential a client can present.
+- **Status map (Edge).** Every returned status commits. mint and redeem `ok` 201, voucher `ok` 200, stock move `ok` 200; `not_found` / `no_facility` 404; `not_redeemable`, `wrong_facility`, `token_invalid`, `wrong_player`, `no_stock_row`, `short`, `over_cap`, `token_exists` 422; `replayed` and `out_of_stock` 409 (`out_of_stock` is a state conflict that changed nothing: the caller vouchers next); `cold_start_cap` 429; 42501 403; 22023 (self-redeem, malformed) 422 and a rollback. `token_invalid` and `wrong_player` are one code on the wire (`token_invalid`), as in `partner-attest`.
+- **Per-member bucket** (`stock-admin:member`, `partner-entitlements:member`, 240 an hour each), taken in its own transaction before the request transaction opens.
+
+### 28.3 Not built, honestly
+
+- **`offline_code` redemption** and **offers-redeem** (P5.1b).
+- **Partners PWA hand-over/stock screens (S7c).**
+- **Creating a stock row** from the partner lane (catalog/ops owns rows).
+- **Paired transfer** (transfer_out here + transfer_in there are two moves).
+- Merge notes: S2b still edits the same enumeration files; lists here include S3–S5 names.
+
+### 28.4 Verification run for this slice
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on this tip: matrix 36's **65/65** cells; all other pgTAP matrices (**5286** tests PASS); partner serialisation; **partner stock concurrency** (`test-partner-stock-concurrency.sh`: six last-unit rounds, same-entitlement race, play guard at a real commit); review-account tool checks; Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest stock + entitlements handler suites (status map, hash-only hand-over token, strict shapes, bucket order). CI on PR #69 tip `b433f81`: all three checks green.
+
+## 29. As built: S7c (hand-over and stock screens; `apps/partners`)
+
+Numbering: **this section 29.** S7b on this branch claims section 27; S5 (parallel Edge/DB half) claims section 28; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page talks to the Edge routes S5 ships (`stock-admin`, `partner-entitlements`).
+
+### 29.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `stock-admin` and `partner-entitlements`; `connect-src` gains two path-scoped sources.
+- **Typed work routes** (`src/api/work-routes.ts`): stock read/move; collect queue; hand-over mint (plaintext once); redeem (`staff_scan` / `hand_over_token`); voucher. Response bodies checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Hand over a marker** and **Stock** beside attest and course-QR. Every A1 action calls `requirePin("A1")` then the action in the same turn. Hand-over token plaintext lives only in `work.minted` until dismissed.
+- **Fake partner server** answers the two new functions in-memory (PIN-grant consume on A1) so the page's unit cells run without the S5 Edge tree on this branch.
+
+### 29.2 Decisions and departures
+
+- **Hand-over token shape is checked without a regexp** (same V8 last-match reason as the session token).
+- **Queue mint/voucher buttons** sit on each collect row; redeem uses a shared form (entitlement id + credential) so a pasted id still works when the queue is empty.
+- **Stock move kinds** match the Edge allow-list (never `redeemed` / `voucher_redeemed`).
+
+### 29.3 Not built, honestly
+
+- Camera scan into redeem credential fields.
+- S7d manager/operator/admin screens (section 31).
+- Offline-code redeem (P5.1b).
+- Merging with S5 will conflict textually in enumeration files the way S7b notes for S2b/S3.
+
+### 29.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 761 tests, all pass** (extends `work.test.ts`: stock load + A1 move; hand-over mint + staff_scan redeem after PIN; request bodies contain no PIN digits).
+
+## 30. As built: S6 (programme and sponsors)
+
+Numbering: **migration `0059`, matrix `37`, this section 30.** S2b claims `0055` / matrix `33` / section 25; S3–S5 claim 0056–0058 / 34–36 / 26–28; **§29 is reserved for S7c UI.** Nothing from 0001–0058 is edited.
+
+### 30.1 What was built
+
+**Migration `0059_partner_programme_sponsors.sql`** (database half) and **matrix `37_partner_programme_sponsors.sql`** (58 cells; both harness modes when green), then Edge functions **`programme-config`**, **`offers-admin`**, and **`sponsorships-admin`**.
+
+- **`private.partner_bound_operator_at_trail(trail)`** — policy predicate (EXECUTE for nobody but the owner; in the 14(c) reader list). True when this transaction carries a partner binding whose member is an operator of the trail (or admin via `has_trail_scope`).
+- **Programme (A0/A3, operator of the trail):** `partner_trail_programme_read_for_partner`, `partner_facility_programme_list_for_partner`, `partner_trail_programme_upsert_for_partner` (`web_player_flow` true → `22023`; statuses `ok | not_found`), `partner_facility_programme_upsert_for_partner` (statuses `ok | no_trail`; never writes `pin_epoch`).
+- **Offers (A0/A3):** `partner_offers_list_for_partner` (full budget / eligibility columns, every status); `partner_offer_upsert_for_partner` (draft create/edit; `ok | not_found | not_draft | bad_funder`); `partner_offer_approve_for_partner` (**admin only**, draft → live); `partner_offer_end_for_partner` (operator of the trail or admin, live → ended).
+- **Sponsorships (A0/A3, AT(20)):** `partner_sponsorships_list_for_partner`; `partner_sponsorship_upsert_for_partner` (draft; sponsor_org must be `kind = sponsor`); `partner_sponsorship_approve_for_partner` (draft → live; when scope is `special_marker` or `both`, every `facility_programme` with `holds_special_marker` must have `special_marker_stock.on_hand >= 1` or the status is `stock_short` and nothing changes).
+- **Rollups (A0):** `partner_operator_rollup_for_partner`, `partner_sponsor_rollup_for_partner` (scope via the sponsorship's trail).
+- **Binding-keyed policies:** 14 `private_definer` policies (`pd_partner_programme_*`) on `trail_programme`, `facility_programme`, `offer`, `sponsorship`, `operator_rollup`, `sponsor_rollup`, and `special_marker_stock`. **None reads a GUC.** Existing `pd_marker_scan_*`, `pd_partner_attest_*`, `pd_partner_review_*`, and `pd_read_sponsorship` stay.
+
+| Function | Routes |
+|---|---|
+| `programme-config` | `GET programme`, `POST programme/trail`, `POST programme/facility`, `GET rollups/operator`, `GET rollups/sponsor` |
+| `offers-admin` | `GET offers`, `POST offers`, `POST offers/approve`, `POST offers/end` |
+| `sponsorships-admin` | `GET sponsorships`, `POST sponsorships`, `POST sponsorships/approve` |
+
+Ports: `PartnerProgrammeTx` / `withProgramme`, `PartnerOffersAdminTx` / `withOffersAdmin`, `PartnerSponsorshipsTx` / `withSponsorships` (merged into `withPartnerSession` like `withStock`). Upsert eligibility is checked with the Edge-local AT(14) schema gate in `offer-eligibility.ts` (closed money-mode aggregate names; `packages/rules` remains the full SSOT outside Edge) **before** the database. Status map: `ok` → 200; `not_found` / `no_trail` / `not_draft` / `not_live` / `bad_funder` / `bad_sponsor` / `stock_short` / `invalid_eligibility` → 422; `42501` → 403; `22023` → 422. Per-member buckets (`programme-config:member`, `offers-admin:member`, `sponsorships-admin:member`, 240 an hour each).
+
+### 30.2 Decisions and departures, and why
+
+- **Offer approve means draft → live in one step** (no separate `approved` stop). Keeps the portal machine simple; `approved` remains a legal enum value for other writers.
+- **Admin-only offer approve** mirrors S4's held-review resolve (`partner_authorize` with an operator role array, then `is_admin` or `42501`).
+- **AT(20) is a status, not a raise** — `stock_short` commits so the Edge can map it to 422 without rolling back an unrelated write in the same request transaction.
+- **Column grants exclude `pin_epoch`** on facility_programme programme writers; the 0046 epoch rotation path stays the only partner write of that column.
+- **Edge half built** — three functions, `verify_jwt = false`, handlers pure (PA-11). Settlement remains P5.1b.
+
+### 30.3 Not built, honestly
+
+- **Settlement-export AT(17)** and **offers-redeem** — moved to **§32 (P5.1b)**; not part of the S6 tip.
+- **Rollups-refresh writer** (rows are read-only here; ops/catalog still seed them).
+- **Issuance staff gate AT(10)** (deferred; see §32.3).
+- **S7d / S7c UI** (portal screens; §29 reserved for S7c).
+- **No mutation pass** was run for this slice.
+
+### 30.4 Verification
+
+Local restricted harness (`HARNESS_MODE=restricted tools/db/test.sh`) on tip `5782bd8`: matrix 37's **58/58** cells; all other pgTAP matrices (**5344** tests PASS across 57 files, including updated 10 / 24 / 25 / 28 inventory and grant cells); Deno integration **382/382**; `verify-function-inventory` OK; service-role lint clean. Vitest programme / offers / sponsorships handler suites plus related PartnerDb fakes (**96** focused cells; broader partner handler run **268**). `definer_policy_exprs.txt` holds the fourteen `pd_partner_programme_*` policies. CI on PR #71 tip `e2b11ac`: all three checks green.
+
+## 31. As built: S7d (manager / operator / admin screens; `apps/partners`)
+
+Numbering: **this section 31.** S7c on this lineage claims section 29; S6 (programme/sponsors Edge half, parallel branch) claims section 30; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls S6/S4 Edge paths by name (`programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`); the fake partner server stubs them so unit cells run without merging those trees.
+
+### 31.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `programme-config`, `offers-admin`, `sponsorships-admin`, `partner-review`; `connect-src` gains four path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`).
+- **Typed admin routes** (`src/api/admin-routes.ts`): programme read + trail/facility upsert; offers list/upsert/approve/end; sponsorships list/upsert/approve; review queue + SLA + resolve offer-code/entitlement; operator and sponsor rollups. Response bodies checked field-by-field (camelCase wire shapes match the S6 handlers).
+- **Admin screens** (`src/app/admin.ts`, extended `WorkView` kinds, `ui/views-admin.ts`). Signed-in home gains a **Programme and ops** section: programme / offers / sponsorships / rollups for `isAdmin` or any `operator` membership; **Review queue** for `isAdmin` only. Staff keep shop-floor only. A0 reads call directly; A3 writes refuse on the client unless `aal` 2 (same gate as printed-QR write).
+- **Errors and i18n.** `ErrorContext` gains programme/offers/sponsorships/review/rollups; closed codes `not_draft`, `not_live`, `bad_funder`, `bad_sponsor`, `stock_short`, `budget_short`, `no_trail`, `invalid_eligibility`, `not_held` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers the four new functions in-memory (A3 checks aal + fresh `mfaUntil`; sessions minted at aal ≥ 2 get a fresh MFA window for fixtures).
+
+### 31.2 Decisions and departures
+
+- **WorkView extended** with `programme | offers | sponsorships | review | rollups` rather than a parallel `AdminView` field, so one `work` slot still replaces home.
+- **Invite/member admin tools** stay on the existing PIN/TOTP/enrol panels; this slice does not add invite-issue UI.
+- **Eligibility** is sent as JSON from a text field; schema validation remains the Edge's AT(14) gate.
+
+### 31.3 Not built, honestly
+
+- Settlement UI (billing / fee settlement surfaces).
+- Camera or richer editors for eligibility rules.
+- Merging with S6 will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 31.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 877 tests, all pass** (adds `admin.test.ts`: open programme/offers/review/rollups, A0 load, A3 aal gate, offer approve and review resolve; request bodies contain no tokens beyond closed ids).
+- CI on PR #72 tip `ec7a5cc`: all three checks green.
+
+## 32. As built: P5.1b (offers-redeem + settlement-export + exports-purge)
+
+Numbering: **migration `0060`, matrix `38`, this section 32.** S6 claims `0059` / matrix `37` / section 30; **§31 is reserved.** Nothing from 0001–0059 is edited.
+
+### 32.1 What was built
+
+**Migration `0060_partner_offers_settlement.sql`** (database half) and **matrix `38_partner_offers_settlement.sql`**, then Edge functions **`partner-offers-redeem`**, **`settlement-export`**, and **`exports-purge`**.
+
+- **Binding-keyed policies** (never a GUC): offer_code select/update (issued→redeemed), offer budget select/update, play guard read via `offer_code.play_id`, attestation insert `kind=offer_redemption`, consumed_nonce for `offer_redemption`, settlement SELECT of redeemed codes on a trail the bound operator runs (or admin).
+- **`GRANT EXECUTE` on `app.consume_offer_budget` TO `private_definer`**; `GRANT UPDATE (budget_used)` on `app.offer`.
+- **`private.partner_offers_redeem_for_partner`** (A1, staff/manager): status-before-`FOR UPDATE` (0058 ordering); method `staff_scan` (player check-in jti); `offline_code` refused with `22023`. Statuses: `ok | not_found | not_issued | expired | wrong_facility | token_invalid | wrong_player | replayed | no_facility | cold_start_cap | budget_short`. Apply helper consumes budget, writes `offer_redemption` attestation via `partner_attest_write`, updates the code.
+- **`private.partner_offers_queue_for_partner`** (A0): issued codes at the facility with player handle.
+- **`private.partner_settlement_export_for_partner`** (A3, operator-at-trail or admin): lines with `facility_id`, `month`, `funder`, `sponsorship_id`, `redemptions`, `offline_count`, `unconfirmed_count`, `face_value_total`. Statuses `ok | empty`.
+
+| Function | Routes |
+|---|---|
+| `partner-offers-redeem` | `GET queue`, `POST redeem` |
+| `settlement-export` | `POST export` → CSV under `exports/`, signed URL (7 days) |
+| `exports-purge` | `POST` (system lane, service-role bearer): delete `exports/` objects older than 7 days |
+
+Ports: `PartnerOffersRedeemTx` / `withOffersRedeem`, `PartnerSettlementExportTx` / `withSettlementExport` (merged into `withPartnerSession`), `ExportsStoragePort` / `exportsStorage` (service-role `createSignedUrl` + purge). Status map: redeem `ok` → 201; settlement `ok` → 200 with `{ path, signedUrl, expiresAt, lines }`; `empty` → 404; `42501` → 403; `22023` → 422. Per-member buckets (`partner-offers-redeem:member` 240/h, `settlement-export:member` 60/h). System bucket `exports-purge` 12/h.
+
+### 32.2 Decisions and departures, and why
+
+- **Budget before attest** in the apply helper — avoids an orphan `offer_redemption` attestation if `consume_offer_budget` raises `check_violation` (`budget_short`).
+- **`offline_code` out of this slice** — Edge shape and database both refuse with 22023 / 400; the offline PIN + profile-card path stays a later seam.
+- **Settlement CSV always includes `sponsorship_id`** (empty when null) so AT(20) attribution is visible on every line.
+- **`exports-purge` is the AT(17) lifecycle** when native Storage lifecycle is unavailable in the harness; signed URL expiry matches the 7-day retention.
+
+### 32.3 Not built, honestly
+
+- **`offline_code` offer redeem** — **built in §35** (migration `0062`, matrix `40`).
+- **Rollups-refresh writer** (still out of scope; S6 seam).
+- **S7 UI** (portal screens for staff_scan landed in §33; offline redeem form in §36).
+- **No mutation pass** was run for this slice.
+
+### 32.4 Verification
+
+Branch: `cursor/p5-1b-offers-settlement-8ffd` (base S6 `ea27b80`).
+
+- **Matrix 38** (`38_partner_offers_settlement.sql`): 32/32 PASS — foreign facility 403, A1 without PIN, happy redeem + budget consume, self-redeem 22023, A3 without TOTP refused, planted GUC, settlement line carries `sponsorship_id` for sponsor funder, export redemptions/`face_value_total` match planted redeem.
+- **Edge vitest** (partner-offers-redeem, settlement-export, exports-purge + CI/module lists): **86/86** PASS.
+- **`HARNESS_MODE=restricted tools/db/test.sh`**: **Files=58, Tests=5376, Result: PASS**; Deno integration **382 passed | 0 failed** (Deno 2.5.2 as CI pins); `verify-function-inventory: OK` (nine `pd_partner_offers_*` allow-list rows in `definer_policy_exprs.txt`); `service-role-lint: clean`. Helpers seed `staff_activity.day` on facility-local date so matrix 34 does not flake across the UTC/Chicago midnight boundary. Settlement policy uses `offer_code.facility_id` (bare `facility_id` deparsed as a tautology).
+- Claims in-slice (0060 tip): **AT(17)** (signed URL after A3 role check + 7-day `exports-purge`), **AT(20)** (settlement lines carry `sponsorship_id`), **AT(10)** reconcile half (export matches redemptions).
+- **CI on PR #73 tip `5f03f03`:** all three checks green (after PartnerDb stubs + 0061 review-account / rewards-isolation gates).
+
+### 32.5 AT(10) issuance staff gate (0061)
+
+Numbering: **migration `0061`, matrix `39`.** Nothing from 0001–0060 is edited.
+
+**Built:** `private.facility_has_active_staff(facility)` (EXISTS non-revoked staff/manager with `partner_scope.facility_id`); `app.activate_offer_code` CREATE OR REPLACE holds an **earned** activate with `hold_detail.heldFor = no_active_staff` when the facility has no active staff (already-issued re-activate is not gated); `app.resolve_held_offer_code` refuses an approve that would **issue** with `23514` / partner status `no_active_staff` (return-to-earned is not gated). Both rewrites call `private.is_demo_account` (review-account ratchet).
+
+**Matrix 39** (`39_at10_issuance_staff_gate.sql`): fac_x still issues; facility with only revoked staff → `held_review` / `no_active_staff`; issued re-activate ungated; resolve/apply refuse issue without staff.
+
+**Verification:** on this branch, `HARNESS_MODE=restricted tools/db/test.sh` pgTAP **Files=59, Tests=5389, Result: PASS** (matrix 39 **13/13**; matrix 15 activate path still green; matrix 10 inventory includes `facility_has_active_staff`). Claims: **AT(10)** issuance half now built; reconcile half remains matrix 38. CI green with §32.4 tip.
+
+## 33. As built: S7 offer redeem + settlement export screens (`apps/partners`)
+
+Numbering: **this section 33.** S7d on this lineage claims section 31; S6 (programme/sponsors Edge) claims section 30; P5.1b (offers-redeem / settlement Edge half, parallel branch) claims section 32; this PWA slice takes the next free section. **No server, database or migration change on this branch**: the page calls P5.1b Edge paths by name (`partner-offers-redeem`, `settlement-export`); the fake partner server stubs them so unit cells run without merging that tree. `exports-purge` stays on the system lane and is **not** allow-listed.
+
+### 33.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` gains `partner-offers-redeem` and `settlement-export`; `connect-src` gains two path-scoped sources (pinned in `client-enrol.test.ts` and `csp.test.ts`). `exports-purge` is explicitly refused by the bearer allow-list cells.
+- **Typed routes.** `work-routes.ts`: `GET partner-offers-redeem/queue`, `POST …/redeem` (staff_scan only; camelCase wire matches P5.1b). `admin-routes.ts`: `POST settlement-export/export` → `{ path, signedUrl, expiresAt, lines }` (signed URL never logged).
+- **Offer redeem screen** (`work.ts` / `views-work.ts`, WorkView kind `offer-redeem`). Facility-scoped like stock/handover. Home button for staff/manager (or admin). A0 queue load; A1 redeem via `requirePin("A1")` then redeem in the same turn.
+- **Settlement export screen** (`admin.ts` / `views-admin.ts`, WorkView kind `settlement`). Home button with Programme and ops (operator/admin). Trail + month form; A3 aal gate (same as printed-QR / S7d writes); shows path, expiry, line count and a download link; dismiss clears the signed URL from state.
+- **Errors and i18n.** `ErrorContext` gains `offer-redeem` and `settlement`; closed codes `not_issued`, `expired`, `wrong_facility`, `token_invalid`, `replayed`, `budget_short`, `cold_start_cap`, `empty` map to catalogue keys. EN + FR-CA keys differ.
+- **Fake partner server** answers both functions in-memory (PIN grant for redeem; aal + fresh `mfaUntil` for export).
+
+### 33.2 Decisions and departures
+
+- Offer redeem stays on the shop-floor `work` slot (facility picker); settlement stays with admin ops (trail picker) — one `work` field still replaces home.
+- Settlement signed URL is held only in `work.export` for display (like a hand-over token); request logs and notices never include it.
+- Month inputs accept `YYYY-MM` (HTML `type=month`) or `YYYY-MM-DD` and normalize to `YYYY-MM-01` for the Edge body.
+
+### 33.3 Not built, honestly
+
+- Camera scan for check-in tokens.
+- Offline offer redeem UI — **built in §36** (`offline_code` Edge path is §35).
+- `exports-purge` UI (system lane).
+- Merging with P5.1b will conflict textually in `partner-functions.json` and the fake server's stubs (replaceable by the real handlers once that tree is present).
+
+### 33.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 917 tests, all pass** (adds offer-redeem A1 PIN + queue/redeem body cells; settlement A3 aal gate, export path/expiry, empty month; allow-list/CSP include the two functions and refuse `exports-purge`).
+- CI on PR #74 tip `fb8b5ea`: all three checks green.
+## 34. As built: S7b (attest and course-QR screens; `apps/partners`)
+
+Numbering: **this section 34.** (S7b originally claimed §27 in parallel with S4; S4 landed on main first via #73, so this UI as-built takes the next free section.) S2b (parallel) claims section 25 and S3 claims section 26; this slice takes the next free section so the branches merge without a rename. **No server, database or migration change**: the page is the only thing that moved. It talks to the Edge routes S2b and S3 ship (`partner-attest`, `course-qr`, `qr-print`).
+
+### 34.1 What was built
+
+- **Allow-list and CSP.** `partner-functions.json` is now `partner-session`, `partner-invites`, `partner-members`, `partner-attest`, `course-qr`, `qr-print`. `connect-src` gains three path-scoped sources; `Permissions-Policy` is `camera=(self)` (paste-only attest today; a later scan into the token field needs no header change).
+- **`call()` query object.** GET routes that need `?facilityId=` take a closed `{ key: value }` map (facility-id charset), appended after the path is validated so a route string still cannot carry `?` or `#`.
+- **Typed work routes** (`src/api/work-routes.ts`): online/offline attest, shift-log, staff-activity, course PIN, rotate, mint, refresh, printed QR read/write. Response bodies are checked field-by-field.
+- **Work screens** (`src/app/work.ts`, `state.work`, `ui/views-work.ts`). Signed-in home offers **Attest a player** and **Course QR**. Every A1 action calls `requirePin("A1")` then the action in the same turn (24.3). Rotate PIN is A2: `reauthWithPasskey` then `requirePin("A2")` then rotate. Printed-QR write is A3: refused in the UI when `aal < 2`.
+- **Fake partner server** answers the three new functions in-memory (PIN-grant consume on A1, reauth window on A2, aal/mfa on A3) so the page's unit cells run without the S2b/S3 Edge trees on this branch.
+
+### 34.2 Decisions and departures
+
+- **`state.work` on signed-in**, not a new top-level `AppState` screen. The PIN prompt is `state.panel`; keeping work under signed-in means `requirePin` needs no second host. Design 20.5's "new AppState branch" is met as a new view branch of signed-in.
+- **Online attest token is pasted** (the check-in jti). Camera policy is open; a BarcodeDetector scan is not built.
+- **Staff-activity and shift-log** are A0 reads on the attest screen (no PIN). Staff who are not managers will get 403 from the server for staff-activity; the page does not hide the button by role (the session's role list has no per-facility rank beyond membership).
+
+### 34.3 Not built, honestly
+
+- Camera scan of a player QR into the token field.
+- S7d screens (manager/operator/admin invite and member tools). Hand-over and stock are S7c (section 29); programme/offers/sponsorships/review/rollups are section 31.
+- Offers-redeem (S3 seam / P5.1b).
+- Merging this branch with S2b/S3 will conflict textually in `partner-functions.json` (already complete here), CSP comments, and the fake server's work stub (replaceable by the real handlers once those trees are present).
+
+### 34.4 Verification run for this slice
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **20 files, 706 tests, all pass** (adds `work.test.ts`: online and offline attest after PIN, course-QR PIN load and mint; request bodies contain no PIN digits).
+
+## 35. As built: offline_code offer redeem (0062)
+
+Numbering: **migration `0062`, matrix `40`, this section 35.** P5.1b (0060 / matrix 38 / §32) left `offline_code` as a seam; AT(10) issuance (0061 / matrix 39 / §32.5) and S7 UI (§33–§34) took intermediate numbers. Nothing from 0001–0061 is edited.
+
+### 35.1 What was built
+
+**Migration `0062_partner_offers_offline_redeem.sql`** and **matrix `40_partner_offers_offline_redeem.sql`**, then Edge route **`POST partner-offers-redeem/redeem/offline`**.
+
+- **`app.offer_code.offline_confirm_by`**: set to `now() + 24 h` on an offline redeem; NULL for staff_scan or after a player-lane cosignal clear (§37 / 0063).
+- **`private.partner_offers_redeem_offline_for_partner(facility, offer_code_id, handle, code, name_confirmed)`** (A1, staff/manager): same verify-and-record counters/candidates as S3 offline attest (0056); `name_confirmed` must be true; redeems with `redeemed_offline = true` and sets `offline_confirm_by`. Statuses: `ok | not_found | not_issued | expired | wrong_facility | wrong_player | verification_failed | replayed | rate_limited | name_unconfirmed | no_facility | cold_start_cap | budget_short`.
+- **`private.partner_offers_redeem_apply_offline`**: owner-only apply tail (consume, attest with `ofr-off:` jti prefix, nonce, code update). 0063 extends it with `p_offline_step` / `offline_step`.
+- **`CREATE OR REPLACE private.partner_settlement_export_for_partner`**: `unconfirmed_count` uses overdue `offline_confirm_by`; inserts `fraud_signal` kind `offer_offline_unconfirmed` once per overdue code.
+- **Fraud INSERT policy** widens to allow `offer_offline_unconfirmed` under a partner binding.
+- **Edge**: `parseOfferRedeemOfflineBody` / `POST redeem/offline`; port `redeemOfferOffline`; privileged calls the new definer. Online `POST redeem` remains staff_scan only (0060 still refuses `offline_code` with 22023).
+
+### 35.2 Decisions and departures, and why
+
+- **Separate route and definer** (not a method on `partner_offers_redeem_for_partner`) — offline needs handle + six digits + `nameConfirmed`; keeping staff_scan's wire shape closed avoids a polymorphic body and matches the attest online/offline split.
+- **`nameConfirmed` is boolean true on the wire** — Edge refuses anything else with 400; the database also returns `name_unconfirmed` if false (defence in depth for a non-Edge caller).
+- **Settlement marks overdue once** — `NOT EXISTS` on `fraud_signal.detail.offer_code_id` so a second export does not duplicate the signal; `unconfirmed_count` still reads the deadline column every time.
+- **Cosignal clear of `offline_confirm_by`** was deliberately out of this slice; **built in §37**.
+
+### 35.3 Not built, honestly
+
+- **Partners PWA offline redeem form** — **built in §36**.
+- **Player-lane cosignal that clears `offline_confirm_by`** — **built in §37**.
+- **Rollups-refresh writer** (S6 seam).
+- **No mutation pass** was run for this slice.
+
+### 35.4 Verification
+
+Branch: `cursor/p5-offline-offer-redeem-8ffd` (base main after #74).
+
+- **Matrix 40**: foreign facility 403, A1 without PIN, `name_unconfirmed`, wrong code, happy offline redeem + `offline_confirm_by`, replay, settlement `unconfirmed_count` + one `offer_offline_unconfirmed` fraud_signal.
+- **Edge vitest** (`partner-offers-redeem-handler`): online + offline shapes and status map.
+- Spine PA-1 expect list includes `partner_offers_redeem_offline_for_partner`.
+- Restricted harness / CI recorded when green on the PR tip.
+
+## 36. As built: partners offline offer redeem UI
+
+Numbering: **this section 36.** Edge/DB offline redeem landed in §35 (0062 / matrix 40 / #75). This slice is **partners PWA only**: no migration, no Edge change. The page calls `POST partner-offers-redeem/redeem/offline` by name.
+
+### 36.1 What was built
+
+- **Typed route.** `work-routes.ts`: `postOfferRedeemOffline` → `POST partner-offers-redeem/redeem/offline` with `{ facilityId, offerCodeId, handle, code, nameConfirmed }`; response still `{ attestationId }`.
+- **Offer-redeem screen mode.** `WorkView` kind `offer-redeem` gains `mode: "staff_scan" | "offline"`. Mode toggle on the screen (same pattern as attest online/offline). Staff-scan form unchanged; offline form collects handle, six digits, and a required `nameConfirmed` checkbox.
+- **A1 path.** `submitOfferRedeemOffline` validates handle/code/`nameConfirmed === true` client-side, then `requirePin("A1")` and the offline POST in the same turn. PIN digits never appear in the request body.
+- **Errors and i18n.** Closed codes `name_unconfirmed` and `verification_failed` map to catalogue keys; EN + FR-CA strings for mode, offline fields, and those errors.
+- **Fake partner server** answers `redeem/offline` in-memory (PIN grant; refuses `nameConfirmed !== true`; maps a planted bad code to `verification_failed`).
+
+### 36.2 Decisions and departures
+
+- **Separate submit path** (not a method switch on `submitOfferRedeem`) — mirrors Edge's separate route and keeps the staff_scan body closed.
+- **`nameConfirmed` must be the boolean `true` on the wire** — checkbox → `fd.get("nameConfirmed") === "on"` → client refuses false before PIN; Edge also refuses anything other than `true`.
+- Hint copy switches with mode so staff are told to confirm the profile-card name before typing the offline code.
+
+### 36.3 Not built, honestly
+
+- Camera scan for check-in tokens (still a seam from §33).
+- Player-lane cosignal that clears `offline_confirm_by` (§35 seam) — **built in §37**.
+- Rollups-refresh writer (S6 seam).
+
+### 36.4 Verification run for this slice
+
+Branch: `cursor/p5-offline-offer-ui-8ffd` (base main after #75). Tip squash-merged to main as `dc83096` (#76).
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **21 files, 930 tests, all pass** (adds offline offer-redeem A1 PIN + body cell — handle lower-cased, `nameConfirmed: true`, no PIN digits — and a client-side name-unconfirmed refusal that never hits the server).
+- CI green on PR #76 tip before merge.
+
+## 37. As built: player-lane offline offer cosignal clear (0063)
+
+Numbering: **migration `0063`, matrix `41`, this section 37.** Clears the §35 seam: a qualifying player fix within the offline code's step window confirms the redeem before the 24 h deadline.
+
+### 37.1 What was built
+
+**Migration `0063_offer_offline_confirm.sql`** and **matrix `41_offer_offline_confirm.sql`**, plus an Edge hook on the marker-scan co-signal intake.
+
+- **`app.offer_code.offline_step`**: HOTP step accepted at offline redeem (survives `offline_code_step` prune).
+- **`private.partner_offers_redeem_apply_offline`**: DROP+CREATE with `p_offline_step`; redeem call site passes the hit step.
+- **`private.offer_offline_confirm_for_actor`** (`edge_actor` only): same co-signal proof as `marker_cosignal_attach_for_actor` (`marker_cosignal_check`); clears `offline_confirm_by` on the bound player's own `redeemed_offline` codes at the facility whose step window holds the fix (`step start −10 min … +20 min`) and whose deadline is still in the future. Statuses: `confirmed | none_awaiting | cosignal_invalid | cosignal_used | review_account`.
+- **Edge**: after `attachCosignal` answers `no_pending_purchase`, call `confirmOfferOffline`; `confirmed` → 200 with empty purchases (`[].every` → outcome `credited`).
+
+### 37.2 Decisions and departures
+
+- **Step on the code, not only on `offline_code_step`** — step rows prune after ~3 steps; the 24 h confirm window needs the step on `offer_code`.
+- **Confirm does not consume the fix** — it only clears deadlines; `cosignal_used` still means a `purchase_evidence` row already referenced the evidence id. Intake order on this tip was attach first, then confirm on `no_pending_purchase`; **§38** flips to confirm-before-attach so a dual pending-purchase + offline-awaiting fix clears both.
+- **No `partner_audit_write` from the actor lane** — that helper requires a partner binding and `^partner\.` action; marker attach also leaves no audit row.
+
+### 37.3 Not built, honestly
+
+- Rollups-refresh writer (S6 seam).
+- Receipts upload / EXIF / phash player lane.
+- Confirm-before-attach when both a pending marker purchase and an offline offer await the same fix — **built in §38**.
+
+### 37.4 Verification
+
+Branch: `cursor/p5-offline-confirm-cosignal-8ffd` (base main after #76). Tip squash-merged to main as `d51435c` (#77).
+
+- **Matrix 41**: inventory/EXECUTE, offline redeem writes `offline_step` (partner bind isolated in SAVEPOINT), happy clear of the planted awaiting code, other player's code untouched, `none_awaiting` / `cosignal_invalid` / `cosignal_used`.
+- **Edge vitest** (`marker-scan-handler`): intake with confirm override → 200 credited, empty purchases.
+- CI green on PR #77 tip before merge (all three checks). Matrix 24 tip fixes on the same branch: NZ wrong-zone PIN non-vacuous when Chicago≡Auckland date; NIT same-day dedupe when `t0-2h` straddles Chicago midnight.
+
+## 38. As built: confirm-before-attach on cosignal intake
+
+Numbering: **this section 38.** No migration. Closes the §37.3 dual-await follow-up: when the same fix can both complete a pending marker purchase and clear an offline offer, confirm must run first.
+
+### 38.1 What was built
+
+- **Edge** (`scan-handler` co-signal intake): call `confirmOfferOffline` **before** `attachCosignal`. Attach still returns the purchase list when a pending row exists; when attach is `no_pending_purchase` and confirm was `confirmed`, answer 200 with empty purchases (unchanged credited outcome).
+- **Vitest**: call order `confirmOfferOffline` → `attachCosignal`; dual path (pending purchase + confirm override) still credits purchases.
+
+### 38.2 Decisions and departures
+
+- **Confirm first is required, not optional** — `marker_cosignal_check` returns `cosignal_used` once any `purchase_evidence` row references the evidence id; attach writes that reference, so confirm-after-attach can never clear an offline offer on the same fix.
+- **Confirm still does not consume the fix** — attach proceeds afterward for a pending marker purchase.
+
+### 38.3 Not built, honestly
+
+- Rollups-refresh writer (S6 seam).
+- Receipts upload / EXIF / phash player lane.
+- Camera scan for check-in tokens (§33 seam) — **built in §39**.
+
+### 38.4 Verification
+
+Branch: `cursor/p5-offline-confirm-order-8ffd` (base main after #77). Tip `6a3525e` CI green on PR #78 (all three checks) before merge.
+
+- Focused vitest (`marker-scan-handler`): 47/47, including confirm-before-attach order and dual pending-purchase + confirm path.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 39. As built: camera scan of check-in tokens (`apps/partners`)
+
+Numbering: **this section 39.** No server, database or migration change. Closes the §33 / §34 / §38 shop-floor seam: a player check-in QR (or hand-over token QR) fills the existing paste field.
+
+### 39.1 What was built
+
+- **`scanCheckinQr`** (`src/ui/camera-scan.ts`): injected ports (`getUserMedia`, `BarcodeDetector`-shaped `detect`, clock, delay). QR only. First non-empty `rawValue` is trimmed to the first token and capped at 256 characters. `stopCameraScan` aborts and stops tracks.
+- **`tokenScanField`**: paste input plus Scan / Stop and a muted preview. Status names only closed failure keys (`unsupported` / `denied` / `timeout`); the scanned value is never copied into status text.
+- Wired on **online attest**, **offer-redeem staff_scan**, and **handover credential** (staff scan or hand-over token). Offline six-digit fields stay typed.
+- **`render`** calls `stopCameraScan` before every rebuild so a PIN prompt, lock, or screen change cannot leave a live track.
+- Permissions-Policy stays `camera=(self)`. Paste remains the fallback when `BarcodeDetector` or the camera is missing.
+
+### 39.2 Decisions and departures
+
+- **No third-party scanner.** `BarcodeDetector` is the platform API; no wasm/zxing in the bundle (every import is still relative).
+- **Rebuild tears down the camera** rather than re-attaching a stream across `replaceChildren`. A scan in progress is aborted honestly; the person taps Scan again.
+- **No new AppState.** The field writes the input the submit handler already reads.
+
+### 39.3 Not built, honestly
+
+- Rollups-refresh writer (S6 seam).
+- Receipts upload / EXIF / phash player lane.
+- A dedicated player-app QR payload schema beyond "the token string in a QR".
+
+### 39.4 Verification
+
+Branch: `cursor/p5-camera-scan-8ffd` (base main after #78).
+
+- `pnpm --filter @golfraven/partners typecheck`: clean.
+- `pnpm --filter @golfraven/partners test:unit`: **22 files, 944 tests, all pass** (adds camera-scan normalize / unsupported / denied / happy / timeout / abort).
+- Restricted harness / CI recorded when green on the PR tip.
+
+## 40. As built: player-lane receipt upload (0064)
+
+Numbering: **migration `0064`, matrix `42`, this section 40.** Closes partner-auth-design §27.3: Storage object + `receipt_intake_for_actor` + `app.dedupe_receipt_fingerprint` on the first purchase of an upload. Nothing from 0001–0063 is edited.
+
+### 40.1 What was built
+
+**Migration `0064_player_receipts_upload.sql`** and **matrix `42_player_receipts_upload.sql`**, then Edge function **`receipts`** (`POST /v1/receipts`).
+
+- **`private.receipt_intake_for_actor`**: bound player only; eligible trails = accepted `facility_programme` + `trail_programme` pilot/live + `marker_source = any_purchase` (same gate as course-QR scan, without `qr_mode`). One `purchase_evidence` (`method=receipt`, `ref_id` = Storage path) + `marker_credit` pending per trail; cosignal `awaiting` for the facility-local day + 7-day deadline. Calls **`app.dedupe_receipt_fingerprint` once** on the first purchase id (`phash` is per upload). Statuses: `ok | duplicate | review | no_facility | no_programme | review_account | bad_args`. `o_dedupe`: `clean | same_user | cross_user`. Same-user duplicate voids every purchase from the upload (`void_reason=duplicate`); cross-user leaves both pending and opens `review_item` + `fraud_signal` via dedupe.
+- **Policies / grants**: `pd_receipt_*` on `receipt_fingerprint`, `fraud_signal`, `review_item`, cross-user `purchase_evidence` demotion, `marker_credit` detach; `GRANT EXECUTE` on dedupe to **`private_definer` only** (not `edge_actor`).
+- **Edge**: multipart `facilityId`, `file`, optional `localDate`, optional `receiptNumberOcr`. **5 MB** max file (`0012_storage.sql` / build plan line 865; matrix TODO “6 MB” is stale — this slice uses 5 MB). Body read uses a **running stream cap** (same discipline as `readCappedJsonBody`); Content-Length is a fast-reject only. MIME sniff: JPEG/PNG/HEIC only; PDF/SVG → 415; empty/corrupt after strip → 415. EXIF strip: JPEG APP1 removed; PNG `eXIf` chunk removed (pure byte walk; no image decoder deps). **`phash` = SHA-256 of the stripped object bytes** for every kind (exact-dupe; perceptual aHash deferred — jpeg-js/pngjs trip the Edge import lint). Storage path `receipts/<uid>/<objectId>.<ext>` via service-role `receiptsStorage` (no client Storage policies); **compensating `removeObject`** when intake refuses after upload. Rate limit **`receipts:member` 60/hour** before `withOwnership`.
+
+### 40.2 Decisions and departures
+
+- **Dedupe once per upload**, not per trail — `phash` identifies the image; sibling trail rows follow the first purchase outcome (same-user void loops the rest).
+- **phash = sha256(stripped)** for JPEG/PNG/HEIC — exact re-upload detection only. Perceptual aHash needs a reviewed decoder that does not pull `node:buffer` / banned remotes into the Edge lock.
+- **5 MB not 6 MB** — `storage.buckets.file_size_limit` and Edge cap align with `0012_storage.sql` (build plan line 865), not the matrix TODO line.
+- **Cross-user UPDATE policy** excludes `void`/`valid` in `USING` so a future caller cannot demote an already-accepted purchase (mirrors `dedupe_receipt_fingerprint`).
+
+### 40.3 Not built, honestly
+
+- OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip.
+- **Mobile client** — moved to **§43** (`api.uploadReceipt`, flag off).
+- **90-day image purge** — moved to **§42** (`receipts-purge`).
+- **Rollups-refresh writer** — moved to **§41** (migration `0065`).
+- JPEG ancillary markers beyond APP1 (e.g. APP13/COM) are not stripped; residual metadata risk is accepted until a re-encode path exists.
+
+### 40.4 Verification
+
+Branch: `cursor/p5-receipts-upload-8ffd` (base main after #79). Tip `ed6aae8` CI green on PR #80 (all three checks) before merge.
+
+- Matrix **42**: EXECUTE/grant cells, happy intake, same-user duplicate, cross-user `review_item`, `review_account`, `no_facility`, `bad_args`, no `edge_actor` on raw dedupe.
+- Vitest: `receipts-image.test.ts` (EXIF strip, MIME reject, sha256 phash stability, size constant), `receipts-handler.test.ts` (status map, Storage path, orphan remove).
+- `deno check` includes `receipts/index.ts` in CI function lists; service-role-lint clean.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 41. As built: rollups-refresh writer (0065)
+
+Numbering: **migration `0065`, matrix `43`, this section 41.** Closes the S6 §30.3 / receipts §40.3 seam: a scheduled system job writes `operator_rollup` / `sponsor_rollup` instead of ops seed. Nothing from 0001–0064 is edited.
+
+### 41.1 What was built
+
+**Migration `0065_rollups_refresh.sql`** and **matrix `43_rollups_refresh.sql`**, then Edge function **`rollups-refresh`** (`POST`).
+
+- **`app.entitlement.earned_at`**: NOT NULL DEFAULT `now()`; backfilled from `play.play_date` (UTC), then `activated_at` / `redeemed_at` / `voucher_issued_at`, then `now()`. Month bucket for `markers_earned`.
+- **`private.refresh_rollups(p_month date)`** (`edge_system` only): NULL month = current UTC month. Opens GUC `app.edge.rollups_refresh = on` (never under a partner binding — policies require `partner_binding_kind() IS DISTINCT FROM 'partner'`). Recomputes:
+  - **`operator_rollup` / `completions`**: non-revoked `user_achievement` with completion-family `award_key ~ '^v[0-9]+$'` on a trail-scoped `catalog_achievement_def`; `cohort_n` = distinct users; `value` = award count.
+  - **`sponsor_rollup` / `markers_earned`**: non-void `entitlement` with `sponsorship_id`; bucketed by `earned_at`; same cohort/value shape.
+  - **k-anonymity**: upsert only when `cohort_n >= 10` (definer SQL + table CHECK; UPDATE WITH CHECK also repeats `cohort_n >= 10`); remove existing rows for those metrics/month when the live cohort falls below 10. Other metric names are left alone.
+- **Eleven `pd_rollups_refresh_*` policies** on `user_achievement`, `catalog_achievement_def`, `entitlement`, `operator_rollup`, `sponsor_rollup` (SELECT/INSERT/UPDATE/DELETE as needed). Partner conjunct is the last top-level AND (inventory check 15). UPDATE/DELETE scope `metric`; INSERT WITH CHECK is GUC + partner only (see §41.2).
+- **Edge**: service-role bearer → system rate limit `rollups-refresh` 12/hour → `refreshRollups` via `openScopedTx("system")`. Empty body or `{ "month": "YYYY-MM-01" }`. Deploy schedules it; nothing in-repo does.
+
+### 41.2 Decisions and departures
+
+- **Closed metric set** (`completions`, `markers_earned`) matching the helpers seed and S6 reads; the build plan’s per-metric table names are already one table + `metric` column (0005 AMBIGUITY).
+- **System lane, not partner A3** — rollups are aggregates over every player; a partner session must not open the writer (GUC window closed under a partner binding).
+- **UTC month** — no facility TZ for programme-wide numbers; documented here.
+- **Completion family = `award_key` `vN`** — matches `user_achievement.award_key` comment in 0003 (“v\<N\> for the completion family”).
+- **INSERT WITH CHECK omits metric/cohort_n** — those predicates made the PA-4c plant-sweep unobservable (insert failed planted and unplanted). Metric scope stays on UPDATE/DELETE; k-anonymity stays on the table CHECK and in the definer; UPDATE WITH CHECK still repeats `cohort_n >= 10`.
+
+### 41.3 Not built, honestly
+
+- Additional metrics, partner-triggered refresh, sponsor portal (P6), in-repo scheduler, OCR/receipt follow-ons from §40.3 (90-day purge → §42).
+
+### 41.4 Verification
+
+Branch: `cursor/p5-rollups-refresh-8ffd` (base main after #80). Tip `3b84b48` CI green on PR #81 (all three checks) before squash-merge as `62309d0`.
+
+- Restricted harness: **PASS** (matrix 43 + inventory check 15 + PA-4c plant of `app.edge.rollups_refresh`; tip `45445db`).
+- Matrix **43**: EXECUTE matrix, sub-threshold remove of seeded completions, happy write at cohort 10, remove after revoke drops cohort, `edge_actor` / `edge_partner` 42501.
+- Vitest: `rollups-refresh-handler.test.ts` (auth order, empty body, month shape, 429/500); `review-account-gate` lists `rollups-refresh` as system lane.
+- `deno check` / `deno cache --frozen` lists include `rollups-refresh/index.ts`; service-role-lint clean.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 42. As built: receipts 90-day image purge
+
+Numbering: **this section 42.** No migration: Storage lifecycle for the private `receipts` bucket (0012 TODO / build plan A66; §40.3 seam). Closes the retention half of player-lane receipt upload (§40).
+
+### 42.1 What was built
+
+Edge function **`receipts-purge`** (`POST`).
+
+- Service-role bearer → system rate limit `receipts-purge` 12/hour → `receiptsStorage.purgeOlderThan(now − 90 days)`.
+- Recursive Storage list under `receipts/` (paths are `receipts/<uid>/<objectId>.ext`); deletes objects whose `created_at` is older than the cutoff.
+- Port: `ReceiptsStoragePort.purgeOlderThan` (upload/remove already existed for intake).
+- Deploy schedules it; nothing in-repo does.
+
+### 42.2 Decisions and departures
+
+- **90 days** — matches 0012 / build plan A66 (exports stay at 7 days via `exports-purge`).
+- **System lane, not player** — same auth order as `exports-purge` / `rollups-refresh` / `retention-purge`.
+- **No DB rows purged** — `purchase_evidence` / fingerprints remain; only the image object is removed (metadata retention is a later product call).
+
+### 42.3 Not built, honestly
+
+- OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, in-repo scheduler, native Storage lifecycle rules (if the platform gains them).
+- **Mobile client** — moved to **§43**.
+
+### 42.4 Verification
+
+Branch: `cursor/p5-receipts-purge-8ffd` (base main after #81). Tip `76af2ab` CI green on PR #82 (all three checks) before squash-merge as `ebff2a4`.
+
+- Vitest: `receipts-purge-handler.test.ts` (auth order, 90-day cutoff, 429/500); `ci-function-lists` + `review-account-gate` list `receipts-purge` as system lane.
+- `deno check` / `deno cache --frozen` lists include `receipts-purge/index.ts`; service-role-lint clean.
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 43. As built: mobile receipt upload client (API + wire)
+
+Numbering: **this section 43.** No migration. Closes the player-app half of §40 (multipart `POST receipts`) without shipping picker/camera UI.
+
+### 43.1 What was built
+
+- **`api.uploadReceipt`** on the real HTTP client: `POST <base>/receipts` as `multipart/form-data` (`facilityId`, `file`, optional `localDate` / `receiptNumberOcr`). Owner bearer (`credentials.accessToken`); **not retried** (a blind repeat may open another fingerprint / review path). Success status **201** only; zod `receiptUploadResultSchema` (`ok` | `duplicate` | `review`).
+- **`HttpFetch` / `once`**: body may be `FormData`; Content-Type left unset so fetch supplies the boundary (JSON calls unchanged).
+- **`receiptUploadFormData`**: Blob/File (Node/web) or React Native `{ uri, name, type }` file part.
+- Mock + unconfigured clients; build flag **`RECEIPTS_UPLOAD_UI_ENABLED = false`** (no screen, no callers outside `src/api`).
+- Wire tests: `apps/mobile/test/receipts-wire.test.ts` (multipart shape, schema, refusals, no callers).
+
+### 43.2 Decisions and departures
+
+- **API-first, flag off** — same pattern as `scanMarker` / `MARKER_COSIGNAL_UI_ENABLED`: store privacy (CAMERA / photo library) and product copy stay out of this slice.
+- **Handler-shaped fixtures at ship time** — multipart recording into `edge-contract.json` landed later as §56; at §43 ship, success/refusal bodies matched `mapStatus` / `okResponse` / Edge error codes from §40.
+- **No UI** — no image picker, no CAMERA permission, no gallery read.
+
+### 43.3 Not built, honestly
+
+- Picker/camera screen, OCR pipeline, `receipt_green_fee` scoring bridge, perceptual aHash, HEIC metadata strip, edge-contract multipart recording (→ §56).
+
+### 43.4 Verification
+
+Branch: `cursor/p5-receipts-mobile-8ffd` (base main after #82). Tip `381df29` CI green on PR #83 (all three checks) before squash-merge as `25e7090`.
+
+- Vitest: `receipts-wire.test.ts` (FormData wire, 201 shapes, refusal map, flag off / no callers); flag count in `rewards-activation.test.ts`.
+- Typecheck includes `uploadReceipt` on `ApiClient` (`HttpFetch` body `string | FormData`; airplane fetch mock FormData-safe).
+- CI green on the PR tip (install/typecheck/build/test, player-plane DB, gitleaks).
+
+## 44. As built: purchase corroboration into scorePlay
+
+Numbering: **migration `0066`, matrix `44`, this section 44.** Closes the §4.6 / score-play trust-table seam: `ctx.purchases` is joined from `app.purchase_evidence` before every live `scorePlay` call (including catalog drain / rescore).
+
+### 44.1 What was built
+
+- **`private.list_valid_purchases_around_for_actor(facility, around_local_date)`** (0066): SECURITY DEFINER under `private_definer`; returns distinct `(facility_id, local_date)` of the bound actor's own `status = 'valid'` rows within ±7 days (`CORROBORATION_WINDOW_DAYS`, hard-coded). Allows `user` and `system_delegate` bindings; refuses unbound / partner. `GRANT EXECUTE` to **`edge_actor` only**. Reuses `pd_marker_scan_purchase_select`; **no** `edge_actor` table SELECT (matrix 16/24 stay closed).
+- **`Repo#purchases.listValidAround`**: calls that definer (not a direct `FROM app.purchase_evidence`).
+- **`evidence/handler.ts`**: both scoring sites (single-item intake and `finalizeScoringForKey`) load purchases and pass them on `scorePlay` context when non-empty.
+- Fake repo + Vitest cells prove the join runs and filters void/out-of-window/other-user rows. Matrix 44 pins EXECUTE, closed table grant, happy path, other-user isolation, unbound/bad-args.
+
+### 44.2 Decisions and departures
+
+- **Definer, not table grant** — first tip tried a direct Edge SELECT and broke every drain/rescore path (`permission denied for table purchase_evidence`); matrix 16 forbids `edge_actor` SELECT on that table.
+- **`valid` only** — matches packages/rules §4.6 (`PurchaseCorroboration` doc); pending/held_review/void never corroborate.
+- **Omit empty `purchases`** — same as before when none qualify (parser treats the field as optional).
+- **`system_delegate` allowed** — catalog drain / promotion re-score must see the same corroboration as live intake.
+
+### 44.3 Not built, honestly
+
+- `receipt_green_fee` evidence writer (still `REJECTED_SOURCES` at `POST evidence`), OCR, perceptual aHash, HEIC metadata strip (→ §45), picker UI.
+
+### 44.4 Verification
+
+Branch: `cursor/p5-purchase-corroboration-8ffd` (base main after #83). Tip `afa198b` CI green on PR #84 (all three checks); squash-merged as `ceeeb66`.
+
+- Vitest: `evidence-handler.test.ts` purchase-corroboration cells; fake `listValidAround` window/status filters.
+- pgTAP matrix 44; Deno integration (drain/rescore no longer trip on purchase_evidence).
+- Matrix 10 / `partner_kind_readers.txt` allow-list the new definer (check 14(c)).
+- `deno check` / typecheck: `Repo.purchases` on the real privileged builder.
+
+## 45. As built: HEIC Exif/XMP strip on receipt intake
+
+Numbering: **this section 45.** No migration. Closes the HEIC half of §40.1's EXIF strip (JPEG APP1 and PNG `eXIf` already shipped).
+
+### 45.1 What was built
+
+- **`stripHeicExif`** in `receipts/image.ts` (pure ISO BMFF walk, no decoder):
+  - Drop top-level `uuid` boxes whose UUID is the standard XMP UUID (`BE7ACFCB-97A9-42E8-9C71-999491E3AFAC`).
+  - Inside `meta`, collect `iinf`/`infe` items of type `Exif` or `mime`/`application/rdf+xml`, then **zero** their `iloc` extents in a copy (offsets stay valid; GPS/camera bytes are gone).
+- **`prepareReceiptImage(..., "heic")`** runs the strip before `phash = sha256(stripped)` (same contract as JPEG/PNG).
+
+### 45.2 Decisions and departures
+
+- **Zero extents, do not rewrite `iloc`/`iinf`** — removing items would require offset surgery across `mdat`; zeroing keeps the file structurally intact for any later decoder while removing privacy payload.
+- **No perceptual aHash** — still blocked by Edge import lint (§40.2).
+- **Residual risk** — non-item metadata forms (if any) are accepted, same honesty as JPEG APP13/COM (§40.3).
+
+### 45.3 Not built, honestly
+
+- `receipt_green_fee` evidence writer (→ §46), OCR, perceptual aHash, picker UI, full HEIC re-encode.
+
+### 45.4 Verification
+
+Branch: `cursor/p5-heic-exif-strip-8ffd` (base main after #84). Tip `7abf645` CI green on PR #85 (all three checks); squash-merged as `8348102`.
+
+- Vitest: `receipts-image.test.ts` XMP uuid drop + Exif item extent zero + phash change; `service-role-lint` clean (numeric FourCC / sequential byte reads).
+
+## 46. As built: receipt_green_fee evidence writer (0067)
+
+Numbering: **migration `0067`, matrix `45`, this section 46.** Closes money-path §2 for receipts: the player-lane upload path writes the scoreable `receipt_green_fee` row. `POST /v1/evidence` keeps the source in `REJECTED_SOURCES`.
+
+### 46.1 What was built
+
+- **`private.receipt_intake_for_actor` (REPLACE)**: after the purchase/credit loop, INSERT one facility-level `app.evidence` row (`source=receipt_green_fee`, `status=accepted`, `course_id` NULL, `attestation_grade=unattestable`) with `source_ref = 'receipt:' || facility_id || ':' || phash` and `ON CONFLICT DO NOTHING`.
+- **`summary`**: `{ localDate, status: "pending"|"void", fingerprint: phash, voidReason?: "duplicate" }` so `listForPlay` → `reconstructOneStoredRow` spreads into `scorePlay`'s `Evidence` shape (pending badge weight 0.2; money still needs `coSignalFix`).
+- **Dedupe**: clean/review → `summary.status=pending`; same-user duplicate with no prior evidence → `void` + `voidReason=duplicate`; same-user re-upload after a pending row → conflict, original pending kept (no second scoreable row).
+- **Policy**: `pd_receipt_evidence_insert` (private_definer INSERT; own user; source/status/course/device locked).
+
+### 46.2 Decisions and departures
+
+- **Extend intake, not a new endpoint** — design §40 / request-shape already reserved the receipt path; forging via `POST /v1/evidence` stays closed.
+- **Idempotency on facility+phash** — Storage object id is new every upload; phash is the natural key.
+- **Cross-user stays pending** — money-path §5 grief rule; review_item path unchanged.
+
+### 46.3 Not built, honestly
+
+- OCR, perceptual aHash, picker UI, attaching `coSignalFix` / promoting to `approved` (→ §47), partner resolve of `receipt_cross_user_match`.
+
+### 46.4 Verification
+
+Branch: `cursor/p5-receipt-green-fee-8ffd` (base main after #85). Tip CI green on PR #86 (all three checks); squash-merged as `524ac87`.
+
+- pgTAP matrix 45; Vitest `request-shape` pin that `receipt_green_fee` stays rejected at `POST /v1/evidence`.
+
+## 47. As built: receipt_green_fee promote on cosignal (0068)
+
+Numbering: **migration `0068`, matrix `46`, this section 47.** Closes the money half of §46: when an attested cosignal makes a `method=receipt` purchase `valid`, the matching facility-level `receipt_green_fee` evidence row is promoted to `summary.status=approved` with `coSignalFix` copied from the fix evidence.
+
+### 47.1 What was built
+
+- **`private.marker_cosignal_attach_for_actor` (REPLACE)**: after a successful attested attach of a receipt purchase, promote the actor's own `receipt_green_fee` row keyed by `receipt:{facility}:{phash}` when there is no open `receipt_cross_user_match` review item on that purchase set.
+- **`summary` after promote**: `{ localDate, status: "approved", fingerprint, coSignalFix }` where `coSignalFix` is the cosignal evidence's `summary.fix` object (scorePlay money path).
+- **Policies**: `pd_receipt_evidence_update` (own pending → approved with `coSignalFix` + fingerprint) and `pd_receipt_review_select` (open cross-user items on the actor's purchases, so the definer can see the block).
+
+### 47.2 Decisions and departures
+
+- **Promote inside attach, not a new endpoint** — the cosignal is the money-path gate; a separate promote call would race or skip the purchase state machine.
+- **Open cross-user blocks promote** — money-path §5 grief rule; purchase may still become `valid`, evidence stays `pending` until partner resolve (unbuilt).
+- **Unattestable stays pending** — held_review purchases never write `coSignalFix`.
+
+### 47.3 Not built, honestly
+
+- OCR, perceptual aHash, picker UI, partner resolve of `receipt_cross_user_match` (→ §48).
+
+### 47.4 Verification
+
+Branch: `cursor/p5-receipt-cosignal-approve-8ffd` (base main after #86 / `524ac87`). Tip CI green on PR #87 (all three checks); squash-merged as `54ba939`.
+
+- pgTAP matrix 46: clean promote, unattestable holds, open cross-user blocks.
+
+## 48. As built: partner resolve of receipt_cross_user_match (0069)
+
+Numbering: **migration `0069`, matrix `47`, this section 48.** Closes the money-path §5 grief gate left open by §47: an admin with A3 approves or rejects an open `receipt_cross_user_match` review item.
+
+### 48.1 What was built
+
+- **`private.partner_resolve_receipt_cross_user_match_for_partner(review_id, approve)`** (class **A3**, **ADMIN only**) + apply helper. Statuses: `ok | not_found | not_open`.
+- **Approve**: close item (`status=approved`), INSERT subject `receipt_fingerprint` (cross-user intake never wrote one), clear the open fraud signal; if the purchase is already `valid`, promote `receipt_green_fee` with `coSignalFix` from the attached cosignal.
+- **Reject**: close item (`status=rejected`), void the subject's upload set with `void_reason='reviewer'`, detach non-terminal credits, void pending `receipt_green_fee` summary, clear fraud signal. Matched earlier purchase untouched.
+- **Edge**: `POST /partner-review/resolve/receipt-cross-user` `{ id, approve }` (same shape as held-reward resolve).
+- **Policies**: eleven `pd_partner_receipt_*` rows keyed on `partner_bound_admin()` (no GUC).
+
+### 48.2 Decisions and departures
+
+- **`not_open`, not `not_held`** — review items are not reward holds; the wire maps both to HTTP 409.
+- **Fingerprint on approve** — required so §47 promote's fingerprint join can succeed after a late cosignal or resolve-time promote.
+- **No PWA button in this slice** — queue already lists the items; the portal branch is a follow-on UI seam.
+
+### 48.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, picker UI, partners PWA resolve affordance for `review_item` rows (→ §49).
+
+### 48.4 Verification
+
+Branch: `cursor/p5-receipt-cross-user-resolve-8ffd` (base main after #87 / `54ba939`). Tip CI green on PR #88 (all three checks); squash-merged as `1cbce0c`.
+
+- pgTAP matrix 47; Vitest partner-review route map; PA-13b EXECUTE list includes the new wrapper.
+
+## 49. As built: partners PWA resolve for receipt_cross_user_match
+
+Numbering: **this section 49.** No migration. Closes the portal half of §48: approve/reject buttons on open `receipt_cross_user_match` queue rows call `POST /partner-review/resolve/receipt-cross-user`.
+
+### 49.1 What was built
+
+- **API**: `postResolveReceiptCrossUser` → `resolve/receipt-cross-user` (same `{ id, approve }` body as held-reward resolve).
+- **Controller / admin**: `resolveReceiptCrossUser` under the A3 client gate (fresh TOTP window).
+- **Review screen**: offer_code / entitlement / `receipt_cross_user_match` each get their own approve/reject actions; other `review_item` kinds stay read-only. Empty handle shows a placeholder (queue rows for review items have no profile join).
+- **i18n**: `admin.notOpen`, `review.noHandle`, `review.readonly` (en + fr-CA); `not_open` maps in `messageForError`.
+- **Fake server + Vitest**: queue seeds a cross-user row; resolve posts to the new path.
+
+### 49.2 Decisions and departures
+
+- **No new Edge or DB surface** — §48 already shipped the route; this slice is partners-PWA only.
+- **Read-only for other review kinds** — `held_offer_budget_unreserved` and similar have no partner resolve definer; showing buttons that call entitlement resolve was a latent bug for non-offer rows.
+
+### 49.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, picker UI (→ §50), image preview in the review queue.
+
+### 49.4 Verification
+
+Branch: `cursor/p5-receipt-cross-user-ui-8ffd` (base main after #88 / `1cbce0c`). Tip CI green on PR #89 (all three checks); squash-merged as `983c90a`.
+
+- Partners Vitest: review resolve for receipt_cross_user_match; existing offer-code resolve cell still green.
+
+## 50. As built: mobile receipt picker UI (library-only)
+
+Numbering: **this section 50.** No migration. Closes the player-app picker half of §43 behind `RECEIPTS_UPLOAD_UI_ENABLED` (still `false`).
+
+### 50.1 What was built
+
+- **`src/receipts/`**: gate, injectable picker port, `expo-image-picker` adapter (library only), upload service, outcome map + copy.
+- **`ReceiptUploadCard`** on the facility page behind `receiptsUploadUiAvailable()`.
+- **Config**: `expo-image-picker` plugin with `cameraPermission: false`, `microphonePermission: false`, honest `photosPermission` (en + fr-CA locale); CAMERA stays in `blockedPermissions`.
+- **Tests**: `receipts-upload.test.ts`; flag inventory; policy plugin rules; wire test allows the upload service as the sole caller.
+
+### 50.2 Decisions and departures
+
+- **Library only, no camera** — avoids unblocking CAMERA; Android system photo picker on modern APIs needs no storage permission; `READ_EXTERNAL_STORAGE` stays blocked.
+- **Flag stays false** — store photo-library privacy / copy review still open (README).
+
+### 50.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, camera capture, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, partners review image preview (→ §51).
+
+### 50.4 Verification
+
+Branch: `cursor/p5-receipt-picker-ui-8ffd` (base main after #89 / `983c90a`). Tip CI green on PR #90 (all three checks); squash-merged as `77ab8dd`.
+
+- Mobile Vitest: receipts-upload + policy + flag inventory; typecheck.
+
+## 51. As built: partners review image preview (receipt_cross_user_match)
+
+Numbering: **migration `0070`, matrix `48`, this section 51.** Closes the review-queue image half left open by §49 / §50: an admin with A0 fetches short-lived signed URLs for subject (+ matched) receipt images on an open `receipt_cross_user_match` item; the partners PWA shows them on the queue row.
+
+### 51.1 What was built
+
+- **Storage**: `receiptsStorage.createSignedUrl(path, expiresInSeconds)` (service-role; mirror of exports settlement signing).
+- **DB**: `private.partner_receipt_cross_user_preview_for_partner(review_id)` (class **A0**, **ADMIN only**). Statuses: `ok | not_found | not_open | no_image`. Returns subject (+ matched if in detail) `purchase_evidence.ref_id` under existing `pd_partner_review_item_select` / `pd_partner_receipt_pe_select` (no new policies).
+- **Edge**: `GET /partner-review/preview/receipt-cross-user?id=<uuid>` → opaque labels `subject` / `matched` + signed URLs (TTL 180s). **Never** returns full storage paths (uid leak); **never** logs signed URLs.
+- **Partners PWA**: `getReceiptCrossUserPreview`; `loadReceiptCrossUserPreview` + auto-load on `loadReview`; queue row shows `<img>` (or a load button if the auto-fetch failed).
+- **CSP**: `img-src 'self' ${apiOrigin}/storage/v1/` so signed Storage URLs can load as images.
+
+### 51.2 Decisions and departures
+
+- **Refs stay on the Edge** — the definer returns storage paths only to the Edge transaction; the wire uses labels + signed URLs.
+- **Matched is best-effort** — if `matched_purchase_evidence_id` is missing, not a receipt, or has no `ref_id`, only the subject image is returned when present.
+- **Flag discipline** — no mobile `RECEIPTS_UPLOAD_UI_ENABLED` flip.
+
+### 51.3 Not built, honestly
+
+- OCR pipeline, perceptual aHash, camera capture, flipping the mobile upload flag.
+
+### 51.4 Verification
+
+Branch: `cursor/p5-receipt-review-preview-8ffd` (base main after #90 / `77ab8dd`). Tip CI green on PR #91 (all three checks); squash-merged as `770815b`.
+
+- pgTAP matrix 48; PA-13b / function_inventory EXECUTE lists; partners Vitest (admin preview + CSP img-src); unit partner-review preview route.
+
+## 52. As built: mobile marker cosignal sender + course-QR link parse
+
+Numbering: **this section 52.** No migration. Closes the orphaned `marker_cosignal` queue left by P4.2c / S2a: a sender redeems the held challenge and POSTs fix-only `marker-scan`; pure link parse is ready for paste / OS-camera open-URL. Capture UI stays behind `MARKER_COSIGNAL_UI_ENABLED` (still `false`).
+
+### 52.1 What was built
+
+- **`marker/link.ts`**: `parseCourseQrLink` for `https://…/q/m#<token>` (rotating) and `https://…/q/f/<slug>#<kid>.<sig>` (printed). Pure string; malformed → `null`.
+- **`marker/send.ts`**: redeem-then-`scanMarker({ facilityId, deviceId, fix, jti })` (no `qr`). Crash-safe `redeemed` persist before POST. `422 no_pending_purchase` retryable until 7 days after `fix.capturedAt`; then drop. `drainMarkerCoSignals` on sync.
+- **Store**: `update` / `deleteById` on Memory + Sqlite stores.
+- **Wiring**: `services.drainMarkerCosignals` from `syncOutbox` after the outbox runner.
+- **Tests**: `marker-link.test.ts`, `marker-send.test.ts`; capture/wire pins updated so `marker/send.ts` is the sole non-api `scanMarker` caller.
+
+### 52.2 Decisions and departures
+
+- **No CAMERA** — paste / deep-link parse only; in-app barcode scanner stays blocked (`CAMERA` in `blockedPermissions`).
+- **Drain not flag-gated** — capture stays behind both UI flags; already-queued rows may clear while flags are false.
+- **Flag stays false** — store privacy / field test for location still open (README).
+
+### 52.3 Not built, honestly
+
+- In-app QR scanner, Q2 PIN UI for online scan+credit (→ §53), `associatedDomains` / App Links hosting, flipping `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED`, OCR / aHash / receipts flag flip.
+
+### 52.4 Verification
+
+Branch: `cursor/p5-marker-cosignal-sender-8ffd` (base main after #91 / `770815b`). Tip CI green on PR #92 (all three checks); squash-merged as `a0fa173`.
+
+- Mobile Vitest: marker-link, marker-send, marker-capture, marker-scan-wire; typecheck.
+
+## 53. As built: mobile paste + PIN shop-QR scan
+
+Numbering: **this section 53.** No migration. Closes the online scan half left open by §52.3: paste a `/q/m` or `/q/f` link (optional 4-digit PIN for printed QR), capture a presence fix, redeem a challenge, POST `marker-scan` with `qr` + `fix` + `jti`. Still no CAMERA; flags stay false.
+
+### 53.1 What was built
+
+- **`marker/scan.ts`**: `scanMarkerFromLink` — parse link, slug check for printed QR, location + live/prefetched challenge, redeem, `scanMarker` with `qr`.
+- **`MarkerCard`**: paste link + PIN fields and "Submit shop QR" beside the offline capture button (same flag gate).
+- **i18n**: en + fr-CA copy for paste/PIN outcomes.
+- **Tests**: `marker-scan.test.ts`; wire/capture pins allow `marker/scan.ts` as a `scanMarker` caller.
+
+### 53.2 Decisions and departures
+
+- **Paste-first, no CAMERA** — OS camera → open URL / paste; `CAMERA` stays blocked.
+- **Slug check client-side** for printed QR before the location prompt; server still binds kid/sig to facility id.
+- **Flag stays false** — same location privacy / field-test gate as capture.
+
+### 53.3 Not built, honestly
+
+- In-app barcode scanner, `associatedDomains` / App Links hosting (→ §54), flipping either UI flag, OCR / aHash / receipts flag flip.
+
+### 53.4 Verification
+
+Branch: `cursor/p5-marker-scan-paste-8ffd` (base main after #92 / `a0fa173`). Tip CI green on PR #93 (all three checks); squash-merged as `2a92a04`.
+
+- Mobile Vitest: marker-scan + existing marker suites; checkin-no-prompt-at-launch allowlist; i18n parity; typecheck.
+
+## 54. As built: course-QR App Links + open-URL park
+
+Numbering: **this section 54.** No migration. Closes the associatedDomains / App Links hosting half left open by §53.3: claim `https://golfraven.app/q/m` and `/q/f/*` on iOS/Android, host AASA + assetlinks on the public site (Team ID / Play SHA inject at deploy), soft-bounce pages for browsers, and park an opened URL for MarkerCard paste-scan. Still no CAMERA; flags stay false.
+
+### 54.1 What was built
+
+- **Mobile `app.json`**: `ios.associatedDomains: applinks:golfraven.app`; Android `intentFilters` for `/q/m` and `/q/f` (autoVerify).
+- **`marker/pending-link.ts`**: park / take a parsed course-QR URL (in-memory).
+- **`app/q/m.tsx`**, **`app/q/f/[slug].tsx`**: universal-link landings; park via `useURL`, redirect home or to facility by slug.
+- **MarkerCard**: on mount, `takeCourseQrLink` into the paste field.
+- **Site**: `/q/m/` and `/q/f/` soft bounces; `gen-applinks.mjs` writes `.well-known/apple-app-site-association` + `assetlinks.json` (empty details until `GOLFRAVEN_APPLE_TEAM_ID` / `GOLFRAVEN_PLAY_CERT_SHA256`); `/q/f/* → /q/f/` rewrite; `_headers` Content-Type + noindex for well-known and `/q/*`.
+- **Policy**: associated-domains entitlement allow-listed for `applinks:golfraven.app` only.
+
+### 54.2 Decisions and departures
+
+- **Host pin `golfraven.app`** — matches package id and QR test fixtures; must equal `GR_COURSE_QR_LINK_ORIGIN` host in deploy.
+- **Team ID / Play SHA not in git** — same rule as the Apple runbook; AASA/assetlinks gain details only when build env is set.
+- **Park only, no auto-scan** — opening a link never prompts for location; the player still taps Submit (and flags stay false so the card is not shown in release).
+
+### 54.3 Not built, honestly
+
+- In-app barcode scanner, flipping either UI flag, OCR / aHash / receipts flag flip, verified AASA on a live `golfraven.app` with real Team ID (`[unverified]` until deploy env is set).
+
+### 54.4 Verification
+
+Branch: `cursor/p5-course-qr-applinks-8ffd` (base main after #93 / `2a92a04`). Tip CI green on PR #94 (all three checks); squash-merged as `0c685cd`.
+
+- Mobile: marker-pending-link, policy associatedDomains; site: applinks unit tests; typecheck.
+
+## 55. As built: typed receipt number on upload card
+
+Numbering: **this section 55.** No migration. Closes the UI half of Edge `receiptNumberOcr` (already accepted since §40 / mobile API §43): optional typed invoice/ticket number on `ReceiptUploadCard`, forwarded on multipart upload. Still no OCR pipeline; `RECEIPTS_UPLOAD_UI_ENABLED` stays false.
+
+### 55.1 What was built
+
+- **`ReceiptUploadInput.receiptNumberOcr`** + `normalizeReceiptNumber` (trim, max 64, empty → omit).
+- **`ReceiptUploadCard`**: optional TextInput before Choose photo; passes value into `uploadReceipt`.
+- **i18n**: en + fr-CA label/hint.
+- **Tests**: upload forwards trimmed number; blanks omitted.
+
+### 55.2 Decisions and departures
+
+- **Typed entry only** — field name stays `receiptNumberOcr` to match Edge multipart; no on-device ML.
+- **Optional** — empty omits the FormData key (server treats missing/blank as null).
+- **Flag stays false** — same photo-library privacy gate as §50.
+
+### 55.3 Not built, honestly
+
+- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, multipart edge-contract recording (→ §56), course-QR abandoned-pending purge.
+
+### 55.4 Verification
+
+Branch: `cursor/p5-receipt-number-ui-8ffd` (base main after #94 / `0c685cd`). Tip CI green on PR #95 (all three checks); squash-merged as `e0ab1d3`.
+
+- Mobile Vitest: receipts-upload + i18n parity; typecheck.
+
+## 56. As built: receipts multipart edge-contract recording
+
+Numbering: **this section 56.** No migration. Closes the deferred §43.2 / §55.3 item: record `POST receipts` from the REAL handler into `edge-contract.json` and prove the mobile client against those answers.
+
+### 56.1 What was built
+
+- **Recorder** (`apps/mobile/scripts/record-edge-contract.rec.ts`): `receipts_` in `OWNED_PREFIXES`; `receiptsEndpoint` runs `parseReceiptMultipart` + `handleReceiptUpload` + the 60/hour member limit behind the real envelope, over the in-memory fake repo, no-op Storage, fixed object/purchase/credit ids. Intake outcomes scripted; sniff / EXIF strip / size cap are real.
+- **Fixture** (`receipts_201_ok` / `_duplicate` / `_review`, `_415`, `_413`, `_422_no_programme`, `_404`, `_403`, `_400`, `_429`) plus `_provenance_p5s56`. Logical `request` fields (not raw FormData); oversize carries `fileBytesLength` only (no megabytes of hex).
+- **Wire tests** (`receipts-wire.test.ts`): FormData built from recorded logical fields; every recorded success/refusal mapped; no retry; callers pin unchanged.
+- **`api-contract.test.ts`**: `receipts_*` errors excluded from the sign-in error table (owned by receipts-wire).
+
+### 56.2 Decisions and departures
+
+- **Logical multipart, not raw FormData** — Node/RN FormData boundaries are not byte-stable; the recorder stores facilityId / fileName / fileBytesHex (or length) / optional localDate / receiptNumberOcr.
+- **Oversize = length only** — embedding `RECEIPTS_MAX_BYTES + 1` of zeros would bloat the fixture ~10 MB; length proves the cap.
+- **Flag stays false** — recording does not flip `RECEIPTS_UPLOAD_UI_ENABLED`.
+
+### 56.3 Not built, honestly
+
+- On-device OCR, perceptual aHash, flipping `RECEIPTS_UPLOAD_UI_ENABLED`, course-QR abandoned-pending purge (→ §57), CAMERA.
+
+### 56.4 Verification
+
+Branch: `cursor/p5-receipts-edge-contract-8ffd` (base main after #95 / `e0ab1d3`). Tip CI green on PR #96 (all three checks); squash-merged as `257b187`.
+
+- Recorder verify mode; mobile Vitest receipts-wire + api-contract; typecheck.
+
+## 57. As built: course-QR retention purges
+
+Numbering: **migration `0071`, matrix `49`, this section 57.** Closes S2a departure 6 / §56.3: bounded `edge_system` purges for expired `course_qr_token`, aged `course_pin_alarm`, and abandoned pending `purchase_evidence` (past `cosignal.awaiting.until`). Wired into the existing hourly `retention-purge` schedule.
+
+### 57.1 What was built
+
+- **`private.purge_course_qr_tokens()`** — `expires_at < now() - 7 days`, LIMIT 5000 (used and unused).
+- **`private.purge_course_pin_alarms()`** — `raised_at < now() - 90 days`, LIMIT 5000.
+- **`private.purge_abandoned_pending_purchases()`** — `status = 'pending'` and `cosignal.awaiting.until < now()`; deletes linked pending `marker_credit` first, then the purchases; LIMIT 5000; method-agnostic.
+- Policies: DELETE + SELECT companions repeating each floor; closed under a partner binding (0050 InitPlan form). `GRANT DELETE` on `course_pin_alarm` (0016 already covered the other tables).
+- Edge: three new `RetentionStep` names after the partner steps; matrices 20 / 30 / Deno step-order updated (twelve → fifteen).
+
+### 57.2 Decisions and departures
+
+- **Floors `[proposed]`** — token 7 days (match nonce hygiene); alarm 90 days (match invite-class retention); abandoned pending immediately after `until` (already incompletable).
+- **DELETE, not void** — hygiene idiom; no new `void_reason`.
+- **Credits first** — FK is `ON DELETE SET NULL`; explicit delete avoids orphan pending credits.
+- **Reuse `retention-purge`** — no new Edge function.
+
+### 57.3 Not built, honestly
+
+- `course_pin_epoch_log` purge (→ §58), PIN alarm UI, pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
+
+### 57.4 Verification
+
+Branch: `cursor/p5-course-qr-pending-purge-8ffd` (base main after #96 / `257b187`). Tip CI green on PR #97 (all three checks); squash-merged as `afa2789`.
+
+- pgTAP matrix 49 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0070`.
+
+## 58. As built: course_pin_epoch_log retention purge
+
+Numbering: **migration `0072`, matrix `50`, this section 58.** Closes the remaining 0046 / §57.3 retention follow-up for `app.course_pin_epoch_log`. Wired into the existing hourly `retention-purge` schedule (fifteen → sixteen steps).
+
+### 58.1 What was built
+
+- **`private.purge_course_pin_epoch_log()`** — `effective_from < now() - 90 days` and not the latest `pin_epoch` for that facility; LIMIT 5000; composite-PK FOR-loop batch (0050 shape).
+- Policies: DELETE + SELECT companions repeating the floor + keep-latest conjunct; closed under a partner binding. `GRANT DELETE` on `course_pin_epoch_log`.
+- Edge: one new `RetentionStep` name after the §57 course-QR steps; matrices 20 / 30 / Deno step-order updated.
+
+### 58.2 Decisions and departures
+
+- **Floor 90 days** — match alarm retention; challenge-window residual is ~24 h / 7 d, so 90 d is generous.
+- **Keep latest per facility (body only)** — `course_pin_epoch_at` needs a predecessor for pre-rotation instants; a sole-old latest row is never deleted. The keep-latest conjunct cannot live in the RLS policy: a same-table subquery recurses under FORCE RLS; `pd_marker_scan_epoch_log_select` (`USING (true)`) already lets the definer read every row for the body's `max(pin_epoch)` check.
+- **Reuse `retention-purge`** — no new Edge function.
+
+### 58.3 Not built, honestly
+
+- PIN alarm UI (→ §59), pepper-rotation tooling, OCR / aHash / UI flag flips / CAMERA.
+
+### 58.4 Verification
+
+Squash-merged as `14c5b6c` (#98). Branch: `cursor/p5-pin-epoch-log-purge-8ffd` (base main after #97 / `afa2789`).
+
+- pgTAP matrices 24 / 49 / 50 (+ 20 / 30 privilege lists); Deno retention-purge step order; `verify-function-inventory`; migrations immutable for `0001`–`0071`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 59. As built: PIN alarm list (partners portal)
+
+Numbering: **migration `0073`, matrix `51`, this section 59.** Closes the operator-facing half of `app.course_pin_alarm` left open by 0046 / §58.3: a class-A0 list of automatic wrong-PIN rotations (30 failures → `pin_epoch + 1`) on the Course QR screen.
+
+### 59.1 What was built
+
+- **`private.course_pin_alarm_list_for_partner(facility)`** — class A0, manager or operator at the facility (admin via authorize); returns row columns only (no user id, no PIN), newest first, at most 100.
+- **SELECT policy** `pd_course_pin_alarm_partner_select` keyed on `partner_bound_manager_at` (InitPlan form). 0046's `actor_uid` policy stays for the player-lane writer; purge companions stay closed under a partner binding.
+- **Edge**: `GET /course-qr/alarms?facilityId=` → `CourseQrTx.pinAlarmList` → the new definer; EXECUTE allowlists (matrices 10 / 25 / 28 + Deno PA-13b) name it.
+- **Partners PWA**: Course QR screen section with load button, empty / list states, en + fr-CA copy; fake-server route + Vitest cell.
+
+### 59.2 Decisions and departures
+
+- **Authorize before empty-facility check** — matches other `_for_partner` readers: unbound → 42501; NULL facility after a live manager binding → 22023; blank string is a scope refusal at authorize.
+- **Manager / operator only** — staff can show today's PIN but not the rotation history (same reach as `partner_bound_manager_at` for operators of a covering trail).
+- **Reuse `course-qr`** — no new Edge function; alarms sit next to PIN / mint on the same screen.
+
+### 59.3 Not built, honestly
+
+- Pepper-rotation tooling, plan §8.3 cap alert, `partner_auth_alarm` purge, OCR / aHash / UI flag flips / CAMERA.
+
+### 59.4 Verification
+
+Squash-merged as `fefa6ff` (#99). Branch: `cursor/p5-pin-alarm-ui-8ffd` (base main after #98 / `14c5b6c`).
+
+- pgTAP matrix 51 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET alarms + partners work alarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0072`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 60. As built: partner_auth_alarm retention purge
+
+Numbering: **migration `0074`, matrix `52`, this section 60.** Closes the retention follow-up for `app.partner_auth_alarm` left open by 0048 / §9 / §59.3. Wired into the existing hourly `retention-purge` schedule (sixteen → seventeen steps).
+
+### 60.1 What was built
+
+- **`private.purge_partner_auth_alarms()`** — `raised_at < now() - 90 days`; LIMIT 5000; InitPlan `= ANY (ARRAY(...))` batch (0050 single-key shape).
+- Policies: DELETE + SELECT companions repeating the floor; closed under a partner binding. `GRANT DELETE, SELECT (id, raised_at)` on `partner_auth_alarm` (0048 granted INSERT + SELECT on the arbiter columns only).
+- Edge: one new `RetentionStep` name after the §58 epoch-log step; matrices 20 / 30 / Deno step-order updated.
+
+### 60.2 Decisions and departures
+
+- **Floor 90 days** — match `course_pin_alarm` / epoch-log retention; the table grows at most one row per (kind, credential, minute).
+- **Reuse `retention-purge`** — no new Edge function.
+- **Column-level SELECT for the batch** — the subquery reads `id` / `raised_at`; 0048's arbiter-column grant is insufficient alone.
+
+### 60.3 Not built, honestly
+
+- Pepper-rotation tooling, plan §8.3 cap alert, OCR / aHash / UI flag flips / CAMERA. Partner-auth-alarm operator UI (portal read) → §61.
+
+### 60.4 Verification
+
+Squash-merged as `2bc01b2` (#100). Branch: `cursor/p5-partner-auth-alarm-purge-8ffd` (base main after #99 / `fefa6ff`).
+
+- pgTAP matrices 20 / 30 / 52; Deno retention-purge step order; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0073`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 61. As built: partner_auth_alarm list (partners portal)
+
+Numbering: **migration `0075`, matrix `53`, this section 61.** Closes the operator-facing half of `app.partner_auth_alarm` left open by 0048 / §60.3: a class-A0, **admin-only** list of sign-in alarms the database raised after the Edge had already passed the assertion (`signature_invalid` / `counter_regression`) on the Review screen.
+
+### 61.1 What was built
+
+- **`private.partner_auth_alarm_list_for_partner()`** — class A0, ADMIN only (same gate as `partner_held_queue_for_partner`: authorize as operator then `is_admin`); returns row columns (including `detail`), newest first, at most 100.
+- **SELECT policy** `pd_partner_auth_alarm_partner_select` keyed on `partner_bound_admin` (InitPlan form). 0048's unbound mint-writer policies and 0074's purge companions stay as before. `GRANT SELECT (detail)` (id / kind / credential_id / minute_bucket / raised_at already granted by 0048 / 0074).
+- **Edge**: `GET /partner-review/auth-alarms` → `PartnerReviewTx.authAlarmList` → the new definer; EXECUTE allowlists (matrices 10 / 25 / 28 + Deno PA-13b) name it.
+- **Partners PWA**: Review (admin) screen section with load button, empty / list states (kind + short credential id + raised_at), en + fr-CA copy; fake-server route + Vitest cell.
+
+### 61.2 Decisions and departures
+
+- **Admin only, not manager/operator** — unlike `course_pin_alarm_list_for_partner` (§59), which is facility-scoped manager/operator; auth alarms are global and carry credential ids, so they follow the held-queue admin gate.
+- **Reuse `partner-review`** — no new Edge function; alarms sit next to the held-review queue on the same admin screen.
+- **Column grant for `detail` only** — the other SELECT columns were already granted for the mint writer / purge path.
+
+### 61.3 Not built, honestly
+
+- Pepper-rotation tooling, plan §8.3 cap alert → §62, OCR / aHash / UI flag flips / CAMERA.
+
+### 61.4 Verification
+
+Squash-merged as `5207f5d` (#101). Branch: `cursor/p5-partner-auth-alarm-ui-8ffd` (base main after #100 / `2bc01b2`).
+
+- pgTAP matrix 53 (+ 10 / 25 / 28 EXECUTE lists); Vitest partner-review-handler GET auth-alarms + partners admin authAlarms cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0074`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 62. As built: course-QR static-PIN daily cap alert (plan §8.3)
+
+Numbering: **migration `0076`, matrix `54`, this section 62.** Closes the plan §8.3 L4 cap left open by S2a / S2b / §61.3: **25 static-PIN course-QR credits per facility per local date is a signal and an alert, not a block.** The 26th printed-QR credit of a local date still credits; what changes is that an operator is told via one open `fraud_signal`.
+
+### 62.1 What was built
+
+- **`private.course_qr_static_pin_credit_count_for_actor(facility, local_date)`** — `edge_actor` only; SECURITY DEFINER `private_definer`; `search_path = ''`; requires a `user` or `system_delegate` binding. Returns the integer count of `app.marker_credit` rows with `status = 'credited'` joined to `app.purchase_evidence` on `method = 'course_qr' AND qr_variant = 'static_pin'` for that `facility_id` + `local_date` (facility-wide, not own-row only).
+- **SELECT policies** `pd_course_qr_cap_credit_select` / `pd_course_qr_cap_purchase_select` keyed on `private.actor_uid() IS NOT NULL` plus the narrow status/method/variant filters (named outside `pd_marker_scan_*` so matrix 24's exact 22-policy pin stays). No `edge_actor` table SELECT.
+- **Edge hook** in `handleMarkerScan` after an accepted `static_pin` `Repo#markerScan.record`: count via the new definer; when count **≥ 25**, `Repo#fraudSignal.insert('course_qr_static_pin_cap', { facilityId, localDate, count: n })`. HTTP response unchanged. Failures counting or writing are swallowed (player-lane modules must not `console.*`); the scan still returns 201.
+- **Dedup**: partial unique index `fraud_signal_course_qr_static_pin_cap_open_idx` on `(detail->>'facilityId', detail->>'localDate') WHERE kind = 'course_qr_static_pin_cap' AND cleared_at IS NULL`; `fraudSignal.insert` uses `ON CONFLICT DO NOTHING` for that kind (same pattern as `quarantined_evidence_row`).
+
+### 62.2 Decisions and departures
+
+- **Reuse `fraudSignal.insert`** — no new write definer; kind has no CHECK. The PIN alarm is a separate table the portal lists; for this seam, writing `fraud_signal` is enough for closable.
+- **Fire when count ≥ 25** — not only `=== 25`, so a multi-trail jump that skips exactly 25 still raises one open signal; further scans at 26+ are absorbed by the unique index (`ON CONFLICT DO NOTHING`). Detail `count` is the observed count at first write.
+- **No PWA change** — partners Course QR PIN-alarms section does not surface this one-liner yet (not built).
+
+### 62.3 Not built, honestly
+
+- Partners PWA one-line status for this signal on the Course QR / PIN-alarms surface; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 62.4 Verification
+
+Squash-merged as `7f63a56` (#102). Branch: `cursor/p5-course-qr-cap-alert-8ffd` (base main after #101 / `5207f5d`).
+
+- pgTAP matrix 54 (+ `partner_kind_readers` / function-inventory check 14); Vitest `marker-scan-handler` + `marker-scan-entrypoint` (no `console.*`); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0075`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 63. As built: course-QR static-PIN cap list (partners portal)
+
+Numbering: **migration `0077`, matrix `55`, this section 63.** Closes the operator surface left open by §62.3: partners Course QR screen can list open `fraud_signal` rows of kind `course_qr_static_pin_cap` for a facility (same A0 manager/operator gate as §59 PIN alarms).
+
+### 63.1 What was built
+
+- **`private.course_qr_static_pin_cap_list_for_partner(facility)`** — class A0, manager or operator at the facility; returns id / facility / local_date / count / raised_at for **open** signals only, newest first, at most 100.
+- **SELECT policy** `pd_course_qr_cap_partner_select` on `app.fraud_signal` keyed on `partner_bound_manager_at(detail->>'facilityId')` plus `kind = course_qr_static_pin_cap` and `cleared_at IS NULL`.
+- **Edge**: `GET /course-qr/cap-alerts` → `CourseQrTx.staticPinCapList` → the new definer; EXECUTE allowlists (matrices 10 / 25 / 28 + Deno PA-13b) name it.
+- **Partners PWA**: Course QR section with load button, empty / list states (local date + count + raised_at), en + fr-CA copy; fake-server route + Vitest cell.
+
+### 63.2 Decisions and departures
+
+- **Reuse `fraud_signal`, not `course_pin_alarm`** — §62 already writes the cap as `fraud_signal`; listing that kind is enough for “operator is told” on the Course QR surface.
+- **Open rows only** — cleared signals are excluded by the policy and the definer.
+- **Sibling section next to PIN alarms** — separate `GET cap-alerts` rather than folding into `/alarms`, so the A0 loads stay independent.
+
+### 63.3 Not built, honestly
+
+- Pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 63.4 Verification
+
+Squash-merged as `51dadd8` (#103). Branch: `cursor/p5-course-qr-cap-ui-8ffd` (base main after #102 / `7f63a56`).
+
+- pgTAP matrix 55 (+ 10 / 25 / 28 EXECUTE lists); Vitest course-qr-handler GET cap-alerts + partners work capAlerts cell; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0076`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 64. As built: sign-in mint session eviction (4.1)
+
+Numbering: **migration `0078`, matrix `56`, this section 64.** Closes the 0048 leftover left open by §17.8 / §22.3: `register_first` already called `partner_sessions_evict_oldest(..., 3)` after its session INSERT; the sign-in mint did not. Beyond three live sessions of a person, the mint now REVOKES the oldest (never DELETE — the 60/h count is from `partner_session` rows).
+
+### 64.1 What was built
+
+- **`CREATE OR REPLACE private.partner_session_mint`** — after a successful session INSERT, `PERFORM private.partner_sessions_evict_oldest(v_cred.user_id, 3)` (same helper / keep as `register_first`). Owner, EXECUTE grant, and refusal-as-status contract unchanged.
+- **COMMENT + `function_inventory` note** mention eviction (REVOKE, not DELETE).
+- **pgTAP matrix 56**: four older live + successful mint → three live; two oldest revoked with `session_limit`; rows remain; under-cap mint writes no `session_limit` revoke.
+
+### 64.2 Decisions and departures
+
+- **keep = 3 for everyone** — matches `register_first`. Design §4.1 table lists Admin concurrent = 2; that role-aware keep stays a separate intentional departure (would need a parallel change to `register_first` and ideally a policy helper column).
+- **No new privilege surface** — issuer already holds EXECUTE on the 0054 helper; no Edge / PWA change.
+
+### 64.3 Not built, honestly
+
+- Admin keep=2; credential display-note `PATCH` → §65; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 64.4 Verification
+
+Squash-merged as `6bb5cff` (#104). Branch: `cursor/p5-mint-session-evict-8ffd` (base main after #103 / `51dadd8`).
+
+- pgTAP matrix 56; `verify-function-inventory`; migrations immutable for `0001`–`0077`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 65. As built: credential display-note PATCH
+
+Numbering: **migration `0079`, matrix `57`, this section 65.** Closes the 0054 leftover named in §23.3: `PATCH credentials/{id}` for the member-chosen display note (≤40 characters, never used by a security decision). Class A0; own credential only.
+
+### 65.1 What was built
+
+- **`private.partner_credential_note_for_partner(id, note)`** — class A0; statuses `ok` | `not_found` (unknown or not own); blank/NULL clears; `char_length > 40` → 22023.
+- **`GRANT UPDATE (note)`** + policy `pd_update_partner_credential_note` (partner-bound, own `user_id`).
+- **Edge**: `PATCH /partner-members/credentials/{id}` → `credentialNote`; not counted against the credential add/revoke 10/h bucket.
+- **pgTAP matrix 57** + PA-22 allowlist widen in matrix 32; EXECUTE lists (10 / 25 / 28 + Deno).
+
+### 65.2 Decisions and departures
+
+- **Own only** — reach-rule note edits are not in scope (revoke is A2 + reach; note is A0 display metadata).
+- **No PWA** — API seam only; partners credential settings UI remains a later surface.
+- **Clear with null / blank** — matches the column default.
+
+### 65.3 Not built, honestly
+
+- Admin keep=2 → §66; IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI → §67. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 65.4 Verification
+
+Squash-merged as `34b8b74` (#105). Branch: `cursor/p5-credential-note-patch-8ffd` (base main after #104 / `6bb5cff`).
+
+- pgTAP matrix 57 (+ 10 / 25 / 28 / 32); Vitest partner-members-handler PATCH; `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0078`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 66. As built: Admin concurrent session keep = 2
+
+Numbering: **migration `0080`, matrix `58`, this section 66.** Closes the §4.1 table leftover left open by §64.2 / §65.3: Admin concurrent = 2; staff / manager / operator stay 3. Both mint paths (`partner_session_mint` and `partner_credential_register_first`) use the same keep.
+
+### 66.1 What was built
+
+- **`private.partner_session_policy`** — OUT column `concurrent` (admin → 2, else → 3); idle / absolute / required_aal unchanged.
+- **`partner_session_mint` / `partner_credential_register_first`** — `PERFORM partner_sessions_evict_oldest(uid, v_pol.concurrent)` after the session INSERT.
+- **pgTAP matrix 58** — policy OUT shape; admin 3→2; staff still 3.
+
+### 66.2 Decisions and departures
+
+- **Policy column, not a parallel helper** — §64.2's preferred shape; no new EXECUTE surface / `partner_owner_privilege` row (issuer already holds EXECUTE on the policy).
+- **DROP + CREATE** — PostgreSQL cannot change a function's return type in place; grants re-applied to `partner_session_issuer`.
+
+### 66.3 Not built, honestly
+
+- IP / global alert-only rate buckets; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; partners credential settings UI → §67. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 66.4 Verification
+
+Squash-merged as `6246993` (#106). Branch: `cursor/p5-admin-session-keep-8ffd` (base main after #105 / `34b8b74`).
+
+- pgTAP matrix 58 (+ 56 regression); `verify-function-inventory`; migrations immutable for `0001`–`0079`; CI green (gitleaks + install/typecheck/build/test + player-plane DB).
+
+## 67. As built: partners credential display-note settings UI
+
+Numbering: **matrix n/a (PWA only), this section 67.** Closes the §65 leftover: partners UI to list the signed-in person's own passkeys and edit the ≤40-character display note (class A0). No revoke, no add, no migration, no UI flag flips.
+
+### 67.1 What was built
+
+- **`apps/partners/src/api/members-routes.ts`** — `getCredentials` / `patchCredentialNote` over `PartnerApi.call` (`partner-members`); `PartnerCredential` matches Edge `CredentialView`; 404 → `not_found`.
+- **Work screen `credentials`** — open / load (A0 GET) / save note (A0 PATCH); trim client-side; length > 40 → `credentials.noteTooLong` without a round-trip; empty/blank clears; notice `credential-note-saved`; revoked rows filtered out when present.
+- **Home entry** — section after PIN (`data-testid="open-credentials"`); no facility select.
+- **Fake partner server** — GET/PATCH credentials for the session user; OPTIONS allow-methods include PATCH; note ≤40 / unknown id → 400 / 404.
+- **i18n** EN + fr-CA key parity; Vitest `work.test.ts` covers open → load → save + PATCH log.
+
+### 67.2 Decisions and departures
+
+- **List + note only** — revoke (A2) and second-credential add stay Edge-only / later UI; matches §65.2 "No PWA" closure as the display-metadata half.
+- **No facility** — credentials are person-scoped, not facility-scoped (unlike stock / attest).
+- **Reload after save** — PATCH then GET so the list matches the wire; `lastSavedId` records which row was written.
+
+### 67.3 Not built, honestly
+
+- IP / global alert-only rate buckets → §68; pepper-rotation tooling; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 67.4 Verification
+
+Squash-merged as `5d760f7` (#107). Branch: `cursor/p5-credential-note-ui-8ffd` (base after #106 / `6246993`).
+
+- `@golfraven/partners` unit tests (incl. credentials screen) + typecheck; i18n EN/FR parity; no Edge / migration change.
+
+## 68. As built: IP / global alert-only rate buckets
+
+Numbering: **migration `0081`, matrix `59`, this section 68.** Closes design §8 / §18.5 / §67.3: pre-auth options and verify-failure buckets that **never refuse** a request (a shared office NAT must not be a login DoS lever). They only raise `app.partner_auth_alarm` rows for operators.
+
+### 68.1 What was built
+
+- **`app.partner_auth_alarm.bucket_key`** — arbiter with `(kind, minute_bucket)`; mint kinds keep `credential_id` and set `bucket_key = credential_id::text`; rate kinds leave `credential_id` NULL and key on sha256(IP) hex or `global`.
+- **Kinds** — `signature_invalid` | `counter_regression` | `rate_options_ip` | `rate_options_global` | `rate_verify_ip`.
+- **`private.partner_mint_alarm_write`** — sets `bucket_key`; `ON CONFLICT (kind, bucket_key, minute_bucket)`.
+- **`private.partner_rate_alarm_raise`** — `edge_partner_minter` only; refuses any binding; `INSERT ON CONFLICT DO NOTHING`; `audit_log` `partner.rate.<kind>` only when new.
+- **Edge** — `PartnerMintTx.raiseRateAlarm`; `partnerClientIp` → first `X-Forwarded-For` / `CF-Connecting-IP` / `unknown`, then sha256 hex (never store raw IP); options: 600/h IP + 20,000/h global alert-only; verify: on Edge assertion failure that records a failure, 100/h IP alert-only. Never 429; writer errors swallowed.
+- **§61 null-safe list** — `credentialId: string | null` on Edge/PWA; Review UI shows `kind · at` when null (no `.slice`).
+- **pgTAP matrix 59** + PA-8 minter EXECUTE allowlists (10 / 25 / 26) + kind_readers.
+
+### 68.2 Decisions and departures
+
+- **Alert-only, not hard limit** — matches design §8; invite hard-limit behaviour of `hitSystemRateLimit` is unchanged.
+- **No raw IP in the database** — only the 64-hex hash (or `global`) as `bucket_key`.
+- **Separate minter writer** — rate kinds cannot use `partner_mint_alarm_write` (credential required); `partner_rate_alarm_raise` is the minter-lane twin.
+
+### 68.3 Not built, honestly
+
+- Pepper-rotation tooling → §69; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 68.4 Verification
+
+Squash-merged as `b583ab5` (#108). Branch: `cursor/p5-alert-rate-buckets-8ffd` (base after #107 / `5d760f7`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 59 ok; 10 / 25 / 26 PA-8 allowlists).
+- Focused: `partner-session-handler` Vitest + Deno-unit (23); `partner-review-handler` Vitest; `@golfraven/partners` `admin.test.ts` (null credentialId cell).
+
+## 69. As built: course PIN pepper rotation tooling
+
+Numbering: **migration `0082`, matrix `60`, this section 69.** Closes design M1 / 0046 header / §68.3: operator rotation of Vault `course_pin_pepper` (+ optional `course_pin_pepper_previous`) with `app.course_pin_pepper_epoch` written only on non-compromise. Pepper bytes never leave the database.
+
+### 69.1 What was built
+
+- **`private.course_pin_pepper_rotate(p_mode text) RETURNS text`** — SECURITY DEFINER, `search_path=''`, owned by `private_definer`; REVOKE PUBLIC; no edge/client/`service_role` EXECUTE (owner / SQL-editor only via `SET LOCAL ROLE private_definer`).
+- **Modes** — `non_compromise` (CLI `non-compromise`): refuse `previous_exists` while previous secret exists; else copy current → `course_pin_pepper_previous` in-DB from `vault.decrypted_secrets`, `vault.update_secret` current with `encode(gen_random_bytes(32),'hex')`, `INSERT app.course_pin_pepper_epoch (effective_from) VALUES (now())`. `compromise`: no copy, no epoch row, replace current, DELETE previous if present. `retire_previous` (CLI `retire-previous`): DELETE previous only when latest `effective_from` ≤ now() − 7 days; else `too_early`; `previous_absent` when already gone. Operator-only in this seam (no retention-purge hook).
+- **Statuses** — `ok` | `previous_exists` | `no_pepper` | `previous_absent` | `too_early`; raise `22023` for bad mode. Optional `audit_log` `operator.course_pin_pepper.rotate` with mode + `effective_from` only (never secret material).
+- **CLI** — `tools/db/rotate-course-pin-pepper.mjs` prints `BEGIN; SET LOCAL ROLE private_definer; SELECT private.course_pin_pepper_rotate('…'); COMMIT;` to stdout (pipe to psql; Node never holds pepper bytes). Unit test: `tools/db/rotate-course-pin-pepper.test.mjs` (node:test).
+- **pgTAP matrix 60** + matrix 24 pepper inventory cells (three namers: derive / matches / rotate).
+
+### 69.2 Decisions and departures
+
+- **Definer is source of truth** — thin CLI mirrors `provision-course-qr-key.mjs` (stdout only); Vault create/update via hosted API (`[unverified]` shape; migration fail-closed if absent); delete is `DELETE FROM vault.secrets` (no `vault.delete_secret`).
+- **Refuse second non-compromise while previous exists** — one previous pepper kept (0046: two rotations inside 7 days would mis-judge older queued scans).
+- **`retire-previous` is operator-only** — not wired to retention purge.
+
+### 69.3 Not built, honestly
+
+- Member-keyed 1,200/h alert-only any-partner-call bucket → §70; OCR / aHash / UI flag flips / CAMERA; credential revoke/add UI; reach-rule note edits; automatic 7-day purge of `course_pin_pepper_previous`. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 69.4 Verification
+
+Squash-merged as `ed5692a` (#109). Branch: `cursor/p5-pepper-rotate-8ffd` (base after #108 / `b583ab5`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 60 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+- `node --test tools/db/rotate-course-pin-pepper.test.mjs` (7 passed).
+
+## 70. As built: member-keyed 1,200/h alert-only any-call bucket
+
+Numbering: **migration `0083`, matrix `61`, this section 70.** Closes design §8 / §69.3 leftover: every authenticated partner HTTP call soft-caps at 1,200/h per member (alert only; never 429). Does not replace hard per-route caps.
+
+### 70.1 What was built
+
+- **Kind `rate_member`** on `app.partner_auth_alarm` — `credential_id` NULL; `bucket_key` = bound member uid text (uuid regex CHECK).
+- **`private.partner_member_rate_alarm_raise(p_detail jsonb)`** — `SECURITY DEFINER`, `search_path=''`, owned by `private_definer`; `edge_partner` only (not minter); REQUIRES partner binding (42501 if unbound); `bucket_key` = `private.partner_binding_user()::text` (never caller-chosen); `INSERT ON CONFLICT DO NOTHING`; `audit_log` `partner.rate.rate_member` only when new. Partner-bound INSERT/SELECT policies for the writer (0048's unbound mint policies stay).
+- **Edge** — `PartnerSessionTx` / `CourseQrTx.raiseMemberRateAlarm`; shared `alertMemberAnyCall` in `handler-kit.ts` via `hitRateLimitForPartner(tokenHash, "partner-any-call", 3600, 1200)` then bound raise; wired once after successful bearer hash in every authenticated partner handler (members, invites session routes, attest, review, stock, entitlements, programme, offers-admin, sponsorships, offers-redeem, settlement, course-qr, qr-print) and once when `partner-session` enters its authenticated switch (not options/verify/pre-auth). Never 429; writer errors swallowed. `partner_rate_alarm_raise` (minter-only) untouched.
+- **pgTAP matrix 61** + PA-1 / inventory edge_partner allowlists (10 / 25) + kind_readers.
+
+### 70.2 Decisions and departures
+
+- **Alert-only soft-cap** — matches design §8 "any partner call | member | 1,200/h (alert, not block)"; hard per-route member buckets stay.
+- **Separate edge_partner writer** — rate_member cannot use minter-lane `partner_rate_alarm_raise` (refuses any binding); binding uid is the only arbiter key.
+
+### 70.3 Not built, honestly
+
+- Automatic 7-day purge of `course_pin_pepper_previous` → §71; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 70.4 Verification
+
+Squash-merged as `6ac6ec8` (#110). Branch: `cursor/p5-member-rate-alert-8ffd` (base after #109 / `ed5692a`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 61 ok; 10 / 25 PA-1 allowlists).
+- Focused: `alertMemberAnyCall` + session-handler Vitest; Deno PA-13b golden; `definer_policy_exprs` + `verify-function-inventory`.
+
+## 71. As built: course_pin_pepper_previous retention purge
+
+Numbering: **migration `0084`, matrix `62`, this section 71.** Closes the automatic 7-day retire of Vault `course_pin_pepper_previous` left open by 0082 / §69.3 / §70.3. Wired into the existing hourly `retention-purge` schedule (seventeen → eighteen steps).
+
+### 71.1 What was built
+
+- **`private.purge_course_pin_pepper_previous() RETURNS integer`** — SECURITY DEFINER, `search_path=''`, owned by `private_definer`; calls `private.course_pin_pepper_rotate('retire_previous')`; maps `ok` → 1, `too_early` / `previous_absent` → 0; raises only on unexpected SQL errors (unexpected status is a programming error).
+- **Grants** — REVOKE PUBLIC; GRANT EXECUTE to `edge_system` only. **Never** GRANT any edge role EXECUTE on `course_pin_pepper_rotate` (owner / SQL-editor only, 0082).
+- **Audit** — keep existing `operator.course_pin_pepper.rotate` from `retire_previous`; no separate `system.*` audit on this seam.
+- **Edge** — `RetentionStep` name `course_pin_pepper_previous` after `partner_auth_alarms`; matrices 20 / 24 / 30 / Deno step-order updated.
+
+### 71.2 Decisions and departures
+
+- **Wrapper only** — the 7-day floor and Vault DELETE stay inside `course_pin_pepper_rotate`; retention-purge never holds pepper bytes and never widens rotate's ACL.
+- **Reuse `retention-purge`** — no new Edge function.
+- **Status → count** — rotate's text statuses become the integer the schedule already expects (`ok` is one row of work; no-ops are zero).
+
+### 71.3 Not built, honestly
+
+- Session-lock make-revoke (`partner_session_lock_for_partner` → `revoke_reason = 'lock'`) → §72; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 71.4 Verification
+
+Squash-merged as `21bf562` (#111). Branch: `cursor/p5-pepper-previous-purge-8ffd` (base after #110 / `6ac6ec8`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (Files=83, Tests=5939; matrix 62 ok; 20 / 24 / 30 privilege / pepper-namer lists).
+- Deno integration **390 passed**; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 72. As built: partner session lock revokes with reason lock
+
+Numbering: **migration `0085`, matrix `63`, this section 72.** Closes the 20.4 / 20.12 server follow-up left open by S7a and named in §71.3: make `private.partner_session_lock_for_partner` revoke with `revoke_reason = 'lock'` (function kept; do not retire). PWA Lock UI stays on `POST sign-out` — no `apps/partners` behaviour change this slice.
+
+### 72.1 What was built
+
+- **`CREATE OR REPLACE private.partner_session_lock_for_partner() RETURNS void`** — same owner/ACL/signature as today (`private_definer`, `EXECUTE` for `edge_partner` only, class `SESSION`). Body mirrors `partner_session_revoke_for_partner`: `partner_authorize(..., 'SESSION')` → `partner_binding_session()` → `UPDATE` `revoked_at` + `revoke_reason = 'lock'` where `revoked_at IS NULL`. No PIN/reauth/OTP/mfa clears before revoke (redundant once the row is dead).
+- **Inventory / COMMENT** — note records revoke-with-reason-lock; COMMENT updated.
+- **pgTAP matrix 63** + collateral flips in matrices 27 / 28 / 31 (live-after-lock → revoked; mfa clear → row dead) and Deno PA-12 / reauth / PA-28 (assert `revoke_reason = 'lock'`; do not expect successful post-lock sign-out on the same token).
+
+### 72.2 Decisions and departures
+
+- **Make-revoke, not retire** — the `lock` route stays callable; PWA switch to `POST lock` deferred to §73.
+- **Revoke-only body** — clearing grants on a dead session was redundant; `partner_totp_mfa_clear` remains for other callers but is no longer invoked from lock.
+- **Class stays SESSION** — lock still advances `last_seen_at` (authorize) then revokes; a non-revoking lock would have needed PEEK, but that path is gone.
+
+### 72.3 Not built, honestly
+
+- PWA Lock UI switch from `POST sign-out` to `POST lock` → §73; credential revoke/add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 72.4 Verification
+
+Squash-merged as `5cfd70b` (#112). Branch: `cursor/p5-session-lock-revoke-8ffd` (base after #111 / `21bf562`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (Files=84, Tests=5952; matrix 63 ok; 27 / 28 / 31 collateral; serialisation 9b: one revoke / three not-live / no deadlock).
+- Deno integration **390 passed** (PA-12 lock revokes with reason `lock`; post-lock sign-out 401); `verify-function-inventory: OK`; service-role-lint clean.
+
+## 73. As built: partners Lock UI uses `POST lock`
+
+Numbering: **matrix n/a (PWA only), this section 73.** Closes the §72.3 leftover: Lock button / `api.lock()` sends `POST partner-session/lock` (server already make-revokes with `revoke_reason = 'lock'` in 0085). Sign-out and `pagehide` keepalive stay on `POST sign-out`. No migration, no UI flag flips.
+
+### 73.1 What was built
+
+- **`apps/partners/src/api/client.ts`** — `endSession` takes a revoke route; `lock()` → `POST lock`; `signOut()` and orphan-session revoke still → `POST sign-out`.
+- **Fake partner server** — `tx.lock()` adds the session to `revokedSessions` (mirrors §72 make-revoke) and increments `lockCalls`.
+- **Tests** — `client.test.ts`, `controller.test.ts`, `contract.test.ts`, Playwright MEDIUM-2 / lock cells, CSP path allow for `lock`.
+- **README + design 20.4** — Lock wire route documented as `POST lock`.
+
+### 73.2 Decisions and departures
+
+- **Lock route, not sign-out** — distinct `revoke_reason = 'lock'` on the wire the page actually calls; operators can tell a Lock from a Sign-out.
+- **pagehide stays sign-out** — navigating away is not a Lock; wording and reason remain `signed-out`.
+- **No Edge / migration change** — 0085 already made the `lock` definer revoke.
+
+### 73.3 Not built, honestly
+
+- Credential revoke UI (own, A2) → §74; second-credential add UI; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 73.4 Verification
+
+Squash-merged as `d6ef09f` (#113). Branch: `cursor/p5-lock-ui-post-lock-8ffd` (base after #112 / `5cfd70b`).
+
+- `@golfraven/partners` vitest **986 passed** (lock → `POST lock`, `lockCalls === 1`); typecheck clean; CI green (incl. Playwright); no Edge / migration change.
+
+## 74. As built: partners credential revoke UI (own, A2)
+
+Numbering: **matrix n/a (PWA only), this section 74.** Closes part of the §73.3 leftover: revoke an **own** passkey from the credentials screen under class A2 (passkey reauth + PIN grant), via existing `DELETE partner-members/credentials/{id}`. Second-credential add and reach-rule note edits stay later. No migration, no UI flag flips.
+
+### 74.1 What was built
+
+- **`apps/partners/src/api/members-routes.ts`** — `revokeCredential(api, id)` → `DELETE credentials/{id}`; maps 404 → `not_found`, 409 → `already_revoked`.
+- **Work screen** — `revokeCredential(id)`: `reauthWithPasskey` then `requirePin("A2")` then DELETE then reload list; notice `credential-revoked`.
+- **Last active refuse** — if only one active passkey, no DELETE (client `credentials.lastActive`); recovery stays the manager path.
+- **Fake partner server** — DELETE on own credential; CORS allow-methods include DELETE; already-revoked → 409.
+- **i18n** EN + fr-CA; Vitest covers A2 order + last-active refuse.
+
+### 74.2 Decisions and departures
+
+- **Own list only** — GET credentials is own-scoped; reach-rule revoke of another's passkey stays Edge-only (managers use recover).
+- **Add stays out** — `POST credentials/options` + register remain later UI.
+- **Last passkey** — client refuses; DB still allows (recovery / reach paths).
+
+### 74.3 Not built, honestly
+
+- Second-credential add UI → §75; reach-rule note edits; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 74.4 Verification
+
+Squash-merged as `e53cd2a` (#114). Branch: `cursor/p5-credential-revoke-ui-8ffd` (base after #113 / `d6ef09f`).
+
+- `@golfraven/partners` vitest **994 passed** (credentials revoke A2 + last-active refuse); typecheck clean; CI green; no Edge / migration change.
+
+## 75. As built: partners second-credential add UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 75.** Closes the §74.3 leftover: add a second (or further) passkey from the credentials screen under class A2, via existing `POST credentials/options` + `POST credentials`. Reach-rule note edits stay later. No migration, no UI flag flips.
+
+### 75.1 What was built
+
+- **`members-routes.ts`** — `credentialOptions` / `registerCredential`; 409 `too_many` mapped.
+- **Work screen `addCredential`** — reauth once; `requirePin("A2")` → options; `createCredential`; `requirePin("A2")` again → register; reload list; notice `credential-added`.
+- **Cap 5** — client refuses when five active (`credentials.tooMany`); matches DB.
+- **Fake partner server** — options + register with A2 (reauth + PIN grant each); exclude list; soft-auth create.
+- **i18n** EN + fr-CA; Vitest covers two-PIN A2 order + cap refuse.
+
+### 75.2 Decisions and departures
+
+- **Two PIN grants** — both options and register call `partner_authorize` A2 (each consumes a grant); one reauth window covers both.
+- **Create between grants** — browser ceremony runs after the first grant; second PIN is just before register.
+- **Reach-rule notes / pepper_kid** stay later.
+
+### 75.3 Not built, honestly
+
+- Reach-rule note edits → §76; partner_pin `pepper_kid`; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 75.4 Verification
+
+Squash-merged as `70e3865` (#115). Branch: `cursor/p5-credential-add-ui-8ffd` (base after #114 / `e53cd2a`).
+
+- `@golfraven/partners` vitest **999 passed** (credentials add A2 two-PIN + too-many refuse); typecheck clean; CI green; no Edge / migration change.
+
+## 76. As built: credential note PATCH under the reach rule
+
+Numbering: **migration `0086`, matrix `64`, this section 76.** Closes the §65.2 / §75.3 leftover: a manager (or higher) under the 6.5 reach rule may set the display-only note on another person's credential. Class stays A0. List stays own-only (no PWA for others yet).
+
+### 76.1 What was built
+
+- **`CREATE OR REPLACE private.partner_credential_note_for_partner`** — own OR `partner_reach_covers`; outside reach / unknown → `not_found` (same shape as revoke).
+- **Policy `pd_update_partner_credential_note`** — USING / WITH CHECK widened to own OR reach (DROP + CREATE).
+- **pgTAP matrix 64** — manager@X notes staff@X; staff cannot note up; staff@Y out of reach; allowlist exprs; inventory note.
+- **Fixture** `definer_policy_exprs.txt` for the widened UPDATE policy.
+
+### 76.2 Decisions and departures
+
+- **A0 unchanged** — notes are display metadata; reach widens *who*, not the authorization class.
+- **No list widen / no PWA** — GET credentials stays own-only; managers who know a credential id can PATCH (API seam). UI for others' passkeys stays later.
+- **partner_pin `pepper_kid`** stays later.
+
+### 76.3 Not built, honestly
+
+- partner_pin `pepper_kid` → §77; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 76.4 Verification
+
+Squash-merged as `3ee503b` (#116). Branch: `cursor/p5-credential-note-reach-8ffd` (base after #115 / `70e3865`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 64); `definer_policy_exprs` + `verify-function-inventory`; migrations immutable for `0001`–`0085`.
+
+## 77. As built: partner PIN pepper rotation + lazy rewrap
+
+Numbering: **migration `0087`, matrix `65`, this section 77.** Closes design D4 / 0052 header / §76.3: operator rotation of Vault `partner_pin_pepper` (+ optional `partner_pin_pepper_previous`) with `app.partner_pin_pepper_epoch` written only on non-compromise. Unlike course PIN (derived from pepper alone), partner verifiers cannot be rehashed without the member's derived key — so `partner_pin_core` dual-verifies and `partner_pin_attempt` lazy-rewraps on a previous match. Pepper bytes never leave the database.
+
+### 77.1 What was built
+
+- **`app.partner_pin_pepper_epoch`** — `effective_from` PK, `recorded_at`, `pepper_kid` (unique); FORCE RLS; `service_role` SELECT/INSERT; `private_definer` SELECT + INSERT (rotate); CHECK `effective_from <= recorded_at`.
+- **`private.partner_pin_core`** — DROP + CREATE: third OUT `o_pepper_kid`; HMAC under CURRENT as `o_verifier`; `o_match` under current **or** previous when previous Vault secret exists **and** an epoch row exists; on previous-only match `o_verifier` is the rewrap target. ACL unchanged (pin verifier + owner).
+- **`private.partner_pin_attempt`** — on ok, when stored verifier ≠ current `o_verifier`, rewrite `verifier` + `pepper_kid`.
+- **`private.partner_pin_set_apply`** — stores current `pepper_kid` (epoch tip, else `'v1'`) on set/change.
+- **`private.partner_pin_pepper_rotate(p_mode text) RETURNS text`** — same modes/statuses as course §69 (`non_compromise` | `compromise` | `retire_previous`); audit `operator.partner_pin_pepper.rotate` (mode + effective_from + pepper_kid on non_compromise). Owner / SQL-editor only.
+- **CLI** — `tools/db/rotate-partner-pin-pepper.mjs` (+ `rotate-partner-pin-pepper.test.mjs`).
+- **pgTAP matrix 65**.
+
+### 77.2 Decisions and departures
+
+- **Lazy rewrap, not bulk rehash** — the PIN never reaches the server; only a successful derived-key attempt can rewrite a row under the new pepper.
+- **Previous without epoch unused** — same fail-closed rule as course `course_pin_matches` (compromise leaves no standing second key).
+- **Members who never authenticate in the 7-day previous window** need a manager reset after `retire_previous` (or after compromise).
+
+### 77.3 Not built, honestly
+
+- Automatic 7-day purge of `partner_pin_pepper_previous` → §78; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 77.4 Verification
+
+Squash-merged as `2c9f43f` (#117). Branch: `cursor/p5-partner-pin-pepper-8ffd` (base after #116 / `3ee503b`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 65 ok); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+- `node --test tools/db/rotate-partner-pin-pepper.test.mjs` (7 passed).
+
+## 78. As built: partner_pin_pepper_previous retention purge
+
+Numbering: **migration `0088`, matrix `66`, this section 78.** Closes the automatic 7-day retire of Vault `partner_pin_pepper_previous` left open by 0087 / §77.3. Wired into the existing hourly `retention-purge` schedule (eighteen → nineteen steps).
+
+### 78.1 What was built
+
+- **`private.purge_partner_pin_pepper_previous() RETURNS integer`** — SECURITY DEFINER, `search_path=''`, owned by `private_definer`; calls `private.partner_pin_pepper_rotate('retire_previous')`; maps `ok` → 1, `too_early` / `previous_absent` → 0; raises only on unexpected SQL errors (unexpected status is a programming error).
+- **Grants** — REVOKE PUBLIC; GRANT EXECUTE to `edge_system` only. **Never** GRANT any edge role EXECUTE on `partner_pin_pepper_rotate` (owner / SQL-editor only, 0087).
+- **Audit** — keep existing `operator.partner_pin_pepper.rotate` from `retire_previous`; no separate `system.*` audit on this seam.
+- **Edge** — `RetentionStep` name `partner_pin_pepper_previous` after `course_pin_pepper_previous`; matrices 20 / 30 / Deno step-order updated.
+- **pgTAP matrix 66**.
+
+### 78.2 Decisions and departures
+
+- **Wrapper only** — the 7-day floor and Vault DELETE stay inside `partner_pin_pepper_rotate`; retention-purge never holds pepper bytes and never widens rotate's ACL.
+- **Reuse `retention-purge`** — no new Edge function.
+- **Status → count** — rotate's text statuses become the integer the schedule already expects (`ok` is one row of work; no-ops are zero).
+
+### 78.3 Not built, honestly
+
+- Credential list under reach → §79; OCR / aHash / UI flag flips / CAMERA; partners PWA for others' credentials. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 78.4 Verification
+
+Squash-merged as `1ecd6fd` (#118). Branch: `cursor/p5-partner-pin-pepper-purge-8ffd` (base after #117 / `2c9f43f`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 66 ok; 20 / 30 privilege lists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 79. As built: credential list under the reach rule
+
+Numbering: **migration `0089`, matrix `67`, this section 79.** Closes the §76.2 / §78.3 leftover: GET credentials may list another person's rows when the 6.5 reach rule covers them. Class stays A0. Partners PWA for others stays later (needs a member roster pick surface).
+
+### 79.1 What was built
+
+- **`DROP` + `CREATE private.partner_credential_list_for_partner(p_user_id uuid DEFAULT NULL)`** — NULL or self → own rows; else only when `partner_reach_covers`; outside reach / unknown → empty (no list status oracle). Never key / credential-id bytes / sign counter.
+- **SELECT policy** — unchanged (`pd_read_partner_credential_bound` already own OR reach since 0054).
+- **Edge** — `GET /partner-members/credentials?userId=` (optional uuid; unknown keys refused); `PartnerMembersTx.credentialList(userId?)`.
+- **pgTAP matrix 67** + matrix 32 ACL `regprocedure` updated to `(uuid)`.
+- **function_inventory** — identity_args `''` → `p_user_id uuid`.
+
+### 79.2 Decisions and departures
+
+- **Empty, not `not_found`** — a list has no refusal status; outside reach looks like "no credentials visible" (same shape as an empty person).
+- **DEFAULT NULL** — bare `partner_credential_list_for_partner()` calls (matrix 32) keep working; catalog identity is `(uuid)`.
+- **No PWA / no member roster** — discovery of a `userId` under reach stays a later seam.
+
+### 79.3 Not built, honestly
+
+- Org member roster GET → §80; partners PWA for others' credentials → §81; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 79.4 Verification
+
+Squash-merged as `d02f88f` (#119). Branch: `cursor/p5-credential-list-reach-8ffd` (base after #118 / `1ecd6fd`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 67 ok; matrix 32 ACL); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 80. As built: org member roster GET
+
+Numbering: **migration `0090`, matrix `68`, this section 80.** Closes the §79.3 leftover: managers / operators may list active memberships in orgs their facility scope covers, so the PWA can pick a `userId` for credential list / note / revoke under reach.
+
+### 80.1 What was built
+
+- **`private.partner_member_list_for_partner(p_org_id uuid)`** — class A0, `manager|operator` (admin passes). Active rows only; scoped via `has_facility_scope` on the org's facility (or `is_admin`). `p_org_id` NULL = every in-scope org. Outside scope → empty. Columns: userId, orgId, role, facilityId, invitedBy, createdAt — never email / token.
+- **SELECT policy** — unchanged (`pd_read_partner_member` USING(true); body is the real scope).
+- **Edge** — `GET /partner-members/members?orgId=` (optional); `PartnerMembersTx.memberList`.
+- **pgTAP matrix 68** + matrix 28 A0 allowlist + Deno EXECUTE allowlist.
+- **function_inventory** — `p_org_id uuid`, `expected_edge_partner`.
+
+### 80.2 Decisions and departures
+
+- **Facility orgs only for non-admins** — operator-org memberships (trail scope, no facility_id) appear only for admins; facility managers do not need them for the credential pick surface.
+- **No email** — unlike invite list; mailbox is not required to open credential list by userId.
+- **No PWA** — roster API only; partners UI for others stays later.
+
+### 80.3 Not built, honestly
+
+- Partners PWA for others' credentials → §81; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 80.4 Verification
+
+Squash-merged as `307fbd5` (#120). Branch: `cursor/p5-member-list-reach-8ffd` (base after #119 / `d02f88f`).
+
+- `HARNESS_MODE=restricted tools/db/test.sh` → pgTAP **Result: PASS** (matrix 68 ok; 10 / 25 / 28 allowlists); Deno integration 390; `verify-function-inventory: OK`; service-role-lint clean.
+
+## 81. As built: partners PWA for others' credentials
+
+Numbering: **matrix n/a (PWA only), this section 81.** Closes the §80.3 leftover: managers / operators (and admins) pick a person from the org roster and list / note / revoke that person's passkeys under the reach rule, via existing `GET members`, `GET credentials?userId=`, `PATCH` / `DELETE credentials/{id}`. No migration, no Edge change, no UI flag flips.
+
+### 81.1 What was built
+
+- **`members-routes.ts`** — `listMembers(api, orgId?)`; `getCredentials(api, userId?)` (optional query).
+- **Work screens** — `members` roster kind; `credentials.targetUserId` for others (no add; no last-active refuse); own credentials unchanged (`targetUserId: null`).
+- **Home** — "Team passkeys" for manager|operator|admin (`canOpenMemberCredentials`).
+- **Fake partner server** — `GET members`, credentials `?userId=`, reach PATCH/DELETE, `seedMember` / `seedCredentialForUser`; request log `search`.
+- **i18n** EN + fr-CA; Vitest covers roster → note → sole-credential revoke (A2) and staff gate.
+
+### 81.2 Decisions and departures
+
+- **No add for others** — second-credential register stays own-only (A2 + create ceremony on the target device).
+- **Actor's A2** — revoke under reach still needs the manager's passkey reauth + PIN, not the target's.
+- **Last active** — client refuse applies only to own list; under reach a sole passkey may be revoked (matches DB / recover path).
+
+### 81.3 Not built, honestly
+
+- Member PIN reset UI → §82; member recover UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 81.4 Verification
+
+Squash-merged as `19c4733` (#121). Branch: `cursor/p5-credential-others-ui-8ffd` (base after #120 / `307fbd5`).
+
+- `@golfraven/partners` vitest **1015 passed** (team credentials under reach); typecheck clean; CI green; no Edge / migration change.
+
+## 82. As built: partners member PIN reset UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 82.** Closes part of the §81.3 leftover: managers / operators (and admins) reset another person's locked PIN under the reach rule via existing `POST partner-members/members/{id}/pin-reset`. No migration, no Edge change, no UI flag flips.
+
+### 82.1 What was built
+
+- **`members-routes.ts`** — `resetMemberPin(api, userId)` → `POST members/{id}/pin-reset`; maps 409 → `pin_not_set`.
+- **Work screen** — `resetMemberPin` on the §81 roster: reauth + `requirePin("A2")` then POST; notice `member-pin-reset`; client refuse for oneself.
+- **Fake partner server** — pin-reset under reach; clears lock/failures, sets `must_change`; `seedMember` creates a stub user for `seedPin`.
+- **i18n** EN + fr-CA; Vitest covers A2 order, self-refuse, and `pin_not_set`.
+
+### 82.2 Decisions and departures
+
+- **Actor's A2 + reauth** — same client order as credential revoke under reach (coworker-with-passcode); DB is A2 only.
+- **Never self** — DB raises 22023; client refuses before wire (`members.pinSelf`).
+- **Recover stays out** — `POST …/recover` (one-time `gr_enr_`) remains a later seam.
+
+### 82.3 Not built, honestly
+
+- Member recover UI → §83; member revoke UI; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 82.4 Verification
+
+Squash-merged as `1f4fd9a` (#122). Branch: `cursor/p5-member-pin-reset-ui-8ffd` (base after #121 / `19c4733`).
+
+- `@golfraven/partners` vitest **1023 passed** (member PIN reset A2); typecheck clean; CI green; no Edge / migration change.
+
+## 83. As built: partners member recover UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 83.** Closes the §82.3 leftover: managers / operators (and admins) recover another person's account under the reach rule via existing `POST partner-members/members/{id}/recover`, showing the one-time `gr_enr_` / enrolUrl once (handover-mint pattern). No migration, no Edge change, no UI flag flips.
+
+### 83.1 What was built
+
+- **`members-routes.ts`** — `recoverMember(api, userId)` → 201 `{ tokenId, expiresAt, token, enrolUrl }`; maps 409 → `no_email`.
+- **Work screen** — `recoverMember` / `dismissMemberRecover` on the roster: reauth + A2 then POST; `work.recovered` holds plaintext until dismiss; notice `member-recovered`; client refuse for oneself.
+- **Fake partner server** — recover under reach; revokes target credentials; `seedMember({ email: null })` for `no_email`.
+- **i18n** EN + fr-CA; Vitest covers A2 order, show-once dismiss, self-refuse, and `no_email`.
+
+### 83.2 Decisions and departures
+
+- **Show once** — same discipline as hand-over mint: plaintext only in `work.recovered`, never logged, cleared on dismiss / leave.
+- **Destructive copy** — UI states that all passkeys and sessions end (not a soft PIN unlock).
+- **Member revoke stays out** — `POST …/revoke` remains a later seam.
+
+### 83.3 Not built, honestly
+
+- Member revoke UI → §84; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 83.4 Verification
+
+Squash-merged as `3c4806e` (#123). Branch: `cursor/p5-member-recover-ui-8ffd` (base after #122 / `1f4fd9a`).
+
+- `@golfraven/partners` vitest **1033 passed** (member recover A2); typecheck clean; CI green; no Edge / migration change.
+
+## 84. As built: partners member revoke UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 84.** Closes the §83.3 leftover: managers / operators (and admins) end **one** membership under the reach rule via existing `POST partner-members/members/{id}/revoke` with `{ orgId }` from the roster row. No migration, no Edge change, no UI flag flips.
+
+### 84.1 What was built
+
+- **`members-routes.ts`** — `revokeMember(api, userId, orgId)` → `{ revoked: true }`; maps 404 → `not_found`.
+- **Work screen** — `revokeMember` on the roster: reauth + A2 then POST; reload list; notice `member-revoked`; client refuse for oneself.
+- **UI** — organisation id shown on each row; revoke testid keyed by `userId` + `orgId` (multi-org safe).
+- **Fake partner server** — revoke under reach removes that roster row.
+- **i18n** EN + fr-CA; Vitest covers A2 order and self-refuse.
+
+### 84.2 Decisions and departures
+
+- **One membership** — body carries the row's `orgId`; a person in two in-scope orgs appears as two rows.
+- **Not recover** — membership end only; credentials/sessions are unchanged (recover remains the full wipe path).
+
+### 84.3 Not built, honestly
+
+- Org sessions revoke-all UI → §85; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 84.4 Verification
+
+Squash-merged as `326f227` (#124). Branch: `cursor/p5-member-revoke-ui-8ffd` (base after #123 / `3c4806e`).
+
+- `@golfraven/partners` vitest **1035 passed** (member revoke A2); typecheck clean; CI green; no Edge / migration change.
+
+## 85. As built: partners org sessions revoke-all UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 85.** Closes the §84.3 leftover: managers / operators (and admins) press the stolen-iPad button via existing `POST partner-members/orgs/{id}/sessions/revoke-all` with optional `{ createdAfter }` (UTC instant). Ends every live session of the org's active members (the actor's own included); when `createdAfter` is set, also revokes credentials of reach-covered members created after that instant (not the actor's). No migration, no Edge change, no UI flag flips.
+
+### 85.1 What was built
+
+- **`members-routes.ts`** — `revokeAllOrgSessions(api, orgId, createdAfter)` → `{ sessions, credentials }`; maps 404 → `not_found`.
+- **Work screen** — `revokeAllOrgSessions` on the §81 roster: reauth + A2 then POST; holds counts in `work.lastRevokeAll` (no roster reload — the actor's session is among those ended); optional `createdAfterDraft` for credential cut-off.
+- **UI** — panic section per manage-org; ISO `…Z` field; result block with session/credential counts.
+- **Fake partner server** — revoke-all under scope returns counts; optional credential revoke after T for reach users except self.
+- **i18n** EN + fr-CA; Vitest covers A2 order and bad `createdAfter` refuse.
+
+### 85.2 Decisions and departures
+
+- **Own session ends** — matches database 6.5; UI shows counts once and does not call GET members after success.
+- **Orgs listed** — manager/operator memberships; admins also see unique `orgId`s from the loaded roster.
+
+### 85.3 Not built, honestly
+
+- Member TOTP reset UI → §86; admin enrolment issue UI (A3); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 85.4 Verification
+
+Squash-merged as `d09d5c3` (#125). Branch: `cursor/p5-org-revoke-all-ui-8ffd` (base after #124 / `326f227`).
+
+- `@golfraven/partners` vitest **1052 passed** (org revoke-all A2); typecheck clean; CI green; no Edge / migration change.
+
+## 86. As built: partners member TOTP reset UI (A3)
+
+Numbering: **matrix n/a (PWA only), this section 86.** Closes the §85.3 leftover: an admin resets another operator's (or admin's) TOTP under the reach rule via existing `POST partner-members/members/{id}/totp-reset` (class A3). Bumps `seed_version`, clears confirmation, revokes the target's sessions. No migration, no Edge change, no UI flag flips.
+
+### 86.1 What was built
+
+- **`members-routes.ts`** — `resetMemberTotp(api, userId)` → `{ reset: true }`; maps 409 → `totp_not_set`.
+- **Work screen** — `resetMemberTotp` on the §81 roster: client A3 gate (`aal` 2); POST; notice `member-totp-reset`; refuse for oneself and for non-admins; roster button only for `operator` rows when the actor is admin.
+- **Fake partner server** — totp-reset under A3 + reach; `seedMemberTotp` for fixtures.
+- **i18n** EN + fr-CA; Vitest covers A3 refuse and happy path.
+
+### 86.2 Decisions and departures
+
+- **No PIN / reauth** — same client A3 gate as printed-QR write and admin screens; fresh MFA is the server's.
+- **Operator rows only in the roster UI** — admin-on-admin reset stays available via API when a different admin appears under reach; the facility roster commonly lists operators.
+
+### 86.3 Not built, honestly
+
+- Admin enrolment issue UI → §87; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 86.4 Verification
+
+Squash-merged as `61cce7a` (#126). Branch: `cursor/p5-member-totp-reset-ui-8ffd` (base after #125 / `d09d5c3`).
+
+- `@golfraven/partners` vitest **1061 passed** (member TOTP reset A3); typecheck clean; CI green; no Edge / migration change.
+
+## 87. As built: partners admin enrolment issue UI (A3)
+
+Numbering: **matrix n/a (PWA only), this section 87.** Closes the §86.3 leftover: an admin issues a one-time `gr_enr_` enrolment token for **another** admin via existing `POST partner-members/admin/enrolments` `{ userId }` (class A3). Show-once plaintext (recover / hand-over pattern). No migration, no Edge change, no UI flag flips.
+
+### 87.1 What was built
+
+- **`members-routes.ts`** — `issueAdminEnrolment(api, userId)` → `{ tokenId, expiresAt, token, enrolUrl }`.
+- **Work screen** — on the §81 members surface when `isAdmin`: UUID draft + issue (A3 gate); holds plaintext in `work.adminEnrolment` until dismiss / leave.
+- **Fake partner server** — `seedAdminUser`; POST `admin/enrolments` under A3 for a different admin.
+- **i18n** EN + fr-CA; Vitest covers A3 refuse, self-refuse, and happy path.
+
+### 87.2 Decisions and departures
+
+- **UUID typed by admin** — facility roster does not list platform admins; no separate admin directory in this slice.
+- **Same show-once discipline as recover** — never logged; cleared on dismiss.
+
+### 87.3 Not built, honestly
+
+- Invites manage UI (list / create / revoke) → §88; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 87.4 Verification
+
+Branch: `cursor/p5-admin-enrolment-ui-8ffd` (base after #126 / `61cce7a`). Squash-merged as `a59249a` (#127).
+
+- `@golfraven/partners` vitest (admin enrolment A3); typecheck clean; no Edge / migration change.
+
+## 88. As built: partners invites manage UI (list / create / revoke)
+
+Numbering: **matrix n/a (PWA only), this section 88.** Closes the §87.3 leftover: managers / operators (and admins) list, create and revoke org invites via existing `GET` / `POST` / `DELETE partner-invites/invites`. Create and revoke are class A2 (reauth + PIN); list is A0. Show-once `gr_inv_` token + inviteUrl (recover / hand-over pattern). No migration, no Edge change, no UI flag flips. Accept flow stays on the pre-session enrol screens.
+
+### 88.1 What was built
+
+- **`invites-routes.ts`** — `listInvites`, `createInvite`, `revokeInvite` with closed body parsing.
+- **Work screen** — `invites` kind: org / email / role drafts; create (A2) holds plaintext until dismiss; list pending; revoke (A2).
+- **Fake partner server** — `withInvites` create / list / revoke / branch E over the in-memory invite store (real `partner-invites` handler).
+- **i18n** EN + fr-CA; Vitest covers staff refuse, create show-once, revoke, and already-member.
+
+### 88.2 Decisions and departures
+
+- **Same home gate as team passkeys** — staff cannot open the surface; Edge still enforces rank and scope on write.
+- **Sponsor role refused in the client** — matches Edge `invites-shape` (staff | manager | operator only).
+
+### 88.3 Not built, honestly
+
+- Branch E invite accept UI (signed-in `POST invites/accept`) → §89; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 88.4 Verification
+
+Branch: `cursor/p5-invites-manage-ui-8ffd` (base after #127 / `a59249a`). Squash-merged as `fb71c09` (#128).
+
+- `@golfraven/partners` vitest (invites manage A0/A2); typecheck clean; no Edge / migration change.
+
+## 89. As built: partners branch E invite accept UI (A2)
+
+Numbering: **matrix n/a (PWA only), this section 89.** Closes the §88.3 / §24.3 leftover: a signed-in person with an existing passkey accepts a `gr_inv_` invite to join another org via existing `POST partner-invites/invites/accept` (class A2). No new credential. No migration, no Edge change, no UI flag flips.
+
+### 89.1 What was built
+
+- **`invites-routes.ts`** — `acceptInvite(api, token)` → `{ orgId, role }`.
+- **`invite-accept.ts`** — holds the token in a closure; reauth + `requirePin("A2")` then POST; refreshes whoami after join.
+- **Invite link** — while signed in, a `gr_inv_` fragment is held for branch E (not enrol); `gr_enr_` is cleared without starting enrol.
+- **Enrol flow** — on `409 existing_member_sign_in` for an invite, the token is handed to branch E so join works after sign-in.
+- **Home** — join / dismiss when `pendingInviteAccept`; i18n EN + fr-CA; Vitest covers hold, accept, dismiss, enrol hand-off.
+
+### 89.2 Decisions and departures
+
+- **Token never in AppState** — only a boolean `pendingInviteAccept` is drawn; same discipline as enrol's closure token.
+- **Enrolment tokens out of scope** — recovery / admin enrolment stay on the pre-session enrol screens.
+
+### 89.3 Not built, honestly
+
+- TOTP enrol QR (otpauth canvas) → §90; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 89.4 Verification
+
+Branch: `cursor/p5-invite-branch-e-8ffd` (base after #128 / `fb71c09`). Squash-merged as `400b0d2` (#129).
+
+- `@golfraven/partners` vitest (branch E A2 + enrol hand-off); typecheck clean; no Edge / migration change.
+
+## 90. As built: partners TOTP enrol QR (canvas, no npm)
+
+Numbering: **matrix n/a (PWA only), this section 90.** Closes the §24.3 / §89.3 leftover and design 6.4: show the TOTP setup `otpauth://` URI as a QR on enrol-confirm. No migration, no Edge change, no UI flag flips, no CAMERA (display only), no npm dependency.
+
+### 90.1 What was built
+
+- **`src/lib/qrcodegen.ts`** — Nayuki QR Code generator (MIT), adapted to an ES module; `// @ts-nocheck` for vendored strictness mismatch.
+- **`src/ui/qr.ts` / `totp-qr.ts`** — ECC M encode + quiet zone; paint onto `<canvas>` (CSP `img-src` has no `data:` / `blob:`).
+- **Enrol panel** — canvas above the setup-key / otpauth text; EN + fr-CA `totp.qr.label` + confirm lead; Vitest golden matrix + canvas stub.
+
+### 90.2 Decisions and departures
+
+- **No npm QR package** — partners README forbids a page dependency; vendored encoder stays under `src/`.
+- **Canvas, not `<img src=data:>`** — keeps the stricter CSP from §4.6 / `csp.mjs`.
+- **Text fallback kept** — seed and otpauth URI remain for apps that cannot scan.
+
+### 90.3 Not built, honestly
+
+- U1 email notice (Q7); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 90.4 Verification
+
+Branch: `cursor/p5-totp-enrol-qr-8ffd` (base after #129 / `400b0d2`). Squash-merged as `2a1b744` (#130).
+
+- `@golfraven/partners` vitest (QR golden + panels); typecheck clean; no Edge / migration change.
+
+## 91. As built: `gr_enr_` bearer refusal (PA-11)
+
+Numbering: **matrix n/a (Edge shared), this section 91.** Closes the §23.3 / §90.3 leftover: `getActorFromRequest` refuses `gr_enr_` the same way it already refuses `gr_ps_` and `gr_inv_` (case-insensitive, before env / GoTrue). Enrolment tokens are not session bearers today; this is defence in depth so a mistaken `Authorization` never reaches a third party. No migration, no PWA change, no UI flag flips.
+
+### 91.1 What was built
+
+- **`privileged.ts#getActorFromRequest`** — `gr_enr_` joins the prefix refusal (`gr_ps_` / `gr_inv_` / `gr_enr_`).
+- **Tests** — vitest source-order pin (`review-account-gate`); partner session / invite / enrolment shapes in the Deno PA-11 cells; session-handler wrong-prefix table; `partnerTokenFromHeader` reject list.
+
+### 91.2 Decisions and departures
+
+- **Enrolment tokens stay body/fragment, not bearers** — refusal does not invent a session use; it only blocks forwarding to GoTrue.
+- **`gr_ho_` stays out** — hand-over tokens are typed/scanned in the staff lane; not an Authorization prefix in this design.
+
+### 91.3 Not built, honestly
+
+- U1 credential-add blocking interstitial (PWA only) → §92 closes the DB + Edge half; §93 closes the PWA interstitial; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 91.4 Verification
+
+Branch: `cursor/p5-gr-enr-refuse-8ffd` (base after #130 / `2a1b744`). Squash-merged as `0780e0d` (#131).
+
+- `supabase/tests` vitest (`review-account-gate`, `partner-modules`, `partner-session-handler`); no migration; tip remains `0090`.
+
+## 92. As built: credential-add notice (U1 server half)
+
+Numbering: **migration `0091`, matrix `69`, this section 92.** Closes U1 conditions (1)+(2) server half from §802 / §91.3: `app.partner_credential_add_notice` written on every second credential add (`created_via_credential_id` set), member `GET credentials/notices` + `POST credentials/notices/{id}/ack`, manager `GET credentials/notices/reach`, operator alarm kind `credential_add`, retention purge, and Edge routes on `partner-members`. **PWA blocking interstitial → §93.** No UI flag flips; no CAMERA / OCR.
+
+### 92.1 What was built
+
+- **Table** — `app.partner_credential_add_notice` (one row per added credential; `subject_acked_at` NULL = pending interstitial).
+- **Trigger** — `AFTER INSERT` on `app.partner_credential` when `created_via_credential_id IS NOT NULL`: notice row + `partner_auth_alarm` kind `credential_add` (`detail` `{"subject":"<uuid>"}` only).
+- **Definers** — `partner_credential_add_notice_list_mine_for_partner`, `partner_credential_add_notice_ack_for_partner`, `partner_credential_add_notice_list_reach_for_partner` (class A0); `purge_partner_credential_add_notices` (`edge_system`).
+- **Edge** — `GET /partner-members/credentials/notices`, `POST /partner-members/credentials/notices/{id}/ack`, `GET /partner-members/credentials/notices/reach` on `members-handler.ts` / `PartnerMembersTx`; not counted against the credential 10/h bucket.
+
+### 92.2 Decisions and departures
+
+- **Audit** — `partner.credential.add` from `partner_credential_register_for_partner` is unchanged; the alarm row is the operator-facing signal (list API already returns all kinds).
+- **Reach list** — manager|operator only (admin passes); never the actor's own notices; staff use list mine + ack only.
+
+### 92.3 Not built, honestly
+
+- U1 **blocking interstitial** in `apps/partners` → §93; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 92.4 Verification
+
+Branch: `cursor/p5-credential-notice-8ffd` (base after #131 / `0780e0d`). Squash-merged as `54d4413` (#132).
+
+- pgTAP matrix `69`; vitest `partner-members-handler`, `partner-modules`, `review-account-gate`; retention step `partner_credential_add_notices` in matrices `20` / `30` and `retentionPurgeSteps`.
+
+## 93. As built: credential-add notice interstitial (U1 PWA)
+
+Numbering: **migration n/a (clients only), this section 93.** Closes U1 condition (1) from §802 / §92.3: after sign-in on any device, unacked `GET partner-members/credentials/notices` rows open a **blocking** panel that names the database-derived label and offers **ack** (A0) or **revoke then ack** (A2 reauth + PIN). Forced first-PIN enrolment still wins when both apply; Lock / Sign out remain reachable. No migration; no UI flag flips; no CAMERA / OCR.
+
+### 93.1 What was built
+
+- **API** — `listCredentialAddNotices` / `ackCredentialAddNotice` on `members-routes.ts` (Edge shapes from §92).
+- **Gate** — `credential-notice.ts`: `maybeOpen` after sign-in and after a forced PIN clears; one notice at a time; fetch failure does not invent a permanent block.
+- **Panel** — `credential-add-notice` in state / `views-panels` / `closePanel` refuse; i18n en + fr-CA.
+- **Fake + tests** — `seedCredentialAddNotice` + notices routes on the fake partner server; `credential-notice.test.ts`.
+
+### 93.2 Decisions and departures
+
+- **Revoke clears the notice** — A2 revoke then ack in one flow (subject still must acknowledge; revoke alone is not enough on the server).
+- **Manager reach list** — Edge `GET credentials/notices/reach` remains available (§92); no manager inbox UI in this slice (operator alarm + audit already fire).
+- **Offline list failure** — home stays open with an error notice rather than blocking the shop floor forever.
+
+### 93.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; manager reach inbox UI → §94; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 93.4 Verification
+
+Branch: `cursor/p5-credential-notice-ui-8ffd` (base after #132 / `54d4413`). Squash-merged as `0d97b0b` (#133).
+
+- `@golfraven/partners` vitest (`credential-notice` + e2e sign-in/lock path pins); typecheck clean; no Edge / migration change; tip remains `0091`.
+
+## 94. As built: credential-add notice reach inbox (U1 managers)
+
+Numbering: **migration n/a (clients only), this section 94.** Closes U1 condition (2) PWA half from §802 / §93.3: managers and operators see unacked `GET partner-members/credentials/notices/reach` rows on the team-passkeys screen (loaded with the roster). View-only; ack remains subject-only (§93). Open credentials under reach to revoke. No migration; no UI flag flips; no CAMERA / OCR.
+
+### 94.1 What was built
+
+- **API** — `listCredentialAddNoticesReach` / `CredentialAddNoticeReach` on `members-routes.ts`.
+- **Work** — `members.credentialAddNotices` filled by `loadMembers` (parallel with roster GET).
+- **UI** — reach notices section on the members screen; i18n en + fr-CA.
+- **Fake + tests** — `seedCredentialAddNotice({ subjectUserId })`; §94 cell in `work.test.ts`.
+
+### 94.2 Decisions and departures
+
+- **Non-blocking** — inbox on team passkeys, not a second forced panel (subject interstitial remains the blocking gate).
+- **No manager ack** — Edge ack is subject-only; managers act by opening the person's credentials under reach.
+
+### 94.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; TOTP-reset operator alarm → §95; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 94.4 Verification
+
+Branch: `cursor/p5-credential-notice-reach-ui-8ffd` (base after #133 / `0d97b0b`). Squash-merged as `200f42d` (#134).
+
+- `@golfraven/partners` vitest (`work` §94); typecheck clean; no Edge / migration change; tip remains `0091`.
+
+## 95. As built: TOTP-reset operator alarm
+
+Numbering: **migration `0092`, matrix `70`, this section 95.** Closes the §1911 / §21.4 leftover left open after §86: a successful `partner_totp_reset_for_partner` raises `app.partner_auth_alarm` kind `totp_reset` (one row per target uid per minute) so the existing admin auth-alarms list surfaces resets, not only `audit_log`. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 95.1 What was built
+
+- **Kind + row CHECK** — `totp_reset` with `credential_id` NULL and `bucket_key` = target uid text (same shape as `rate_member`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer` (bucket is the target, not the actor).
+- **Wrapper** — `CREATE OR REPLACE partner_totp_reset_for_partner`: after audit, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` only.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 95.2 Decisions and departures
+
+- **No extra audit** — `partner.totp.reset` already records the actor; the alarm is the operator-facing signal (list API returns all kinds).
+- **Flood shape** — one alarm per target per UTC minute; a second reset in the same minute still returns `ok` / `unset` and still revokes sessions.
+
+### 95.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; Review auth-alarms i18n polish → §96; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 95.4 Verification
+
+Branch: `cursor/p5-totp-reset-alarm-8ffd` (base after #134 / `200f42d`). Squash-merged as `fcf44c9` (#135).
+
+- pgTAP matrix `70`; tip `0092`; partners e2e reload/bfcache settle §93 notices before lifecycle marks.
+
+## 96. As built: Review auth-alarms i18n polish
+
+Numbering: **matrix n/a (PWA only), this section 96.** Closes the §61 / §95 leftover: the Review auth-alarms list no longer frames every row as a refused sign-in, and closed `kind` values render as EN / fr-CA labels (raw kind fallback for unknowns). Optional `detail.subject` prefix on credential-less rows (`totp_reset`). No migration, no Edge change, no UI flag flips.
+
+### 96.1 What was built
+
+- Catalogue: broader title / hint / load / empty; `review.authAlarms.kind.*` for the eight CHECK kinds; `rowSubject` for subject-only rows.
+- `authAlarmKindLabel` / `authAlarmSubjectPrefix` helpers; Review list uses labels + optional subject.
+- Fake auth-alarms seed includes `totp_reset`; unit + admin cells cover the label path.
+
+### 96.2 Decisions and departures
+
+- **Closed over known kinds** — unknown `kind` strings stay visible as the raw token (no silent blank).
+- **Subject is a prefix only** — first 8 characters of `detail.subject`; never full uuid paste into a new surface beyond what the API already returns.
+
+### 96.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; `pin_locked` operator alarm → §97; `pin_reset` operator alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 96.4 Verification
+
+Branch: `cursor/p5-auth-alarms-i18n-8ffd` (base after #135 / `fcf44c9`). Squash-merged as `4b7bc7a` (#136).
+
+- `@golfraven/partners` vitest (`auth-alarms`, `admin`, `i18n`); tip remains `0092`.
+
+## 97. As built: PIN-lock operator alarm
+
+Numbering: **migration `0093`, matrix `71`, this section 97.** Closes the §19.5 / LOW-3 / §96.3 leftover: a newly locked partner PIN (`o_newly_locked` from verify or change) raises `app.partner_auth_alarm` kind `pin_locked` (one row per subject uid per minute) so the admin auth-alarms list surfaces locks, not only `audit_log` `partner.pin.locked`. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 97.1 What was built
+
+- **Kind + row CHECK** — `pin_locked` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `rate_member` / `totp_reset`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrappers** — `CREATE OR REPLACE partner_pin_verify_for_partner` and `partner_pin_change_for_partner`: after the existing audit, when `o_newly_locked`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","stage"}` (`verify` | `change`).
+- **Catalogue** — `review.authAlarms.kind.pin_locked` (EN / fr-CA).
+- **Inventories** — function notes + definer_policy_allowlist for the two policies.
+
+### 97.2 Decisions and departures
+
+- **Only on newly locked** — a further attempt against an already-locked PIN writes no audit and no alarm (same as today for `partner.pin.locked`).
+- **Operator alarm only** — member/manager email notice stays Q7; no new interstitial.
+
+### 97.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; `pin_reset` operator alarm → §98; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 97.4 Verification
+
+Branch: `cursor/p5-pin-locked-alarm-8ffd` (base after #136 / `4b7bc7a`). Squash-merged as `2511ab0` (#137).
+
+- pgTAP matrix `71`; tip `0093`; partners i18n / auth-alarms unit cells.
+
+## 98. As built: PIN-reset operator alarm
+
+Numbering: **migration `0094`, matrix `72`, this section 98.** Closes the §97.3 / §21.4 leftover left open after §95 (TOTP) and §97 (PIN lock): a successful `partner_pin_reset_for_partner` raises `app.partner_auth_alarm` kind `pin_reset` (one row per target uid per minute) so the admin auth-alarms list surfaces PIN resets, not only `audit_log` `partner.pin.reset`. Branch-E accept and member recover call `partner_pin_reset_apply` directly and do not raise this alarm. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 98.1 What was built
+
+- **Kind + row CHECK** — `pin_reset` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_pin_reset_for_partner`: after audit, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` (`ok` | `unset`).
+- **Catalogue** — `review.authAlarms.kind.pin_reset` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 98.2 Decisions and departures
+
+- **Wrapper only** — invite-accept / recover apply paths keep their own audit actions and do not raise `pin_reset`.
+- **Flood shape** — one alarm per target per UTC minute; a second reset in the same minute still returns `ok` / `unset`.
+
+### 98.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 98.4 Verification
+
+Branch: `cursor/p5-pin-reset-alarm-8ffd` (base after #137 / `2511ab0`). Squash-merged as `967d666` (#138).
+
+- pgTAP matrix `72`; tip `0094`; partners i18n / auth-alarms unit cells.
+
+## 99. As built: Edge encoded-path refuse + `ROUTE_METHODS` Object.hasOwn
+
+Numbering: **migration n/a (Edge shared), this section 99.** Closes the §20.12 optional path hardening and the S1.2 `ROUTE_METHODS` NIT: partner handlers refuse a raw URL path that still carries `%2F`, `%5C` or `%2E` (any hex case) with **400** before the closed route map runs, and `partner-session` uses `Object.hasOwn` so a prototype key such as `constructor` is **404** rather than **405**. No migration; tip remains `0094`. No UI flag flips; no CAMERA / OCR.
+
+### 99.1 What was built
+
+- **`handler-kit`** — `rawPathname`, `rawPathHasEncodedSegments`, `encodedPathRefusal` (400 `bad_request`).
+- **All partner handlers** that route via `routeOfFunction` / session `routeOf` call `encodedPathRefusal` immediately before matching.
+- **`session-handler`** — `Object.hasOwn(ROUTE_METHODS, route)` before the method check.
+- **Tests** — vitest cells on `partner-session-handler` (helpers, `%2F`/`%5C` Request URLs, `constructor` → 404) and `partner-members-handler` (one `%2F` cell).
+
+### 99.2 Decisions and departures
+
+- **Check `req.url` as the runtime presents it** — Deno/`Request` may already normalise bare `%2e%2e` segments away; those then miss the refuse and fall through to 404 from the route map (fail-closed). The helper still refuses `%2E` when it remains in the raw path string (unit-tested without `Request` normalisation).
+- **Shared helper, every partner function** — not only `partner-session`, so a probe aimed at `partner-members` / review / … gets the same 400.
+
+### 99.3 Not built, honestly
+
+- Staging path probe against a live gateway (still named in §20.12); dedicated partners API host / Q1; U1 condition (3) / Q7 email notice; member-recover operator alarm → §100; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 99.4 Verification
+
+Branch: `cursor/p5-edge-path-harden-8ffd` (base after #138 / `967d666`). Squash-merged as `3b2d65d` (#139).
+
+- vitest `partner-session-handler`, `partner-members-handler`; no migration; tip remains `0094`.
+
+## 100. As built: member-recover operator alarm
+
+Numbering: **migration `0095`, matrix `73`, this section 100.** Closes the §21.4 / §98 leftover: a successful `partner_member_recover_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `member_recover` (one row per target uid per minute) so the admin auth-alarms list surfaces recovers, not only `audit_log` `partner.member.recover`. `no_email` stays quiet. PIN reset from recover still goes through `partner_pin_reset_apply` and does not raise `pin_reset`. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 100.1 What was built
+
+- **Kind + row CHECK** — `member_recover` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_member_recover_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.member_recover` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 100.2 Decisions and departures
+
+- **ok only** — `no_email` returns before any write and does not raise an alarm.
+- **Flood shape** — one alarm per target per UTC minute; a second recover in the same minute still returns `ok`.
+
+### 100.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; org revoke-all operator alarm → §101; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 100.4 Verification
+
+Branch: `cursor/p5-member-recover-alarm-8ffd` (base after #139 / `3b2d65d`). Squash-merged as `5fe353d` (#140).
+
+- pgTAP matrix `73`; tip `0095`; partners i18n / auth-alarms unit cells.
+
+## 101. As built: org revoke-all operator alarm
+
+Numbering: **migration `0096`, matrix `74`, this section 101.** Closes the §100.3 / §21.4 leftover: a successful `partner_org_sessions_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `org_revoke_all` (one row per org id per minute) so the admin auth-alarms list surfaces the stolen-iPad button, not only `audit_log` `partner.org.revoke_all`. `not_found` stays quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 101.1 What was built
+
+- **Kind + row CHECK** — `org_revoke_all` with `credential_id` NULL and `bucket_key` = org id text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_org_sessions_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"org","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.org_revoke_all` (EN / fr-CA); `authAlarmSubjectPrefix` reads `detail.org` as well as `detail.subject`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 101.2 Decisions and departures
+
+- **ok only** — `not_found` returns before audit/alarm.
+- **Bucket = org id** — not actor uid; flood shape is one row per org per UTC minute.
+- **Detail uses `org`** — not `subject`, so person-uid kinds stay unambiguous; the Review prefix helper accepts either key.
+
+### 101.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; member-revoke operator alarm; PWA Cache-Control `/*` no-store NIT (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 101.4 Verification
+
+Branch: `cursor/p5-org-revoke-alarm-8ffd` (base after #140 / `5fe353d`). Squash-merged as `0241cc0`.
+
+- pgTAP matrix `74`; tip `0096`; partners i18n / auth-alarms unit cells.
+
+## 102. As built: member-revoke operator alarm
+
+Numbering: **migration `0097`, matrix `75`, this section 102.** Closes the §101.3 / §21.4 leftover: a successful `partner_member_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `member_revoke` (one row per target uid per minute) so the admin auth-alarms list surfaces membership revokes, not only `audit_log` `partner.member.revoke`. `not_found` stays quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 102.1 What was built
+
+- **Kind + row CHECK** — `member_revoke` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_member_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","org","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.member_revoke` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 102.2 Decisions and departures
+
+- **ok only** — `not_found` returns before audit/alarm.
+- **Bucket = target uid** — same shape as `member_recover` / `pin_reset`; flood shape is one row per subject per UTC minute.
+- **Detail keeps both `subject` and `org`** — revoke is per-membership; the Review row still prefixes the person uid.
+
+### 102.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; PWA Cache-Control `/*` no-store NIT (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 102.4 Verification
+
+Branch: `cursor/p5-member-revoke-alarm-8ffd` (base after #141 / `0241cc0`). Squash-merged as `f0cb028`.
+
+- pgTAP matrix `75`; tip `0097`; partners i18n / auth-alarms unit cells.
+
+## 103. As built: PWA `/*` Cache-Control no-store
+
+Numbering: **migration n/a (PWA headers), this section 103.** Closes the §20.12 / §102.3 leftover: generated `_headers` puts `Cache-Control: no-store` on `/*` so host SPA fallbacks (`/invite`, `/members`, …) are uncacheable, not only `/` and `/index.html`. Hashed `/assets/*` detach with `! Cache-Control` then set `public, max-age=31536000, immutable`. No migration; tip remains `0097`. No UI flag flips; no CAMERA / OCR.
+
+### 103.1 What was built
+
+- **`buildHeadersFile`** — `Cache-Control: no-store` on the `/*` security block; remove per-path `/` / `/index.html` / `/invite` blocks; `/assets/*` does `! Cache-Control` then the immutable value.
+- **Parsers** — unit + e2e `_headers` helpers honour Cloudflare Pages detach (`! Name`).
+- **bfcache cells** — cacheable control aliases omit `Cache-Control` via `extraHeaders: null` so DEFENCE IN DEPTH / CONTROL 1 still isolate the pagehide/pageshow defence.
+- **README** — deploy notes match `/*` + asset detach.
+
+### 103.2 Decisions and departures
+
+- **Favicon / manifest also no-store** — they match `/*`; only content-hashed `/assets/*` stay long-lived. Acceptable for a shop-floor PWA.
+- **No Edge / DB change** — headers-only; tip stays `0097`.
+
+### 103.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 103.4 Verification
+
+Branch: `cursor/p5-pwa-nostore-all-8ffd` (base after #142 / `f0cb028`). Squash-merged as `8f7af35`.
+
+- partners `csp.test.ts` + e2e header / bfcache cells; tip unchanged `0097`.
+
+## 104. As built: credential-revoke operator alarm
+
+Numbering: **migration `0098`, matrix `76`, this section 104.** Closes the §103.3 / §21.4 leftover after `credential_add`: a successful `partner_credential_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `credential_revoke` (one row per credential id per minute) so the admin auth-alarms list surfaces passkey revokes, not only `audit_log` `partner.credential.revoke`. `not_found` / `already_revoked` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 104.1 What was built
+
+- **Kind + row CHECK** — `credential_revoke` with `credential_id` NOT NULL and `bucket_key` = credential id text (same shape as `credential_add`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_credential_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","own","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.credential_revoke` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 104.2 Decisions and departures
+
+- **ok only** — `not_found` / `already_revoked` return before audit/alarm.
+- **Bucket = credential id** — flood shape is one row per credential per UTC minute (not per owner).
+- **Detail keeps `own`** — matches the audit payload so operators can tell self-revoke from manager revoke.
+
+### 104.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 104.4 Verification
+
+Branch: `cursor/p5-credential-revoke-alarm-8ffd` (base after #143 / `8f7af35`). Squash-merged as `e07eab2`.
+
+- pgTAP matrix `76`; tip `0098`; partners i18n / auth-alarms unit cells.
+
+## 105. As built: invite-revoke operator alarm
+
+Numbering: **migration `0099`, matrix `77`, this section 105.** Closes the §104.3 / §21.4 leftover after the membership/credential alarm trail: a successful `partner_invite_revoke_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `invite_revoke` (one row per invite id per minute) so the admin auth-alarms list surfaces invite revokes, not only `audit_log` `partner.invite.revoke`. `not_found` / `already_accepted` / `already_revoked` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 105.1 What was built
+
+- **Kind + row CHECK** — `invite_revoke` with `credential_id` NULL and `bucket_key` = invite id text (same uuid shape as `org_revoke_all`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_invite_revoke_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"invite","org","status"}` (`ok`).
+- **Catalogue** — `review.authAlarms.kind.invite_revoke` (EN / fr-CA); `authAlarmSubjectPrefix` reads `detail.invite` as well as `detail.subject` / `detail.org`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 105.2 Decisions and departures
+
+- **ok only** — `not_found` / `already_accepted` / `already_revoked` return before audit/alarm.
+- **Bucket = invite id** — flood shape is one row per invite per UTC minute (not per org).
+- **Detail keeps `org`** — operators can group revokes by facility without joining the invite row.
+
+### 105.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); admin `enrolment_issue` alarm; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 105.4 Verification
+
+Branch: `cursor/p5-invite-revoke-alarm-8ffd` (base after #144 / `e07eab2`). Squash-merged as `5c0a093`.
+
+- pgTAP matrix `77`; tip `0099`; partners i18n / auth-alarms unit cells.
+
+## 106. As built: admin enrolment-issue operator alarm
+
+Numbering: **migration `0100`, matrix `78`, this section 106.** Closes the §105.3 leftover: a successful `partner_admin_enrolment_issue_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `enrolment_issue` (one row per target uid per minute) so the admin auth-alarms list surfaces admin enrolment-token issues, not only `audit_log` `partner.admin.enrolment_issue`. Exception paths (`42501` / `22023`) stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 106.1 What was built
+
+- **Kind + row CHECK** — `enrolment_issue` with `credential_id` NULL and `bucket_key` = target uid text.
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_admin_enrolment_issue_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}` (`ok`); never the token hash.
+- **Catalogue** — `review.authAlarms.kind.enrolment_issue` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 106.2 Decisions and departures
+
+- **ok only** — authorize / admin / hash failures RAISE before audit/alarm.
+- **Bucket = target uid** — flood shape is one row per target per UTC minute (not per token id).
+- **No token material in detail** — matches the audit payload's `target` only.
+
+### 106.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 106.4 Verification
+
+Branch: `cursor/p5-enrolment-issue-alarm-8ffd` (base after #145 / `5c0a093`). Squash-merged as `5d31992`.
+
+- pgTAP matrix `78`; tip `0100`; partners i18n / auth-alarms unit cells.
+
+## 107. As built: invite-create operator alarm
+
+Numbering: **migration `0101`, matrix `79`, this section 107.** Closes the §106.3 / §21.4 leftover after `invite_revoke`: a successful `partner_invite_create_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `invite_create` (one row per invite id per minute) so the admin auth-alarms list surfaces invite creates, not only `audit_log` `partner.invite.create`. `already_member` stays quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 107.1 What was built
+
+- **Kind + row CHECK** — `invite_create` with `credential_id` NULL and `bucket_key` = invite id text (same uuid shape as `invite_revoke`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_invite_create_for_partner`: after audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"invite","org","role","status"}` (`ok`); never the token hash or invitee email.
+- **Catalogue** — `review.authAlarms.kind.invite_create` (EN / fr-CA); subject prefix already reads `detail.invite` / `detail.org`.
+- **Inventories** — function note + definer_policy_allowlist for the two policies.
+
+### 107.2 Decisions and departures
+
+- **ok only** — `already_member` returns before audit/alarm; exception paths RAISE before audit/alarm.
+- **Bucket = invite id** — flood shape is one row per invite per UTC minute (not per org).
+- **Detail keeps `org` / `role`** — matches the audit payload without PII (no email).
+
+### 107.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); invite-accept operator alarm → §108; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 107.4 Verification
+
+Branch: `cursor/p5-invite-create-alarm-8ffd` (base after #146 / `5d31992`). Squash-merged as `d594896`.
+
+- pgTAP matrix `79`; tip `0101`; partners i18n / auth-alarms unit cells.
+
+## 108. As built: invite-accept operator alarm
+
+Numbering: **migration `0102`, matrix `80`, this section 108.** Closes the §107.3 / §21.4 leftover after `invite_create`: when `app.partner_invite.accepted_at` first becomes non-NULL, raise `app.partner_auth_alarm` kind `invite_accept` (one row per invite id per minute) so the admin auth-alarms list surfaces acceptances from both branch N (`partner_invite_accept`) and branch E (`partner_invite_accept_for_partner`), not only `audit_log` `partner.invite.accept`. Quiet statuses that never set `accepted_at` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 108.1 What was built
+
+- **Kind + row CHECK** — `invite_accept` with `credential_id` NULL and `bucket_key` = invite id text (same uuid shape as `invite_create` / `invite_revoke`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer` (branch E). Unbound mint-lane accepts use the existing 0048 binding-IS-NULL policies.
+- **Trigger** — `AFTER UPDATE OF accepted_at` → `private.partner_invite_accept_alarm_on_update`: first accept only; `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"invite","org","role","subject","status"}` (`subject` = `accepted_by`); never the token hash or invitee email.
+- **Catalogue** — `review.authAlarms.kind.invite_accept` (EN / fr-CA); subject prefix already reads `detail.invite` / `detail.subject` / `detail.org`.
+- **Inventories** — trigger function note + definer_policy_allowlist for the two policies.
+
+### 108.2 Decisions and departures
+
+- **Trigger, not wrapper REPLACE** — one writer covers both accept owners (`partner_session_issuer` branch N and `private_definer` branch E) without granting the issuer new table privileges on `partner_auth_alarm`.
+- **ok only** — quiet statuses (`email_mismatch`, `already_member`, `not_found`, …) never set `accepted_at`, so the trigger stays quiet.
+- **Bucket = invite id** — flood shape is one row per invite per UTC minute.
+- **Detail keeps `subject`** — acceptor uid (no email), matching the credential-add subject pattern.
+
+### 108.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); enrolment-accept operator alarm → §109; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 108.4 Verification
+
+Branch: `cursor/p5-invite-accept-alarm-8ffd` (base after #147 / `d594896`). Squash-merged as `83d456f`.
+
+- pgTAP matrix `80`; tip `0102`; partners i18n / auth-alarms unit cells.
+
+## 109. As built: enrolment-accept operator alarm
+
+Numbering: **migration `0103`, matrix `81`, this section 109.** Closes the §108.3 / §21.4 leftover after `invite_accept` (pairs `enrolment_issue`): when `app.partner_enrolment_token.consumed_at` first becomes non-NULL, raise `app.partner_auth_alarm` kind `enrolment_accept` (one row per token id per minute) so the admin auth-alarms list surfaces minter-lane token acceptances (`partner_enrolment_token_accept`), not only `audit_log` `partner.enrolment.accept`. Quiet statuses that never set `consumed_at` stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 109.1 What was built
+
+- **Kind + row CHECK** — `enrolment_accept` with `credential_id` NULL and `bucket_key` = enrolment token id text (same uuid shape as `invite_accept`).
+- **Policies** — none new; accept is minter-lane only (unbound). The existing 0048 binding-IS-NULL INSERT/SELECT cover the writer.
+- **Trigger** — `AFTER UPDATE OF consumed_at` → `private.partner_enrolment_accept_alarm_on_update`: first consume only; `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"token","purpose","subject","status"}` (`subject` = token `user_id`); never the token hash or email.
+- **Catalogue** — `review.authAlarms.kind.enrolment_accept` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — trigger function note (no definer_policy_allowlist twin; no new policies).
+
+### 109.2 Decisions and departures
+
+- **Trigger, not wrapper REPLACE** — `partner_enrolment_token_accept` is owned by `partner_session_issuer`; the alarm INSERT stays on `private_definer` via the trigger (same pattern as `invite_accept`).
+- **ok only** — quiet statuses (`email_mismatch`, `existing_member_sign_in`, `not_found`, …) never set `consumed_at`, so the trigger stays quiet. Attempts-only updates stay quiet.
+- **Bucket = token id** — flood shape is one row per enrolment token per UTC minute.
+- **No partner-bound policies** — unlike `invite_accept` (branch E), enrolment accept has no bound writer; 0048 unbound policies suffice.
+
+### 109.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); TOTP-lock operator alarm → §110; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 109.4 Verification
+
+Branch: `cursor/p5-enrolment-accept-alarm-8ffd` (base after #148 / `83d456f`). Squash-merged as `5dee723`.
+
+- pgTAP matrix `81`; tip `0103`; partners i18n / auth-alarms unit cells.
+
+## 110. As built: TOTP-lock operator alarm
+
+Numbering: **migration `0104`, matrix `82`, this section 110.** Closes the §109.3 leftover after `enrolment_accept` (pairs `pin_locked` §97): when a partner TOTP is newly locked (`retry_after = 900` from the 5th consecutive failure on verify or confirm), raise `app.partner_auth_alarm` kind `totp_locked` (one row per subject uid per minute) so the admin auth-alarms list surfaces locks, not only `audit_log` `partner.totp.locked`. Already-locked attempts (`ceil(remaining)`) stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 110.1 What was built
+
+- **Kind + row CHECK** — `totp_locked` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `pin_locked` / `totp_reset`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrappers** — `CREATE OR REPLACE partner_totp_verify_for_partner` and `partner_totp_confirm_for_partner`: after the existing audit, when newly locked (`status = locked` and `retry_after = 900`), `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","stage"}` (`verify` | `confirm`).
+- **Catalogue** — `review.authAlarms.kind.totp_locked` (EN / fr-CA).
+- **Inventories** — function notes + definer_policy_allowlist twin for the two policies.
+
+### 110.2 Decisions and departures
+
+- **Newly locked only** — apply returns `retry_after = 900` on the transition; already-locked returns `ceil(remaining)`. Matches `pin_locked`'s `o_newly_locked` without widening the apply signatures.
+- **Bucket = subject uid** — flood shape is one row per person per UTC minute.
+- **Detail keeps `stage`** — operators can tell confirm vs step-up verify without joining audit.
+
+### 110.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); first-credential register operator alarm → §111; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 110.4 Verification
+
+Branch: `cursor/p5-totp-locked-alarm-8ffd` (base after #149 / `5dee723`). Squash-merged as `09866b8`.
+
+- pgTAP matrix `82`; tip `0104`; partners i18n / auth-alarms unit cells.
+
+## 111. As built: first-credential register operator alarm
+
+Numbering: **migration `0105`, matrix `83`, this section 111.** Closes the §110.3 leftover after `totp_locked` (completes the invite/enrolment issue→accept→register trail): when `app.partner_invite.registered_credential_id` or `app.partner_enrolment_token.registered_credential_id` first becomes non-NULL, raise `app.partner_auth_alarm` kind `credential_register` (one row per credential id per minute) so the admin auth-alarms list surfaces `partner_credential_register_first` successes. Quiet paths that never set the column stay quiet. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 111.1 What was built
+
+- **Kind + row CHECK** — `credential_register` mint-shaped (`credential_id` NOT NULL and `bucket_key` = credential id text; same as `credential_add` / `credential_revoke`).
+- **Policies** — none new; `register_first` is minter-lane only (unbound). The existing 0048 binding-IS-NULL INSERT/SELECT cover the writer.
+- **Triggers** — `AFTER UPDATE OF registered_credential_id` on `partner_invite` and `partner_enrolment_token` → `private.partner_invite_credential_register_alarm_on_update` / `private.partner_enrolment_credential_register_alarm_on_update`: first set only; `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"credential","subject","source","invite"|"token",…,"status"}` (`source` = `invite` | `enrolment`); never the token hash or email.
+- **Catalogue** — `review.authAlarms.kind.credential_register` (EN / fr-CA); subject prefix already reads `detail.subject`.
+- **Inventories** — trigger function notes (no definer_policy_allowlist twin; no new policies).
+
+### 111.2 Decisions and departures
+
+- **Triggers, not wrapper REPLACE** — `partner_credential_register_first` is owned by `partner_session_issuer` and is large; the alarm INSERT stays on `private_definer` via triggers on the acceptance columns it already writes (same pattern as `invite_accept` / `enrolment_accept`).
+- **Mint-shaped bucket** — flood shape is one row per registered credential per UTC minute; operators can join to the credential row.
+- **No partner-bound policies** — unlike second-credential `credential_add` (bound writer), first registration is unbound; 0048 unbound policies suffice.
+- **Accept/consume stay separate kinds** — `invite_accept` / `enrolment_accept` already fire on accept/consume; this kind fires only when registration is recorded.
+
+### 111.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); PIN-set operator alarm → §112; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 111.4 Verification
+
+Branch: `cursor/p5-credential-register-alarm-8ffd` (base after #150 / `09866b8`). Squash-merged as `f13b765`.
+
+- pgTAP matrix `83`; tip `0105`; partners i18n / auth-alarms unit cells.
+
+## 112. As built: PIN-set operator alarm
+
+Numbering: **migration `0106`, matrix `84`, this section 112.** Closes the §111.3 leftover after `credential_register` (next staff enrolment ceremony step after `register_first`): a successful `partner_pin_set_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `pin_set` (one row per subject uid per minute) so the admin auth-alarms list surfaces first PIN sets, not only `audit_log` `partner.pin.set`. `already_set` / `locked` stay quiet. `pin_change` is deliberately not covered (routine self-service). No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 112.1 What was built
+
+- **Kind + row CHECK** — `pin_set` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `pin_reset` / `pin_locked`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_pin_set_for_partner`: after the existing audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status"}`.
+- **Catalogue** — `review.authAlarms.kind.pin_set` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist twin for the two policies.
+
+### 112.2 Decisions and departures
+
+- **ok only** — refusals write no PIN and stay quiet; flood shape is one row per person per UTC minute.
+- **Not `pin_change`** — a member changing their own live PIN is not an operator-facing ceremony event; reset already has `pin_reset`.
+- **Staff / manager only** — operators and admins hold no PIN (6.3); the wrapper's membership gate is unchanged.
+
+### 112.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); TOTP-enrol operator alarm → §113; OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 112.4 Verification
+
+Branch: `cursor/p5-pin-set-alarm-8ffd` (base after #151 / `f13b765`). Squash-merged as `5a2f57a`.
+
+- pgTAP matrix `84`; tip `0106`; partners i18n / auth-alarms unit cells.
+
+## 113. As built: TOTP-enrol operator alarm
+
+Numbering: **migration `0107`, matrix `85`, this section 113.** Closes the §112.3 leftover after `pin_set` (operator/admin enrolment ceremony step after `register_first`): a successful `partner_totp_enrol_for_partner` (`ok`) raises `app.partner_auth_alarm` kind `totp_enrol` (one row per subject uid per minute) so the admin auth-alarms list surfaces TOTP enrolments, not only `audit_log` `partner.totp.enrol`. `already_confirmed` stays quiet. Detail carries `subject` / `status` / `seed_version` only — never the seed. No Edge change; no UI flag flips; no CAMERA / OCR.
+
+### 113.1 What was built
+
+- **Kind + row CHECK** — `totp_enrol` with `credential_id` NULL and `bucket_key` = subject uid text (same shape as `totp_reset` / `totp_locked`).
+- **Policies** — partner-bound INSERT/SELECT for `private_definer`.
+- **Wrapper** — `CREATE OR REPLACE partner_totp_enrol_for_partner`: after the existing audit on `ok`, `INSERT … ON CONFLICT DO NOTHING` with `detail` `{"subject","status","seed_version"}`.
+- **Catalogue** — `review.authAlarms.kind.totp_enrol` (EN / fr-CA).
+- **Inventories** — function note + definer_policy_allowlist twin for the two policies.
+
+### 113.2 Decisions and departures
+
+- **ok only** — `already_confirmed` writes no seed and stays quiet; flood shape is one row per person per UTC minute.
+- **Never the seed** — alarm detail mirrors the audit row's `seed_version` only; the otpauth seed stays in the function return to the enrol session.
+- **Not `totp_confirm`** — confirm is the same ceremony's second step; enrol is the operator-visible seed issuance.
+
+### 113.3 Not built, honestly
+
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 113.4 Verification
+
+Branch: `cursor/p5-totp-enrol-alarm-8ffd` (base after #152 / `5a2f57a`). Squash-merged as `a5e8bce`.
+
+- pgTAP matrix `85`; tip `0107`; partners i18n / auth-alarms unit cells.
+
+### 113.5 Keep-going note (no next in-repo seam)
+
+After §113 the partner auth-alarm ceremony trail
+(`enrolment_issue` → `enrolment_accept` → `credential_register` → `pin_set` → `totp_enrol`,
+plus the earlier revoke / lock / reset / invite trail through §110) has no further
+in-repo closable leftover under standing constraints: U1 condition (3) / Q7 email,
+staging path probe against a live gateway (§20.12), and OCR / aHash / UI flag flips /
+CAMERA remain blocked. `totp_confirm` and `pin_change` stay deliberate non-alarms
+(§113.2 / §112.2). Tip remains `0107`.
+

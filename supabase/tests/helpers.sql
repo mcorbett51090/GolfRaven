@@ -200,8 +200,10 @@ VALUES ('fac_x', 'presence', 'player_a',
         'a0000000-1111-0000-0000-000000000001',
         'staff_x_handle');
 
+-- day must match partner_attest_write's facility-local date (fac_x = America/Chicago);
+-- current_date alone drifts past UTC midnight while Chicago is still the prior calendar day.
 INSERT INTO app.staff_activity (staff_user_id, facility_id, day, attests, activations)
-VALUES ('00000000-0000-0000-0000-1000000000a1', 'fac_x', current_date, 1, 0);
+VALUES ('00000000-0000-0000-0000-1000000000a1', 'fac_x', (now() AT TIME ZONE 'America/Chicago')::date, 1, 0);
 
 INSERT INTO app.marker_credit (id, user_id, trail_id, facility_id, purchase_evidence_id, status)
 VALUES ('b0000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-00000000000a',

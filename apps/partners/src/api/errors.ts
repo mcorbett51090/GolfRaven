@@ -19,6 +19,12 @@ export type ApiErrorKind =
   | "unsupported_media_type"
   /** 429: a rate limit. */
   | "rate_limited"
+  /** 409: the request is well formed but the state refuses it (a PIN already set, an invite whose person already has a passkey ...). Read `code`. */
+  | "conflict"
+  /** 410: an enrolment or challenge has expired; start again. */
+  | "gone"
+  /** 422: an argument the database refused (an action on oneself, a time in the future). */
+  | "unprocessable"
   /** 400, 413: the server refused the request body. */
   | "bad_request"
   /** 404, 405: a route the server does not have. */
@@ -60,6 +66,9 @@ export function kindForStatus(status: number, code: string | null): ApiErrorKind
   if (status === 403) return code === "reauth_refused" ? "reauth_refused" : "forbidden";
   if (status === 415) return "unsupported_media_type";
   if (status === 429) return "rate_limited";
+  if (status === 409) return "conflict";
+  if (status === 410) return "gone";
+  if (status === 422) return "unprocessable";
   if (status === 400 || status === 413) return "bad_request";
   if (status === 404 || status === 405) return "not_found";
   if (status === 503) return "unavailable";

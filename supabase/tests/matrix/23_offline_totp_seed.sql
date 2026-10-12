@@ -138,7 +138,7 @@ SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE poli
 RESET ROLE;
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.offline_code_step'::regclass AND p.polroles <> ARRAY['private_definer'::regrole::oid]), 0,
   'the replay table has policies for private_definer ONLY (no client or edge role has one)');
-SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.offline_code_step'::regclass), 5, 'and exactly the five the migration names');
+SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid = 'app.offline_code_step'::regclass), 9, 'and exactly the five the migration names plus the four 0056 adds for the partner lane (insert, select, prune, prune companion: all keyed on the partner binding)');
 
 -- ----------------------------------------------------------------------------
 -- 5. The registered inventory still matches the live grants (the standalone check is tools/db/verify-function-inventory.mjs)

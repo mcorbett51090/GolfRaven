@@ -4,6 +4,13 @@
 // authenticator are supabase/tests/deno-unit/partner-session-handler.deno.test.ts (the S0 wrapper and the software authenticator); the cells that need a real database are
 // supabase/tests/integration/partner-session.deno.test.ts. Here the ports are fakes, and every cell states one thing the handler decides ON ITS OWN.
 
+import {
+  encodedPathRefusal,
+  MEMBER_ANY_CALL_BUCKET,
+  MEMBER_ANY_CALL_PER_HOUR,
+  rawPathHasEncodedSegments,
+  rawPathname,
+} from "../../functions/_shared/partner/handler-kit.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handlePartnerSessionRequest, REAUTH_BUCKET, routeOf } from "../../functions/_shared/partner/session-handler.ts";
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
@@ -162,6 +169,45 @@ describe("routing", () => {
     expect((await handlePartnerSessionRequest(req("PATCH", "lock", { headers: authed(), body: {} }), f.deps)).status).toBe(405);
     expect(f.calls).toEqual([]);
   });
+
+  it("Object.hasOwn: a prototype key such as constructor is 404, not 405 (20.12 NIT)", async () => {
+    const f = makeFakes();
+    const res = await handlePartnerSessionRequest(req("GET", "constructor"), f.deps);
+    expect(res.status).toBe(404);
+    expect(await bodyOf(res)).toEqual({ error: { code: "not_found", message: "not found" } });
+    expect(f.calls).toEqual([]);
+  });
+});
+
+describe("§20.12 / §99 encoded path refuse", () => {
+  it("rawPathname keeps percent-encoding and strips query/hash", () => {
+    expect(rawPathname("https://x.test/functions/v1/partner-session%2F..%2Frest")).toBe("/functions/v1/partner-session%2F..%2Frest");
+    expect(rawPathname("https://x.test/partner-session/verify?x=1#y")).toBe("/partner-session/verify");
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/verify")).toBe(false);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session%2Fverify")).toBe(true);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/%2e%2e/verify")).toBe(true);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/%5C../verify")).toBe(true);
+    expect(rawPathHasEncodedSegments("https://x.test/partner-session/%2E%2E/verify")).toBe(true);
+    const decision = { kind: "none" as const };
+    const refusal = encodedPathRefusal(decision, "https://x.test/partner-session%2f..%2frest");
+    expect(refusal).not.toBeNull();
+    expect(refusal!.status).toBe(400);
+  });
+
+  it("a request whose URL still carries %2F or %5C is 400 before ports are touched", async () => {
+    const f = makeFakes();
+    const cases = [
+      "https://project.example.test/functions/v1/partner-session%2F..%2F..%2F..%2Frest%2Fv1%2F",
+      "https://project.example.test/functions/v1/partner-session/..%2F..%2F..%2Frest/v1/",
+      "https://project.example.test/functions/v1/partner-session/%5c../verify",
+    ];
+    for (const url of cases) {
+      const res = await handlePartnerSessionRequest(new Request(url, { method: "GET", headers: { origin: ORIGIN } }), f.deps);
+      expect(res.status, url).toBe(400);
+      expect(await bodyOf(res)).toEqual({ error: { code: "bad_request", message: "encoded path segments are not allowed" } });
+    }
+    expect(f.calls).toEqual([]);
+  });
 });
 
 describe("PA-11: a Supabase JWT (or any foreign bearer) is the ONE 401 on every session route, and nothing is touched", () => {
@@ -169,11 +215,13 @@ describe("PA-11: a Supabase JWT (or any foreign bearer) is the ONE 401 on every 
     ["GET", "session"], ["POST", "sign-out"], ["POST", "lock"], ["POST", "reauth/options"], ["POST", "reauth"],
     // S1.3: the step-up PIN and the email proof are session routes too
     ["GET", "pin"], ["POST", "step-up/pin"], ["POST", "pin/set"], ["POST", "pin/change"], ["POST", "otp-proof/start"], ["POST", "otp-proof/verify"],
+    // S1.4: operator/admin TOTP
+    ["POST", "totp/enrol"], ["POST", "totp/confirm"], ["POST", "step-up/totp"],
   ];
   it("a JWT, a wrong-length partner token, a wrong prefix, another scheme and no header are all refused identically", async () => {
     const f = makeFakes();
     const bearers: Array<string | null> = [
-      `Bearer ${JWT}`, `Bearer gr_ps_short`, `Bearer ${SESSION_TOKEN}x`, `Bearer GR_PS_${SESSION_TOKEN.slice(6)}`, `Bearer gr_inv_${SESSION_TOKEN.slice(6)}`, `Basic ${SESSION_TOKEN}`, SESSION_TOKEN,
+      `Bearer ${JWT}`, `Bearer gr_ps_short`, `Bearer ${SESSION_TOKEN}x`, `Bearer GR_PS_${SESSION_TOKEN.slice(6)}`, `Bearer gr_inv_${SESSION_TOKEN.slice(6)}`, `Bearer gr_enr_${SESSION_TOKEN.slice(6)}`, `Basic ${SESSION_TOKEN}`, SESSION_TOKEN,
       `Bearer ${SESSION_TOKEN} extra`, "Bearer", "", null,
     ];
     const seen = new Set<string>();
@@ -207,11 +255,32 @@ describe("POST options", () => {
     const res = await handlePartnerSessionRequest(req("POST", "options", { headers: { origin: ORIGIN }, body: {} }), f.deps);
     expect(res.status).toBe(200);
     const b = (await bodyOf(res)) as { data: { options: unknown; challengeToken: string; expiresAt: string } };
-    expect(f.calls).toEqual(["db.withMint", "mint.rpConfig", "mint.issueChallenge", "webauthn.options"]);
+    expect(f.calls).toEqual([
+      "db.hitSystemRateLimit",
+      "db.hitSystemRateLimit",
+      "db.withMint",
+      "mint.rpConfig",
+      "mint.issueChallenge",
+      "webauthn.options",
+    ]);
     expect(b.data.challengeToken).toMatch(/^[A-Za-z0-9_-]{43}\.[0-9]+\.[A-Za-z0-9_-]{43}$/);
     expect(b.data.expiresAt).toBe(new Date((NOW_MS / 1000 + 120) * 1000).toISOString());
     expect(f.tx).toEqual([{ kind: "mint", committed: true }]);
     expect((await handlePartnerSessionRequest(req("POST", "options", { body: { extra: 1 } }), f.deps)).status).toBe(400);
+  });
+
+  it("§68 alert-only: a tripped IP/global options bucket raises an alarm and still returns 200 (never 429)", async () => {
+    const f = makeFakes({ systemRateLimitOk: false });
+    const res = await handlePartnerSessionRequest(
+      req("POST", "options", { headers: { origin: ORIGIN, "x-forwarded-for": "203.0.113.9" }, body: {} }),
+      f.deps,
+    );
+    expect(res.status).toBe(200);
+    expect(f.calls.filter((c) => c.startsWith("mint.raiseRateAlarm:"))).toEqual([
+      expect.stringMatching(/^mint\.raiseRateAlarm:rate_options_ip:[0-9a-f]{64}$/),
+      "mint.raiseRateAlarm:rate_options_global:global",
+    ]);
+    expect(res.headers.get("retry-after")).toBeNull();
   });
 
   it("a configured origin that differs from partner_rp_config.origin is a 503 and a rollback (the two copies of one fact cannot drift apart silently)", async () => {
@@ -311,9 +380,27 @@ describe("POST verify (PA-12): the wrapper first, the mint second, COMMIT on eve
     const f = makeFakes({ verify: { ok: false, counterOnly: false } });
     const res = await handlePartnerSessionRequest(req("POST", "verify", { body: verifyBody() }), f.deps);
     expect(res.status).toBe(401);
-    expect(f.calls).toEqual(["db.withMint", "mint.rpConfig", "mint.lookupCredential", "webauthn.verify", "mint.recordFailure"]);
+    expect(f.calls).toEqual([
+      "db.withMint",
+      "mint.rpConfig",
+      "mint.lookupCredential",
+      "webauthn.verify",
+      "mint.recordFailure",
+      "db.hitSystemRateLimit",
+    ]);
     expect(f.mintInputs).toHaveLength(0);
     expect(f.tx).toEqual([{ kind: "mint", committed: true }]);
+  });
+
+  it("§68 alert-only: a tripped verify-IP bucket after an Edge assertion failure raises rate_verify_ip and still returns 401 (never 429)", async () => {
+    const f = makeFakes({ verify: { ok: false, counterOnly: false }, systemRateLimitOk: false });
+    const res = await handlePartnerSessionRequest(
+      req("POST", "verify", { headers: { "cf-connecting-ip": "198.51.100.4" }, body: verifyBody() }),
+      f.deps,
+    );
+    expect(res.status).toBe(401);
+    expect(f.calls).toContainEqual(expect.stringMatching(/^mint\.raiseRateAlarm:rate_verify_ip:[0-9a-f]{64}$/));
+    expect(res.headers.get("retry-after")).toBeNull();
   });
 
   it("an unknown, a revoked and a cooling credential are ONE answer, nothing is verified and nothing is counted (the cooldown is not extended by presenting more)", async () => {
@@ -454,7 +541,7 @@ describe("reauth (PA-27)", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("3600");
     expect(f.calls).toEqual(["db.hitRateLimit"]);
-    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: REAUTH_BUCKET, windowSeconds: 3600, max: 10 }]);
+    expect(f.rateLimitHits).toEqual([{ hash: await sha256Hex(SESSION_TOKEN), bucket: MEMBER_ANY_CALL_BUCKET, windowSeconds: 3600, max: MEMBER_ANY_CALL_PER_HOUR }, { hash: await sha256Hex(SESSION_TOKEN), bucket: REAUTH_BUCKET, windowSeconds: 3600, max: 10 }]);
   });
 
   it("a valid reauth: hit, then ONE transaction: the session's own credential, the wrapper, the definer; the answer carries reauthUntil", async () => {
@@ -527,6 +614,13 @@ describe("PA-11: nothing is ever logged", () => {
       [{ otpSendThrows: true }, "POST", "otp-proof/start", authed(), {}],
       [{}, "POST", "otp-proof/verify", authed(), { code: "123456" }],
       [{ otpVerifyOk: false }, "POST", "otp-proof/verify", authed(), { code: "123456" }],
+      // S1.4: TOTP enrol / confirm / step-up
+      [{}, "POST", "totp/enrol", authed(), {}],
+      [{ totpEnrol: { status: "already_confirmed", seed: null, seedVersion: null, issuer: null, period: null, digits: null, algo: null } }, "POST", "totp/enrol", authed(), {}],
+      [{}, "POST", "totp/confirm", authed(), { code: "123456" }],
+      [{ totpConfirm: { status: "wrong", retryAfterSeconds: 0 } }, "POST", "totp/confirm", authed(), { code: "123456" }],
+      [{}, "POST", "step-up/totp", authed(), { code: "123456" }],
+      [{ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } }, "POST", "step-up/totp", authed(), { code: "123456" }],
     ];
     for (const [state, method, path, headers, body] of matrix) {
       const f = makeFakes(state);

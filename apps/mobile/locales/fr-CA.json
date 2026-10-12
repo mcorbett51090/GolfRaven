@@ -1,3 +1,4 @@
 {
-  "NSLocationWhenInUseUsageDescription": "GolfRaven utilise votre position seulement lorsque l'app est ouverte, quand vous touchez « Je suis ici » ou « J'achète un marqueur », pour confirmer que vous êtes au parcours ou à la boutique. L'app ne vous suit jamais en arrière-plan."
+  "NSLocationWhenInUseUsageDescription": "GolfRaven utilise votre position seulement lorsque l'app est ouverte, quand vous touchez « Je suis ici » ou « J'achète un marqueur », pour confirmer que vous êtes au parcours ou à la boutique. L'app ne vous suit jamais en arrière-plan.",
+  "NSPhotoLibraryUsageDescription": "GolfRaven utilise votre photothèque seulement lorsque vous touchez « Choisir une photo de reçu », pour téléverser un reçu de green fee pour cet établissement. L'app n'accède pas à votre caméra."
 }

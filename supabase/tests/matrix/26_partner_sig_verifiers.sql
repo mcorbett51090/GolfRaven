@@ -34,8 +34,9 @@ SELECT is((SELECT count(*)::int FROM pg_proc p JOIN pg_namespace n ON n.oid = p.
              AND p.proname <> 'partner_sig_verify'
              AND (has_function_privilege('anon', p.oid, 'EXECUTE') OR has_function_privilege('authenticated', p.oid, 'EXECUTE') OR has_function_privilege('service_role', p.oid, 'EXECUTE')
                   OR has_function_privilege('edge_actor', p.oid, 'EXECUTE') OR has_function_privilege('edge_system', p.oid, 'EXECUTE') OR has_function_privilege('edge_partner', p.oid, 'EXECUTE')
-                  OR has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE') OR has_function_privilege('partner_session_issuer', p.oid, 'EXECUTE'))), 0,
-  'no helper of the verifier is executable by any role but its owner: reached only from inside partner_sig_verify, as private_definer');
+                  OR has_function_privilege('edge_partner_minter', p.oid, 'EXECUTE')
+                  OR (has_function_privilege('partner_session_issuer', p.oid, 'EXECUTE') AND p.proname NOT IN ('partner_cbor_head', 'partner_cose_parse')))), 0,
+  'no helper of the verifier is executable by any role but its owner: reached only from inside partner_sig_verify, as private_definer (0054 grants the COSE parser and its CBOR head reader to the issuer for register_first, matrix 32)');
 SELECT is((SELECT p.prosecdef AND p.proconfig = ARRAY['search_path=""'] AND p.proowner = 'private_definer'::regrole FROM pg_proc p WHERE p.oid = 'private.partner_sig_verify(smallint, bytea, bytea, bytea)'::regprocedure), true,
   'the entry point is SECURITY DEFINER with search_path = '''' (so every helper runs as its owner under an empty path)');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system'), ('edge_partner'), ('edge_partner_minter'), ('partner_session_issuer')) r(n)

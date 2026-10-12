@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildPartners } from "../scripts/build.mjs";
-import { checkBundleInputs } from "../scripts/lib/inputs.mjs";
+import { checkBundleInputs, SHARED_FILES } from "../scripts/lib/inputs.mjs";
 
 let scratch: string;
 beforeAll(async () => {
@@ -76,11 +76,20 @@ describe("checkBundleInputs on fixtures: every way of pulling a package in is ca
 });
 
 describe("the build itself fails on a package import (the check is wired in, not just available)", () => {
-  /** A scratch copy of this package's buildable files (src/, index.html, public/), so the build can be pointed at a source that imports a package. */
+  /**
+   * A scratch copy of this package's buildable files (src/, index.html, public/), so the build can be pointed at a source that imports a package. It sits at
+   * `<name>/apps/partners` with the three shared PIN-contract files at `<name>/supabase/functions/_shared/partner/`, the same relative place they have in the repository.
+   */
   async function project(name: string, extraMain: string): Promise<string> {
-    const dir = join(scratch, name);
+    const base = join(scratch, name);
+    const dir = join(base, "apps", "partners");
     const pkg = new URL("..", import.meta.url).pathname;
     await mkdir(dir, { recursive: true });
+    for (const rel of SHARED_FILES) {
+      const dest = join(dir, rel);
+      await mkdir(join(dest, ".."), { recursive: true });
+      await cp(join(pkg, rel), dest);
+    }
     await cp(join(pkg, "src"), join(dir, "src"), { recursive: true });
     await cp(join(pkg, "public"), join(dir, "public"), { recursive: true });
     await cp(join(pkg, "index.html"), join(dir, "index.html"));
@@ -95,7 +104,15 @@ describe("the build itself fails on a package import (the check is wired in, not
   it("control: an unmodified copy of the package builds", async () => {
     const root = await project("build-ok", "");
     const r = await buildPartners({ dist: join(root, "dist"), env, root });
-    expect(r.inputs.every((i) => i.startsWith("src/"))).toBe(true);
+    expect(r.inputs.every((i) => i.startsWith("src/") || SHARED_FILES.includes(i))).toBe(true);
+  });
+
+  it("a FOURTH file outside src/ (any other shared module) fails the build: the allow-list is exact, not a directory", async () => {
+    const root = await project("build-extra-shared", `
+import "../../../supabase/functions/_shared/partner/other.ts";
+`);
+    await writeFile(join(root, "..", "..", "supabase", "functions", "_shared", "partner", "other.ts"), "export const other = 1;\n");
+    await expect(buildPartners({ dist: join(root, "dist"), env, root })).rejects.toThrow(/bundle inputs outside src\/:\n\s+\.\.\/\.\.\/supabase\/functions\/_shared\/partner\/other\.ts: is outside src\//);
   });
 
   it.each([
@@ -112,17 +129,19 @@ describe("the real build", () => {
     const r = await buildPartners({ dist: join(scratch, "real"), env: { GOLFRAVEN_PARTNERS_API_BASE: "https://abc123.example.org/functions/v1" } });
     expect(r.inputs).toContain("src/main.ts");
     expect(r.inputs.length).toBeGreaterThan(10);
+    // src/ and nothing else, except the three shared PIN-contract files (an exact list: a fourth would fail the build)
     for (const i of r.inputs) {
-      expect(i.startsWith("src/"), i).toBe(true);
+      expect(i.startsWith("src/") || SHARED_FILES.includes(i), i).toBe(true);
       expect(i.includes("node_modules"), i).toBe(false);
     }
+    expect(r.inputs.filter((i) => !i.startsWith("src/")).sort()).toEqual([...SHARED_FILES].sort());
     expect(checkBundleInputs({ inputs: Object.fromEntries(r.inputs.map((i) => [i, {}])) })).toEqual([]);
   });
 
   it("the e2e build's inputs are src/ plus the harness, and nothing from node_modules", async () => {
     const r = await buildPartners({ dist: join(scratch, "real-e2e"), env: { GOLFRAVEN_PARTNERS_E2E: "1", GOLFRAVEN_PARTNERS_API_BASE: "http://localhost:4999/functions/v1" } });
     expect(r.inputs).toContain("test/e2e/harness/harness.ts");
-    expect(r.inputs.filter((i) => !i.startsWith("src/") && !i.startsWith("test/e2e/harness/"))).toEqual([]);
+    expect(r.inputs.filter((i) => !i.startsWith("src/") && !i.startsWith("test/e2e/harness/") && !SHARED_FILES.includes(i))).toEqual([]);
     expect(r.inputs.some((i) => i.includes("node_modules"))).toBe(false);
   });
 });

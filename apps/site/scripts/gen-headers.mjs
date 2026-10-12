@@ -219,6 +219,19 @@ export function buildHeaders(env = process.env, formsConfig = FORMS_CONFIG) {
         `\n`
       : "") +
     `/catalog/v1/*\n` +
+    `  X-Robots-Tag: noindex\n` +
+    `\n` +
+    `# P5 §54: Apple/Android app-link verification files must be application/json\n` +
+    `# (AASA has no extension; Cloudflare would otherwise serve octet-stream).\n` +
+    `/.well-known/apple-app-site-association\n` +
+    `  Content-Type: application/json\n` +
+    `  X-Robots-Tag: noindex\n` +
+    `\n` +
+    `/.well-known/assetlinks.json\n` +
+    `  Content-Type: application/json\n` +
+    `  X-Robots-Tag: noindex\n` +
+    `\n` +
+    `/q/*\n` +
     `  X-Robots-Tag: noindex\n`
   );
 }

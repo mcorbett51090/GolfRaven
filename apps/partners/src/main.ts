@@ -7,6 +7,7 @@
 
 import { createPartnerApi } from "./api/client";
 import { createController } from "./app/controller";
+import { consumeInviteLink } from "./app/invite-link";
 import { installPageLifecycle } from "./app/lifecycle";
 import { LOCALES, resolveLocale, type Locale } from "./i18n";
 import { render } from "./ui/render";
@@ -18,6 +19,7 @@ if (root === null) throw new Error("missing #app");
 
 const api = createPartnerApi({ baseUrl: __GR_PARTNERS_API_BASE__ });
 const controller = createController({ api, webauthn: { credentials: navigator.credentials } });
+const link = { location: window.location, history: window.history };
 
 let locale: Locale = resolveLocale(navigator.languages ?? [navigator.language]);
 const env = {
@@ -38,3 +40,6 @@ function draw(): void {
 controller.subscribe(draw);
 installPageLifecycle(window, api, controller);
 draw();
+// an invite link opens the enrolment screen; the token is read from the fragment and removed from the address bar (invite-link.ts)
+consumeInviteLink(link, controller);
+window.addEventListener("hashchange", () => void consumeInviteLink(link, controller));

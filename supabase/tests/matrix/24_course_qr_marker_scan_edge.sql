@@ -236,6 +236,7 @@ SELECT pg_temp.seed_ev('fixR_b', 'ee240000-0000-0000-0000-0000000000b0', 'fac_s2
 SELECT pg_temp.seed_ev('fixR_c', 'ee240000-0000-0000-0000-0000000000c0', 'fac_s24r', 'attested', :'t0'::timestamptz);
 SELECT pg_temp.seed_ev('fixR_d', 'ee240000-0000-0000-0000-0000000000d0', 'fac_s24r', 'attested', :'t0'::timestamptz - interval '1 day');
 SELECT pg_temp.seed_ev('fixR_e', 'ee240000-0000-0000-0000-0000000000e0', 'fac_s24r', 'attested', :'t0'::timestamptz - interval '2 hours');
+SELECT pg_temp.seed_ev('fixR_nit', 'ee240000-0000-0000-0000-0000000000e0', 'fac_s24r', 'attested', :'t0'::timestamptz);
 SELECT pg_temp.seed_ev('fixR_f', 'ee240000-0000-0000-0000-0000000000f0', 'fac_s24r', 'attested', :'t0'::timestamptz - interval '1 day');
 SELECT pg_temp.seed_ev('fixR_g', 'ee240000-0000-0000-0000-000000000010', 'fac_s24r', 'attested', :'t0'::timestamptz - interval '2 hours');
 -- M2: PA's evidence with ONE thing wrong each (all at fac_s24a, captured at t0, attested, unless it is the point)
@@ -315,7 +316,18 @@ SELECT private.course_pin_derive('fac_s24e', (now() AT TIME ZONE 'America/Chicag
 SELECT private.course_pin_derive('fac_s24e', (now() AT TIME ZONE 'America/Chicago')::date - 1, 0) AS pin_e_yday \gset
 SELECT private.course_pin_derive('fac_s24g', (now() AT TIME ZONE 'Pacific/Auckland')::date, 0) AS pin_g \gset
 SELECT private.course_pin_derive('fac_s24g', (now() AT TIME ZONE 'Pacific/Auckland')::date - 1, 0) AS pin_g_yday \gset
-SELECT private.course_pin_derive('fac_s24g', (now() AT TIME ZONE 'America/Chicago')::date, 0) AS pin_g_utcday \gset
+-- Another zone's calendar date, forced ≠ from Auckland's so the cell stays non-vacuous
+-- when Chicago and Auckland share a day (common near UTC morning / NZ evening).
+SELECT private.course_pin_derive(
+  'fac_s24g',
+  CASE
+    WHEN (now() AT TIME ZONE 'America/Chicago')::date
+       = (now() AT TIME ZONE 'Pacific/Auckland')::date
+    THEN (now() AT TIME ZONE 'America/Chicago')::date - 1
+    ELSE (now() AT TIME ZONE 'America/Chicago')::date
+  END,
+  0
+) AS pin_g_utcday \gset
 SELECT private.course_pin_derive('fac_s24h', (now() AT TIME ZONE 'America/Chicago')::date, 0) AS pin_h \gset
 -- fac_s24r: the PIN displayed at each instant, under the epoch live then, for the facility-local date OF THAT INSTANT
 SELECT private.course_pin_derive('fac_s24r', ((:'t0'::timestamptz - interval '4 hours') AT TIME ZONE 'America/Chicago')::date, 0) AS pin_r_a \gset
@@ -362,9 +374,15 @@ SELECT format('CREATE FUNCTION pg_temp.t0() RETURNS timestamptz LANGUAGE sql IMM
 CREATE FUNCTION pg_temp.ev(p_fix text) RETURNS uuid LANGUAGE sql IMMUTABLE AS $f$ SELECT md5('ev-' || p_fix)::uuid $f$;
 -- the PINs as a pg_temp lookup, for the bodies of throws_ok (psql does not interpolate :'vars' inside dollar quotes)
 CREATE TABLE pg_temp.pins (k text PRIMARY KEY, v text NOT NULL);
-INSERT INTO pg_temp.pins VALUES ('pin_e', :'pin_e'), ('pin_g', :'pin_g'), ('pin_h', :'pin_h'), ('pin_h_yday', :'pin_h_yday'), ('wrong1', :'wrong1'), ('pin_r_d', :'pin_r_d');
+INSERT INTO pg_temp.pins VALUES ('pin_e', :'pin_e'), ('pin_g', :'pin_g'), ('pin_h', :'pin_h'), ('pin_h_yday', :'pin_h_yday'), ('wrong1', :'wrong1'), ('pin_r_d', :'pin_r_d'),
+  ('pin_r_b', :'pin_r_b'), ('pin_r_c', :'pin_r_c');
 GRANT SELECT ON pg_temp.pins TO PUBLIC;
 CREATE FUNCTION pg_temp.p(p_k text) RETURNS text LANGUAGE sql STABLE AS $f$ SELECT v FROM pg_temp.pins WHERE k = p_k $f$;
+-- True when t0-2h and t0 share a Chicago local date (NIT cross-epoch path). Near local midnight they do not.
+CREATE FUNCTION pg_temp.nit_same_day() RETURNS boolean LANGUAGE sql STABLE AS $f$
+  SELECT ((pg_temp.t0() - interval '2 hours') AT TIME ZONE 'America/Chicago')::date
+       = (pg_temp.t0() AT TIME ZONE 'America/Chicago')::date
+$f$;
 -- n PIN attempts in a row, one call each (a LATERAL function scan with no outer reference is evaluated ONCE by the planner and rescanned from a tuplestore: it would not repeat the call)
 CREATE FUNCTION pg_temp.pin_tries(p_fac text, p_pin text, p_n integer) RETURNS text[] LANGUAGE plpgsql AS $f$
 DECLARE r text; o text[] := '{}'; i integer;
@@ -772,10 +790,25 @@ ROLLBACK;
 BEGIN;
 SET LOCAL ROLE edge_actor;
 SELECT lives_ok($$SELECT private.bind_actor('ee240000-0000-0000-0000-0000000000e0')$$, 'bind PE (a second purchase after a rotation)');
-SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24r', :'pin_r_b', pg_temp.t0() - interval '2 hours')), 'ok', 'NIT: the first purchase, a fix captured under epoch 1');
-SELECT is((SELECT array_agg(o_result) FROM private.marker_scan_for_actor('fac_s24r', 'static_pin', NULL, 'pq1', :'pin_r_b', pg_temp.t0() - interval '2 hours', 'attested', 'fixR_e', pg_temp.ev('fixR_e'))), ARRAY['accepted'], 'NIT: accepted');
-SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24r', :'pin_r_c', now())), 'ok', 'NIT: later the same local day, under the NEW epoch');
-SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24r', 'static_pin', NULL, 'pq1', :'pin_r_c', now(), NULL, NULL, NULL)), 'duplicate', 'NIT: the dedupe key has no epoch: a rotation does NOT allow a second same-day purchase at the shop');
+-- Cross-epoch when t0-2h stays on t0's Chicago day; near local midnight fall back to two scans at t0
+-- (still proves same-day dedupe; the unique index omits epoch either way).
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor(
+    'fac_s24r',
+    CASE WHEN pg_temp.nit_same_day() THEN pg_temp.p('pin_r_b') ELSE pg_temp.p('pin_r_c') END,
+    CASE WHEN pg_temp.nit_same_day() THEN pg_temp.t0() - interval '2 hours' ELSE pg_temp.t0() END)),
+  'ok', 'NIT: the first purchase, a fix captured under epoch 1 (or live epoch near Chicago midnight)');
+SELECT is((SELECT array_agg(o_result) FROM private.marker_scan_for_actor(
+    'fac_s24r', 'static_pin', NULL, 'pq1',
+    CASE WHEN pg_temp.nit_same_day() THEN pg_temp.p('pin_r_b') ELSE pg_temp.p('pin_r_c') END,
+    CASE WHEN pg_temp.nit_same_day() THEN pg_temp.t0() - interval '2 hours' ELSE pg_temp.t0() END,
+    'attested',
+    CASE WHEN pg_temp.nit_same_day() THEN 'fixR_e' ELSE 'fixR_nit' END,
+    CASE WHEN pg_temp.nit_same_day() THEN pg_temp.ev('fixR_e') ELSE pg_temp.ev('fixR_nit') END)),
+  ARRAY['accepted'], 'NIT: accepted');
+SELECT is((SELECT o_result FROM private.course_pin_attempt_for_actor('fac_s24r', :'pin_r_c', pg_temp.t0())), 'ok', 'NIT: later the same local day, under the NEW epoch');
+-- No co-signal: p_at must stay within 5 minutes of now (t0 is now() at seed). Refuses a second same-day purchase even after rotation.
+SELECT is((SELECT o_result FROM private.marker_scan_for_actor('fac_s24r', 'static_pin', NULL, 'pq1', :'pin_r_c', pg_temp.t0(), NULL, NULL, NULL)),
+  'duplicate', 'NIT: the dedupe key has no epoch: a rotation does NOT allow a second same-day purchase at the shop');
 ROLLBACK;
 BEGIN;
 SET LOCAL ROLE edge_actor;

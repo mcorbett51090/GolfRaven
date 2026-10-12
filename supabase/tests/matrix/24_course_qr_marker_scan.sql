@@ -42,15 +42,15 @@ SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge
   'no client role and no edge role holds ANY privilege on the epoch log or the proof (every path is a definer)');
 SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polrelid IN ('app.course_pin_epoch_log'::regclass, 'private.course_pin_proof'::regclass) AND p.polroles <> ARRAY['private_definer'::regrole::oid]), 0,
   'the epoch log and the proof have policies for private_definer ONLY');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_epoch_log' AND p.proname NOT IN ('course_pin_epoch_log_write', 'course_pin_epoch_at')), 0,
-  'no function but the log''s trigger function (the only writer) and the epoch reader names the epoch log');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_epoch_log' AND p.proname NOT IN ('course_pin_epoch_log_write', 'course_pin_epoch_at', 'purge_course_pin_epoch_log')), 0,
+  'no function but the log''s trigger function (the only writer), the epoch reader and the 0072 retention purge names the epoch log');
 SELECT has_table('app', 'course_pin_pepper_epoch', 'app.course_pin_pepper_epoch exists (WHEN the current pepper took effect: the operator writes it, never inferred from Vault timestamps)');
 SELECT columns_are('app', 'course_pin_pepper_epoch', ARRAY['effective_from', 'recorded_at'], 'the pepper epoch holds a time only: no user id, no secret');
 SELECT is((SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE oid = 'app.course_pin_pepper_epoch'::regclass), true, 'the pepper epoch has RLS enabled AND forced');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)
            WHERE has_any_column_privilege(r.n, 'app.course_pin_pepper_epoch', 'SELECT,INSERT,UPDATE,REFERENCES') OR has_table_privilege(r.n, 'app.course_pin_pepper_epoch', 'DELETE,TRUNCATE,TRIGGER')), 0, 'no client role and no edge role holds ANY privilege on the pepper epoch');
 SELECT is((has_table_privilege('service_role', 'app.course_pin_pepper_epoch', 'SELECT') AND has_table_privilege('service_role', 'app.course_pin_pepper_epoch', 'INSERT') AND NOT has_table_privilege('service_role', 'app.course_pin_pepper_epoch', 'UPDATE,DELETE')), true, 'service_role (the operator) may read and INSERT the pepper epoch, never rewrite or delete a row of it');
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_pepper_epoch' AND p.proname <> 'course_pin_matches'), 0, 'only the matcher reads the pepper epoch');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace IN ('private'::regnamespace, 'app'::regnamespace) AND p.prosrc ~ 'course_pin_pepper_epoch' AND p.proname NOT IN ('course_pin_matches', 'course_pin_pepper_rotate')), 0, 'only the matcher and the operator rotate definer (0082) read the pepper epoch');
 -- the proof's lifetime is ENFORCED: a deferred constraint trigger deletes the backend's rows at COMMIT (the real-commit proof is in the rows file)
 SELECT is((SELECT count(*)::int FROM pg_trigger t WHERE t.tgrelid = 'private.course_pin_proof'::regclass AND NOT t.tgisinternal AND t.tgname = 'course_pin_proof_expire_trg' AND t.tgconstraint <> 0 AND t.tgdeferrable AND t.tginitdeferred
              AND t.tgfoid = 'private.course_pin_proof_expire()'::regprocedure AND (t.tgtype & 4) = 4), 1, 'the proof table has a DEFERRABLE INITIALLY DEFERRED constraint trigger on INSERT that runs the expiry function');
@@ -71,22 +71,32 @@ ROLLBACK;
 -- ----------------------------------------------------------------------------
 -- 1. What the definers may do on the tables they do not own: column-narrow, and nothing for any edge or client role
 -- ----------------------------------------------------------------------------
-SELECT is(has_column_privilege('private_definer', 'app.facility_programme', 'pin_epoch', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'participation', 'UPDATE')
-          AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'qr_mode', 'UPDATE'), true, 'private_definer may UPDATE facility_programme.pin_epoch and no other column');
+-- S6 (0059) widens facility_programme UPDATE to the programme columns; pin_epoch stays (0046 rotate path). The identity columns stay immutable.
+SELECT is(has_column_privilege('private_definer', 'app.facility_programme', 'pin_epoch', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.facility_programme', 'participation', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.facility_programme', 'qr_mode', 'UPDATE')
+          AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'trail_id', 'UPDATE')
+          AND NOT has_column_privilege('private_definer', 'app.facility_programme', 'facility_id', 'UPDATE'), true,
+  'private_definer may UPDATE facility_programme.pin_epoch (0046) and the programme columns (0059), never the identity columns');
 SELECT is(has_column_privilege('private_definer', 'app.catalog_facility', 'tz', 'SELECT') AND has_column_privilege('private_definer', 'app.catalog_facility', 'id', 'SELECT')
           AND NOT has_column_privilege('private_definer', 'app.catalog_facility', 'name', 'SELECT'), true, 'private_definer may read catalog_facility (id, tz) and nothing else of it');
+-- S6 (0059) grants full SELECT on trail_programme for programme writers (fees included); 0046's column-narrow SELECT alone is no longer the shape.
 SELECT is(has_column_privilege('private_definer', 'app.trail_programme', 'status', 'SELECT') AND has_column_privilege('private_definer', 'app.trail_programme', 'marker_source', 'SELECT')
-          AND NOT has_column_privilege('private_definer', 'app.trail_programme', 'fee_amount', 'SELECT'), true, 'private_definer may read trail_programme (trail_id, status, marker_source) and not its fees');
+          AND has_column_privilege('private_definer', 'app.trail_programme', 'fee_amount', 'SELECT'), true,
+  'private_definer may read trail_programme including fees (0059 programme writers; full SELECT)');
 SELECT is(has_column_privilege('private_definer', 'app.course_qr_token', 'used_at', 'UPDATE') AND has_column_privilege('private_definer', 'app.course_qr_token', 'used_by_user', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'nonce_hash', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'issued_at', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.course_qr_token', 'facility_id', 'UPDATE') AND NOT has_table_privilege('private_definer', 'app.course_qr_token', 'INSERT'), true,
   'private_definer may only mark a token used: UPDATE(used_by_user, used_at); it cannot issue (INSERT) or edit one (S2b issues)');
 SELECT is(has_column_privilege('private_definer', 'app.purchase_evidence', 'status', 'UPDATE') AND has_column_privilege('private_definer', 'app.purchase_evidence', 'cosignal', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.purchase_evidence', 'void_reason', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'user_id', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'facility_id', 'UPDATE')
           AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'local_date', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.purchase_evidence', 'method', 'UPDATE'), true,
-  'private_definer may UPDATE purchase_evidence (status, cosignal) only');
-SELECT is(has_column_privilege('private_definer', 'app.marker_credit', 'status', 'UPDATE') AND NOT has_column_privilege('private_definer', 'app.marker_credit', 'user_id', 'UPDATE')
-          AND NOT has_column_privilege('private_definer', 'app.marker_credit', 'purchase_evidence_id', 'UPDATE'), true, 'private_definer may UPDATE marker_credit.status only');
+  'private_definer may UPDATE purchase_evidence (status, cosignal, void_reason) only');
+SELECT is(has_column_privilege('private_definer', 'app.marker_credit', 'status', 'UPDATE')
+          AND has_column_privilege('private_definer', 'app.marker_credit', 'purchase_evidence_id', 'UPDATE')
+          AND NOT has_column_privilege('private_definer', 'app.marker_credit', 'user_id', 'UPDATE'), true,
+  'private_definer may UPDATE marker_credit (status, purchase_evidence_id detach) only');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('edge_actor'), ('edge_system')) r(n)
            WHERE has_table_privilege(r.n, 'app.purchase_evidence', 'INSERT,UPDATE,DELETE') OR has_table_privilege(r.n, 'app.marker_credit', 'INSERT,UPDATE,DELETE')
               OR has_any_column_privilege(r.n, 'app.purchase_evidence', 'INSERT,UPDATE') OR has_any_column_privilege(r.n, 'app.marker_credit', 'INSERT,UPDATE')
@@ -131,9 +141,9 @@ SELECT is((SELECT count(*)::int FROM pg_policy p WHERE p.polname LIKE 'pd\_marke
 -- ----------------------------------------------------------------------------
 -- 2. The pepper: readable by nobody but the one derivation function; the function posture
 -- ----------------------------------------------------------------------------
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), 2, 'the pepper: exactly TWO functions in the database name it');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), ARRAY['course_pin_derive', 'course_pin_matches'],
-  'the pepper: private.course_pin_derive (the current pepper) and private.course_pin_matches (which also reads the previous one)');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), 4, 'the pepper: exactly FOUR functions in the database name it');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_pepper'), ARRAY['course_pin_derive', 'course_pin_matches', 'course_pin_pepper_rotate', 'purge_course_pin_pepper_previous'],
+  'the pepper: private.course_pin_derive (current), private.course_pin_matches (current + previous), private.course_pin_pepper_rotate (operator rotation, 0082), private.purge_course_pin_pepper_previous (0084 retention wrapper)');
 SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n), (VALUES
              ('private.course_pin_derive(text, date, integer)'), ('private.course_pin_from_key(text, text, date, integer)'), ('private.course_pin_matches(text, date, integer, text, timestamptz)'),
              ('private.course_pin_epoch_at(text, timestamptz)'), ('private.course_pin_epoch_log_write()'), ('private.course_pin_proof_expire()'), ('private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)')) f(n)
@@ -141,8 +151,8 @@ SELECT is((SELECT count(*)::int FROM (VALUES ('anon'), ('authenticated'), ('serv
 SELECT is((SELECT bool_and(p.proacl::text !~ '(^\{|,)=') FROM pg_proc p WHERE p.oid IN ('private.course_pin_derive(text, date, integer)'::regprocedure, 'private.course_pin_matches(text, date, integer, text, timestamptz)'::regprocedure,
              'private.course_pin_from_key(text, text, date, integer)'::regprocedure, 'private.course_pin_epoch_at(text, timestamptz)'::regprocedure, 'private.marker_cosignal_check(uuid, text, date, timestamptz, text, text, uuid)'::regprocedure)),
   true, 'the pepper: PUBLIC has no EXECUTE on any of them');
-SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_derive' AND p.proname <> 'course_pin_derive'), ARRAY['course_pin_matches'],
-  'the derivation is called by exactly one function: the matcher');
+SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_derive' AND p.proname <> 'course_pin_derive'), ARRAY['course_pin_matches', 'course_pin_show_for_partner'],
+  'the derivation is called by exactly two functions: the matcher (the player lane) and the staff lane''s today''s-PIN wrapper (0055, S2b: the screen and the app can never differ)');
 SELECT is((SELECT array_agg(p.proname::text ORDER BY p.proname) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'course_pin_matches' AND p.proname <> 'course_pin_matches'), ARRAY['course_pin_attempt_for_actor', 'marker_scan_for_actor'],
   'the matcher is called by exactly two functions: the PIN gate (course_pin_attempt_for_actor) and the scan (marker_scan_for_actor)');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM (VALUES ('anon'), ('authenticated'), ('service_role'), ('edge_gateway'), ('edge_actor'), ('edge_system')) r(n)

@@ -72,6 +72,21 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 0.5rem;
 }
+.totp-enrol-secret {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+.totp-qr {
+  display: block;
+  width: min(100%, 14rem);
+  height: auto;
+  image-rendering: pixelated;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  background: #fff;
+}
 .fields dt {
   color: var(--muted);
 }
@@ -98,6 +113,23 @@ h2 {
   flex-wrap: wrap;
   gap: 0.75rem;
   margin: 1.25rem 0;
+}
+.review-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+.review-previews figure {
+  margin: 0;
+  max-width: 12rem;
+}
+.review-previews img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
 }
 button {
   min-height: 2.75rem;
@@ -134,4 +166,37 @@ button:disabled {
 :focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
+}
+.field {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+}
+.field label {
+  font-weight: 600;
+}
+.text-field {
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  letter-spacing: 0.15em;
+}
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.scan-preview {
+  display: block;
+  width: min(100%, 20rem);
+  max-height: 14rem;
+  margin: 0.5rem 0;
+  background: #111;
+  border-radius: 0.5rem;
+}
+.scan-preview[hidden] {
+  display: none;
 }

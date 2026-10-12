@@ -5,26 +5,20 @@
  */
 
 import type { WhoAmI } from "../api/types";
-import type { AppState, AppController, Notice } from "../app/controller";
+import { canOpenAdminOps, canOpenReview, trailChoices } from "../app/admin";
+import { canOpenInvites, canOpenMemberCredentials, canOpenOfferRedeem } from "../app/work";
+import type { AppState, AppController } from "../app/controller";
 import { translate, plural, type Locale, type MessageKey } from "../i18n";
 import { h } from "./dom";
+import { noticeElement } from "./notice";
+import { enrolView } from "./views-enrol";
+import { panelView } from "./views-panels";
+import { stopCameraScan } from "./camera-scan";
+import { workView } from "./views-work";
 
 export interface RenderEnv {
   readonly locale: Locale;
   readonly setLocale: (l: Locale) => void;
-}
-
-const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
-  locked: "notice.locked",
-  "signed-out": "notice.signedOut",
-  expired: "notice.expired",
-  "sign-out-offline": "notice.signOutOffline",
-  "lock-offline": "notice.lockOffline",
-};
-
-function noticeText(n: Notice, locale: Locale): string {
-  if (n.kind === "error") return translate(locale, n.message.key, n.message.params);
-  return translate(locale, NOTICE_KEY[n.kind]);
 }
 
 function formatTime(iso: string, locale: Locale): string {
@@ -74,6 +68,7 @@ function roles(s: WhoAmI, locale: Locale): HTMLElement {
 }
 
 export function render(root: HTMLElement, state: AppState, controller: AppController, env: RenderEnv): void {
+  stopCameraScan();
   const { locale } = env;
   const t = (k: MessageKey, p?: Record<string, string | number>) => translate(locale, k, p);
   document.documentElement.setAttribute("lang", locale);
@@ -82,54 +77,205 @@ export function render(root: HTMLElement, state: AppState, controller: AppContro
   const langButton = h("button", { type: "button", class: "link", lang: locale === "en" ? "fr-CA" : "en", "aria-label": t("lang.toggle.label"), "data-testid": "lang-toggle", onclick: () => env.setLocale(locale === "en" ? "fr-CA" : "en") }, t("lang.toggle"));
   const header = h("header", { class: "bar" }, h("span", { class: "brand" }, t("app.name")), langButton);
 
-  const notice = (n: Notice | null) => (n === null ? null : h("p", { class: n.kind === "error" ? "notice error" : "notice", role: n.kind === "error" ? "alert" : "status", "data-testid": "notice" }, noticeText(n, locale)));
+  const notice = (n: Parameters<typeof noticeElement>[0]) => noticeElement(n, locale);
+  const lockAndSignOut = () => [
+    // Lock and Sign-out are NEVER disabled by a busy refresh (a refresh that never answers must not stand between a person and the lock); each takes effect at once
+    h("button", { type: "button", "data-testid": "lock", onclick: () => void controller.lock() }, t("home.lock")),
+    h("button", { type: "button", class: "danger", "data-testid": "sign-out", onclick: () => void controller.signOut() }, t("home.signOut")),
+  ];
 
   let main: HTMLElement;
-  let heading: HTMLElement;
-  if (state.screen === "signed-in") {
+  if (state.screen === "signed-in" && state.panel !== null) {
+    // a panel replaces the home / work screen; Lock and Sign out stay reachable from it (the forced first PIN has no other way out)
+    main = panelView(state.panel, controller, locale);
+    main.append(h("div", { class: "actions", "data-testid": "session-actions" }, ...lockAndSignOut()));
+  } else if (state.screen === "signed-in" && state.work !== null) {
+    main = workView(state, controller, locale);
+    main.append(h("div", { class: "actions", "data-testid": "session-actions" }, ...lockAndSignOut()));
+  } else if (state.screen === "signed-in") {
     const busy = state.busy !== null;
-    heading = h("h1", { tabindex: "-1", "data-testid": "heading" }, t("home.title"));
+    const needsSecondFactor = state.session.aal < state.session.requiredAal;
+    const firstFacility = state.session.memberships.flatMap((m) => m.facilityIds)[0] ?? "";
+    const firstTrail = trailChoices(state.session)[0] ?? "";
+    const showAdminOps = canOpenAdminOps(state.session);
+    const showReview = canOpenReview(state.session);
+    const showOfferRedeem = canOpenOfferRedeem(state.session);
+    const showMembers = canOpenMemberCredentials(state.session);
+    const showInvites = canOpenInvites(state.session);
     main = h(
       "main",
       { "aria-busy": busy ? "true" : "false", "data-screen": "signed-in" },
-      heading,
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("home.title")),
       notice(state.notice),
-      state.session.aal < state.session.requiredAal ? h("p", { class: "notice", role: "status", "data-testid": "aal-low" }, t("home.aalLow")) : null,
+      needsSecondFactor ? h("p", { class: "notice", role: "status", "data-testid": "aal-low" }, t("home.aalLow")) : null,
       h("section", {}, h("h2", {}, t("home.session.title")), sessionFields(state.session, locale)),
       h("section", {}, h("h2", {}, t("home.roles.title")), roles(state.session, locale)),
       h(
-        "div",
-        { class: "actions" },
-        h("button", { type: "button", disabled: busy, "data-testid": "refresh", onclick: () => void controller.refresh() }, t("home.refresh")),
-        // Lock and Sign-out are NEVER disabled by a busy refresh (a refresh that never answers must not stand between a person and the lock); each takes effect at once
-        h("button", { type: "button", "data-testid": "lock", onclick: () => void controller.lock() }, t("home.lock")),
-        h("button", { type: "button", class: "danger", "data-testid": "sign-out", onclick: () => void controller.signOut() }, t("home.signOut")),
+        "section",
+        {},
+        h("h2", {}, t("home.work.title")),
+        h("p", { class: "muted" }, t("home.work.hint")),
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", class: "primary", disabled: busy || needsSecondFactor, "data-testid": "open-attest", onclick: () => controller.openAttest(firstFacility) }, t("home.work.attest")),
+          h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-course-qr", onclick: () => controller.openCourseQr(firstFacility) }, t("home.work.courseQr")),
+          h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-handover", onclick: () => controller.openHandover(firstFacility) }, t("home.work.handover")),
+          h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-stock", onclick: () => controller.openStock(firstFacility) }, t("home.work.stock")),
+          showOfferRedeem
+            ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-offer-redeem", onclick: () => controller.openOfferRedeem(firstFacility) }, t("home.work.offerRedeem"))
+            : null,
+        ),
       ),
+      showAdminOps || showReview
+        ? h(
+            "section",
+            { "data-testid": "home-admin" },
+            h("h2", {}, t("home.admin.title")),
+            h("p", { class: "muted" }, t("home.admin.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-programme", onclick: () => controller.openProgramme(firstTrail) }, t("home.admin.programme"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-offers", onclick: () => controller.openOffers(firstTrail) }, t("home.admin.offers"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-sponsorships", onclick: () => controller.openSponsorships(firstTrail) }, t("home.admin.sponsorships"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-rollups", onclick: () => controller.openRollups(firstTrail) }, t("home.admin.rollups"))
+                : null,
+              showAdminOps
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-settlement", onclick: () => controller.openSettlement(firstTrail) }, t("home.admin.settlement"))
+                : null,
+              showReview
+                ? h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-review", onclick: () => controller.openReview() }, t("home.admin.review"))
+                : null,
+            ),
+          )
+        : null,
+      h(
+        "section",
+        {},
+        h("h2", {}, t("home.pin.title")),
+        h("p", { class: "muted" }, t("home.pin.hint")),
+        h("div", { class: "actions" }, h("button", { type: "button", disabled: busy, "data-testid": "pin-setup-open", onclick: () => void controller.openPinSetup() }, t("home.pin.button"))),
+      ),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("home.credentials.title")),
+        h("p", { class: "muted" }, t("home.credentials.hint")),
+        h("div", { class: "actions" }, h("button", { type: "button", disabled: busy, "data-testid": "open-credentials", onclick: () => controller.openCredentials() }, t("home.credentials.button"))),
+      ),
+      showMembers
+        ? h(
+            "section",
+            { "data-testid": "home-members" },
+            h("h2", {}, t("home.members.title")),
+            h("p", { class: "muted" }, t("home.members.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-members", onclick: () => controller.openMembers() }, t("home.members.button")),
+            ),
+          )
+        : null,
+      showInvites
+        ? h(
+            "section",
+            { "data-testid": "home-invites" },
+            h("h2", {}, t("home.invites.title")),
+            h("p", { class: "muted" }, t("home.invites.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              h("button", { type: "button", disabled: busy || needsSecondFactor, "data-testid": "open-invites", onclick: () => controller.openInvites() }, t("home.invites.button")),
+            ),
+          )
+        : null,
+      state.pendingInviteAccept
+        ? h(
+            "section",
+            { "data-testid": "home-invite-accept" },
+            h("h2", {}, t("home.inviteAccept.title")),
+            h("p", { class: "muted" }, t("home.inviteAccept.hint")),
+            h(
+              "div",
+              { class: "actions" },
+              h(
+                "button",
+                {
+                  type: "button",
+                  class: "primary",
+                  disabled: busy || needsSecondFactor,
+                  "data-testid": "invite-accept",
+                  onclick: () => void controller.acceptInvite(),
+                },
+                t("home.inviteAccept.action"),
+              ),
+              h(
+                "button",
+                {
+                  type: "button",
+                  disabled: busy,
+                  "data-testid": "invite-accept-dismiss",
+                  onclick: () => controller.dismissInviteAccept(),
+                },
+                t("home.inviteAccept.dismiss"),
+              ),
+            ),
+          )
+        : null,
+      needsSecondFactor
+        ? h(
+            "section",
+            {},
+            h("h2", {}, t("home.totp.title")),
+            h(
+              "div",
+              { class: "actions" },
+              h("button", { type: "button", class: "primary", disabled: busy, "data-testid": "totp-open", onclick: () => void controller.openTotp("verify") }, t("home.totp.enter")),
+              h("button", { type: "button", disabled: busy, "data-testid": "totp-enrol-open", onclick: () => void controller.openTotp("enrol") }, t("home.totp.add")),
+            ),
+          )
+        : null,
+      h("div", { class: "actions" }, h("button", { type: "button", disabled: state.busy === "refresh", "data-testid": "refresh", onclick: () => void controller.refresh() }, t("home.refresh")), ...lockAndSignOut()),
       h("p", { class: "muted" }, t("home.lock.hint")),
       h("p", { class: "muted" }, t("home.reloadNote")),
       h("p", { class: "muted" }, t("home.later")),
     );
+  } else if (state.screen === "enrol") {
+    main = enrolView(state, controller, locale);
   } else if (state.screen === "signing-in") {
-    heading = h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title"));
     main = h(
       "main",
       { "aria-busy": "true", "data-screen": "signing-in" },
-      heading,
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title")),
       h("p", { role: "status", "data-testid": "busy" }, t("signIn.busy")),
       h("div", { class: "actions" }, h("button", { type: "button", "data-testid": "cancel", onclick: () => controller.cancelSignIn() }, t("signIn.cancel"))),
     );
   } else {
-    heading = h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title"));
     main = h(
       "main",
       { "data-screen": "signed-out" },
-      heading,
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("signIn.title")),
       notice(state.notice),
       h("p", {}, t("signIn.lead")),
-      h("div", { class: "actions" }, h("button", { type: "button", class: "primary", disabled: state.retryUntilMs !== undefined && Date.now() < state.retryUntilMs, "data-testid": "sign-in", onclick: () => void controller.signIn() }, t("signIn.button"))),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", class: "primary", disabled: state.retryUntilMs !== undefined && Date.now() < state.retryUntilMs, "data-testid": "sign-in", onclick: () => void controller.signIn() }, t("signIn.button")),
+        h("button", { type: "button", "data-testid": "have-invite", onclick: () => controller.startEnrol() }, t("signIn.haveInvite")),
+      ),
     );
   }
 
   root.replaceChildren(header, main);
-  heading.focus({ preventScroll: true });
+  // the first field of a form takes focus (so a screen-reader or keyboard user can type at once); otherwise the heading does
+  const target = main.querySelector<HTMLElement>("[data-autofocus]") ?? main.querySelector<HTMLElement>("h1");
+  target?.focus({ preventScroll: true });
 }

@@ -1,0 +1,1000 @@
+/**
+ * Draws the S7b/S7c/S7 work screens (attest, course-QR, stock, hand-over, offer redeem). Plain DOM, `textContent` only. Forms collect values on submit and hand them to the controller; nothing secret is kept in the tree.
+ */
+
+import type { AppController } from "../app/controller";
+import type { SignedInState } from "../app/state";
+import { facilityChoices } from "../app/work";
+import { STOCK_MOVE_KINDS, type StockMoveKind } from "../api/work-routes";
+import { translate, type Locale, type MessageKey } from "../i18n";
+import { h } from "./dom";
+import { noticeElement } from "./notice";
+import { tokenScanField } from "./scan-field";
+import { adminView } from "./views-admin";
+
+function facilitySelect(state: SignedInState, controller: AppController, locale: Locale): HTMLElement {
+  const t = (k: MessageKey) => translate(locale, k);
+  const choices = facilityChoices(state.session);
+  const work = state.work;
+  const current = work !== null && "facilityId" in work ? work.facilityId : choices[0] ?? "";
+  const select = h(
+    "select",
+    {
+      "data-testid": "work-facility",
+      "aria-label": t("work.facility"),
+      disabled: state.busy !== null || choices.length === 0,
+      onchange: (e: Event) => controller.setWorkFacility((e.target as HTMLSelectElement).value),
+    },
+    ...choices.map((id) => h("option", { value: id, selected: id === current }, id)),
+  );
+  return h("label", { class: "field" }, h("span", {}, t("work.facility")), select);
+}
+
+export function workView(state: SignedInState, controller: AppController, locale: Locale): HTMLElement {
+  const work = state.work!;
+  if (
+    work.kind === "programme" || work.kind === "offers" || work.kind === "sponsorships" ||
+    work.kind === "review" || work.kind === "rollups" || work.kind === "settlement"
+  ) {
+    return adminView(state, controller, locale);
+  }
+
+  const t = (k: MessageKey, p?: Record<string, string | number>) => translate(locale, k, p);
+  const busy = state.busy !== null || work.busy;
+  const back = h("button", { type: "button", disabled: busy, "data-testid": "work-back", onclick: () => controller.closeWork() }, t("work.back"));
+
+  if (work.kind === "attest") {
+    const online = work.mode === "online";
+    const form = online
+      ? h(
+          "form",
+          {
+            "data-testid": "attest-online",
+            onsubmit: (e: SubmitEvent) => {
+              e.preventDefault();
+              const fd = new FormData(e.target as HTMLFormElement);
+              void controller.submitOnlineAttest(String(fd.get("token") ?? ""));
+            },
+          },
+          tokenScanField({ name: "token", label: t("attest.token.label"), testid: "attest-token", busy, autofocus: true, t }),
+          h("p", { class: "muted" }, t("attest.token.hint")),
+          h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "attest-online-submit" }, t("attest.token.submit"))),
+        )
+      : h(
+          "form",
+          {
+            "data-testid": "attest-offline",
+            onsubmit: (e: SubmitEvent) => {
+              e.preventDefault();
+              const fd = new FormData(e.target as HTMLFormElement);
+              void controller.submitOfflineAttest(String(fd.get("handle") ?? ""), String(fd.get("code") ?? ""));
+            },
+          },
+          h("label", { class: "field" }, h("span", {}, t("attest.handle.label")), h("input", { name: "handle", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "attest-handle", disabled: busy })),
+          h("label", { class: "field" }, h("span", {}, t("attest.code.label")), h("input", { name: "code", type: "text", inputmode: "numeric", autocomplete: "one-time-code", maxlength: 6, required: true, "data-testid": "attest-code", disabled: busy })),
+          h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "attest-offline-submit" }, t("attest.offline.submit"))),
+        );
+
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "attest" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("attest.title")),
+      noticeElement(state.notice, locale),
+      facilitySelect(state, controller, locale),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", ...(online ? { class: "primary" } : {}), disabled: busy, "data-testid": "attest-mode-online", onclick: () => controller.setAttestMode("online") }, t("attest.mode.online")),
+        h("button", { type: "button", ...(!online ? { class: "primary" } : {}), disabled: busy, "data-testid": "attest-mode-offline", onclick: () => controller.setAttestMode("offline") }, t("attest.mode.offline")),
+      ),
+      h(
+        "label",
+        { class: "field" },
+        h("span", {}, t("attest.kind")),
+        h(
+          "select",
+          {
+            "data-testid": "attest-kind",
+            disabled: busy,
+            onchange: (e: Event) => controller.setAttestKind((e.target as HTMLSelectElement).value === "marker_purchase" ? "marker_purchase" : "presence"),
+          },
+          h("option", { value: "presence", selected: work.attestKind === "presence" }, t("attest.kind.presence")),
+          h("option", { value: "marker_purchase", selected: work.attestKind === "marker_purchase" }, t("attest.kind.marker_purchase")),
+        ),
+      ),
+      form,
+      work.lastResult !== null
+        ? h("p", { role: "status", "data-testid": "attest-result" }, t("attest.result", { held: work.lastResult.held ? t("common.yes") : t("common.no") }))
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "attest-shift-log", onclick: () => void controller.loadShiftLog() }, t("attest.shiftLog")),
+        h("button", { type: "button", disabled: busy, "data-testid": "attest-staff-activity", onclick: () => void controller.loadStaffActivity(7) }, t("attest.staffActivity")),
+        back,
+      ),
+      work.shiftLog !== null
+        ? h("ul", { "data-testid": "shift-log" }, ...work.shiftLog.map((e) => h("li", {}, `${e.createdAt} · ${e.kind} · ${e.playerHandle} · ${e.staffHandle}`)))
+        : null,
+      work.staffActivity !== null
+        ? h("ul", { "data-testid": "staff-activity" }, ...work.staffActivity.map((r) => h("li", {}, `${r.day} · ${r.attests} · ${r.activations} · ${r.anomalies}`)))
+        : null,
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "course-qr") {
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "course-qr" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("courseQr.title")),
+      noticeElement(state.notice, locale),
+      facilitySelect(state, controller, locale),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("courseQr.pin.title")),
+        work.pin !== null ? h("p", { "data-testid": "course-pin" }, t("courseQr.pin.value", { pin: work.pin.pin, until: work.pin.validUntil, epoch: work.pin.pinEpoch })) : null,
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", disabled: busy, "data-testid": "course-pin-load", onclick: () => void controller.loadCoursePin() }, t("courseQr.pin.load")),
+          h("button", { type: "button", disabled: busy, "data-testid": "course-pin-rotate", onclick: () => void controller.rotatePin() }, t("courseQr.pin.rotate")),
+        ),
+      ),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("courseQr.alarms.title")),
+        h("p", { class: "muted" }, t("courseQr.alarms.hint")),
+        work.alarms !== null
+          ? work.alarms.length === 0
+            ? h("p", { "data-testid": "course-alarms-empty" }, t("courseQr.alarms.empty"))
+            : h(
+                "ul",
+                { "data-testid": "course-alarms" },
+                ...work.alarms.map((a) =>
+                  h("li", {}, t("courseQr.alarms.row", { date: a.localDate, before: a.pinEpochBefore, after: a.pinEpochAfter, failures: a.failures, at: a.raisedAt })),
+                ),
+              )
+          : null,
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", disabled: busy, "data-testid": "course-alarms-load", onclick: () => void controller.loadCoursePinAlarms() }, t("courseQr.alarms.load")),
+        ),
+      ),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("courseQr.capAlerts.title")),
+        h("p", { class: "muted" }, t("courseQr.capAlerts.hint")),
+        work.capAlerts !== null
+          ? work.capAlerts.length === 0
+            ? h("p", { "data-testid": "course-cap-alerts-empty" }, t("courseQr.capAlerts.empty"))
+            : h(
+                "ul",
+                { "data-testid": "course-cap-alerts" },
+                ...work.capAlerts.map((a) =>
+                  h("li", {}, t("courseQr.capAlerts.row", { date: a.localDate, count: a.count, at: a.raisedAt })),
+                ),
+              )
+          : null,
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", disabled: busy, "data-testid": "course-cap-alerts-load", onclick: () => void controller.loadCourseStaticPinCaps() }, t("courseQr.capAlerts.load")),
+        ),
+      ),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("courseQr.sale.title")),
+        work.sale !== null
+          ? h(
+              "div",
+              { "data-testid": "course-sale" },
+              h("p", {}, `${t("courseQr.sale.token")}: ${work.sale.token}`),
+              work.sale.link !== null ? h("p", {}, `${t("courseQr.sale.link")}: ${work.sale.link}`) : null,
+              work.refreshLeft !== null ? h("p", {}, t("courseQr.sale.left", { seconds: work.refreshLeft })) : null,
+            )
+          : null,
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", class: "primary", disabled: busy, "data-testid": "course-mint", onclick: () => void controller.mintToken() }, t("courseQr.sale.mint")),
+          h("button", { type: "button", disabled: busy || work.sale === null, "data-testid": "course-refresh", onclick: () => void controller.refreshSale() }, t("courseQr.sale.refresh")),
+        ),
+      ),
+      h(
+        "section",
+        {},
+        h("h2", {}, t("courseQr.print.title")),
+        work.printed !== null ? h("p", { "data-testid": "course-printed" }, t("courseQr.print.meta", { kid: work.printed.qrKid, at: work.printed.printedAt })) : null,
+        h(
+          "div",
+          { class: "actions" },
+          h("button", { type: "button", disabled: busy, "data-testid": "course-print-load", onclick: () => void controller.loadPrintedQr() }, t("courseQr.print.load")),
+          h("button", { type: "button", disabled: busy, "data-testid": "course-print-write", onclick: () => void controller.printQr() }, t("courseQr.print.write")),
+          back,
+        ),
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "stock") {
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "stock" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("stock.title")),
+      noticeElement(state.notice, locale),
+      facilitySelect(state, controller, locale),
+      h("p", { class: "muted" }, t("stock.hint")),
+      work.lastOnHand !== null ? h("p", { role: "status", "data-testid": "stock-last" }, t("stock.lastOnHand", { onHand: work.lastOnHand })) : null,
+      work.rows !== null
+        ? h(
+            "ul",
+            { "data-testid": "stock-rows" },
+            ...work.rows.map((r) => h("li", {}, t("stock.row", { trail: r.trailId, onHand: r.onHand, status: r.status }))),
+          )
+        : null,
+      h(
+        "form",
+        {
+          "data-testid": "stock-move",
+          onsubmit: (e: SubmitEvent) => {
+            e.preventDefault();
+            const fd = new FormData(e.target as HTMLFormElement);
+            const kind = String(fd.get("kind") ?? "") as StockMoveKind;
+            const qty = Number(fd.get("qty"));
+            const noteRaw = String(fd.get("note") ?? "").trim();
+            void controller.submitStockMove(String(fd.get("trailId") ?? ""), kind, qty, noteRaw.length > 0 ? noteRaw : null);
+          },
+        },
+        h("label", { class: "field" }, h("span", {}, t("stock.trail")), h("input", { name: "trailId", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-testid": "stock-trail", disabled: busy })),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("stock.kind")),
+          h(
+            "select",
+            { name: "kind", "data-testid": "stock-kind", disabled: busy },
+            ...STOCK_MOVE_KINDS.map((k) => h("option", { value: k }, t(`stock.kind.${k}` as MessageKey))),
+          ),
+        ),
+        h("label", { class: "field" }, h("span", {}, t("stock.qty")), h("input", { name: "qty", type: "number", required: true, "data-testid": "stock-qty", disabled: busy })),
+        h("label", { class: "field" }, h("span", {}, t("stock.note")), h("input", { name: "note", type: "text", autocomplete: "off", "data-testid": "stock-note", disabled: busy })),
+        h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "stock-move-submit" }, t("stock.move"))),
+      ),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "stock-load", onclick: () => void controller.loadStock() }, t("stock.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "members") {
+    const memberRole = (role: string): string => {
+      const key = `role.${role}` as MessageKey;
+      const label = translate(locale, key);
+      return label === key ? role : label;
+    };
+    const isSelf = (userId: string) => userId.toLowerCase() === state.session.userId.toLowerCase();
+    const manageOrgs = (() => {
+      const ids = new Set<string>();
+      for (const m of state.session.memberships) {
+        if ((m.role === "manager" || m.role === "operator") && /^[0-9a-f-]{36}$/i.test(m.orgId)) ids.add(m.orgId.toLowerCase());
+      }
+      if (state.session.isAdmin && work.rows !== null) {
+        for (const row of work.rows) if (/^[0-9a-f-]{36}$/i.test(row.orgId)) ids.add(row.orgId.toLowerCase());
+      }
+      return [...ids].sort();
+    })();
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "members" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("members.title")),
+      noticeElement(state.notice, locale),
+      h("p", { class: "muted" }, t("members.hint")),
+      work.recovered !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "member-recovered" },
+            h("p", {}, t("members.recovered.lead")),
+            h("p", { "data-testid": "member-recover-token" }, work.recovered.token),
+            h("p", { "data-testid": "member-recover-url" }, work.recovered.enrolUrl),
+            h("p", { class: "muted" }, t("members.recovered.until", { until: work.recovered.expiresAt })),
+            h(
+              "button",
+              { type: "button", disabled: busy, "data-testid": "member-recover-dismiss", onclick: () => controller.dismissMemberRecover() },
+              t("members.recovered.dismiss"),
+            ),
+          )
+        : null,
+      work.lastRevokeAll !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "org-revoke-all-result" },
+            h(
+              "p",
+              {},
+              t("members.revokeAll.result", {
+                org: work.lastRevokeAll.orgId.slice(0, 8),
+                sessions: String(work.lastRevokeAll.sessions),
+                credentials: String(work.lastRevokeAll.credentials),
+              }),
+            ),
+            h("p", { class: "muted" }, t("members.revokeAll.signInAgain")),
+            h(
+              "button",
+              { type: "button", disabled: busy, "data-testid": "org-revoke-all-dismiss", onclick: () => controller.dismissOrgRevokeAll() },
+              t("members.revokeAll.dismiss"),
+            ),
+          )
+        : null,
+      manageOrgs.length > 0
+        ? h(
+            "section",
+            { "data-testid": "org-revoke-all" },
+            h("h2", {}, t("members.revokeAll.title")),
+            h("p", { class: "muted" }, t("members.revokeAll.hint")),
+            h(
+              "label",
+              { class: "field" },
+              h("span", {}, t("members.revokeAll.createdAfter")),
+              h("input", {
+                type: "text",
+                autocomplete: "off",
+                spellcheck: "false",
+                disabled: busy,
+                value: work.createdAfterDraft,
+                "data-testid": "org-revoke-created-after",
+                onchange: (e: Event) => controller.setOrgRevokeCreatedAfter((e.target as HTMLInputElement).value),
+              }),
+            ),
+            h(
+              "ul",
+              { "data-testid": "org-revoke-all-list" },
+              ...manageOrgs.map((orgId) =>
+                h(
+                  "li",
+                  { "data-testid": `org-revoke-row-${orgId}` },
+                  h("p", { class: "muted" }, t("members.org"), ": ", orgId.slice(0, 8)),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "danger",
+                      disabled: busy,
+                      "data-testid": `org-revoke-all-${orgId}`,
+                      onclick: () => void controller.revokeAllOrgSessions(orgId),
+                    },
+                    t("members.revokeAll.action"),
+                  ),
+                ),
+              ),
+            ),
+          )
+        : null,
+      state.session.isAdmin
+        ? h(
+            "section",
+            { "data-testid": "admin-enrolment" },
+            h("h2", {}, t("members.adminEnrol.title")),
+            h("p", { class: "muted" }, t("members.adminEnrol.hint")),
+            work.adminEnrolment !== null
+              ? h(
+                  "div",
+                  { role: "status", "data-testid": "admin-enrolment-issued" },
+                  h("p", {}, t("members.adminEnrol.lead")),
+                  h("p", { "data-testid": "admin-enrol-token" }, work.adminEnrolment.token),
+                  h("p", { "data-testid": "admin-enrol-url" }, work.adminEnrolment.enrolUrl),
+                  h("p", { class: "muted" }, t("members.adminEnrol.until", { until: work.adminEnrolment.expiresAt })),
+                  h(
+                    "button",
+                    { type: "button", disabled: busy, "data-testid": "admin-enrol-dismiss", onclick: () => controller.dismissAdminEnrolment() },
+                    t("members.adminEnrol.dismiss"),
+                  ),
+                )
+              : h(
+                  "div",
+                  { class: "actions" },
+                  h(
+                    "label",
+                    { class: "field" },
+                    h("span", {}, t("members.adminEnrol.userId")),
+                    h("input", {
+                      type: "text",
+                      autocomplete: "off",
+                      spellcheck: "false",
+                      disabled: busy,
+                      value: work.adminEnrolUserIdDraft,
+                      "data-testid": "admin-enrol-user-id",
+                      onchange: (e: Event) => controller.setAdminEnrolUserId((e.target as HTMLInputElement).value),
+                    }),
+                  ),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "primary",
+                      disabled: busy,
+                      "data-testid": "admin-enrol-issue",
+                      onclick: () => void controller.issueAdminEnrolment(),
+                    },
+                    t("members.adminEnrol.action"),
+                  ),
+                ),
+          )
+        : null,
+      work.credentialAddNotices !== null
+        ? h(
+            "section",
+            { "data-testid": "credential-add-notices-reach" },
+            h("h2", {}, t("members.credentialNotices.title")),
+            h("p", { class: "muted" }, t("members.credentialNotices.hint")),
+            work.credentialAddNotices.length === 0
+              ? h("p", { "data-testid": "credential-add-notices-empty" }, t("members.credentialNotices.empty"))
+              : h(
+                  "ul",
+                  { "data-testid": "credential-add-notices-list" },
+                  ...work.credentialAddNotices.map((n) =>
+                    h(
+                      "li",
+                      { "data-testid": `credential-add-notice-${n.noticeId}` },
+                      h("p", {}, t("members.credentialNotices.label"), ": ", n.label),
+                      h("p", { class: "muted" }, t("members.user"), ": ", n.subjectUserId.slice(0, 8)),
+                      h("p", { class: "muted" }, t("members.credentialNotices.createdAt"), ": ", n.createdAt),
+                      n.credentialRevokedAt !== null
+                        ? h("p", { class: "muted", "data-testid": `credential-add-notice-revoked-${n.noticeId}` }, t("members.credentialNotices.revoked"))
+                        : null,
+                      h(
+                        "div",
+                        { class: "actions" },
+                        h(
+                          "button",
+                          {
+                            type: "button",
+                            class: "primary",
+                            disabled: busy,
+                            "data-testid": `credential-add-notice-open-${n.noticeId}`,
+                            onclick: () => controller.openMemberCredentials(n.subjectUserId),
+                          },
+                          t("members.openCredentials"),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+          )
+        : null,
+      work.rows !== null
+        ? work.rows.length === 0
+          ? h("p", { "data-testid": "members-empty" }, t("members.empty"))
+          : h(
+              "ul",
+              { "data-testid": "members-list" },
+              ...work.rows.map((m) =>
+                h(
+                  "li",
+                  { "data-testid": `member-row-${m.userId}-${m.orgId}` },
+                  h("p", {}, t("members.user"), ": ", m.userId.slice(0, 8)),
+                  h("p", { class: "muted" }, t("members.role"), ": ", memberRole(m.role)),
+                  h("p", { class: "muted" }, t("members.org"), ": ", m.orgId.slice(0, 8)),
+                  h(
+                    "div",
+                    { class: "actions" },
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        class: "primary",
+                        disabled: busy,
+                        "data-testid": `member-credentials-${m.userId}`,
+                        onclick: () => controller.openMemberCredentials(m.userId),
+                      },
+                      t("members.openCredentials"),
+                    ),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        disabled: busy || isSelf(m.userId),
+                        "data-testid": `member-pin-reset-${m.userId}`,
+                        onclick: () => void controller.resetMemberPin(m.userId),
+                      },
+                      t("members.resetPin"),
+                    ),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        class: "danger",
+                        disabled: busy || isSelf(m.userId),
+                        "data-testid": `member-recover-${m.userId}`,
+                        onclick: () => void controller.recoverMember(m.userId),
+                      },
+                      t("members.recover"),
+                    ),
+                    h(
+                      "button",
+                      {
+                        type: "button",
+                        class: "danger",
+                        disabled: busy || isSelf(m.userId),
+                        "data-testid": `member-revoke-${m.userId}-${m.orgId}`,
+                        onclick: () => void controller.revokeMember(m.userId, m.orgId),
+                      },
+                      t("members.revoke"),
+                    ),
+                    state.session.isAdmin && m.role === "operator"
+                      ? h(
+                          "button",
+                          {
+                            type: "button",
+                            class: "danger",
+                            disabled: busy || isSelf(m.userId),
+                            "data-testid": `member-totp-reset-${m.userId}`,
+                            onclick: () => void controller.resetMemberTotp(m.userId),
+                          },
+                          t("members.resetTotp"),
+                        )
+                      : null,
+                  ),
+                ),
+              ),
+            )
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "members-load", onclick: () => void controller.loadMembers() }, t("members.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "invites") {
+    const memberRole = (role: string): string => {
+      const key = `role.${role}` as MessageKey;
+      const label = translate(locale, key);
+      return label === key ? role : label;
+    };
+    const manageOrgs = (() => {
+      const ids = new Set<string>();
+      for (const m of state.session.memberships) {
+        if ((m.role === "manager" || m.role === "operator") && /^[0-9a-f-]{36}$/i.test(m.orgId)) ids.add(m.orgId.toLowerCase());
+      }
+      if (state.session.isAdmin && work.orgIdDraft !== "" && /^[0-9a-f-]{36}$/i.test(work.orgIdDraft)) {
+        ids.add(work.orgIdDraft.toLowerCase());
+      }
+      return [...ids].sort();
+    })();
+    const pending = work.rows === null ? null : work.rows.filter((r) => r.acceptedAt === null && r.revokedAt === null);
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "invites" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("invites.title")),
+      noticeElement(state.notice, locale),
+      h("p", { class: "muted" }, t("invites.hint")),
+      work.created !== null
+        ? h(
+            "div",
+            { role: "status", "data-testid": "invite-created" },
+            h("p", {}, t("invites.created.lead")),
+            h("p", { "data-testid": "invite-created-token" }, work.created.token),
+            h("p", { "data-testid": "invite-created-url" }, work.created.inviteUrl),
+            h("p", { class: "muted" }, t("invites.created.until", { until: work.created.expiresAt })),
+            h(
+              "button",
+              { type: "button", disabled: busy, "data-testid": "invite-created-dismiss", onclick: () => controller.dismissInviteCreated() },
+              t("invites.created.dismiss"),
+            ),
+          )
+        : null,
+      h(
+        "section",
+        { "data-testid": "invite-create" },
+        h("h2", {}, t("invites.create.title")),
+        h("p", { class: "muted" }, t("invites.create.hint")),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("invites.org")),
+          manageOrgs.length > 0
+            ? h(
+                "select",
+                {
+                  disabled: busy,
+                  "data-testid": "invite-org",
+                  "aria-label": t("invites.org"),
+                  onchange: (e: Event) => controller.setInviteOrgId((e.target as HTMLSelectElement).value),
+                },
+                ...manageOrgs.map((id) => h("option", { value: id, selected: id === work.orgIdDraft }, id.slice(0, 8))),
+              )
+            : h("input", {
+                type: "text",
+                autocomplete: "off",
+                spellcheck: "false",
+                disabled: busy,
+                value: work.orgIdDraft,
+                "data-testid": "invite-org",
+                onchange: (e: Event) => controller.setInviteOrgId((e.target as HTMLInputElement).value),
+              }),
+        ),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("invites.email")),
+          h("input", {
+            type: "email",
+            autocomplete: "off",
+            spellcheck: "false",
+            disabled: busy || work.created !== null,
+            value: work.emailDraft,
+            "data-testid": "invite-email",
+            onchange: (e: Event) => controller.setInviteEmail((e.target as HTMLInputElement).value),
+          }),
+        ),
+        h(
+          "label",
+          { class: "field" },
+          h("span", {}, t("invites.role")),
+          h(
+            "select",
+            {
+              disabled: busy || work.created !== null,
+              "data-testid": "invite-role",
+              "aria-label": t("invites.role"),
+              onchange: (e: Event) => controller.setInviteRole((e.target as HTMLSelectElement).value as "staff" | "manager" | "operator"),
+            },
+            ...(["staff", "manager", "operator"] as const).map((role) =>
+              h("option", { value: role, selected: role === work.roleDraft }, memberRole(role)),
+            ),
+          ),
+        ),
+        h(
+          "button",
+          {
+            type: "button",
+            class: "primary",
+            disabled: busy || work.created !== null,
+            "data-testid": "invite-create",
+            onclick: () => void controller.createInvite(),
+          },
+          t("invites.create.action"),
+        ),
+      ),
+      pending !== null
+        ? pending.length === 0
+          ? h("p", { "data-testid": "invites-empty" }, t("invites.empty"))
+          : h(
+              "ul",
+              { "data-testid": "invites-list" },
+              ...pending.map((inv) =>
+                h(
+                  "li",
+                  { "data-testid": `invite-row-${inv.id}` },
+                  h("p", {}, t("invites.email"), ": ", inv.inviteeEmail),
+                  h("p", { class: "muted" }, t("invites.role"), ": ", memberRole(inv.role)),
+                  h("p", { class: "muted" }, t("invites.org"), ": ", inv.orgId.slice(0, 8)),
+                  h("p", { class: "muted" }, t("invites.expires"), ": ", inv.expiresAt),
+                  h(
+                    "button",
+                    {
+                      type: "button",
+                      class: "danger",
+                      disabled: busy,
+                      "data-testid": `invite-revoke-${inv.id}`,
+                      onclick: () => void controller.revokeInvite(inv.id),
+                    },
+                    t("invites.revoke"),
+                  ),
+                ),
+              ),
+            )
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "invites-load", onclick: () => void controller.loadInvites() }, t("invites.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "credentials") {
+    const others = work.targetUserId !== null;
+    const active = work.rows === null ? null : work.rows.filter((c) => c.revokedAt === null);
+    const credentialsBack = others
+      ? h("button", { type: "button", disabled: busy, "data-testid": "work-back", onclick: () => controller.openMembers() }, t("members.back"))
+      : back;
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "credentials" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t(others ? "credentials.othersTitle" : "credentials.title")),
+      noticeElement(state.notice, locale),
+      h("p", { class: "muted" }, t(others ? "credentials.othersHint" : "credentials.hint")),
+      !others && active !== null && active.length === 1
+        ? h("p", { class: "muted", "data-testid": "credentials-last-hint" }, t("credentials.lastHint"))
+        : null,
+      active !== null
+        ? active.length === 0
+          ? h("p", { "data-testid": "credentials-empty" }, t("credentials.empty"))
+          : h(
+              "ul",
+              { "data-testid": "credentials-list" },
+              ...active.map((c) =>
+                h(
+                  "li",
+                  {},
+                  h("p", {}, t("credentials.label"), ": ", c.label),
+                  h(
+                    "form",
+                    {
+                      "data-testid": `credential-form-${c.id}`,
+                      onsubmit: (e: SubmitEvent) => {
+                        e.preventDefault();
+                        const fd = new FormData(e.target as HTMLFormElement);
+                        void controller.saveCredentialNote(c.id, String(fd.get("note") ?? ""));
+                      },
+                    },
+                    h(
+                      "label",
+                      { class: "field" },
+                      h("span", {}, t("credentials.note")),
+                      h("input", {
+                        name: "note",
+                        type: "text",
+                        value: c.note ?? "",
+                        maxlength: 40,
+                        autocomplete: "off",
+                        "data-testid": `credential-note-${c.id}`,
+                        disabled: busy,
+                      }),
+                    ),
+                    h(
+                      "div",
+                      { class: "actions" },
+                      h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": `credential-save-${c.id}` }, t("credentials.save")),
+                      h(
+                        "button",
+                        {
+                          type: "button",
+                          class: "danger",
+                          disabled: busy || (!others && active.length <= 1),
+                          "data-testid": `credential-revoke-${c.id}`,
+                          onclick: () => void controller.revokeCredential(c.id),
+                        },
+                        t("credentials.revoke"),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            )
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "credentials-load", onclick: () => void controller.loadCredentials() }, t("credentials.load")),
+        others
+          ? null
+          : h(
+              "button",
+              {
+                type: "button",
+                class: "primary",
+                disabled: busy || active === null || active.length >= 5,
+                "data-testid": "credentials-add",
+                onclick: () => void controller.addCredential(),
+              },
+              t("credentials.add"),
+            ),
+        credentialsBack,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  if (work.kind === "offer-redeem") {
+    const scan = work.mode === "staff_scan";
+    const codeField = h(
+      "label",
+      { class: "field" },
+      h("span", {}, t("offerRedeem.code")),
+      h("input", {
+        name: "offerCodeId",
+        type: "text",
+        value: work.selectedOfferCodeId,
+        autocomplete: "off",
+        spellcheck: "false",
+        required: true,
+        "data-testid": "offer-redeem-code",
+        disabled: busy,
+      }),
+    );
+    const form = scan
+      ? h(
+          "form",
+          {
+            "data-testid": "offer-redeem-form",
+            onsubmit: (e: SubmitEvent) => {
+              e.preventDefault();
+              const fd = new FormData(e.target as HTMLFormElement);
+              void controller.submitOfferRedeem(String(fd.get("offerCodeId") ?? ""), String(fd.get("credential") ?? ""));
+            },
+          },
+          codeField,
+          tokenScanField({ name: "credential", label: t("offerRedeem.credential"), testid: "offer-redeem-credential", busy, autofocus: true, t }),
+          h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-submit" }, t("offerRedeem.submit"))),
+        )
+      : h(
+          "form",
+          {
+            "data-testid": "offer-redeem-offline-form",
+            onsubmit: (e: SubmitEvent) => {
+              e.preventDefault();
+              const fd = new FormData(e.target as HTMLFormElement);
+              void controller.submitOfferRedeemOffline(
+                String(fd.get("offerCodeId") ?? ""),
+                String(fd.get("handle") ?? ""),
+                String(fd.get("code") ?? ""),
+                fd.get("nameConfirmed") === "on",
+              );
+            },
+          },
+          codeField,
+          h("label", { class: "field" }, h("span", {}, t("offerRedeem.handle")), h("input", { name: "handle", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-autofocus": true, "data-testid": "offer-redeem-handle", disabled: busy })),
+          h("label", { class: "field" }, h("span", {}, t("offerRedeem.offlineCode")), h("input", { name: "code", type: "text", inputmode: "numeric", autocomplete: "one-time-code", maxlength: 6, required: true, "data-testid": "offer-redeem-offline-code", disabled: busy })),
+          h(
+            "label",
+            { class: "field checkbox" },
+            h("input", { name: "nameConfirmed", type: "checkbox", required: true, "data-testid": "offer-redeem-name-confirmed", disabled: busy }),
+            h("span", {}, t("offerRedeem.nameConfirmed")),
+          ),
+          h("p", { class: "muted" }, t("offerRedeem.nameConfirmed.hint")),
+          h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "offer-redeem-offline-submit" }, t("offerRedeem.offline.submit"))),
+        );
+
+    return h(
+      "main",
+      { "aria-busy": busy ? "true" : "false", "data-screen": "offer-redeem" },
+      h("h1", { tabindex: "-1", "data-testid": "heading" }, t("offerRedeem.title")),
+      noticeElement(state.notice, locale),
+      facilitySelect(state, controller, locale),
+      h("p", { class: "muted" }, scan ? t("offerRedeem.hint") : t("offerRedeem.hint.offline")),
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", ...(scan ? { class: "primary" } : {}), disabled: busy, "data-testid": "offer-redeem-mode-scan", onclick: () => controller.setOfferRedeemMode("staff_scan") }, t("offerRedeem.mode.scan")),
+        h("button", { type: "button", ...(!scan ? { class: "primary" } : {}), disabled: busy, "data-testid": "offer-redeem-mode-offline", onclick: () => controller.setOfferRedeemMode("offline") }, t("offerRedeem.mode.offline")),
+      ),
+      work.queue !== null
+        ? h(
+            "ul",
+            { "data-testid": "offer-redeem-queue" },
+            ...work.queue.map((r) =>
+              h(
+                "li",
+                {},
+                h(
+                  "span",
+                  {},
+                  t("offerRedeem.queue.row", {
+                    handle: r.playerHandle ?? "—",
+                    face: r.faceValue ?? "—",
+                    expires: r.expiresAt ?? "—",
+                  }),
+                ),
+                h(
+                  "button",
+                  {
+                    type: "button",
+                    disabled: busy,
+                    "data-testid": `offer-redeem-pick-${r.offerCodeId}`,
+                    onclick: () => controller.selectOfferCode(r.offerCodeId),
+                  },
+                  t("offerRedeem.pick"),
+                ),
+              ),
+            ),
+          )
+        : null,
+      form,
+      work.lastRedeem !== null
+        ? h("p", { role: "status", "data-testid": "offer-redeem-result" }, t("offerRedeem.result", { id: work.lastRedeem.attestationId }))
+        : null,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { type: "button", disabled: busy, "data-testid": "offer-redeem-load", onclick: () => void controller.loadOffersQueue() }, t("offerRedeem.load")),
+        back,
+      ),
+      busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+    );
+  }
+
+  // handover
+  const scan = work.redeemMethod === "staff_scan";
+  return h(
+    "main",
+    { "aria-busy": busy ? "true" : "false", "data-screen": "handover" },
+    h("h1", { tabindex: "-1", "data-testid": "heading" }, t("handover.title")),
+    noticeElement(state.notice, locale),
+    facilitySelect(state, controller, locale),
+    h("p", { class: "muted" }, t("handover.hint")),
+    work.minted !== null
+      ? h(
+          "div",
+          { role: "status", "data-testid": "handover-minted" },
+          h("p", {}, t("handover.minted.lead")),
+          h("p", { "data-testid": "handover-token" }, work.minted.token),
+          h("p", { class: "muted" }, t("handover.minted.until", { until: work.minted.expiresAt })),
+          h("button", { type: "button", disabled: busy, "data-testid": "handover-mint-dismiss", onclick: () => controller.dismissHandoverMint() }, t("handover.minted.dismiss")),
+        )
+      : null,
+    work.queue !== null
+      ? h(
+          "ul",
+          { "data-testid": "handover-queue" },
+          ...work.queue.map((r) =>
+            h(
+              "li",
+              {},
+              h("span", {}, t("handover.queue.row", { handle: r.playerHandle, trail: r.trailId, state: r.state })),
+              h(
+                "div",
+                { class: "actions" },
+                h("button", { type: "button", disabled: busy, "data-testid": `handover-mint-${r.entitlementId}`, onclick: () => void controller.mintHandover(r.entitlementId) }, t("handover.mint")),
+                h("button", { type: "button", disabled: busy, "data-testid": `handover-voucher-${r.entitlementId}`, onclick: () => void controller.submitVoucher(r.entitlementId) }, t("handover.voucher")),
+              ),
+            ),
+          ),
+        )
+      : null,
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { type: "button", ...(scan ? { class: "primary" } : {}), disabled: busy, "data-testid": "handover-method-scan", onclick: () => controller.setRedeemMethod("staff_scan") }, t("handover.method.scan")),
+      h("button", { type: "button", ...(!scan ? { class: "primary" } : {}), disabled: busy, "data-testid": "handover-method-token", onclick: () => controller.setRedeemMethod("hand_over_token") }, t("handover.method.token")),
+    ),
+    h(
+      "form",
+      {
+        "data-testid": "handover-redeem",
+        onsubmit: (e: SubmitEvent) => {
+          e.preventDefault();
+          const fd = new FormData(e.target as HTMLFormElement);
+          void controller.submitRedeem(String(fd.get("entitlementId") ?? ""), String(fd.get("credential") ?? ""));
+        },
+      },
+      h("label", { class: "field" }, h("span", {}, t("handover.entitlement")), h("input", { name: "entitlementId", type: "text", autocomplete: "off", spellcheck: "false", required: true, "data-testid": "handover-entitlement", disabled: busy })),
+      tokenScanField({
+        name: "credential",
+        label: scan ? t("handover.credential.scan") : t("handover.credential.token"),
+        testid: "handover-credential",
+        busy,
+        autofocus: true,
+        t,
+      }),
+      h("div", { class: "actions" }, h("button", { type: "submit", class: "primary", disabled: busy, "data-testid": "handover-redeem-submit" }, t("handover.redeem"))),
+    ),
+    work.lastRedeem !== null
+      ? h("p", { role: "status", "data-testid": "handover-redeem-result" }, t("handover.redeem.result", { movement: work.lastRedeem.movement }))
+      : null,
+    h(
+      "div",
+      { class: "actions" },
+      h("button", { type: "button", disabled: busy, "data-testid": "handover-load", onclick: () => void controller.loadCollectQueue() }, t("handover.load")),
+      back,
+    ),
+    busy ? h("p", { class: "muted", role: "status" }, t("work.busy")) : null,
+  );
+}

@@ -45,7 +45,7 @@ function happy(call: Recorded): Response {
 }
 
 /** Most tests exercise `call()` against a second, later partner function, so the default test client allows one; the allow-list tests use PARTNER_FUNCTIONS itself. */
-const TEST_FUNCTIONS = [...PARTNER_FUNCTIONS, "partner-attest"];
+const TEST_FUNCTIONS = [...PARTNER_FUNCTIONS, "later-fn"];
 
 function make(responder: (c: Recorded) => Response | Promise<Response> = happy, over: Partial<PartnerApiConfig> = {}) {
   const s = stubFetch(responder);
@@ -77,7 +77,7 @@ describe("requests: method, URL, body", () => {
     await api.session();
     await api.reauthOptions();
     await api.reauth({ challengeToken: CHALLENGE, credential: CRED });
-    await api.lock(); // lock revokes: the wire request is `POST sign-out`
+    await api.lock(); // lock revokes: the wire request is `POST lock` (§73)
     const again = make();
     await again.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     await again.api.signOut();
@@ -89,7 +89,7 @@ describe("requests: method, URL, body", () => {
       ["GET", "/partner-session/session", undefined],
       ["POST", "/partner-session/reauth/options", {}],
       ["POST", "/partner-session/reauth", { challengeToken: CHALLENGE, credential: CRED }],
-      ["POST", "/partner-session/sign-out", {}],
+      ["POST", "/partner-session/lock", {}],
       ["POST", "/partner-session/verify", { challengeToken: CHALLENGE, credential: CRED }],
       ["POST", "/partner-session/sign-out", {}],
     ]);
@@ -116,7 +116,7 @@ describe("requests: headers and credentials mode", () => {
     await m.api.session();
     await m.api.reauthOptions();
     await m.api.reauth({ challengeToken: CHALLENGE, credential: CRED });
-    await m.api.call("POST", "partner-attest", "scan", { a: 1 }).catch(() => undefined);
+    await m.api.call("POST", "later-fn", "scan", { a: 1 }).catch(() => undefined);
     await m.api.lock();
     return m.calls;
   }
@@ -147,7 +147,7 @@ describe("requests: headers and credentials mode", () => {
     const byRoute = (r: string) => calls.find((c) => c.url.endsWith(`/partner-session/${r}`))!;
     expect(byRoute("options").headers["authorization"]).toBeUndefined();
     expect(byRoute("verify").headers["authorization"]).toBeUndefined();
-    for (const r of ["session", "reauth/options", "reauth", "sign-out"]) expect(byRoute(r).headers["authorization"], r).toBe(`Bearer ${VALID_TOKEN}`);
+    for (const r of ["session", "reauth/options", "reauth", "lock"]) expect(byRoute(r).headers["authorization"], r).toBe(`Bearer ${VALID_TOKEN}`);
   });
 
   it("a token that is HELD never leaks onto the pre-auth route: options carries no Authorization even in a signed-in client", async () => {
@@ -205,13 +205,13 @@ describe("the token", () => {
     expect(m.calls).toEqual([]);
   });
 
-  it("lock wipes it (a locked screen needs a fresh passkey tap), and REVOKES the session: the request is POST sign-out and it carried the token", async () => {
+  it("lock wipes it (a locked screen needs a fresh passkey tap), and REVOKES the session: the request is POST lock and it carried the token", async () => {
     const m = await signedIn();
     await m.api.lock();
     expect(m.calls).toHaveLength(1);
-    expect(m.calls[0]!.url.endsWith("/partner-session/sign-out")).toBe(true);
+    expect(m.calls[0]!.url.endsWith("/partner-session/lock")).toBe(true);
     expect(m.calls[0]!.init.method).toBe("POST");
-    expect(m.calls.some((c) => c.url.endsWith("/lock"))).toBe(false);
+    expect(m.calls.some((c) => c.url.endsWith("/sign-out"))).toBe(false);
     expect(m.calls[0]!.headers["authorization"]).toBe(`Bearer ${VALID_TOKEN}`);
     expect(m.api.hasSession()).toBe(false);
   });
@@ -417,31 +417,41 @@ describe("error mapping", () => {
 describe("call(): authenticated requests to later partner functions", () => {
   it("attaches the same headers and credentials mode and applies the same 401 handling", async () => {
     let phase = 0;
-    const m = make((c) => (phase === 0 ? happy(c) : c.url.endsWith("/partner-attest/scan") ? jsonResponse(200, { data: { ok: true } }) : jsonResponse(401, { error: { code: "unauthenticated", message: "x" } })));
+    const m = make((c) => (phase === 0 ? happy(c) : c.url.endsWith("/later-fn/scan") ? jsonResponse(200, { data: { ok: true } }) : jsonResponse(401, { error: { code: "unauthenticated", message: "x" } })));
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     phase = 1;
     m.calls.length = 0;
-    expect(await m.api.call("POST", "partner-attest", "scan", { a: 1 })).toEqual({ ok: true });
-    expect(m.calls[0]!.url).toBe(`${BASE}/partner-attest/scan`);
+    expect(await m.api.call("POST", "later-fn", "scan", { a: 1 })).toEqual({ ok: true });
+    expect(m.calls[0]!.url).toBe(`${BASE}/later-fn/scan`);
     expect(m.calls[0]!.headers["authorization"]).toBe(`Bearer ${VALID_TOKEN}`);
     expect(m.calls[0]!.headers["content-type"]).toBe("application/json");
     expect(m.calls[0]!.init.credentials).toBe("omit");
-    await kindOf(m.api.call("GET", "partner-attest", "other"));
+    await kindOf(m.api.call("GET", "later-fn", "other"));
     expect(m.api.hasSession()).toBe(false);
   });
 
   it("refuses a function name or route that could change the path", async () => {
     const m = await signedIn();
-    for (const [fn, route] of [["..", "x"], ["a/b", "x"], ["partner-attest", "../x"], ["partner-attest", "x?y=1"], ["partner-attest", "x#y"], ["partner-attest", "//evil.test"], ["Partner", "x"], ["", "x"], ["partner-attest", "a:b"]] as const) {
+    for (const [fn, route] of [["..", "x"], ["a/b", "x"], ["later-fn", "../x"], ["later-fn", "x?y=1"], ["later-fn", "x#y"], ["later-fn", "//evil.test"], ["Partner", "x"], ["", "x"], ["later-fn", "a:b"]] as const) {
       expect(((await kindOf(m.api.call("GET", fn, route))) as PartnerApiError).kind, `${fn} ${route}`).toBe("bad_request");
     }
     expect(m.calls).toEqual([]);
     expect(m.api.hasSession()).toBe(true);
   });
 
+  it("accepts a closed query object and refuses a bad key or value", async () => {
+    const m = make((c) => (c.url.includes("/partner-attest/shift-log?") ? jsonResponse(200, { data: { entries: [] } }) : happy(c)));
+    await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
+    m.calls.length = 0;
+    expect(await m.api.call("GET", "partner-attest", "shift-log", undefined, { facilityId: "fac_a" })).toEqual({ entries: [] });
+    expect(m.calls[0]!.url).toBe(`${BASE}/partner-attest/shift-log?facilityId=fac_a`);
+    expect(((await kindOf(m.api.call("GET", "partner-attest", "shift-log", undefined, { "bad key": "x" }))) as PartnerApiError).kind).toBe("bad_request");
+    expect(((await kindOf(m.api.call("GET", "partner-attest", "shift-log", undefined, { facilityId: "a/b" }))) as PartnerApiError).kind).toBe("bad_request");
+  });
+
   it("without a session it makes no request", async () => {
     const m = make();
-    expect(((await kindOf(m.api.call("GET", "partner-attest", "x"))) as PartnerApiError).kind).toBe("unauthenticated");
+    expect(((await kindOf(m.api.call("GET", "later-fn", "x"))) as PartnerApiError).kind).toBe("unauthenticated");
     expect(m.calls).toEqual([]);
   });
 });
@@ -458,7 +468,7 @@ describe("call(): the bearer goes only to the partner-function allow-list (LOW-3
     const m = strict();
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     m.calls.length = 0;
-    for (const fn of ["partner-attest", "other-fn", "rest", "auth", "me-export", "partner-session2", "partner"]) {
+    for (const fn of ["exports-purge", "other-fn", "rest", "auth", "me-export", "partner-session2", "partner"]) {
       expect(((await kindOf(m.api.call("POST", fn, "x", {}))) as PartnerApiError).kind, fn).toBe("bad_request");
     }
     expect(m.calls).toEqual([]);
@@ -584,23 +594,30 @@ describe("timeouts (MEDIUM-2): every request is cut off", () => {
 });
 
 describe("ending a session is immediate (MEDIUM-2): wipe and notify BEFORE sending, send with a copy", () => {
-  it.each(["signOut", "lock"] as const)("%s: by the time the request is on the wire the token is already gone and the listeners have already been told", async (op) => {
+  it.each([
+    ["signOut", "signed-out", "/sign-out$"],
+    ["lock", "locked", "/lock$"],
+  ] as const)("%s: by the time the request is on the wire the token is already gone and the listeners have already been told", async (op, reason, routeRe) => {
     const events: string[] = [];
     let api!: PartnerApi;
+    const re = new RegExp(routeRe);
     const s = stubFetch((c) => {
-      if (/\/sign-out$/.test(c.url)) events.push(`send(hasSession=${api.hasSession()})`);
+      if (re.test(c.url)) events.push(`send(hasSession=${api.hasSession()})`);
       return happy(c);
     });
     api = createPartnerApi({ baseUrl: BASE, fetch: s.fetch });
     api.onSessionEnded((r) => events.push(`ended:${r}`));
     await api.verify({ challengeToken: CHALLENGE, credential: CRED });
     await api[op]();
-    expect(events).toEqual([`ended:${op === "lock" ? "locked" : "signed-out"}`, "send(hasSession=false)"]);
+    expect(events).toEqual([`ended:${reason}`, "send(hasSession=false)"]);
     expect(s.calls.at(-1)!.headers["authorization"]).toBe(`Bearer ${VALID_TOKEN}`); // the request still carried the copy
   });
 
-  it.each(["signOut", "lock"] as const)("%s: a request that never answers leaves the session already ended, then fails by timeout (and the wipe never waited for it)", async (op) => {
-    const h = hangingFetch((u) => u.endsWith("/sign-out"));
+  it.each([
+    ["signOut", "signed-out", "/sign-out"],
+    ["lock", "locked", "/lock"],
+  ] as const)("%s: a request that never answers leaves the session already ended, then fails by timeout (and the wipe never waited for it)", async (op, reason, route) => {
+    const h = hangingFetch((u) => u.endsWith(route));
     const api = createPartnerApi({ baseUrl: BASE, fetch: h.fetch, timeoutMs: 80 });
     const reasons: string[] = [];
     api.onSessionEnded((r) => reasons.push(r));
@@ -608,7 +625,7 @@ describe("ending a session is immediate (MEDIUM-2): wipe and notify BEFORE sendi
     const p = kindOf(api[op]());
     // synchronously after the call returns its promise: ended, token gone, the request is on the wire
     expect(api.hasSession()).toBe(false);
-    expect(reasons).toEqual([op === "lock" ? "locked" : "signed-out"]);
+    expect(reasons).toEqual([reason]);
     expect(h.seen.at(-1)!.authorization).toBe(`Bearer ${VALID_TOKEN}`);
     expect(((await p) as PartnerApiError).kind).toBe("network");
   });
@@ -644,10 +661,11 @@ describe("ending a session is immediate (MEDIUM-2): wipe and notify BEFORE sendi
     expect(((await read) as PartnerApiError).kind).toBe("network");
   });
 
-  it("the sign-out request of a lock is NOT aborted by the wipe that started it", async () => {
+  it("the lock request is NOT aborted by the wipe that started it", async () => {
     const m = await signedIn();
     await m.api.lock();
     expect(m.calls).toHaveLength(1); // it went out and completed
+    expect(m.calls[0]!.url.endsWith("/partner-session/lock")).toBe(true);
   });
 
   it("a late 401 for an OLD session does not wipe the NEW one (the 401 belongs to the session the request was sent under)", async () => {
@@ -758,7 +776,7 @@ describe("storage: the token is never written anywhere", () => {
     await m.api.session();
     await m.api.reauthOptions();
     await m.api.reauth({ challengeToken: CHALLENGE, credential: CRED });
-    await m.api.call("POST", "partner-attest", "scan", {}).catch(() => undefined);
+    await m.api.call("POST", "later-fn", "scan", {}).catch(() => undefined);
     await m.api.lock();
     await m.api.verify({ challengeToken: CHALLENGE, credential: CRED });
     await m.api.signOut();

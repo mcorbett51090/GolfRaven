@@ -51,9 +51,24 @@ describe("every authenticated Edge function authenticates through getActorFromRe
     .filter((n) => !n.startsWith("_") && statSync(join(FUNCTIONS, n)).isDirectory())
     .map((n) => ({ name: n, path: join(FUNCTIONS, n, "index.ts") }));
   // the system functions authenticate a SCHEDULER or a signed webhook, not a user: they never mint an Actor
-  const SYSTEM = new Set(["import-catalog", "retention-purge", "signin-revocation-drain"]);
-  // the partner lane (S1.2, 0049) authenticates a partner SESSION TOKEN through its own binder, never a player identity: it must not call getActorFromRequest at all (which refuses gr_ps_ tokens)
-  const PARTNER_LANE = new Set(["partner-session"]);
+  const SYSTEM = new Set(["import-catalog", "retention-purge", "signin-revocation-drain", "exports-purge", "rollups-refresh", "receipts-purge"]);
+  // the partner lane (S1.2, 0049; S1.5, 0054) authenticates a partner SESSION TOKEN through its own binder (or, for the accept routes, an emailed code and an invite token), never a player identity: it must not call getActorFromRequest at all (which refuses gr_ps_ tokens)
+  const PARTNER_LANE = new Set([
+    "partner-session",
+    "partner-invites",
+    "partner-members",
+    "course-qr",
+    "qr-print",
+    "partner-attest",
+    "partner-review",
+    "stock-admin",
+    "partner-entitlements",
+    "programme-config",
+    "offers-admin",
+    "sponsorships-admin",
+    "partner-offers-redeem",
+    "settlement-export",
+  ]);
 
   it("the user-facing entrypoints all call it, inside handleRequest", () => {
     const users = entrypoints.filter((e) => !SYSTEM.has(e.name) && !PARTNER_LANE.has(e.name));
@@ -98,8 +113,10 @@ describe("privileged.ts#getActorFromRequest runs the review-account gate", () =>
     expect(ret).toBeGreaterThan(gate);
   });
 
-  it("composes with the partner-token refusal (PA-11): gr_ps_ / gr_inv_ are refused BEFORE the environment is read, any client exists or GoTrue is asked, so before the gate", () => {
-    const prefix = body.indexOf('lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_")');
+  it("composes with the partner-token refusal (PA-11): gr_ps_ / gr_inv_ / gr_enr_ are refused BEFORE the environment is read, any client exists or GoTrue is asked, so before the gate", () => {
+    const prefix = body.indexOf(
+      'lowered.startsWith("gr_ps_") || lowered.startsWith("gr_inv_") || lowered.startsWith("gr_enr_")',
+    );
     const env = body.indexOf('Deno.env.get("SUPABASE_URL")');
     const client = body.indexOf("createClient(");
     const verified = body.indexOf("auth.getUser(token)");

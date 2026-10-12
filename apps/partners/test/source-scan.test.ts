@@ -73,6 +73,17 @@ describe("source rules", () => {
     expect(others).toEqual([]);
   });
 
+  it("the PIN derivation has ONE entry point: only auth/pin.ts imports the shared contract and deny-list, and nothing else in src/ touches Web Crypto", () => {
+    const importers = sources.filter((s) => /pin-contract|pin-deny-list/.test(s.code)).map((s) => s.path);
+    expect(importers).toEqual(["auth/pin.ts"]);
+    expect(sources.filter((s) => /crypto\s*\.\s*(subtle|getRandomValues)|\bSubtleCrypto\b/.test(s.code)).map((s) => s.path)).toEqual([]);
+  });
+
+  it("the only files outside src/ that the bundle may read are the three shared PIN-contract files, imported by exact relative path", () => {
+    const outside = sources.flatMap((s) => [...s.code.matchAll(/from\s+["'](\.\.\/[^"']*supabase[^"']*)["']/g)].map((m) => `${s.path}: ${m[1]}`));
+    expect(outside.map((l) => l.replace(/^.*: /, "").split("/").pop()).sort()).toEqual(["pin-contract.ts", "pin-deny-list.ts", "token.ts"]);
+  });
+
   it("the scan regexes do match what they are meant to (a control)", () => {
     expect(FORBIDDEN.find(([n]) => n === "localStorage")![1].test("localStorage.setItem(1)")).toBe(true);
     expect(FORBIDDEN.find(([n]) => n === "Function constructor")![1].test("x = new Function('a')")).toBe(true);

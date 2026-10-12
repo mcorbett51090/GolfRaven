@@ -42,7 +42,8 @@ describe.each(STORES)("airplane-mode check-in, end to end (%s)", (_n, make) => {
     let served = scriptedFetch({ respond: "challenge_prefetch_10_201" });
     const fetchImpl: Parameters<typeof createHttpApiClient>[0]["fetch"] = (url, init) => {
       if (mode.net === "airplane") {
-        seen.push({ url, method: init.method, headers: init.headers, body: init.body === undefined ? undefined : JSON.parse(init.body), redirect: init.redirect, credentials: init.credentials });
+        const raw = init.body;
+        seen.push({ url, method: init.method, headers: init.headers, body: raw === undefined ? undefined : typeof raw === "string" ? JSON.parse(raw) : raw, redirect: init.redirect, credentials: init.credentials });
         return Promise.reject(new TypeError("Network request failed"));
       }
       const before = served.seen.length;

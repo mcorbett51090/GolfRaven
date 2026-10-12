@@ -37,7 +37,7 @@
 #      `retry_after` without being evaluated); with the PIN one failure from locking and no backoff running, twenty concurrent wrong keys lock it ONCE (one `locked` audit row, nineteen plain `locked`). Without the
 #      row lock (`FOR UPDATE` in private.partner_pin_attempt) every call reads the same count and evaluates, so both cases fail.
 #   9. SAME-SESSION CONCURRENCY (S1.3 gate LOW-1): eight parallel CORRECT verifies on ONE freshly-seen session all answer ok and none deadlocks. Under class A0 each call took the session row FOR SHARE and then
-#      UPDATEd it (the grant): two FOR SHARE holders that both upgrade deadlock. Class A0_WRITE takes FOR NO KEY UPDATE up front, so the calls queue. 9b: the same for four deliberately overlapping session locks (class SESSION).
+#      UPDATEd it (the grant): two FOR SHARE holders that both upgrade deadlock. Class A0_WRITE takes FOR NO KEY UPDATE up front, so the calls queue. 9b: four overlapping session locks (class SESSION); since 0085 lock revokes, expect one ok and three not-live, zero deadlocks.
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the signin concurrency step, against the same throwaway cluster and database.)
@@ -670,16 +670,28 @@ for round in 1 2 3; do
   if [ "$DEAD9" -ne 0 ] || [ "$OK9" -ne 8 ]; then fail "9 (round $round): eight parallel correct verifies on one session gave ok=$OK9 other=$OTHER9 deadlocks=$DEAD9, expected ok=8 and no deadlock (partner_authorize must lock the session row FOR NO KEY UPDATE up front for a definer that writes it)"; break; fi
 done
 if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 8 parallel correct verifies on one session -> all ok, no deadlock (A0_WRITE locks the session row FOR NO KEY UPDATE up front)"; fi
-# 9b. the same shape on the two SESSION-class writers (S1.2's sign-out and lock): the lock clears a standing PIN grant, an UPDATE of the session row. A lock is too quick for a plain race to overlap, so the overlap is
-# MADE: each of four sessions first authorizes (class SESSION, through the planted action definer: it takes the row lock and keeps it to commit), sleeps, and only then calls the real lock definer, which UPDATEs the
-# row. Under FOR SHARE all four hold a share when the first UPDATE asks for the row (deadlock); under FOR NO KEY UPDATE the second session waits at its authorize and never holds a share.
+# 9b. SESSION-class writers serialize on the session row (FOR NO KEY UPDATE up front). Since 0085 / §72 lock
+# REVOKES the bound session, only the first of four overlapping locks can finish; the waiters then see
+# "session is not live" at authorize. Overlap is MADE: each session authorizes (planted zz24s_action),
+# sleeps, then calls the real lock definer. Under FOR SHARE that upgrade deadlocks; under FOR NO KEY UPDATE
+# they queue — one lock, three refusals, zero deadlocks. A fresh live session is planted each round
+# (prior winner revoked the previous row).
+plant_sess8() {
+  S8="$(hq "SELECT gen_random_uuid()")"
+  H8="$(printf '%s' "ser8-$$-$RANDOM-$(date +%s%N)-$1" | sha256sum | cut -d' ' -f1)"
+  hx "ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
+      INSERT INTO app.partner_session (id, token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind, mint_nonce_hash, mint_authenticator_data, mint_client_data_json, mint_signature)
+      VALUES ('$S8', '$H8', '$U8', '$C8', 1, now() - interval '1 hour', now(), now() + interval '8 hours', 'sign_in', decode(md5('ser-n8-$1') || md5('ser-nb8-$1'), 'hex'), decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'));
+      SET CONSTRAINTS ALL IMMEDIATE;
+      ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;"
+}
 lock_sql() { # $1 = seconds to hold the row lock between the authorize and the lock's write
   printf '%s\n' "BEGIN;" "SET LOCAL ROLE edge_partner;" "SELECT private.bind_partner_session('$H8');" "SELECT 'authorized:' || private.zz24s_action('fac_x', 'SESSION');" "SELECT pg_sleep($1);" \
     "SELECT private.partner_session_lock_for_partner();" "SELECT 'status:locked';" "COMMIT;"
 }
 for round in 1 2 3; do
   seed_pin8 0 NULL
-  hx "UPDATE app.partner_session SET last_seen_at = now() WHERE id = '$S8'"
+  plant_sess8 "$round"
   pin_run 1 "$GOOD8"
   if [ "$(status_of "$OUT_DIR/pin_1.out")" != "ok|0" ]; then fail "9b (round $round): the seeding verify was not ok: '$(status_of "$OUT_DIR/pin_1.out")'"; break; fi
   pids=()
@@ -688,14 +700,23 @@ for round in 1 2 3; do
     pids+=($!)
   done
   set +e; for pid in "${pids[@]}"; do wait "$pid"; done; set -e
-  OKL=0; DEADL=0
+  OKL=0; REFUSED=0; DEADL=0
   for i in 1 2 3 4; do
-    [ "$(status_of "$OUT_DIR/lock_$i.out")" = "locked" ] && OKL=$((OKL + 1)) || echo "  lock $i (round $round): $(head -c 300 "$OUT_DIR/lock_$i.err")" >&2
+    if [ "$(status_of "$OUT_DIR/lock_$i.out")" = "locked" ]; then
+      OKL=$((OKL + 1))
+    elif grep -q "partner_authorize: the session is not live" "$OUT_DIR/lock_$i.err" 2>/dev/null; then
+      REFUSED=$((REFUSED + 1))
+    else
+      echo "  lock $i (round $round): $(head -c 300 "$OUT_DIR/lock_$i.err")" >&2
+    fi
     if grep -qi "deadlock" "$OUT_DIR/lock_$i.err" 2>/dev/null; then DEADL=$((DEADL + 1)); fi
   done
-  if [ "$DEADL" -ne 0 ] || [ "$OKL" -ne 4 ]; then fail "9b (round $round): four overlapping session locks gave ok=$OKL deadlocks=$DEADL (class SESSION must lock the session row FOR NO KEY UPDATE up front)"; break; fi
+  if [ "$DEADL" -ne 0 ] || [ "$OKL" -ne 1 ] || [ "$REFUSED" -ne 3 ]; then
+    fail "9b (round $round): four overlapping session locks gave ok=$OKL refused=$REFUSED deadlocks=$DEADL (expect ok=1 refused=3 deadlock=0: lock revokes; SESSION still FOR NO KEY UPDATE)"
+    break
+  fi
 done
-if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 4 overlapping session locks (each clearing a standing PIN grant) -> all ok, no deadlock"; fi
+if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 4 overlapping session locks -> one revoke, three not-live refusals, no deadlock (SESSION FOR NO KEY UPDATE; lock revokes per §72)"; fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "tools/db/test-partner-serialisation.sh: FAILED" >&2

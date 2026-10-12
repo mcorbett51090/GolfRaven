@@ -43,7 +43,7 @@ describe("sign-in against the real handler", () => {
     await w.api.session();
     await w.api.lock();
     const logged = w.server.log.filter((r) => r.method !== "OPTIONS");
-    expect(logged.map((r) => `${r.method} ${r.path.split("/").pop()}`)).toEqual(["POST options", "POST verify", "GET session", "POST sign-out"]);
+    expect(logged.map((r) => `${r.method} ${r.path.split("/").pop()}`)).toEqual(["POST options", "POST verify", "GET session", "POST lock"]);
     for (const r of logged) {
       expect(r.contentType, r.path).toBe("application/json");
       expect(r.origin, r.path).toBe(PAGE_ORIGIN);
@@ -143,12 +143,12 @@ describe("session routes against the real handler", () => {
     expect(raw.status).toBe(401);
   });
 
-  it("lock REVOKES the session on the real handler (design 20.4 ruling): the client wipes, the server marks it revoked, and the OLD token then gets the uniform 401", async () => {
+  it("lock REVOKES the session on the real handler via POST lock (design 20.4 / §73): the client wipes, the server marks it revoked, and the OLD token then gets the uniform 401", async () => {
     const w = await signedIn();
     const token = w.server.issuedTokens[0]!;
     await w.api.lock();
-    expect(w.server.state.lockCalls).toBe(0); // the non-revoking `lock` route is no longer called
-    expect(w.server.state.signOutCalls).toBe(1);
+    expect(w.server.state.lockCalls).toBe(1);
+    expect(w.server.state.signOutCalls).toBe(0);
     expect(w.api.hasSession()).toBe(false);
     expect(w.server.state.revokedSessions.size).toBe(1);
     expect(w.server.sessions()).toEqual([]);
