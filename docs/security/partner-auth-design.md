@@ -5156,6 +5156,60 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 129.** T
 
 ### 129.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b50d058` / #169). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b50d058` / #169). Squash-merged as `41781cc` (#170).
 
 - Per-file runs of the invites test: 6/6 in `superuser` and in `restricted`; the unit file 24/24; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 130. As built: the members lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 130.** The same shape as §122, §125 to §127 and §129, for the `partner-members` lane: the roster, revoking a membership, recovering a person, resetting a PIN, the stolen-iPad button, and a person's own credentials (list, note, a second credential through a real ceremony, the add-notice, revoke). **No defect was found in the lane**, recorded because a clean result is still a result and because §129 found one in the sibling lane that looked just like this one. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 130.1 What was built
+
+- **`supabase/tests/integration/partner-members.deno.test.ts`** (8 cells): the REAL `handlePartnerMembersRequest` over the REAL `privileged.ts` (`partnerDb.withMembers`, `withMint`, `hitRateLimit`) and the REAL `registrationVerifier`, REAL manager and staff sessions from the REAL partner-session mint, REAL database. Effects are read back as the owner.
+  1. **roster:** a manager's roster lists the facility's active members with role, facility, `invitedBy` and an ISO time; with no `orgId`, everything in scope and nothing outside it; a manager of another facility (`fac_y`) sees none of them; staff are 403, an unknown query parameter 400, no bearer 401;
+  2. **revoke:** acting on oneself is 422, another facility's manager is 403 and nothing changes, an unknown member is 404; a revoke is 200 `{revoked: true}`, the membership row is revoked, the person is off the roster, **the revoked person's very next call is 401** (control: another member's session is untouched), and the same call again is 404;
+  3. **recover (the hash contract only the real stack shows):** `gr_enr_…` once, in an `enrolUrl` fragment, 24 hours; the database holds the **independent SHA-256** of the token for that person with `purpose = recover` and `issued_by` that manager, and the plaintext nowhere; every credential of the person is revoked and their session is dead; a second recovery revokes the first token and leaves exactly one live; an address-less person is 409 `no_email` with nothing written and nothing revoked; another facility's manager is 403 and nothing is written;
+  4. **PIN reset:** no PIN is 409 `pin_not_set`; a locked PIN (five failures, a backoff, `locked_at`) is cleared to counters 0, no lock, no backoff and `must_change = true`, and the reset raises its alarm row; another facility's manager is 403 and the lock stays; oneself is 422. (The PIN row is planted by the owner: the verifier bytes are a placeholder, because this cell does not verify a PIN.)
+  5. **the stolen-iPad button:** another facility's manager is 403 and nobody is signed out; an unknown organisation is 404; a time in the future is 422 and signs nobody out; a real call answers `{revokedSessions: 3, revokedCredentials: 0}` (the three live sessions of the organisation, the caller's own included) and all three sessions are dead with no credential revoked; with `createdAfter` the other covered members' credentials are revoked as well (`{3, 2}`), the caller's own is not;
+  6. **a person's own credentials:** the list (label, note, ISO time, backup flags), setting and clearing the display note (a padded note is trimmed; `null` and blanks clear it), a stranger's credential id or an unknown one is 404 and nothing is written, a manager lists a covered person's credentials and a manager outside the reach rule gets an empty list, not an error;
+  7. **a second credential through a real ceremony:** the Edge's creation options exclude the credential the person already holds; a REAL registration from a software authenticator is verified by the REAL wrapper; the database stores **exactly the credential id and public key the authenticator holds**; **a real sign-in with the second credential works** (which only holds if the stored key is the authenticator's) and its session lists both credentials; the add-notice reaches the person and, through the reach list, the manager; each acknowledges once (200, then 409 `already_acked`, an unknown notice 404);
+  8. **credential revoke:** a stranger's or an unknown id is 404 and nothing is revoked; the person's own second credential is 200, then 409 `already_revoked`; the revoked credential can no longer sign in, and the first credential and its session are untouched.
+- Design log: §129.5 now records its squash SHA (`41781cc`, #170).
+
+### 130.2 Measured, not assumed
+
+- **No defect found in the lane.** After one correction of my own (below) the file was 8/8 in `superuser` and in `restricted` on its first complete run.
+- **Four of eight cells failed the first time, all on one wrong expectation of mine:** I expected a 400 for acting on oneself (`22023`) and for a `createdAfter` in the future; the Edge answers a database `22023` as **422 `invalid_request`** (the handler's header says a 22023 "throws: nothing was written"; the 400 is for a malformed body, which cell 1 and the invites test cover). The four assertions now say 422.
+- **The cells can fail (10 of 10 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (8 passed) |
+  | M1 recover passes an UPPERCASE token hash (the database requires lowercase hex) | 3 |
+  | M2 the enrolment link carries the token in the query, not the fragment | 3 |
+  | M3 a revoked membership is answered `revoked: false` | 2 |
+  | M4 revoke-all swaps its two counts | 5 |
+  | M5 the credential list drops the note | 6 |
+  | M6 register binds the challenge expiry off by one (the MAC no longer matches) | 7 and 8 |
+  | M7 a PIN reset is answered `reset: false` | 4 |
+  | M8 the roster drops the facility | 1 |
+  | M9 `already_revoked` is answered 404 | 8 |
+  | M10 `already_acked` is answered 404 | 7 |
+
+  (M6's first attempt did not apply: its anchor line occurs four times. It was re-run with the two-line anchor that is unique.)
+- **Observed, not judged.** `orgs/{id}/sessions/revoke-all` answers 404 for an organisation that does not exist and 403 for one outside the caller's reach, because the definer returns `not_found` (0054, line 1455) before the scope check (line 1460): a manager who is not an admin can tell the two apart. Organisation ids are random UUIDs, so the practical reach is small; the invites lane's revoke made the opposite choice on purpose ("an unknown id and an id outside the actor's scope are one answer", 0054 7c). Changing it is a migration; cell 5 pins the current answers and says so, so a change will show up as a failing cell to update on purpose.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **424 passed, 0 failed** in each (the 416 that were there plus these 8); `service-role-lint` clean. No unit test changed (the server unit suite was last run at 1916 tests for §129).
+
+### 130.3 Not built, honestly
+
+- **Not driven:** `totp-reset` and `admin/enrolments` (class A3: aal 2 and a live TOTP; the other integration files write that state, but neither route has a cell here); the PIN reset's _PIN_ (a row is planted); the redemption of the recovery token (branch N of the invites lane: GoTrue's email OTP); the credential bucket (10 an hour per member) and the `too_many` ceiling on credentials; a credential-add notice for a credential that has since been revoked.
+- **Why a revoked member is signed out was not traced** (the definer that revokes a membership only sets `revoked_at`; the 401 is the binder's single answer for a dead session, and I did not read which of its checks fires).
+- **Four partner lanes still have no real-stack test:** programme, settlement, sponsorships, stock (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 130.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `41781cc` / #170). Squash SHA recorded after merge.
+
+- Per-file runs of this test: 8/8 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
