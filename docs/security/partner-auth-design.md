@@ -4876,6 +4876,55 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 122.** �
 
 ### 122.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `040e54e` / #161). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `040e54e` / #161). Squash-merged as `3d88f5b` (#163).
 
 - Pre/post matrix as above (both harness modes). Re-run on `cb5230c` plus this file, in `superuser` and then `restricted`: pgTAP 106 files / 6294 tests PASS and Deno integration **393 passed, 0 failed** in each (the 3 review-lane cells included); the only change on `main` since is the lint root guard (§121); `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
+
+## 123. As built: the Edge's SQL call text is pinned to the migrations' signatures and result columns
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 123.** Every privileged lane reaches the database through SQL written in tagged templates in `supabase/functions/_shared/privileged.ts` (`trx\`select o_status from private.partner_stock_move_for_partner(${a}::text, …)\``). Until now nothing tied that text to the migrations. The pgTAP matrix calls the SQL functions directly, and the Edge unit suites hand the handlers a _mocked_ port, so a migration that renames a function, adds a required argument, changes an argument's type or drops a returned column left every suite green and failed only at runtime, as an uncaught 500, in the one lane that calls it — and nine partner lanes have no real-stack test (§122). This is the same failure class as design 115 (a status the SQL learned and the Edge did not), one layer down. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 123.1 What was built
+
+- **`supabase/tests/unit/privileged-sql-contract.test.ts`** (19 cells). It replays the migrations in order into the _current_ set of function signatures — `CREATE [OR REPLACE] FUNCTION` and `DROP FUNCTION`, overloads included, comments stripped — then tokenises `privileged.ts` so that only SQL _inside a template literal_ counts (comments, ordinary strings, `${…}` expressions and regular-expression literals do not). Every `private.*` / `app.*` call must:
+  1. name a function some migration defines and none later dropped (a rename or typo is "no such function" at runtime);
+  2. pass an argument count the current signature accepts (defaults make trailing arguments optional);
+  3. cast each argument it casts to a type the parameter accepts — the same type, or an implicit widening PostgreSQL would apply (`int → bigint`, `date → timestamptz`, …);
+  4. select only `o_*` columns the function returns (`RETURNS TABLE` or `OUT` parameters; an `as` alias names an output column and is not one).
+- **Cells beyond the check itself.** Fixtures for the migration replay (later definition wins whatever the file order; an overload is kept; a `DROP` removes exactly its overload, with or without parameter names; a `CREATE` inside a comment is ignored); for the tokenizer (a call in a comment, string or `${…}` is not a call; `insert into app.t (cols)` is not a call; line numbers; an unterminated template throws instead of seeing nothing; regex literals holding a quote or backtick, and a division, are read correctly); for the checker (each of the four failure kinds, the widening, the optional argument, and that with no migrations every call is _reported_, never passed). Real-tree floors make a vacuous pass impossible (>100 migrations, >300 functions, >150 call sites, >100 distinct functions, >70 sites with a column list) and pin that `partner_offers_redeem_apply_offline`, created with 7 arguments in 0062 and dropped and recreated with 8 in 0063, has exactly one current signature.
+- **A sweep that the pin is the whole picture:** no other `.ts` file under `supabase/functions` contains a call of this shape (service-role-lint confines privileged calls to `privileged.ts`; this fails if that stops being true, because the pin would then be missing sites).
+- **Found while building it:** `settlement-handler.ts` has regex literals such as `/[",\n\r]/` and `/"/g`; the first tokenizer read the quote as a string opener and lost its place on that file. `privileged.ts` has none today, but a pin that silently breaks when someone adds `/"/g` there would be a poor one, so the tokenizer now recognises regex literals from the preceding token and has cells for them.
+
+### 123.2 Measured baseline (nothing to fix)
+
+- **107 migrations replay to 339 current signatures on 337 functions** (2 overloaded). `privileged.ts` holds **331** SQL templates with **162 call sites to 154 distinct functions**, 101 of them with a column list; **0 problems**. An independent count (comments stripped, `insert into` column lists excluded, regex-based, no tokenizer) gives the same 162 — the tokenizer neither invents nor drops sites.
+- The earlier ad-hoc scans that led here, recorded so they are not repeated: signatures 0 mismatches over 195 raw matches (33 were mentions in comments); selected columns 0 real mismatches (one apparent hit was a JSDoc line containing the words "select private.\*("); and the status vocabulary of §122.3.
+
+### 123.3 Mutation proof
+
+Seven mutants, each killed by exactly the real-tree cell with a message that names the line, the function and the cause, and each restored byte-identical (sha256):
+
+| Mutant                                                       | Message                                                             |
+| ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Edge: `${qty}::int` → `::uuid`                               | `argument type mismatch … #4 cast ::uuid for int`                   |
+| Edge: last argument removed                                  | `called with 4 argument(s) but the current signature(s) take 5..5`  |
+| Edge: selected `o_availability` → `o_availabilityx`          | `selects ["o_availabilityx"] but 0058 returns […]`                  |
+| Edge: function name → `…x`                                   | `no migration defines this function`                                |
+| Migration: `DROP` + `CREATE` with a required 6th parameter   | `called with 5 argument(s) but the current signature(s) take 6..6`  |
+| Migration: `DROP` + `CREATE` that no longer returns a column | `selects ["o_availability"] but … returns ["o_status","o_on_hand"]` |
+| Migration: `DROP` with no replacement                        | `no migration defines this function`                                |
+
+Two controls must pass and do: an overload _added_ without dropping the old signature (PostgreSQL allows it, so the Edge's call to the old one still resolves), and a `CREATE OR REPLACE` with the same identity and columns. The scratch migration used for the migration-side mutants was untracked and removed.
+
+### 123.4 Not built, honestly
+
+- **What it cannot see:** an argument the call does not cast (25 of the 162 sites have at least one — the bound value's type is then whatever the driver sends); the _order_ of two same-typed arguments (two `::text` swapped); a `select *`; SQL assembled from strings (none exists). A `${…}` expression that itself contains a template is skipped, not read.
+- **Not a replacement for the real stack.** This proves the text _could_ resolve against the current schema; it does not run it. Nine partner lanes (invites, members, entitlements, offers-redeem, offers, programme, settlement, sponsorships, stock) still have no integration test — the review lane (§122) is the only one added.
+- **The status vocabulary** stays pinned only for the resolve set (§115); the sweep of the other closed sets (§122.3) found no drift, but about eight sets could not be mapped to a definer and none has a permanent pin.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 123.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `3d88f5b` / #163). Squash SHA recorded after merge.
+
+- `privileged-sql-contract` 19/19; full server unit suite **100 files / 1900 tests, 0 failed** (1881 + 19). Local Node is 22 (repo pins `>=24`), run with `--config.engine-strict=false`; CI uses Node 24.
