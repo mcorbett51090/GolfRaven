@@ -5499,6 +5499,64 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 136.** �
 
 ### 136.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `614b1e7 / #176`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `614b1e7 / #176`). Merged as `eb89f39` (#177).
 
 - Per-file runs: 4/4 in `superuser` and in `restricted`; the full harness as above; unit suite 103 files / 1925 tests green. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 137. As built: the sponsorship that funds an offer, or a trail's special marker, must be a sponsorship of that trail (migration 0109)
+
+Numbering: **migration 0109, matrix 87, this section 137.** Migration 0108 and matrix 86 are left to the open draft PR #162 (its §122); nothing here depends on it and it depends on nothing here. I found no gate that requires contiguous migration numbers (a search of `tools/db` and the workflows for contiguity checks came back empty, and `tools/db/check-migrations-immutable.sh` compares only files already on the base); a hosted `supabase db push` of 0109 ahead of a later 0108 may need the CLI's `--include-all` `[unverified: training knowledge, not checked this session]`, which does not matter while nothing is deployed. **A real defect**, found while scouting the "sponsor-funded consumers of approved sponsorships" that §132.3, §133.3 and §134.3 each named as undriven. Product behaviour changes for the two refusals below only; the Edge is unchanged; no UI flag flips; no CAMERA / OCR.
+
+### 137.1 What was wrong, and what was built
+
+**Observed on the real database** (a probe: matrix 37's principals, an operator of `trl_t` bound to a real partner session, sponsorships planted by the owner; then, through the real handlers, the integration cells below run against the schema _without_ 0109):
+
+| As the operator of `trl_t`, before 0109                                                                                   | Result                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| offer, funder `sponsor`, a live `offers` sponsorship **of `trl_t`** (control)                                              | `ok`                                                                                     |
+| the same, a sponsorship **of another trail** (`trl_u`)                                                                     | **`ok`**: a draft offer on `trl_t` naming `trl_u`'s sponsorship; through the Edge: 200   |
+| the same, a sponsorship of `trl_t` that is draft, special-marker-only, or ended                                            | `ok` in all three (not changed here, 137.3)                                              |
+| the same, an id that names no sponsorship                                                                                  | a raw foreign-key violation, 23503; through the Edge: **HTTP 500 `internal_error`**      |
+| programme, `special_marker_funded_by = sponsor`, a sponsorship of `trl_u`                                                  | **`ok`**, stored                                                                         |
+| programme, an id that names no sponsorship                                                                                 | 23503; through the Edge: **HTTP 500 `internal_error`**                                   |
+| programme, `sponsor` with no id; `trail` with a foreign id                                                                 | `ok` and stored (not changed here, 137.3)                                                |
+
+Why it matters, in the order of how sure I am: **(observation)** `partner_offer_upsert_for_partner` (0059) checked that a sponsor offer names a sponsorship and that any other does not, and nothing else, and `partner_offer_approve_for_partner` reads nothing about the sponsorship; the settlement export (0060 / 0062) returns one line per facility, funder and `o.sponsorship_id`; the sponsorship list shows ids to the operators of that trail. **(inference)** so an operator of trail A who learns an id of trail B's sponsorship can have trail A's redemptions attributed to trail B's sponsor, and a special marker shown with trail B's sponsor `[unverified: the export was not driven with a sponsor-funded offer, see 137.3]`. The ids are random UUIDs and an admin must approve an offer before it goes live, so I rate this low to moderate, not high; it is still a cross-tenant reference the database should refuse.
+
+- **`supabase/migrations/0109_partner_sponsorship_trail_binding.sql`**: `CREATE OR REPLACE` of the two definers, the bodies of 0059 verbatim plus one check each, in the 0107 pattern (`SET ROLE private_definer`, owner / ACL / `search_path` / volatility untouched, comments and `function_inventory` notes updated, a `DO` block that asserts the new text is there and that the EXECUTE set did not move). **Offer:** a non-null `p_sponsorship_id` that is not a sponsorship of `p_trail_id` is the existing status **`bad_funder`** (422 on the Edge, already mapped by `offers-handler.ts` and translated by the portal), and "another trail's" and "no such id" are the **same** answer, so the refusal tells an operator nothing about anyone else's ids. **Programme:** a non-null `p_special_marker_sponsorship_id` that is not a sponsorship of `p_trail_id` is **22023** (the Edge's 422 `invalid_request`), after the trail's own `not_found` check. The statuses of both functions are unchanged, so **the Edge needs no change and there is no deploy-order hazard** (the previous Edge works with the new migration: it already maps both outcomes).
+- **`supabase/tests/matrix/87_partner_sponsorship_trail_binding.sql`** (24 cells): the offer and programme rules at the definer, with controls (a sponsorship of the trail is `ok`, the row names it), the foreign and the unknown id, an edit of a draft to a foreign sponsorship (the draft keeps its sponsorship and its budget), the existing funder rules still standing, scope still checked first (an operator of `trl_t` is 42501 on `trl_u`), refusals write no audit row, and that the ACL, owner and `search_path` did not move.
+- **`supabase/tests/integration/partner-sponsor-binding.deno.test.ts`** (3 cells; the REAL `offers-admin`, `programme-config` and `sponsorships-admin` handlers over the REAL `privileged.ts`, a real operator and the seeded admin with real sessions, every cell on its own trails): **(1)** the whole sponsor-funded life: the sponsorship is made and approved through its own route, an offer funded by it is drafted (the row, the list), edited to another sponsorship of the same trail, approved by the admin and ended by the operator; **(2)** another trail's sponsorship and an unknown id are each 422 `bad_funder`, nothing is written, an edit that tries it leaves the draft as it was, and an admin is held to the same rule; **(3)** the programme: a foreign and an unknown id are each 422 `invalid_request` and the programme keeps what it had, the trail's own sponsorship and no sponsorship are accepted.
+- Design log: §136.4 now records its squash SHA.
+
+### 137.2 Measured, not assumed
+
+- **The cells can fail, and the defect is real, not a fixture artefact.** Run _without_ 0109 the control cell passes and the two refusal cells fail on their first assertion (200 where 422 is expected, for both routes). A probe through the Edge for a nonexistent id returned **500 `internal_error`** on both routes.
+- **6 of 6 mutants of the migration killed, by the pgTAP cells and, separately, by the Deno cells** (scratch copy through the real harness, the repo's files never touched; controls 24/24 and 3/3). Both layers were run on their own, because a failing pgTAP step aborts the harness before the Deno step and the Deno cells would otherwise never have been tried:
+
+  | Mutant                                                                                    | pgTAP cells (87) that fail | Deno cell that fails |
+  | ----------------------------------------------------------------------------------------- | -------------------------- | -------------------- |
+  | M1 the offer check is switched off (the text stays)                                       | 3–7, 24                    | 2                    |
+  | M2 the programme check is switched off                                                    | 13–15                      | 3                    |
+  | M3 the offer check asks only that the sponsorship exists (the trail test made vacuous)    | 3, 4, 6, 7, 24             | 2                    |
+  | M4 the programme check asks only that the sponsorship exists                              | 13, 15                     | 3                    |
+  | M5 the offer refusal is `not_found`, not `bad_funder`                                     | 3, 5, 6                    | 2                    |
+  | M6 the programme refusal is 42501, not 22023                                              | 13, 14                     | 3                    |
+
+  (My first attempt at M1–M4 deleted or rewrote the very text the migration's own `DO` block looks for, so the migration aborted and none of the cells ran: that shows the post-check works, not that the cells do. They were redone as mutants that keep the checked text and disable the behaviour.)
+- **Slips of my own, found by running it:** my first draft of a matrix cell called the helper twice (creating a second row) to compare it with itself, and the plan count was 25 for 24 cells; both fixed before the first run that counted. A scratch tree I reuse for the harness still held two probe files from this section's scouting (a pgTAP file and a Deno file); I found them by listing the files the scratch tree held that the worktree does not track, deleted them, and only then started the full run, so they are in none of the numbers below.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP **107 files / 6318 tests PASS** (the 106 / 6294 of §136 plus matrix 87's 24); the Deno integration suite **455 passed, 0 failed** in each (the 452 that were there plus these 3); the function-inventory checks and `service-role-lint` clean.
+
+### 137.3 Not built, honestly
+
+- **Whether a sponsorship must be live, in scope, or current to fund an offer is a product call.** The probe shows a draft, a special-marker-only and an ended sponsorship are all accepted for an offer. The natural place for such a rule may be the admin's approve (a human gate that today reads nothing about the sponsorship) rather than the operator's draft. Not changed.
+- **`special_marker_funded_by` and the sponsorship id are not tied to each other** (`sponsor` with no id and `trail` with an id are both stored). Whether a programme may say `sponsor` before the sponsorship exists is a product call. Not changed.
+- **The settlement export is still not driven with a sponsor-funded offer:** the control cell makes such an offer exist and go live, but nothing is redeemed under it, so the AT(20) attribution column (§132.3) is still seen with `sponsorshipId: null` only, and the inference in 137.1 about attribution rests on reading 0060 / 0062, not on running them.
+- **Existing rows are not repaired.** Nothing is deployed, so none are expected `[unverified: there is no production database to ask]`; the migration changes writes only.
+- The admin paths of the other lanes, the GoTrue adapters and the real exports adapter / Storage remain undriven (§136.3).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 137.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eb89f39 / #177`). Squash SHA recorded after merge.
+
+- Per-file runs: matrix 87 24/24 and the integration file 3/3 in `superuser` and `restricted` (the integration file); the full harness as above; the unit suite 103 files / 1925 tests (unchanged: the SQL call-text pins and the account-label pin pass over the new migration and the new file); `check-migrations-immutable.sh` OK (107 files byte-identical to the base). Local Node is 22 (repo pins `>=24`); CI uses Node 24.
