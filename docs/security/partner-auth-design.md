@@ -4965,6 +4965,40 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 124.** Two leftove
 
 ### 124.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `72ec764` / #164). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `72ec764` / #164). Squash-merged as `143f61e` (#165).
 
 - `ci-tap-verdict` 9/9, `ci-script-sigpipe` 6/6, `partner-modules` 39/39; full server unit suite **101 files / 1911 tests, 0 failed** (1900 on `main` before this section + 11 new). Local Node is 22 (repo pins `>=24`), run with `--config.engine-strict=false`; CI uses Node 24. `bash -n` clean on both scripts.
+
+## 125. As built: the offers-admin lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 125.** The same shape as §122, for the next lane. The `offers-admin` unit suite hands the handler a _mocked_ port and the pgTAP matrix calls the definers directly, so nothing ran the Edge's own binding of an offer's eligibility (a nested JSON rule through `trx.json(...)::jsonb`), its numeric and date parameters (`::numeric`, `::date`), or the way the returned rows are read back (numerics and dates as the wire carries them). §123 shows the call text _could_ resolve against the current schema; this runs it. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 125.1 What was built
+
+- **`supabase/tests/integration/offers-admin.deno.test.ts`** (5 cells): the REAL `handlePartnerOffersAdminRequest` over the REAL `privileged.ts` (`partnerDb.withOffersAdmin` = `withPartnerSession`), a REAL operator and a REAL admin session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (`edge_gateway` login, `SET LOCAL ROLE edge_partner`):
+  1. an operator **drafts** an offer with a nested eligibility rule, `budgetCap` 250.5, `faceValue` 12.25, `maxRedemptions` 40 and fixed dates: the row (read as `service_role`, not through the code under test) holds the eligibility as a JSON **object** (`jsonb_typeof = 'object'`, equal to what was sent), the numerics exact and the dates `2031-03-01` / `2031-09-30`; `GET offers` reads them back as numbers and plain dates;
+  2. a draft is **edited in place** by its id (same id, one row, new values), an **operator's approve is a 403** and the offer stays a draft, an admin's approve is 200 and the row is `live`, a second approve is 422 `not_draft`;
+  3. a **live offer is not editable** (422 `not_draft`, the row untouched); it is **ended** once (200, `ended`), a second end is 422 `not_live`, an unknown id is 422 `not_found`;
+  4. the **funder rules** are the database's (a sponsor offer without a sponsorship, and a non-sponsor offer with one, are each 422 `bad_funder`) and the Edge's **eligibility gate** stops an unrepresentable rule (`minConfidence`) with a 422 before the database is opened; the offer count is unchanged after all three;
+  5. **A3 needs the second factor**: an operator whose session is at aal 1 gets a 403 on draft and on end, nothing is written and the existing draft is untouched.
+- **Fixtures.** An operator org scoped to trail `trl_t` (which `fac_x` is on, both seeded by the harness), role `operator`, a real credential, and a session from the real mint; the second-factor state (aal 2, a live `mfa_until`) is written by the owner with the session-guard trigger off for that statement only, as the other partner integration files do. The admin is the harness-seeded one, as in §122. Everything the code under test must not be trusted to report is read back as `service_role`.
+- **Self-contained on purpose.** Like `course-qr`, `partner-attest` and the review test, the file carries its own session helpers (about 100 lines duplicated) instead of a shared module: touching the merged files to extract one is a larger change than this section, and a shared fixture module is worth a section of its own if more lanes follow.
+
+### 125.2 Measured, not assumed
+
+- **No defect found.** 5/5 on the first run in `superuser` and again in `restricted` mode: the lane's binding is correct, which is what the §123 baseline (0 drift over 162 call sites) predicted. Recorded because a clean result is still a result, and because the lane now has a test that would catch the next change that breaks it.
+- **The cells can fail (4 of 4 Edge-side mutants killed),** each applied to a scratch copy of `privileged.ts` and run through the real harness: the eligibility bound as `trx.json(JSON.stringify(eligibility))` (a JSON string scalar) fails cell 1 on its `"stored as a JSON object, not a JSON string scalar"` assertion; the budget rounded (`Math.round(budgetCap)`) fails cells 1 and 2; `validFrom` taking `validTo` fails cell 1; the list returning the budget as a string fails cell 1. The repo's `privileged.ts` was never touched.
+- **What the offers leave behind:** drafts and ended offers on `trl_t` at `fac_x`; the cell that approves one ends it again, so no `live` offer is left for the files that share the database. The harness's cluster is throwaway.
+
+### 125.3 Not built, honestly
+
+- **Eight partner lanes still have no real-stack test:** invites, members, entitlements, offers-redeem, programme, settlement, sponsorships, stock (review: §122; offers-admin: this section). Offers-redeem is the money path and the next candidate; it needs a PIN grant, a player's check-in token and an `issued` offer code.
+- This file does not exercise a real sponsorship (`funder = 'sponsor'` with a sponsorship id that exists and has stock), only the refusals around it; the approve-time budget reservation for sponsor offers is not driven.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 125.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `143f61e` / #165). Squash SHA recorded after merge.
+
+- The full, unpatched harness on this tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs: **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **398 passed, 0 failed** in each (the 393 that were there plus these 5); `service-role-lint` clean. Nothing the five cells leave behind (drafts and ended offers on `trl_t` at `fac_x`) disturbed any other file.
+- Local Node is 22 (repo pins `>=24`); CI uses Node 24.
