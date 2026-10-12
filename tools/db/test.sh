@@ -166,25 +166,12 @@ done
 
 PSQL=("$PG_BIN_DIR/psql" -h "$PGSOCK" -p "$PGPORT" -U postgres -v ON_ERROR_STOP=1 -q)
 
-# H2 (post-P3a gate) static check: no migration file may reference the
-# harness-only `migration_owner` role by name in ACTIVE SQL — a real
-# deploy's own migration role is never literally called that, and
-# 0016/0017 both did this before the fix (GRANT ... TO migration_owner),
-# failing outright on a real deploy. `migration_owner` belongs ONLY in
-# supabase/tests/shim.sql (the harness's own bootstrap). Strips `--`
-# comment lines first (this fix's own explanatory prose legitimately
-# names `migration_owner` when describing the bug it fixed) — a real
-# reference is one that survives the strip.
-H2_HITS=""
-for f in "$SUPABASE_DIR"/migrations/*.sql; do
-  if grep -v '^\s*--' "$f" | grep -q 'migration_owner'; then
-    H2_HITS="$H2_HITS $f"
-  fi
-done
-if [ -n "$H2_HITS" ]; then
-  echo "tools/db/test.sh: FAILED (H2) — the migration file(s) below reference 'migration_owner' by name outside a comment; a real deploy has no such role (use CURRENT_USER instead):$H2_HITS" >&2
-  exit 1
-fi
+# H2 (post-P3a gate) static check: no migration file may reference the harness-only `migration_owner` role by name in ACTIVE SQL (rationale and the
+# comment-stripping rule: tools/db/check-no-migration-owner-refs.sh). It lives in its own script because the inline loop FAILED OPEN: `grep -v ... | grep -q`
+# under `set -o pipefail` read a match as no match for a violation near the top of a file larger than the pipe buffer. The script proves itself
+# (--self-test: large files, early and late violations, comment-only mentions) before it is trusted to scan.
+bash "$ROOT_DIR/tools/db/check-no-migration-owner-refs.sh" --self-test
+bash "$ROOT_DIR/tools/db/check-no-migration-owner-refs.sh" "$SUPABASE_DIR/migrations"
 
 run_as_pg "'$PG_BIN_DIR/createdb' -h '$PGSOCK' -p '$PGPORT' -U postgres '$DBNAME'"
 
