@@ -38,6 +38,11 @@
 #      row lock (`FOR UPDATE` in private.partner_pin_attempt) every call reads the same count and evaluates, so both cases fail.
 #   9. SAME-SESSION CONCURRENCY (S1.3 gate LOW-1): eight parallel CORRECT verifies on ONE freshly-seen session all answer ok and none deadlocks. Under class A0 each call took the session row FOR SHARE and then
 #      UPDATEd it (the grant): two FOR SHARE holders that both upgrade deadlock. Class A0_WRITE takes FOR NO KEY UPDATE up front, so the calls queue. 9b: four overlapping session locks (class SESSION); since 0085 lock revokes, expect one ok and three not-live, zero deadlocks.
+#  10. THE PARTNER TOTP HARD LOCK UNDER CONCURRENCY (0108, §114): real concurrent step-ups of ONE person, spread over four of that person's sessions (so the serialiser is the TOTP row's FOR UPDATE, not the session
+#      row). 10a: twelve parallel WRONG codes on a fresh row evaluate exactly five (four wrong, the 5th starts the 15-minute lock) and are refused uncounted after it: the consecutive count ends at exactly 5.
+#      10b: eight parallel wrong codes at 17 consecutive failures count exactly three (wrong, wrong, then the 20th hard-locks) and the other five are refused uncounted: the count ends at exactly 20, the hard
+#      lock is set ONCE (ONE partner.totp.hard_locked audit row, ONE totp_hard_locked alarm). 10c: five parallel CORRECT codes on the hard-locked row are all refused and none is evaluated. Without the
+#      row lock every call reads the same count (17), the count ends at 18 and the lock never sets.
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-partner-serialisation.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the signin concurrency step, against the same throwaway cluster and database.)
@@ -98,8 +103,10 @@ cleanup() {
   hx "DROP POLICY IF EXISTS zz24s_cred ON app.partner_credential; DROP POLICY IF EXISTS zz24s_sess ON app.partner_session; " 2>/dev/null
   revoke_temp_grants app.partner_credential app.partner_session
   hx "DELETE FROM app.partner_sign_in_failure WHERE credential_id::text LIKE 'ee26f000-%'; DELETE FROM app.partner_pin WHERE user_id::text LIKE 'ee24f000-%';" 2>/dev/null
-  hx "DROP POLICY IF EXISTS zz27s_fail ON app.partner_sign_in_failure; DROP POLICY IF EXISTS zz28s_pin ON app.partner_pin;" 2>/dev/null
-  revoke_temp_grants app.partner_sign_in_failure app.partner_pin
+  hx "DELETE FROM app.partner_totp WHERE user_id::text LIKE 'ee24f000-%'; DELETE FROM app.partner_auth_alarm WHERE bucket_key LIKE 'ee24f000-%';" 2>/dev/null
+  hx "SET ROLE service_role; DELETE FROM app.admin_user WHERE user_id::text LIKE 'ee24f000-%';" 2>/dev/null
+  hx "DROP POLICY IF EXISTS zz27s_fail ON app.partner_sign_in_failure; DROP POLICY IF EXISTS zz28s_pin ON app.partner_pin; DROP POLICY IF EXISTS zz29s_totp ON app.partner_totp;" 2>/dev/null
+  revoke_temp_grants app.partner_sign_in_failure app.partner_pin app.partner_totp
   rm -rf "$OUT_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -717,6 +724,112 @@ for round in 1 2 3; do
   fi
 done
 if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 4 overlapping session locks -> one revoke, three not-live refusals, no deadlock (SESSION FOR NO KEY UPDATE; lock revokes per §72)"; fi
+
+
+# ---------------------------------------------------------------------------
+# 10. THE PARTNER TOTP HARD LOCK UNDER CONCURRENCY (0108, §114)
+# ---------------------------------------------------------------------------
+# One person (an admin: no membership needed), four live sessions of theirs, one confirmed TOTP row. The calls are spread over the four sessions so they do NOT queue on a session row: what serialises them is
+# the TOTP row's FOR UPDATE in private.partner_totp_attempt. The correct code is computed here from the Vault key by an independent HMAC (RFC 4226), not by the function under test.
+echo "tools/db/test-partner-serialisation.sh: 10. concurrent wrong TOTP codes: the consecutive count, the hard lock set once, a correct code refused"
+U9="ee24f000-0000-0000-0000-0000000000b9"; C9="ee24f000-0000-0000-0000-0000000000c9"
+SID9=("ee24f000-0000-0000-0000-0000000000d9" "ee24f000-0000-0000-0000-0000000000da" "ee24f000-0000-0000-0000-0000000000db" "ee24f000-0000-0000-0000-0000000000dc")
+HT9=()
+for n in 1 2 3 4; do HT9+=("$(printf '%s' "ser9-$n-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"); done
+hx "SET ROLE service_role;
+    INSERT INTO auth.users (id, email) VALUES ('$U9', 'ser9@partner.test') ON CONFLICT (id) DO NOTHING;
+    INSERT INTO app.admin_user (user_id) VALUES ('$U9') ON CONFLICT DO NOTHING;
+    RESET ROLE;
+    INSERT INTO app.partner_credential (id, user_id, credential_id, public_key, alg) VALUES ('$C9', '$U9', decode(md5('ser-c9') || md5('ser-cb9'), 'hex'), decode(md5('ser-k9') || md5('ser-kb9'), 'hex'), -7);
+    ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;"
+for n in 0 1 2 3; do
+  hx "INSERT INTO app.partner_session (id, token_hash, user_id, credential_id, aal, created_at, last_seen_at, expires_at, mint_kind, mint_nonce_hash, mint_authenticator_data, mint_client_data_json, mint_signature)
+      VALUES ('${SID9[$n]}', '${HT9[$n]}', '$U9', '$C9', 1, now() - interval '1 hour', now(), now() + interval '8 hours', 'sign_in', decode(md5('ser-n9-$n') || md5('ser-nb9-$n'), 'hex'), decode(repeat('04', 40), 'hex'), convert_to('{}', 'UTF8'), decode(repeat('05', 70), 'hex'));"
+done
+hx "SET CONSTRAINTS ALL IMMEDIATE;
+    ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_totp TO CURRENT_USER;
+    DROP POLICY IF EXISTS zz29s_totp ON app.partner_totp; CREATE POLICY zz29s_totp ON app.partner_totp FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);"
+seed_totp9() { # $1 = failed_count, $2 = consecutive_failed, $3 = true|false (hard-locked)
+  hx "DELETE FROM app.partner_totp WHERE user_id = '$U9';
+      INSERT INTO app.partner_totp (user_id, seed_version, enrolled_at, confirmed_at, failed_count, created_at, consecutive_failed, hard_locked_at)
+      VALUES ('$U9', 1, now(), now(), $1, now(), $2, CASE WHEN $3 THEN now() END);"
+}
+code9() { # $1 = step offset: the code RFC 4226 gives for (the current 30 s step + offset), HMAC-SHA1 keyed with the Vault-derived 32-byte seed
+  hq "WITH k AS (SELECT public.hmac(convert_to('golfraven/partner-totp/v1', 'UTF8') || decode('00', 'hex') || decode(replace('$U9', '-', ''), 'hex') || int4send(1), convert_to(s.decrypted_secret, 'UTF8'), 'sha256') AS h FROM vault.decrypted_secrets s WHERE s.name = 'partner_totp_key'),
+           m AS (SELECT public.hmac(int8send(floor(extract(epoch FROM clock_timestamp()) / 30)::bigint + ${1:-0}), h, 'sha1') AS d FROM k),
+           o AS (SELECT d, get_byte(d, 19) % 16 AS off FROM m)
+         SELECT lpad(((('x' || encode(substr(d, off + 1, 4), 'hex'))::bit(32)::bigint & 2147483647) % 1000000)::text, 6, '0') FROM o"
+}
+# a code that is valid for none of the steps now-3 .. now+3 (the window is now-1 .. now+1)
+WRONG9="$(hq "SELECT c FROM (SELECT lpad(g::text, 6, '0') AS c FROM generate_series(0, 20) g) x WHERE c NOT IN ('$(code9 -3)', '$(code9 -2)', '$(code9 -1)', '$(code9 0)', '$(code9 1)', '$(code9 2)', '$(code9 3)') ORDER BY c LIMIT 1")"
+totp_sql() { # $1 = session token hash, $2 = code, $3 = hold open (seconds) after the call
+  printf '%s\n' "BEGIN;" "SET LOCAL ROLE edge_partner;" "SELECT private.bind_partner_session('$1');" \
+    "SELECT 'status:' || o_status || '|' || o_retry_after FROM private.partner_totp_verify_for_partner('$2');" "SELECT pg_sleep($3);" "COMMIT;"
+}
+totp_run() { # $1 = how many concurrent calls (round-robin over the four sessions), $2 = code; outputs in $OUT_DIR/totp_<i>.out
+  local n=$1 i; local pids=()
+  for i in $(seq 1 "$n"); do
+    totp_sql "${HT9[$(( (i - 1) % 4 ))]}" "$2" 0.1 | edge "ser_totp_$i" >"$OUT_DIR/totp_$i.out" 2>"$OUT_DIR/totp_$i.err" &
+    pids+=($!)
+  done
+  set +e; for pid in "${pids[@]}"; do wait "$pid"; done; set -e
+}
+totp_tally() { # $1 = count; echoes "wrong=a locked=b hard=c ok=d other=e"
+  local n=$1 i st w=0 l=0 h=0 k=0 o=0
+  for i in $(seq 1 "$n"); do
+    st="$(status_of "$OUT_DIR/totp_$i.out")"
+    case "$st" in wrong\|*) w=$((w + 1));; locked\|*) l=$((l + 1));; hard_locked\|*) h=$((h + 1));; ok\|*) k=$((k + 1));; *) o=$((o + 1)); echo "  totp call $i: '${st}' $(head -c 300 "$OUT_DIR/totp_$i.err")" >&2;; esac
+  done
+  echo "wrong=$w locked=$l hard=$h ok=$k other=$o"
+}
+totp_rows() { # echoes "consecutive,failed_count,hard,last_step_null"
+  hq "SELECT consecutive_failed || ',' || failed_count || ',' || (hard_locked_at IS NOT NULL)::text || ',' || (last_step IS NULL)::text FROM app.partner_totp WHERE user_id = '$U9'"
+}
+aud9() { hq "SELECT count(*) FROM app.audit_log WHERE subject_id = '$U9' AND action = '$1'"; }
+alm9() { hq "SELECT count(*) FROM app.partner_auth_alarm WHERE kind = '$1' AND bucket_key = '$U9'"; }
+# 10-control. the oracle above is a VALID code: on a fresh row it is accepted (so the refusals of 10c are the lock, not a bad oracle), and it spends its step (last_step is set)
+seed_totp9 0 0 false
+totp_run 1 "$(code9 0)"
+CTRL10="$(status_of "$OUT_DIR/totp_1.out"):$(totp_rows)"
+if [ "$CTRL10" != "ok|0:0,0,false,false" ]; then fail "10-control: the independently computed correct code was not accepted on a fresh row (got '$CTRL10', expected ok|0 with the counters at 0 and last_step set): the oracle is wrong, so 10c would prove nothing"
+else echo "PASS: control: the independently computed (RFC 4226) code is accepted on a fresh row and clears nothing it should keep (the oracle used by 10c is a valid code)"; fi
+# 10a. a fresh row, twelve concurrent wrong codes: exactly five evaluated
+seed_totp9 0 0 false
+W0=$(aud9 partner.totp.wrong)
+totp_run 12 "$WRONG9"
+T10A="$(totp_tally 12)"
+ROW10A="$(totp_rows)"
+W10A=$(( $(aud9 partner.totp.wrong) - W0 ))
+if [ "$T10A" != "wrong=4 locked=8 hard=0 ok=0 other=0" ]; then fail "10a: twelve concurrent wrong codes gave $T10A, expected exactly wrong=4 locked=8 (the 5th evaluated code starts the 15-minute lock; the other seven are refused locked without being counted)"
+elif [ "$ROW10A" != "5,0,false,true" ]; then fail "10a: expected the consecutive count at exactly 5 (failed_count back at 0, no hard lock), got '$ROW10A'"
+elif [ "$W10A" != "4" ]; then fail "10a: expected exactly four partner.totp.wrong audit rows, got $W10A"
+else echo "PASS: 12 concurrent wrong TOTP codes -> exactly 4 wrong and 8 locked; the consecutive count ends at exactly 5 (FOR UPDATE on the TOTP row)"; fi
+# 10b. 17 consecutive failures (failed_count 2): eight concurrent wrong codes count 18, 19 and the 20th, which hard-locks ONCE
+seed_totp9 2 17 false
+HL0=$(aud9 partner.totp.hard_locked); W0=$(aud9 partner.totp.wrong); L0=$(aud9 partner.totp.locked); A0=$(alm9 totp_hard_locked)
+totp_run 8 "$WRONG9"
+T10B="$(totp_tally 8)"
+ROW10B="$(totp_rows)"
+HL10B=$(( $(aud9 partner.totp.hard_locked) - HL0 )); W10B=$(( $(aud9 partner.totp.wrong) - W0 )); L10B=$(( $(aud9 partner.totp.locked) - L0 )); A10B=$(( $(alm9 totp_hard_locked) - A0 ))
+if [ "$T10B" != "wrong=2 locked=0 hard=6 ok=0 other=0" ]; then fail "10b: eight concurrent wrong codes at 17 consecutive failures gave $T10B, expected exactly wrong=2 hard=6 (two counted in turn, the third is the 20th and hard-locks, five refused uncounted)"
+elif [ "$ROW10B" != "20,0,true,true" ]; then fail "10b: expected the count at exactly 20 and the row hard-locked, got '$ROW10B'"
+elif [ "$HL10B" != "1" ] || [ "$W10B" != "2" ] || [ "$L10B" != "0" ]; then fail "10b: expected ONE hard-lock audit row, two wrong rows and no soft-lock row, got hard=$HL10B wrong=$W10B locked=$L10B"
+elif [ "$A10B" != "1" ]; then fail "10b: expected ONE totp_hard_locked alarm, got $A10B"
+else echo "PASS: 8 concurrent wrong TOTP codes at 17 consecutive failures -> exactly 2 wrong, the 20th hard-locks and 6 are refused uncounted; the count ends at exactly 20 with ONE hard-lock audit row and ONE alarm (FOR UPDATE on the TOTP row)"; fi
+# 10c. the CORRECT code on the hard-locked row, five at once: every one refused, none evaluated
+HL1=$(aud9 partner.totp.hard_locked); A1=$(alm9 totp_hard_locked); HLAT0="$(hq "SELECT hard_locked_at FROM app.partner_totp WHERE user_id = '$U9'")"
+RAISED0="$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$U9' AND (aal <> 1 OR mfa_until IS NOT NULL)")"
+totp_run 5 "$(code9 0)"
+T10C="$(totp_tally 5)"
+ROW10C="$(totp_rows)"
+RAISED10C="$(hq "SELECT count(*) FROM app.partner_session WHERE user_id = '$U9' AND (aal <> 1 OR mfa_until IS NOT NULL)")"
+if [ "$T10C" != "wrong=0 locked=0 hard=5 ok=0 other=0" ]; then fail "10c: five concurrent CORRECT codes on a hard-locked row gave $T10C, expected all five hard_locked"
+elif [ "$ROW10C" != "20,0,true,true" ]; then fail "10c: expected the row untouched (20, hard-locked, last_step still NULL: nothing evaluated), got '$ROW10C'"
+elif [ "$RAISED10C" != "$RAISED0" ]; then fail "10c: a session of the hard-locked person was raised to aal 2 (from $RAISED0 raised sessions, before the refusals, to $RAISED10C; the one before is the control's)"
+elif [ "$(hq "SELECT hard_locked_at FROM app.partner_totp WHERE user_id = '$U9'")" != "$HLAT0" ]; then fail "10c: hard_locked_at moved"
+elif [ "$(aud9 partner.totp.hard_locked)" != "$HL1" ] || [ "$(alm9 totp_hard_locked)" != "$A1" ]; then fail "10c: refusals on a hard-locked row wrote an audit row or an alarm"
+else echo "PASS: 5 concurrent CORRECT codes on a hard-locked TOTP -> all refused (hard_locked), none evaluated (last_step NULL, no session raised, hard_locked_at unmoved), no audit row and no alarm"; fi
 
 if [ "$FAILED" -ne 0 ]; then
   echo "tools/db/test-partner-serialisation.sh: FAILED" >&2
