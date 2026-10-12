@@ -191,3 +191,27 @@ export { buildConfigIndex, deriveRepoRoot } from "./config.js";
 export { lintSource } from "./lint.js";
 export type { Finding, LintOptions, LintResult, RuleId } from "./lint.js";
 export { lintPrivilegedSource } from "./privileged-lint.js";
+
+/**
+ * Can a lint run over `root` prove anything? A run over a path that does not exist, is not a directory, or holds no files finds nothing, and "finds nothing" is what
+ * the CLI reports as `clean`: a typo in the path (`supabase/functionz`), a renamed or moved functions directory, or an empty checkout would turn this secrets gate into
+ * a pass over nothing. (The CLI already refused a path with no `.git` ancestor, `deriveRepoRoot`; a path INSIDE the repo got through.) The CLI calls this before linting and
+ * exits 2 on `ok: false`; `lintDirectory` itself is unchanged, because its own tests lint small synthetic trees.
+ */
+export function checkLintRoot(root: string): { ok: true; fileCount: number } | { ok: false; reason: string } {
+  const abs = resolve(root);
+  let st;
+  try {
+    st = statSync(abs);
+  } catch {
+    return { ok: false, reason: `${root} does not exist` };
+  }
+  if (!st.isDirectory()) return { ok: false, reason: `${root} is not a directory` };
+  let fileCount = 0;
+  for (const entry of readdirSync(abs, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) fileCount += 1;
+  }
+  if (fileCount === 0) return { ok: false, reason: `${root} holds no files, so a lint of it would prove nothing` };
+  return { ok: true, fileCount };
+}
+
