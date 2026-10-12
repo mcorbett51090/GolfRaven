@@ -4744,7 +4744,32 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 117.** The auth-al
 
 ### 117.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash-merged as `4e54da1` (#158), together with the sign-out e2e fix recorded in §117.1.
 
 - vitest: 5/5 on the real tree (23 kinds in `0107`, EN and fr-CA); full server unit suite green.
 - **Mutation proof** — a missing EN label, a missing fr-CA label, a stale label, a kind dropped from the shape CHECK (in a copy of `0107`) and a new kind with no label each fail (1, 1, 1, 1 and 3 cells red); all files restored byte-identical (sha256).
+
+## 118. As built: three stale statements corrected (lock, partners README, App Attest re-registration)
+
+Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-scout (§114 on) kept finding places where the *prose* had fallen behind the code, because this log is append-only and later sections close earlier items without editing them. Three were worth fixing in place, because a reader acts on them: one is a comment in security code, one tells a reader that shipped screens do not exist, one contradicts the paragraph above it. Comment and documentation only; no behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 118.1 What was corrected
+
+- **`supabase/functions/_shared/partner/session-handler.ts` (header comment).** `POST lock` was described as "clears every step-up grant now (the session stays live)". Since 0085 (§72) it **revokes** the presented session (`revoke_reason = 'lock'`) and the portal wipes its token (§73), so a locked page must sign in again. Verified against the `lock` case (`s.lock()`), the migration and §73 before the edit.
+- **`apps/partners/README.md`.** Hand-over, stock, offer redeem, the manager / operator / admin screens, settlement export and the camera scan of check-in tokens were listed under "Not built" / "paste-only"; all are built (§29, §31, §33, §34, §36, §39). The camera row was the one to be careful with: §39 already built the partners staff-app scan (`BarcodeDetector` into the existing paste field, paste as the fallback), so the correction records what exists and builds nothing.
+- **`docs/security/edge-role-design.md`.** "App Attest key re-registration (not built yet) needs a definer" contradicted the paragraph above it describing 0034's `register_attest_key_for_actor`. Marked built, with the original sentence kept.
+
+### 118.2 Decisions and departures
+
+- **In place, with the original kept where it was a statement of need.** The App Attest bullet keeps its PR1b-era text and says it was built; the README and the comment are rewritten because nothing else in the log depends on their old wording.
+- **Left alone on purpose:** §21.4's "Not built here" for PA-29 (built in 0054, pinned by matrix 32) and the other closed seams in the append-only sections; those are history, and each is closed by a later section that names it.
+
+### 118.3 Not built, honestly
+
+- A check that would catch this class of drift mechanically; prose has no gate. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 118.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
+
+- `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
