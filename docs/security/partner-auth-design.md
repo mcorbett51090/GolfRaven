@@ -4630,3 +4630,32 @@ staging path probe against a live gateway (§20.12), and OCR / aHash / UI flag f
 CAMERA remain blocked. `totp_confirm` and `pin_change` stay deliberate non-alarms
 (§113.2 / §112.2). Tip remains `0107`.
 
+
+## 114. As built: Play Integrity egress guard (K11)
+
+Numbering: **migration n/a (Edge shared code), matrix n/a (vitest), this section 114.** Closes the K11 follow-up in `p3-money-path-requirements.md` ("Play Integrity egress is unguarded"), which was the first in-repo leftover found when §113.5's "no further in-repo closable leftover" was re-checked against the code instead of the log: `_shared/rewards/play-integrity-client.ts` called the bare platform `fetch` with no host allow-list and no `redirect: "error"` on **both** its calls, so a 307/308 from Google would have replayed the signed service-account assertion (OAuth POST) or the integrity token (decode POST) to whatever host the redirect named. Defence in depth only (the hosts are fixed constants; exploiting it needs a redirect from Google itself), but it was the one vendor adapter without the guard `devicecheck-client.ts` and `signin/safe-fetch.ts` already carry. No migration; no Edge route change; no UI flag flips; no CAMERA / OCR.
+
+### 114.1 What was built
+
+- **Allow-list** — `PLAY_INTEGRITY_ALLOWED_HOSTS` = `oauth2.googleapis.com`, `playintegrity.googleapis.com`; `isAllowedPlayIntegrityUrl` accepts only `https` with no userinfo and no explicit port and a parsed (never pattern-matched) hostname on the list — the same shape as `isAllowedDeviceCheckUrl`.
+- **Both calls guarded** — the host is checked **before** a JWT is signed or an OAuth exchange starts (a refused decode host costs no OAuth round trip and reads no clock); each POST goes through one `post()` helper that sends `redirect: "error"`, keeps the `AbortSignal.timeout`, and refuses a response flagged `redirected` (a valid-looking body that arrived via a followed redirect is never trusted, and a redirected OAuth answer is not cached).
+- **`VendorHttp.fetch`** — `redirect: "error"` is now **required** in the init type (it was optional "only so the Play Integrity adapter … still type-checks"), so a future vendor adapter cannot forget it.
+- **Test-only override** — `createIntegrityDecoder(config, http, endpoints?)` mirrors `createDeviceCheckClient`'s `hosts` override; `play-integrity-egress.test.ts` pins that no production call site passes it.
+- **Tests** — `supabase/tests/unit/play-integrity-egress.test.ts` (14 cells): allow-list contents; look-alike / userinfo / port / scheme / other-Google-host refusals; request shape on both calls; host refused before signing or any clock read, whatever the key; redirect refused on the OAuth step and on the decode (rejected fetch, flagged `redirected`, 307 / 308 / 302); time bound on both calls; an unconfigured decoder still fails closed as `VendorNotConfiguredError`.
+
+### 114.2 Decisions and departures
+
+- **A refusal is `VendorUnavailableError`, not `VendorNotConfiguredError`** — the same retryable 503-class mapping DeviceCheck uses: a redirect or a wrong host is not evidence about the player's token or about our credentials, so nothing is graded.
+- **Host check before key check** — an unusable key behind a refused host reports the host (Unavailable), and neither signs nor sends; pinned by the "never reads the clock" cell.
+- **JWT `aud` stays the real Google token URL** — it is the audience Google expects, not an address we call.
+
+### 114.3 Not built, honestly
+
+- Live Google verification is still not exercised (no Google credential or route here); the Android build itself and the Play Integrity wire facts stay `[unverified]`. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 114.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a364aa8` / #154). Squash SHA recorded after merge.
+
+- vitest `play-integrity-egress` 14/14; `vendor-adapters` / `devicecheck-egress` / `play-integrity` unchanged and green; full server unit suite 1847/1847; `deno check` (2.5.2, the CI pin) of the four touched modules and the `verification-ports` consumer; workspace typecheck of `rules`, `service-role-lint`, `catalog-tools`, `mobile`.
+- **Mutation proof** — seven mutants of the client (drop `redirect:"error"`; drop the `redirected` refusal; drop each host check; add a host to the list; allow userinfo; drop the timeout signal) each turn the new test red (1–4 cells each); the unmutated control is 14/14 and the client was restored byte-identical (sha256).

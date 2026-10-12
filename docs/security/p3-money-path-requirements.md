@@ -2871,7 +2871,7 @@ server-side; compare follow-up F16). The trust anchor is **not** configuration. 
 - **K10. Certificate-validity skew is ±5 minutes** (clock skew between this server and Apple's issuance). Apple's credential certificates
   are believed short-lived `[unverified]`; if the live run shows a leaf already expired at attestation time, this is the knob and the
   reason code is `chain_validity`.
-- **K11. Play Integrity egress is unguarded (tracked follow-up, not built; the security gate ruled it not a blocker for the Apple work).** The
+- **K11. Play Integrity egress is unguarded — CLOSED (`partner-auth-design.md` §114, 2026-10-12): allow-list of the two Google hosts, `redirect: "error"`, redirected-response refusal and `play-integrity-egress.test.ts`. The text below is the original finding, kept as written (tracked follow-up, not built; the security gate ruled it not a blocker for the Apple work).** The
   Google adapter (`_shared/rewards/play-integrity-client.ts`: the OAuth token POST at `:79`, the `decodeIntegrityToken` POST at `:113`) calls the
   bare platform `fetch` through `VendorHttp`: no exact-host allow-list and no `redirect: "error"`. A redirect (307/308) would be followed with the
   request body replayed, and that body is the signed service-account assertion (token POST) or the integrity token (decode POST), to whatever
