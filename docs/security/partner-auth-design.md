@@ -4717,7 +4717,34 @@ Numbering: **migration n/a (Edge shared code + portal), matrix n/a (vitest), thi
 
 ### 116.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `580bd7e` / #156). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `580bd7e` / #156). Squash-merged as `17490a4` (#157).
 
 - vitest: contract test + the three updated handler suites 126/126; full server unit suite 1865/1865; `apps/partners` unit 1172/1172; the mobile edge-contract drift check passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exits 0.
 - **Mutation proof** — `coldStartCapped` emitting `rate_limited` (8 cells red), a wrong `Retry-After` (4), the attest handler bypassing the helper (2), the offers-redeem handler bypassing it (1), the portal dropping `credential_in_use` (1) and dropping the add-refusal mapping (1) each fail; all files restored byte-identical (sha256).
+
+## 117. As built: guard the auth-alarm kind trail (database CHECK <-> portal labels)
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 117.** The auth-alarm trail (§95 .. §113) grew one `kind` per seam, and each seam widened the same two `app.partner_auth_alarm` constraints and added a portal label. The §112 / §113 review that opened this log's re-scout found the packaging *correct*, but only because it was checked by hand: nothing enforced it. `apps/partners/test/auth-alarms.test.ts` hard-codes a subset of kinds, so a kind added to the database without its `review.authAlarms.kind.*` label would reach an admin as a raw token (`authAlarmKindLabel` falls back to the kind), in either language. Test-only; no behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 117.1 What was built
+
+- **`supabase/tests/unit/partner-auth-alarm-kinds.test.ts`** reads the *latest* migration that defines `partner_auth_alarm_kind_check` and `partner_auth_alarm_bucket_shape_check` (a balanced-parenthesis parse that skips quoted strings; the later migration's drop-and-re-add wins), so the next alarm seam is covered the moment its migration lands. It requires: every kind the database allows has an EN **and** an fr-CA label; no label names a kind the database cannot hold; and every allowed kind is named by the shape CHECK (a kind in the first and in no branch of the second can never be inserted).
+- **Incidental, found by this PR's own CI: a race in the partners sign-out e2e.** `partners.e2e.test.ts` › "sign-out: back to sign-in, the session revoked on the server and its token refused afterwards" asserted `signOutCalls` and then a 401 on the old token *synchronously* after the signed-out screen appeared. By design the page ends the session first and tells the server after (`api/client.ts`: "ending a session is immediate"), so the screen can be up before the sign-out reaches the server; the test passed on #155 – #157 only because the request usually wins. Reproduced deterministically by giving the fake server's `signOut` a 400 ms delay (unfixed: `expected +0 to be 1`, CI's exact error); fixed by waiting for the recorded revoke first, `await expect.poll(() => server.state.revokedSessions.size).toBe(1)`, the same sync point the lock test uses. The product code is unchanged. Test-only; unrelated to the alarm kinds, carried here because it blocked this PR's CI.
+- **The parser is self-tested** on a synthetic pair of migrations (the later definition wins, quoted parentheses are skipped, an unbalanced CHECK or a missing constraint throws), so the guard cannot silently see nothing; a floor on the kind count and two named kinds make the same point against the real tree.
+
+### 117.2 Decisions and departures
+
+- **Derived from the migrations, not a second hand-kept list** — a list in the test would be the same drift one file over. It reads the migration text because that is the schema's source of truth in this repo; the pgTAP cells (matrix 70 .. 85) already prove each kind's *behaviour*.
+- **Not asserted: that the two constraints were redefined in the same migration.** That would be stricter than the invariant (a kind may legitimately be placed by an existing branch); the real invariant is the placement check above.
+- **Dead keys** (`app.loading`, `common.back`, `home.busy`, noted by the scout) are a catalogue-hygiene question, not drift of this trail; left alone.
+
+### 117.3 Not built, honestly
+
+- The trail's *other* inventories stay pinned where they were: `definer_policy_exprs.txt` by the function-inventory verifier (it compares the live allow-list to the fixture by key), the function notes by matrix 10. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 117.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash SHA recorded after merge.
+
+- vitest: 5/5 on the real tree (23 kinds in `0107`, EN and fr-CA); full server unit suite green.
+- **Mutation proof** — a missing EN label, a missing fr-CA label, a stale label, a kind dropped from the shape CHECK (in a copy of `0107`) and a new kind with no label each fail (1, 1, 1, 1 and 3 cells red); all files restored byte-identical (sha256).

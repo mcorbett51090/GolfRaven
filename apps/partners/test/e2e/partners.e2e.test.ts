@@ -416,6 +416,9 @@ suite("apps/partners in Chromium", () => {
       await w.page.getByTestId("sign-out").click();
       await w.page.locator('[data-screen="signed-out"]').waitFor();
       expect(await textOf(w.page.getByTestId("notice"))).toContain("signed out");
+      // The page ends the session FIRST and tells the server after (client.ts: "ending a session is immediate"), so the signed-out screen can be up before the
+      // sign-out has reached the server. Wait for the revoke to be recorded before asserting on the count and on the token (the lock test does the same).
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
       expect(server.state.signOutCalls).toBe(1);
       const res = await fetch(`${apiOrigin}/functions/v1/partner-session/session`, { headers: { authorization: `Bearer ${token}`, "content-type": "application/json", origin: pageOrigin } });
       expect(res.status).toBe(401);
