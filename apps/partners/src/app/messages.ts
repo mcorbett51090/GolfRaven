@@ -116,6 +116,7 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "bad_sponsor") return { key: "admin.badSponsor" };
     if (code === "stock_short") return { key: "admin.stockShort" };
     if (code === "budget_short") return { key: "admin.budgetShort" };
+    if (code === "no_active_staff") return { key: "admin.noActiveStaff" };
     if (code === "no_trail") return { key: "admin.noTrailRow" };
     if (code === "invalid_eligibility") return { key: "admin.invalidEligibility" };
     if (code === "not_held") return { key: "admin.notHeld" };

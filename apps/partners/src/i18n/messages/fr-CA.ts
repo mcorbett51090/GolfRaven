@@ -348,6 +348,7 @@ export const frCA: Record<MessageKey, string> = {
   "admin.badSponsor": "Cette organisation n'est pas un commanditaire.",
   "admin.stockShort": "Chaque établissement à marqueur spécial doit avoir du stock avant la mise en ligne.",
   "admin.budgetShort": "L'offre ne peut pas couvrir ce code. Augmentez le budget ou refusez le code.",
+  "admin.noActiveStaff": "Cet établissement n'a aucun membre du personnel ni gestionnaire actif, donc le code ne peut pas être émis. Ajoutez du personnel ou refusez le code.",
   "admin.noTrailRow": "Enregistrez le programme du circuit avant celui de l'établissement.",
   "admin.invalidEligibility": "L'admissibilité a échoué à la validation.",
   "admin.notHeld": "Cette récompense n'attend pas de revue.",

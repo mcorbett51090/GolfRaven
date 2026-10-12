@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { PartnerApiError, type ApiErrorKind } from "../src/api/errors";
 import { messageForError, messageForPinRejection } from "../src/app/messages";
 import { en } from "../src/i18n/messages/en";
+import { frCA } from "../src/i18n/messages/fr-CA";
 import { WebAuthnFailure, type WebAuthnFailureKind } from "../src/webauthn/assertion";
 
 describe("messageForError", () => {
@@ -82,6 +83,17 @@ describe("messageForError", () => {
 
     it("every PIN rejection reason has a message", () => {
       for (const r of ["format", "repeated", "run", "year", "date", "common"] as const) expect(Object.keys(en)).toContain(messageForPinRejection(r).key);
+    });
+  });
+
+  describe("the review context reads the server's CLOSED code for a held reward that cannot be issued", () => {
+    const e = (code: string | null) => new PartnerApiError("unprocessable", { status: 422, code, retryAfterSeconds: null });
+    it("no_active_staff (0061) names the cause instead of the generic failure, and the key exists in EN and fr-CA", () => {
+      expect(messageForError(e("no_active_staff"), "review")).toEqual({ key: "admin.noActiveStaff" });
+      expect(messageForError(e("budget_short"), "review")).toEqual({ key: "admin.budgetShort" });
+      expect(messageForError(e(null), "review")).toEqual({ key: "admin.failed" });
+      expect(Object.keys(en)).toContain("admin.noActiveStaff");
+      expect(Object.keys(frCA)).toContain("admin.noActiveStaff");
     });
   });
 

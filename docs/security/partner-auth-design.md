@@ -4630,3 +4630,63 @@ staging path probe against a live gateway (§20.12), and OCR / aHash / UI flag f
 CAMERA remain blocked. `totp_confirm` and `pin_change` stay deliberate non-alarms
 (§113.2 / §112.2). Tip remains `0107`.
 
+**Correction, 2026-10-12.** The claim above was wrong, and it was wrong because it was made from this log instead of from the code. It held for the *auth-alarm ceremony trail* (every `partner_audit_write('partner.*')` event that is an operator-facing ceremony now has an alarm; the rest are business operations — attest, offers, sponsorships, stock, handover, programme, course-QR / PIN — or the deliberate non-alarms listed here). It did not hold for the repository: re-reading the code against the design found in-repo leftovers that no section had recorded, closed by §114 (K11) and §115 (`no_active_staff`), with further sections following as each is merged.
+
+
+## 114. As built: Play Integrity egress guard (K11)
+
+Numbering: **migration n/a (Edge shared code), matrix n/a (vitest), this section 114.** Closes the K11 follow-up in `p3-money-path-requirements.md` ("Play Integrity egress is unguarded"), which was the first in-repo leftover found when §113.5's "no further in-repo closable leftover" was re-checked against the code instead of the log: `_shared/rewards/play-integrity-client.ts` called the bare platform `fetch` with no host allow-list and no `redirect: "error"` on **both** its calls, so a 307/308 from Google would have replayed the signed service-account assertion (OAuth POST) or the integrity token (decode POST) to whatever host the redirect named. Defence in depth only (the hosts are fixed constants; exploiting it needs a redirect from Google itself), but it was the one vendor adapter without the guard `devicecheck-client.ts` and `signin/safe-fetch.ts` already carry. No migration; no Edge route change; no UI flag flips; no CAMERA / OCR.
+
+### 114.1 What was built
+
+- **Allow-list** — `PLAY_INTEGRITY_ALLOWED_HOSTS` = `oauth2.googleapis.com`, `playintegrity.googleapis.com`; `isAllowedPlayIntegrityUrl` accepts only `https` with no userinfo and no explicit port and a parsed (never pattern-matched) hostname on the list — the same shape as `isAllowedDeviceCheckUrl`.
+- **Both calls guarded** — the host is checked **before** a JWT is signed or an OAuth exchange starts (a refused decode host costs no OAuth round trip and reads no clock); each POST goes through one `post()` helper that sends `redirect: "error"`, keeps the `AbortSignal.timeout`, and refuses a response flagged `redirected` (a valid-looking body that arrived via a followed redirect is never trusted, and a redirected OAuth answer is not cached).
+- **`VendorHttp.fetch`** — `redirect: "error"` is now **required** in the init type (it was optional "only so the Play Integrity adapter … still type-checks"), so a future vendor adapter cannot forget it.
+- **Test-only override** — `createIntegrityDecoder(config, http, endpoints?)` mirrors `createDeviceCheckClient`'s `hosts` override; `play-integrity-egress.test.ts` pins that no production call site passes it.
+- **Tests** — `supabase/tests/unit/play-integrity-egress.test.ts` (14 cells): allow-list contents; look-alike / userinfo / port / scheme / other-Google-host refusals; request shape on both calls; host refused before signing or any clock read, whatever the key; redirect refused on the OAuth step and on the decode (rejected fetch, flagged `redirected`, 307 / 308 / 302); time bound on both calls; an unconfigured decoder still fails closed as `VendorNotConfiguredError`.
+
+### 114.2 Decisions and departures
+
+- **A refusal is `VendorUnavailableError`, not `VendorNotConfiguredError`** — the same retryable 503-class mapping DeviceCheck uses: a redirect or a wrong host is not evidence about the player's token or about our credentials, so nothing is graded.
+- **Host check before key check** — an unusable key behind a refused host reports the host (Unavailable), and neither signs nor sends; pinned by the "never reads the clock" cell.
+- **JWT `aud` stays the real Google token URL** — it is the audience Google expects, not an address we call.
+
+### 114.3 Not built, honestly
+
+- Live Google verification is still not exercised (no Google credential or route here); the Android build itself and the Play Integrity wire facts stay `[unverified]`. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 114.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a364aa8` / #154). Squash-merged as `35866d8` (#155).
+
+- vitest `play-integrity-egress` 14/14; `vendor-adapters` / `devicecheck-egress` / `play-integrity` unchanged and green; full server unit suite 1847/1847; `deno check` (2.5.2, the CI pin) of the four touched modules and the `verification-ports` consumer; workspace typecheck of `rules`, `service-role-lint`, `catalog-tools`, `mobile`.
+- **Mutation proof** — seven mutants of the client (drop `redirect:"error"`; drop the `redirected` refusal; drop each host check; add a host to the list; allow userinfo; drop the timeout signal) each turn the new test red (1–4 cells each); the unmutated control is 14/14 and the client was restored byte-identical (sha256).
+
+## 115. As built: held-reward resolve learns `no_active_staff`
+
+Numbering: **migration n/a (Edge shared code + portal), matrix n/a (vitest), this section 115.** Found by the same code-first re-scout as §114, not by a log: since 0061 (AT(10)) `private.partner_resolve_held_offer_code_apply` returns the status `no_active_staff` when an admin approves a held offer code at a facility that has no active staff or manager. The Edge validates `o_status` against a closed set (`privileged.ts`) and that set did not list it, so `resolveHeldOf` threw "returned no usable status" — an uncaught 500 for the admin — and neither the review handler nor the portal had a mapping. Only the pgTAP matrix (`39_at10_issuance_staff_gate.sql`) pinned the status; nothing tied the Edge to it. No migration; no UI flag flips; no CAMERA / OCR.
+
+### 115.1 What was built
+
+- **One list** — `RESOLVE_HELD_STATUSES` in `partner/ports.ts`, a runtime `as const` array from which `ResolveHeldStatus` is derived. `privileged.ts` validates the database's `o_status` against it; `review-handler.ts`'s `switch` is exhaustive over the type, so a status the list gains but the handler does not map fails `deno check` with `TS2366` (shown by deleting the case).
+- **Handler** — `no_active_staff` is a `422` with the status as its code, beside `budget_short` (the code cannot be issued as it stands).
+- **Portal** — `admin.noActiveStaff` (EN and fr-CA: "add staff there or reject the code"), mapped in the `review` context ahead of the generic `admin.failed`. The wording is accurate to the SQL: only an approve *into `issued`* needs staff, so a reject still works. fr-CA wording is a draft for a native reviewer, like the rest of the catalogue (§20.9).
+- **Drift pin** — `supabase/tests/unit/partner-resolve-statuses.test.ts` reads the *latest* definition of every `private.partner_resolve_*_apply` across the migrations and requires the statuses they can return to **equal** the Edge list (a status unknown to the Edge, or an Edge entry no SQL returns, both fail); the parser is self-tested so the pin cannot silently see nothing.
+- **Tests** — `partner-review-handler.test.ts` iterates the whole list over all three resolve routes against an explicit status -> HTTP table (a status added without deciding its answer fails); `apps/partners/test/messages.test.ts` pins the portal mapping and both catalogues.
+
+### 115.2 Decisions and departures
+
+- **422, not 409** — nothing is in conflict (the code is still held); the request cannot be applied as asked. The refusal leaves the code held (`39_at10_issuance_staff_gate.sql`: "refused approve leaves the code held"), so the admin can add staff and approve again, or reject.
+- **A shared list, not a second copy** — the first fix would have been one more string in the Set; that is how the gap arose. The list is the single place, and the SQL side is pinned against it.
+- **`o_status` stays validated** — an unknown status is still a thrown error (fail closed); what changed is that the known vocabulary can no longer fall behind the SQL unnoticed.
+
+### 115.3 Not built, honestly
+
+- A Deno integration cell for the review lane against the real database (no `partner-review` integration test exists; the 14 lanes without one are an open coverage item). The SQL <-> Edge link is pinned textually and the Edge <-> portal link by unit cells instead. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 115.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `35866d8` / #155). Squash SHA recorded after merge.
+
+- vitest: `partner-resolve-statuses` + `partner-review-handler` 24/24, `apps/partners` `messages` 47/47; the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exits 0.
+- **Mutation proof** — dropping the status from the shared list (3 cells red), dropping the handler case (2), dropping the portal mapping (1) and corrupting the 0061 status literal (3) each fail; all files restored byte-identical (sha256).

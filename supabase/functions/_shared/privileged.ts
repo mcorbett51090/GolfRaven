@@ -145,6 +145,7 @@ import {
   type RedeemMethod,
   type RedeemResult,
   type RedeemStatus,
+  RESOLVE_HELD_STATUSES,
   type ResolveHeldResult,
   type ResolveHeldStatus,
   type ReviewSlaSummary,
@@ -4464,10 +4465,10 @@ function buildPartnerAttestTx(trx: TxSql): PartnerAttestTx {
 }
 
 /** The review definers of 0057 (S4). Every status is a returned row, so a refusal COMMITS. */
-const RESOLVE_HELD_STATUSES: ReadonlySet<string> = new Set(["ok", "not_found", "not_held", "budget_short", "not_open"]);
+const RESOLVE_HELD_STATUS_SET: ReadonlySet<string> = new Set<string>(RESOLVE_HELD_STATUSES);
 const QUEUE_KINDS: ReadonlySet<string> = new Set(["offer_code", "entitlement", "review_item"]);
 function resolveHeldOf(r: Record<string, unknown> | undefined, fn: string): ResolveHeldResult {
-  if (typeof r?.o_status !== "string" || !RESOLVE_HELD_STATUSES.has(r.o_status)) throw new Error(`${fn} returned no usable status`);
+  if (typeof r?.o_status !== "string" || !RESOLVE_HELD_STATUS_SET.has(r.o_status)) throw new Error(`${fn} returned no usable status`);
   return { status: r.o_status as ResolveHeldStatus, state: textOrNull(r.o_state) };
 }
 function buildPartnerReviewTx(trx: TxSql): PartnerReviewTx {
