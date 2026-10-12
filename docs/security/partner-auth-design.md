@@ -5358,6 +5358,56 @@ Numbering: **migration n/a, matrix n/a (Deno integration + unit), this section 1
 
 ### 133.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `68e62fa` / #173). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `68e62fa` / #173). Squash-merged as `4641a85` (#174).
 
 - Per-file runs: the integration file 5/5 in `superuser` and in `restricted`; the unit file 5/5; the full harness and the unit suite as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 134. As built: the sponsorships lane gets a real-stack integration test (and the last partner lane has one)
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 134.** The same shape as §122, §125 to §127 and §129 to §133, for the `sponsorships-admin` lane: an operator's draft sponsorships (class A3), their approval (draft to live, with the AT(20) stock rule) and the list (class A0). **No defect was found in the lane.** With this section every partner lane has a real-stack test. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 134.1 What was built
+
+- **`supabase/tests/integration/partner-sponsorships.deno.test.ts`** (5 cells): the REAL `handlePartnerSponsorshipsRequest` over the REAL `privileged.ts` (`partnerDb.withSponsorships` = `withPartnerSession`, `hitRateLimit`), a REAL operator session from the REAL partner-session mint, REAL database. Every cell works on **its own trail** (a ledger row and a catalog trail made here), because the programme and stock tables are shared state.
+  1. **create, list, edit:** a draft upserted through the handler is stored and listed with every value (a numeric fee as a number, dates as `YYYY-MM-DD`, the approval time `null`); an edit by `id` replaces the draft in place, including the fields it nulls (one row, not two); a sponsor organisation of kind `facility` is 422 `bad_sponsor` and an unknown id 422 `not_found`, each writing nothing;
+  2. **approve:** a draft goes live and the approval time is stamped (and listed); approving it again, or editing it, is 422 `not_draft` and the live row is not edited; an unknown id is 422 `not_found`;
+  3. **the AT(20) stock rule, which reaches across lanes:** with a programme in which `fac_x` holds the special marker (`true`) and `fac_y` does not (`false`), a `special_marker` or `both` sponsorship is 422 `stock_short` and stays a draft while `fac_x` has no stock, an `offers`-only one is never blocked, and once `fac_x` has stock the same approval succeeds; stock is read at the moment of approval (zeroed again, the next approval is `stock_short` again), and a facility that **stops holding the marker** (`holds_special_marker` set to `false`) stops blocking. (`holds_special_marker` is the column §133 made writable as `false` through the Edge; here it is seeded by the owner, so this cell stands apart from that fix.)
+  4. **class A3 and the aal gate:** a control first (the operator with the step-up creates); then a manager, an operator at aal 1 (a read too) and an operator of another trail are 403 and write nothing; another trail's operator cannot approve this trail's sponsorship (403); no bearer is 401; seven malformed bodies (category, scope, a blank name, a negative fee, a malformed date, a malformed sponsor id, an extra key), a malformed approve id and a missing trail are 400;
+  5. **the per-member cap:** 240 requests an hour, then 429 with a `Retry-After`; another member is not slowed.
+- **`supabase/tests/unit/integration-account-labels.test.ts`** (4 cells): a pin against the slip below. Every Deno integration file shares one database and `createTestUser(uid, label)` inserts `<label>@integration.test`, which is unique, so two files that build their labels from the same prefix collide in the full suite and never in a per-file run. The pin reads every `createTestUser` call in the integration directory (47 call sites, all seen) and requires that no literal label prefix is used by more than one file. Two cells cover the reader on synthetic input; two cover the real tree (a floor on files and calls, so a reader that saw nothing cannot pass; and the rule).
+- Design log: §133.5 now records its squash SHA (`4641a85`, #174).
+
+### 134.2 Measured, not assumed
+
+- **No defect found in the lane.** 5/5 on the first complete run in `superuser` and in `restricted`.
+- **The cells can fail (8 of 8 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (5 passed) |
+  | M1 the placement fee is rounded to a whole number on the way in | 1 |
+  | M2 the list drops the approval time | 2 |
+  | M3 `not_draft` on approve is answered 409 | 2 |
+  | M4 `stock_short` is answered 409 | 3 |
+  | M5 every sponsorship is stored with the scope `offers` | 1 and 3 |
+  | M6 `bad_sponsor` is answered 409 | 1 |
+  | M7 the per-member cap is 241, not 240 | 5 |
+  | M8 the list drops the start date | 1 |
+
+- **A slip of my own, found only by the full harness (the per-file runs were 5/5):** the helpers were copied from the programme file and kept its account-label prefix `prg-`, so the two files collided on `users_email_key` in the shared database — three cells failed in the full `superuser` run. It is the second time (§127: `rd-` from offers-redeem). The file has its own prefix (`spn-`) and the pin above now makes the class a failing cell.
+- **The pin's mutants** (the integration files edited and restored byte-identical by SHA-256): the sponsorships file keeping `prg-` fails the rule cell, naming `prg-` and both files; the entitlements file keeping `rd-staff-` fails it; **controls that must pass and do:** the unmutated tree, and a new unique prefix in the stock file.
+- **Observed, not judged.** Approving a sponsorship that does not exist is 422 `not_found`, while approving one that exists on another trail is 403: the definer returns `not_found` before it checks the trail scope (0059), so an operator can tell the two apart. Sponsorship ids are random UUIDs. It is the same shape as the revoke-all of §130 and the sponsor rollup of §133.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **443 passed, 0 failed** in each (the 438 that were there plus these 5; the first full `superuser` run, before the prefix fix, failed three cells); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 103 files, **1925** tests, the 1921 that were there plus the 4 new label cells) passes.
+
+### 134.3 Not built, honestly
+
+- The label pin sees only literal prefixes in `createTestUser(uid, <label>)`: not a label built from a variable, not a prefix that is a strict prefix of another file's (`rv-` against `rv-staff-` is safe only because the suffixes differ in kind), and not users created some other way.
+- The admin path (an admin may approve any trail's sponsorship) is not driven; neither is a sponsor-funded special marker or offer **using** the approved sponsorship (the sponsorship is the object under test here, not its consumers).
+- **Every partner lane now has a real-stack test** (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock §131; settlement §132; programme §133; sponsorships: this section). That is coverage of what the tests drive: branch N of the invites lane (GoTrue's email OTP), the class-A3 routes of the members lane, the real exports adapter and the real Storage, and the admin role are not driven anywhere in these files.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 134.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4641a85` / #174). Squash SHA recorded after merge.
+
+- Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the unit pin 4/4; the full harness and the unit suite as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
