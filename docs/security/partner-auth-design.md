@@ -5210,6 +5210,52 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 130.** T
 
 ### 130.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `41781cc` / #170). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `41781cc` / #170). Squash-merged as `b5cc39f` (#171).
 
 - Per-file runs of this test: 8/8 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 131. As built: the stock lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 131.** The same shape as §122, §125 to §127, §129 and §130, for the `stock-admin` lane: reading a facility's stock and moving it (delivered, transfer in / out, count adjustment, damaged), the lane that decides what the player-facing availability says. **No defect was found in the lane.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 131.1 What was built
+
+- **`supabase/tests/integration/partner-stock.deno.test.ts`** (5 cells): the REAL `handlePartnerStockRequest` over the REAL `privileged.ts` (`partnerDb.withStock` = `withPartnerSession`, `hitRateLimit`), REAL staff and manager sessions from the REAL partner-session mint, REAL database. The stock row, the movement rows and the availability row are read back as the owner.
+  1. **read:** staff of the facility see the stock row with on-hand, threshold, projected availability and last count (`status: null`, never counted, before any movement; `in_stock` and an ISO last-counted time after a count adjustment); a manager of the facility may read and move too; staff of another facility are 403, a missing facility or an unknown query parameter 400, no bearer 401;
+  2. **every kind of movement:** `delivered`, `transfer_in`, `transfer_out`, `damaged` and both signs of `count_adjustment` in one run (10 → 15 → 16 → 10 → 3 → 7 → 3 → 0): the sign (a `damaged` or `transfer_out` of 7 is a movement of −7; only a count adjustment may be negative), the stock row after each call, **one movement row per call** with the signed quantity, the note and no entitlement, the projected availability after each call (`in_stock` above the threshold, `low` at or under it, `out` at zero) in both the response and the availability row, and the last-counted time stamped by a count adjustment;
+  3. **refusals change nothing:** a `transfer_out` or a negative count adjustment below zero is 422 `short`; one over the cap is 422 `over_cap` (and exactly the cap, 1,000,000, is allowed); a trail with no stock row is 422 `no_stock_row`; in each the stock is unchanged, nothing is projected and no movement is written;
+  4. **class A1 — one PIN per action:** a movement without a grant is 403 and changes nothing; with one it succeeds and **consumes the grant** (the session's `pin_grant_until` is null afterwards), so the next movement without a new grant is 403; staff of another facility with a grant are 403; seven malformed bodies (zero, negative for a non-count kind, an unknown kind, a fraction, over 100,000, a 201-character note, an extra key) are 400 and move nothing;
+  5. **the per-member cap:** 240 reads an hour, then 429 with a `Retry-After`; a movement counts against the same bucket; another member is not slowed.
+- Design log: §130.4 now records its squash SHA (`b5cc39f`, #171).
+
+### 131.2 Measured, not assumed
+
+- **No defect found in the lane.** The first complete run was 5/5 in both modes once one slip of my own was fixed: I ordered the movement rows by `created_at`, and the column is `at` (found by running it, before anything else).
+- **The cells can fail (7 of 7 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (5 passed) |
+  | M1 `short` is answered 409 | 3 |
+  | M2 the stock list reports a zero threshold | 1 |
+  | M3 a `damaged` movement is sent to the database as `transfer_out` | 2 |
+  | M4 the per-member cap is 241, not 240 | 5 |
+  | M5 a movement answers without the availability | 2 |
+  | M6 a negative count adjustment is sent as its absolute value | 2 and 3 |
+  | M7 the stock list drops the last-counted time | 1 |
+
+- **Shared state.** Every integration file shares one database, so each cell sets the one stock row (`trl_t`, `fac_x`) exactly, and removes its availability row so the projection starts from nothing; staff and manager accounts use their own `stk-` prefix.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **429 passed, 0 failed** in each (the 424 that were there plus these 5); `service-role-lint` clean. No unit test changed.
+
+### 131.3 Not built, honestly
+
+- **The stock lock's race** for the last unit (`SELECT … FOR UPDATE`, `36_partner_stock_handover.sql` covers it in the database with real concurrent connections): not driven through the Edge.
+- The PIN itself (a grant is written by the owner); a sponsor or operator role on this lane (the definer allows staff and manager only; neither was tried); movement notes of exactly 200 characters (201 is the refused edge).
+- **Three partner lanes still have no real-stack test:** programme, settlement, sponsorships (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 131.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b5cc39f` / #171). Squash SHA recorded after merge.
+
+- Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
