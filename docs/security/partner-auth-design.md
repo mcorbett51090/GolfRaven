@@ -5619,4 +5619,4 @@ SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-000000
 
 ### 138.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `23aafa1 / #178`). Squash SHA recorded after merge. No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `23aafa1 / #178`). Merged as `59dc9a8` (#179). No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
