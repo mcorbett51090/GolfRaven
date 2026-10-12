@@ -43,6 +43,17 @@ describe("the mechanism: an early-exit reader under pipefail", () => {
     const fixed = `set -o pipefail; if (printf 'MATCH\\n'; sleep 0.15; printf 'more\\n') | grep MATCH >/dev/null; then exit 0; else exit 1; fi`;
     expect(bash(fixed)).toBe(0);
   });
+
+  it("the same on `echo \"$big\" | grep -q` when the variable is larger than the 64 KB pipe buffer: an early `not ok` is missed (test.sh's psql fallback before design 124), and the corrected form finds it", () => {
+    const setup = `set -o pipefail; big="$(printf 'not ok 1 - early failure\\n'; yes 'ok 2 - filler line to push this output past the pipe buffer' | head -n 4000)"`;
+    const pat = `'^not ok|ERROR|Looks like you (failed|planned)'`;
+    expect(
+      bash(`${setup}; if echo "$big" | grep -qE ${pat}; then exit 0; else exit 1; fi`),
+    ).toBe(1); // the failure was on line 1
+    expect(
+      bash(`${setup}; if echo "$big" | grep -E ${pat} >/dev/null; then exit 0; else exit 1; fi`),
+    ).toBe(0);
+  });
 });
 
 describe("the script that lost the race", () => {
