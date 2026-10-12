@@ -17,13 +17,21 @@
 // would run once real functions exist; it is exposed here mainly for local
 // manual use.
 
-import { lintDirectory } from "./index.js";
+import { checkLintRoot, lintDirectory } from "./index.js";
 
 const root = process.argv[2] ?? "supabase/functions";
+
+// A root that does not exist, is not a directory or holds no files cannot be "clean": refuse it (exit 2, distinct from a finding's exit 1) rather than report a pass over nothing.
+const rootCheck = checkLintRoot(root);
+if (!rootCheck.ok) {
+  console.error(`service-role-lint: refusing to lint ${root}: ${rootCheck.reason}`);
+  process.exit(2);
+}
+
 const results = lintDirectory(root);
 
 if (results.length === 0) {
-  console.log(`service-role-lint: clean (${root})`);
+  console.log(`service-role-lint: clean (${root}, ${rootCheck.fileCount} file(s))`);
   process.exit(0);
 }
 

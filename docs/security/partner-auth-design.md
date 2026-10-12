@@ -4821,6 +4821,33 @@ Numbering: **migration n/a, matrix n/a (vitest + a shell self-test), this sectio
 
 ### 120.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash-merged as `cb5230c` (#160).
 
 - `ci-h2-gate` 6/6; the real `test.sh` runs the self-test and the scan before the cluster is created and the full harness (pgTAP 106 files / 6294 tests, then the Deno suite) passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
+
+## 121. As built: the service-role lint refuses a root it cannot lint instead of reporting `clean`
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 121.** The same family as §119–§120 — a gate that can pass over nothing — in the secrets lint. `tools/service-role-lint` (build plan §4.7.1a: service-role client construction and privileged calls are confined to `withOwnership()`) reports `clean` whenever it finds nothing, and a run over a path that does not exist, is not a directory or holds no files finds nothing. CI-tooling hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 121.1 Root cause
+
+- **`clean` meant "found nothing", not "looked at something".** The CLI refused a path with no `.git` ancestor (`deriveRepoRoot`), but a path _inside_ the repo that was wrong — `supabase/functionz`, a functions directory that moved, an empty checkout — walked zero files and printed `service-role-lint: clean (<root>)`, exit 0.
+- **Not reachable today.** `tools/db/test.sh` passes the computed absolute path of the real `supabase/functions` tree, which holds 171 files, so nothing was hit. The hole is the day that directory is renamed or relocated: the gate would stay green while linting nothing.
+
+### 121.2 What was built
+
+- **`checkLintRoot(root)`** (`tools/service-role-lint/src/index.ts`) — `{ ok:false, reason }` when the root does not exist, is not a directory, or has no file anywhere under it (a tree of empty directories included); otherwise `{ ok:true, fileCount }`.
+- **`cli.ts`** calls it before linting and exits **2** (distinct from a finding's exit 1) with `service-role-lint: refusing to lint <root>: <reason>`. A clean run now says how many files it covered: `service-role-lint: clean (supabase/functions, 171 file(s))`. `lintDirectory` itself is unchanged — its own tests lint small synthetic trees.
+- **`tools/service-role-lint/test/lint-root.test.ts`** (9 cells) — the function across missing / file / empty / nested-empty / populated / the real tree (so the guard cannot lock the gate out of its own subject); the built CLI end to end (a typo'd in-repo path and an empty directory exit 2 with the reason, the real tree exits 0 with a file count; fails loudly with the build command if `dist/cli.js` is absent — CI builds before it tests); and a pin that the root is checked before it is linted.
+- **Mutation proof** — accepting an empty directory, accepting a missing root, and removing the CLI check each fail the cells that cover them; all files restored byte-identical (sha256).
+
+### 121.3 Not built, honestly
+
+- The lint still trusts what is _in_ the tree: a file moved out of `supabase/functions` is simply not linted, which is the gate's contract (the path is the scope), not a hole this closes. A minimum file count was not added — any threshold would be a number to maintain, and "holds at least one file" is the claim a pass-over-nothing violates.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 121.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `cb5230c` / #160). Squash SHA recorded after merge.
+
+- `lint-root` 9/9; the lint package suite 436/436 and typecheck clean; the real tree reports `clean (supabase/functions, 171 file(s))`; manual probes — typo'd in-repo path, empty directory and a file path each exit 2, the real tree exits 0. Full server unit suite and the CI frozen-lockfile `deno check` (exit measured directly) green.
