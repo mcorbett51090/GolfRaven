@@ -5302,6 +5302,62 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 132.** T
 
 ### 132.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `035af7d` / #172). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `035af7d` / #172). Squash-merged as `68e62fa` (#173).
 
 - Per-file runs of this test: 4/4 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 133. As built: the programme lane gets a real-stack integration test — and the second defect a lane test has found: a facility programme could not say "no"
+
+Numbering: **migration n/a, matrix n/a (Deno integration + unit), this section 133.** The same shape as §122, §125 to §127 and §129 to §132, for the `programme-config` lane: an operator's trail programme and facility programme (class A3 writes, class A0 reads) and the two rollups. The second lane test to find a defect in the lane rather than in itself; one Edge parser is fixed, and no migration, UI flag or CAMERA / OCR is touched.
+
+### 133.1 The defect, and the fix
+
+- **What.** `parseOptionalBool` (`supabase/functions/_shared/partner/programme-shape.ts`) answered an invalid value with the literal `false`, and `parseFacilityProgrammeUpsertBody` read `stocksMarkers === false`, `holdsSpecialMarker === false` and `staffNetwork === false` as "invalid". But `false` is also a **legitimate value** of those three nullable booleans ("this facility does not stock markers / does not hold the special marker / has no staff network"), so every body that said so was a **400 `bad_request`**. The facility programme could be written with `true`, `null` or nothing, and never with `false`. The same file's other `parseOptional*` helpers use `false` as their marker too, but their values (a string, a uuid, a number) can never be `false`, so only the boolean one collided; the trail body reads its two booleans with a plain `typeof` and was never affected.
+- **Reach, stated carefully.** The partners portal's programme form sends `stocks === "true"` (`apps/partners/src/ui/views-admin.ts:149-152`), i.e. `false` for a typed "false", so an operator who tried to record a "no" was refused. The columns hold `false` fine (nullable booleans; the harness seeds `true`). The one consumer of these columns I found outside the programme definers and the portal form is the **sponsorship approval** (0059, `partner_sponsorship_approve_for_partner`), which reads `holds_special_marker IS TRUE`: a special-marker sponsorship is refused `stock_short` while a facility of the trail that holds the marker has no stock. `null` behaves like `false` there, so an operator could have worked around the defect by leaving the field empty; but the record could not say "no", and the form's "false" was a 400. This is a data-entry defect, not a security or money defect.
+- **Since when** (the clone has full history): the parser entered with the lane in `4cfb5ec` (#73, 2026-10-09), the same commit that brought the invite-create cast of §129.
+- **Why nothing saw it.** The only unit test that touches these fields (`partner-programme-handler.test.ts`) hands the handler a parsed value or a mock and never sends a `false`; the pgTAP matrix calls the definer with its own SQL; and the portal's tests run against a fake server.
+- **Fix.** `parseOptionalBool` returns a distinct sentinel (`NOT_A_BOOLEAN`, a symbol) for a value that is not a boolean, and the three call sites compare with it. `false`, `true`, `null` and an omitted field now mean what they say.
+
+### 133.2 What was built
+
+- **`supabase/tests/unit/partner-programme-shape.test.ts`** (5 cells): `false` and `true` accepted for each of the three booleans; `null` and an omitted field read as `null`; `"false"`, `"true"`, `0`, `1`, `[]` and `{}` refused with the field named; the rest of the facility body unchanged (participation, QR mode, the 500-character note, an unknown key); the trail body's two booleans accept `false`.
+- **`supabase/tests/integration/partner-programme.deno.test.ts`** (5 cells): the REAL `handlePartnerProgrammeRequest` over the REAL `privileged.ts` (`partnerDb.withProgramme` = `withPartnerSession`, `hitRateLimit`), REAL operator and manager sessions from the REAL partner-session mint, REAL database. Every cell works on **its own trail** (a ledger row and a catalog trail made here), because `trail_programme` and `facility_programme` are shared state.
+  1. **a trail's programme round trip:** the thirteen values upserted through the handler read back the same through the handler **and** as the owner (a numeric fee as a number, dates as `YYYY-MM-DD`, nullable fields as null); no programme yet is 422 `not_found`; a second upsert replaces every field including the ones it nulls; `webPlayerFlow: true` is refused (a database 22023 answered 422) and changes nothing;
+  2. **a facility's programme:** before the trail's own it is 422 `no_trail` and writes nothing; two facilities upserted through the handler (one with every field set, including the three `false`s of the second upsert, one with every nullable field null) are listed and match the owner's rows; a second upsert replaces a row rather than adding one; five malformed bodies are 400;
+  3. **class A3, and the assurance level gates every class:** a control first (the operator with the step-up writes); then a manager, an operator at aal 1 and an operator of another trail are each 403 on both write routes and write nothing; **an operator at aal 1 cannot even read** (`partner_authorize` step 4, M2: the aal gates every class including A0), the same operator at aal 2 can; a manager and another trail's operator are 403 on a read; no bearer 401; five malformed trail bodies 400;
+  4. **the rollups:** the operator rollup lists a trail's rows newest month first with the numeric value and the cohort size; another trail's operator is 403; the sponsor rollup lists a sponsorship's rows (a sponsor organisation and a sponsorship are seeded by the owner); another trail's operator is 403; a malformed id is 400; **observed, not judged:** a sponsorship that does not exist is an empty list while one outside the caller's scope is 403, so an operator can tell the two apart (the definer returns before the scope check when the row is missing; ids are random UUIDs);
+  5. **the per-member cap:** 240 requests an hour, then 429 with a `Retry-After`; another member is not slowed.
+- Design log: §132.4 now records its squash SHA (`68e62fa`, #173).
+
+### 133.3 Measured, not assumed
+
+- **Revert-and-run.** The unit cells against the **old** parser: 1 fails (`stocksMarkers: false: expected false to be true`) and 4 pass, the four being the controls above. The integration file against the **pre-fix Edge** (the old parser, otherwise unmutated): **cells 2 and 3 fail**, cells 1, 4 and 5 pass; against the fixed Edge: 5/5 in `superuser` and in `restricted`.
+- **Mutants** (8 of 8 killed), each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** the pre-fix Edge | 2 and 3 |
+  | M1 control: the fixed Edge, unmutated | none (5 passed) |
+  | M2 the trail read drops the fee amount | 1 |
+  | M3 the fee amount is rounded to a whole number on the way in | 1 |
+  | M4 `stocks_markers` and `holds_special_marker` are swapped on the way in | 2 |
+  | M5 the facility list drops the QR mode | 2 |
+  | M6 `no_trail` is answered 409 | 2 |
+  | M7 the operator rollup truncates the value | 4 |
+  | M8 the per-member cap is 241, not 240 | 5 |
+  | M9 a missing programme is answered 404 | 1 |
+
+- **Three slips of my own, found by running it:** (1) the first run failed all five cells, because I assumed an operator's read needed only the operator's scope; `partner_authorize` gates the assurance level for every class (the rule is now a cell); (2) my default facility body said `holdsSpecialMarker: false`, which is how the defect surfaced — the 400 was the parser, not the fixture; (3) the first version of the trail fixture needed a catalog ledger row (the upsert answers `not_found` for a trail the ledger does not know).
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **438 passed, 0 failed** in each (the 433 that were there plus these 5); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 102 files, **1921** tests, the 1916 that were there plus the 5 new shape cells) passes.
+
+### 133.4 Not built, honestly
+
+- A programme with a **sponsor-funded** special marker (`specialMarkerFundedBy: "sponsor"` and a `specialMarkerSponsorshipId`) is not driven; the sponsorship seeded for the rollup cell is not used by the trail upsert. The admin path (an admin may configure any trail) is not driven either.
+- **One partner lane still has no real-stack test:** sponsorships (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock §131; settlement §132; programme: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 133.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `68e62fa` / #173). Squash SHA recorded after merge.
+
+- Per-file runs: the integration file 5/5 in `superuser` and in `restricted`; the unit file 5/5; the full harness and the unit suite as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
