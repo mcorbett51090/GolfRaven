@@ -4848,6 +4848,34 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 121.** The same fa
 
 ### 121.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `cb5230c` / #160). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `cb5230c` / #160). Squash-merged as `040e54e` (#161).
 
 - `lint-root` 9/9; the lint package suite 436/436 and typecheck clean; the real tree reports `clean (supabase/functions, 171 file(s))`; manual probes — typo'd in-repo path, empty directory and a file path each exit 2, the real tree exits 0. Full server unit suite and the CI frozen-lockfile `deno check` (exit measured directly) green.
+
+## 122. As built: the review lane gets a real-stack integration test (handler + privileged.ts + database)
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 122.** §115 fixed an uncaught 500 on `partner-review` (a database status, `no_active_staff`, that the Edge's closed status list did not know) and pinned it with a SQL↔Edge string pin and a handler table. Neither of those runs the path _between_ the handler and the database. This section adds the one cell that does. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 122.1 What was built
+
+- **`supabase/tests/integration/partner-review.deno.test.ts`** (3 cells) — the REAL `handlePartnerReviewRequest` over the REAL `privileged.ts` (`partnerDb.withReview` = `withPartnerSession`), a REAL admin session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (the provisioned `edge_gateway` login, `SET LOCAL ROLE edge_partner`):
+  1. an admin **approves** a held offer code at a facility with **no active staff** → HTTP **422** `no_active_staff`, and the code is still `held_review` in the table (read back);
+  2. the same admin **rejects** it → 200 `void` (rejection needs no staff);
+  3. the same approve first answers 422 (no staff yet), then, once an active staff member is added, the same approve → 200 `issued` and the code is `issued` in the table.
+- **Fixtures are `service_role`-made.** The facility (`catalog_id_ledger` + `catalog_facility`) and the held offer code are inserted as `service_role`; the admin is seeded rather than created after sign-in (an `admin_user` insert after a sign-in revokes that user's sessions, §5.2).
+
+### 122.2 Measured, not assumed
+
+- **Pre-fix tree** (the Edge before §115): in **both** `HARNESS_MODE=superuser` and `restricted`, **1 pass / 2 fail**. The reject cell passes; the two cells that approve at a facility with no active staff fail on that first approve, with HTTP **500** `internal_error` where 422 was expected (cell 3 fails at its own "no staff yet" assertion, before staff is added), which is exactly the production defect. **Post-fix tree: 3/3 in both modes.** The full harness with this file added: Deno integration **393 passed**.
+
+### 122.3 Decisions and departures
+
+- **`service_role` fixtures, not the owner path.** In `restricted` mode (the NOSUPERUSER `migration_owner`, which is what a real deploy resembles) an owner-path `catalog_facility` insert did not persist, so the first draft passed in `superuser` mode and failed in `restricted`. Making the fixtures `service_role` made the two modes agree, and the pre/post matrix above is the proof they do.
+- **Only the review lane.** The other ~13 Edge lanes have no real-stack cell either; a sweep of all of them was not built (each needs its own fixtures), and this lane was chosen because it is the one with a measured production defect behind it.
+- **A sweep for other SQL↔Edge status drift was measured, and found none.** `privileged.ts` holds ~35 closed `*_STATUSES` sets, and only the resolve one has a pin (§115). A one-off sweep (not committed) compared each set with the literal statuses its definer and the definers it calls can return. It flagged three sets, and all three are branches the lane cannot reach, not drift: `OFFER_REDEEM_STATUSES` vs `no_programme` (`partner_attest_write` returns it only for `p_kind = 'marker_purchase'`, `0056:243-249`; offer redemption passes `'offer_redemption'`) and the two invite-accept sets (`partner_invite_accept_core` returns `session_stale` / `existing_member_sign_in` / `recover_required` only in mode `'new'` and `already_member` only in mode `'member'`, `0054:651-716`, and the two Edge sets split exactly on that line). **What this does not cover:** about eight sets the sweep could not map to a definer (`ATTEST`, the PIN and TOTP sets, the receipt sets) were not checked, and no permanent pin was built — a generic one needs a per-set exception table for these argument-dependent branches, which is more code than a measured zero drift justifies today.
+
+### 122.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `040e54e` / #161). Squash SHA recorded after merge.
+
+- Pre/post matrix as above (both harness modes). Re-run on `cb5230c` plus this file, in `superuser` and then `restricted`: pgTAP 106 files / 6294 tests PASS and Deno integration **393 passed, 0 failed** in each (the 3 review-lane cells included); the only change on `main` since is the lint root guard (§121); `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
