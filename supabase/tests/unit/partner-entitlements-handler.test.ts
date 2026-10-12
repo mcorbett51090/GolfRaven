@@ -361,7 +361,7 @@ describe("POST redeem", () => {
     ["no_programme", 422, "no_programme"],
     ["replayed", 409, "replayed"],
     ["out_of_stock", 409, "out_of_stock"],
-    ["cold_start_cap", 429, "rate_limited"],
+    ["cold_start_cap", 429, "cold_start_cap"],
   ];
   for (const [status, http, code] of cases) {
     it(`${status} is ${http} (code ${code}) and the transaction COMMITS`, async () => {

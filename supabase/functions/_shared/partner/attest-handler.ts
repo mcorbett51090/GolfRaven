@@ -21,7 +21,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, coldStartCapped, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { parseOfflineAttestBody, parseOnlineAttestBody, parseShiftLogQuery, parseStaffActivityQuery } from "./attest-shape.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { AttestResult, PartnerDb, ShiftLogRow, StaffActivityRow } from "./ports.ts";
@@ -103,7 +103,7 @@ function attestResponse(decision: Decision, r: AttestResult): Response {
     case "rate_limited":
       return rateLimited(decision, "too many failed attempts: try again later", 3600);
     case "cold_start_cap":
-      return rateLimited(decision, "a new member's daily limit has been reached", 3600);
+      return coldStartCapped(decision);
     case "no_programme":
       return partnerError(decision, 422, "no_programme", "this facility has no marker programme");
     case "no_facility":

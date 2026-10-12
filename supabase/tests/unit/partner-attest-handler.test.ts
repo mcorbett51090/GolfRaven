@@ -230,7 +230,7 @@ describe("the status map: every returned status commits, every throw rolls back"
     ["token_invalid", 422, "token_invalid"],
     ["verification_failed", 422, "verification_failed"],
     ["rate_limited", 429, "rate_limited"],
-    ["cold_start_cap", 429, "rate_limited"],
+    ["cold_start_cap", 429, "cold_start_cap"],
     ["no_programme", 422, "no_programme"],
     ["no_facility", 404, "not_found"],
   ];
