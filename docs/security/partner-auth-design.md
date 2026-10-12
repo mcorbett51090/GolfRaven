@@ -4795,6 +4795,32 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 119.** Found when 
 
 ### 119.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158, with §118 in the same PR). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158, with §118 in the same PR). Squash-merged as `a47e6e5` (#159).
 
 - vitest: `ci-script-sigpipe` 5/5; the real `--self-test` passes; full server unit suite green. Mutation: restoring `head -n1` fails the script pin; script restored byte-identical (sha256).
+
+## 120. As built: the H2 gate (no migration names the harness-only role) no longer fails open
+
+Numbering: **migration n/a, matrix n/a (vitest + a shell self-test), this section 120.** The worse instance of the class §119 found. `tools/db/test.sh` enforces H2 — *no migration may reference the harness-only `migration_owner` role by name outside a comment; a real deploy has no such role* (0016 and 0017 both did, and failed outright on a real deploy) — with an inline loop, `grep -v '^\s*--' "$f" | grep -q 'migration_owner'`. CI-script hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 120.1 Root cause
+
+- **It failed open.** Under `set -o pipefail`, `grep -q` exits at its first match. For a file larger than the pipe buffer (64 KB — 7 of the 107 migrations are) the writer, `grep -v`, is still writing, takes SIGPIPE and exits 141; `pipefail` makes 141 the pipeline's status, so the `if` evaluates **false on a real match**. Unlike §119's flake this is not a race: on a must-fail fixture (a `migration_owner` grant on line 2 of a 670 KB file) the old form detected the violation in **0 of 1500** runs, and the corrected form in **1500 of 1500**.
+- **Nothing has been missed.** A scan of all 107 migrations with the corrected check finds no violation, so the hole has not been hiding an existing problem; it was only waiting for the first large migration with an early reference.
+
+### 120.2 What was built
+
+- **`tools/db/check-no-migration-owner-refs.sh`** — the same check (comment lines stripped first) with a second `grep` that has **no `-q`** and sends its output to `/dev/null`, so it reads all of its input and the writer never takes the signal. An empty directory is refused rather than passed vacuously.
+- **`--self-test`** — a violation near the top of a >64 KB file, one at the bottom, a small one (all must be found) and a large clean file, a comment-only mention (also indented) and an empty file (none may be). `test.sh` runs the self-test first and then the scan, so a gate that cannot fail is not trusted.
+- **`supabase/tests/unit/ci-h2-gate.test.ts`** — end to end through the real script: a >64 KB migration with an early violation exits 1 and names the file; late and small violations are found; comment-only passes; an empty directory exits 2; the self-test and the real tree pass; and static pins that `test.sh` calls the self-test then the scan and no longer carries the inline loop.
+- **Mutation proof** — the old `grep -q` form restored in the gate fails the end-to-end cell and the script's own self-test; dropping the self-test call, or bringing the inline loop back, fails the `test.sh` pins; all files restored byte-identical (sha256).
+
+### 120.3 Not built, honestly
+
+- The fallback `echo "$OUTPUT" | grep -qE '^not ok|ERROR|…'` in `test.sh` has the same shape on a large variable, but is reached only when `pg_prove` is absent (CI installs it) — left alone, and recorded. The many small `echo "$small" | grep -q` sites are not at risk. A general lint for early-exit readers under `pipefail` was not built: it would flag the safe sites. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 120.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash SHA recorded after merge.
+
+- `ci-h2-gate` 6/6; the real `test.sh` runs the self-test and the scan before the cluster is created and the full harness (pgTAP 106 files / 6294 tests, then the Deno suite) passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
