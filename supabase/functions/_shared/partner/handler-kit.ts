@@ -128,6 +128,16 @@ export function rateLimited(decision: Decision, message: string, retryAfterSecon
   return partnerError(decision, 429, "rate_limited", message, { "retry-after": String(Math.max(1, retryAfterSeconds)) });
 }
 
+/** What a member who is still inside the cold-start window is told when the daily cap is reached (plan 8.3, AT(15); design 26.1 / 28.2: "429 `cold_start_cap`").
+ * Still a 429 with the same `Retry-After` as every other cap, but with its OWN `code`: the portal keys its explanation on it (`attest.coldStart`,
+ * `handover.coldStart`, `offerRedeem.coldStart`), and under the generic `rate_limited` code it could only say "try again in an hour", which is wrong for a rolling
+ * 24 hour cap. The cap is the caller's own, so naming it tells them nothing about anyone else. `partner-edge-pwa-error-contract.test.ts` runs this response through
+ * the portal's own message mapper. */
+export const COLD_START_RETRY_AFTER_SECONDS = 3600;
+export function coldStartCapped(decision: Decision): Response {
+  return partnerError(decision, 429, "cold_start_cap", "a new member's daily limit has been reached", { "retry-after": String(COLD_START_RETRY_AFTER_SECONDS) });
+}
+
 /** Design §8 / §70: alert-only 1,200/h any-partner-call soft-cap. Never a 429; does not replace hard per-route caps. */
 export const MEMBER_ANY_CALL_BUCKET = "partner-any-call";
 export const MEMBER_ANY_CALL_PER_HOUR = 1200;

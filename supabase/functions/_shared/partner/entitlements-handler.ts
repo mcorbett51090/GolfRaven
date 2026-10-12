@@ -24,7 +24,7 @@ import { decideOrigin, preflightResponse } from "./cors.ts";
 import { type EntitlementRef, parseCollectQuery, parseEntitlementRefBody, parseRedeemBody } from "./entitlements-shape.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, coldStartCapped, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import type { EntitlementQueueRow, HandoverMintResult, PartnerDb, RedeemResult, VoucherResult } from "./ports.ts";
 import { newPartnerHandoverToken, sha256Hex } from "./token.ts";
@@ -132,7 +132,7 @@ function redeemResponse(decision: Decision, r: RedeemResult): Response {
     case "no_programme":
       return partnerError(decision, 422, "no_programme", "this facility has no marker programme");
     case "cold_start_cap":
-      return rateLimited(decision, "a new member's daily limit has been reached", 3600);
+      return coldStartCapped(decision);
     default:
       return refusalOf(decision, r.status) ?? partnerError(decision, 422, "invalid_request", "the request cannot be applied");
   }

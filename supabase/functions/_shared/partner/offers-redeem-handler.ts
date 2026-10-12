@@ -19,7 +19,7 @@ import { Errors } from "../http.ts";
 import { decideOrigin, preflightResponse } from "./cors.ts";
 import {
   alertMemberAnyCall,
-  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
+  bearerHash, type Decision, encodedPathRefusal, mapPartnerError, matchRoute, methodRefusal, rateLimited, coldStartCapped, routeOfFunction, type RouteSpec } from "./handler-kit.ts";
 import { partnerError, partnerOk, readPartnerJsonBody, runPartnerHandler, unauthenticated } from "./http.ts";
 import { parseOfferRedeemBody, parseOfferRedeemOfflineBody, parseOffersQueueQuery } from "./offers-redeem-shape.ts";
 import type { OfferQueueRow, OfferRedeemResult, PartnerDb } from "./ports.ts";
@@ -118,8 +118,9 @@ function redeemResponse(decision: Decision, r: OfferRedeemResult): Response {
     case "verification_failed":
       return partnerError(decision, 422, "verification_failed", "the offline code could not be verified");
     case "cold_start_cap":
+      return coldStartCapped(decision);
     case "rate_limited":
-      return rateLimited(decision, r.status === "cold_start_cap" ? "a new member's daily limit has been reached" : "too many failed offline attempts", 3600);
+      return rateLimited(decision, "too many failed offline attempts", 3600);
     default:
       return partnerError(decision, 422, "invalid_request", "the request cannot be applied");
   }
