@@ -4773,3 +4773,28 @@ Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-sc
 Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
 
 - `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
+
+## 119. As built: the migrations-immutable self-test no longer loses a SIGPIPE race
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 119.** Found when this PR's own first CI run failed: the `player-plane DB` job died in 20 ms at its first step, `tools/db/check-migrations-immutable.sh --self-test`, with **exit 141** (128 + SIGPIPE), on a documentation-only diff the self-test does not even read. It had passed on the four PRs before. Not a flake to re-run away: a defect in the script. CI-script hardening only; no behaviour change to the product; no UI flag flips; no CAMERA / OCR.
+
+### 119.1 Root cause and fix
+
+- **Cause.** `self_test()` picked a sample migration with `git ls-tree -r --name-only … | head -n1` under `set -euo pipefail`. `head -n1` quits after one line; `git ls-tree`'s listing (5.5 KB, 107 files — more than git's 4 KB stdout buffer, so it needs a second `write`) can still be writing, takes SIGPIPE, exits 141, and `pipefail` makes that the pipeline's status, so `set -e` aborts the script. Whether it does depends on a race between two processes.
+- **Measured, not assumed.** The exact pipeline exits 141 in **31 of 3000** runs (~1%); the whole `--self-test` fails **14 of 600** (~2.3%) on the original script and **0 of 400** after the fix. The replacement, `sed -n '1p'`, reads all of its input, so the writer never takes the signal (0 of 3000 for the pipeline).
+- **Pin.** `supabase/tests/unit/ci-script-sigpipe.test.ts` shows the mechanism deterministically (a producer still writing after the reader has quit: `head -n1` → 141, `sed -n 1p` → 0, no timing luck needed; and that an `if … | grep -q` reads a *match* as no match), then pins the script (the sample pick uses `sed -n '1p'`, and the script has no `| head` at all). Restoring the original line fails exactly the script pin.
+
+### 119.2 Decisions and departures
+
+- **Fix the script, don't retry it.** A retry would hide a 1-in-40 failure on every PR; the cause is two characters.
+- **The same class has a worse instance, recorded for the next section rather than fixed here:** the H2 gate in `tools/db/test.sh` (`grep -v '^\s*--' "$f" | grep -q 'migration_owner'`) *fails open*: for a violation near the top of a file larger than the pipe buffer (7 migrations are) it detected **0 of 1500** runs, and the corrected form 1500 of 1500. A scan of all 107 migrations with the corrected check finds no violation, so nothing has been missed so far.
+
+### 119.3 Not built, honestly
+
+- The H2 gate fix (§120, own PR). The fallback `echo "$OUTPUT" | grep -qE …` in `test.sh` (only reached without `pg_prove`, which CI installs). A general lint for early-exit readers under `pipefail`: the many `echo "$small" | grep -q` sites are not at risk, and a blanket ban would flag them.
+
+### 119.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158, with §118 in the same PR). Squash SHA recorded after merge.
+
+- vitest: `ci-script-sigpipe` 5/5; the real `--self-test` passes; full server unit suite green. Mutation: restoring `head -n1` fails the script pin; script restored byte-identical (sha256).
