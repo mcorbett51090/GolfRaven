@@ -26,6 +26,11 @@
 //
 // FAIL CLOSED: no/incomplete config, or an unusable key, throws
 // `VendorNotConfiguredError` on every call.
+//
+// EGRESS GUARD (K11; the same protections as `devicecheck-client.ts` and the sign-in modules' `safe-fetch.ts`): the host of every call must be one
+// of the two exact Google hosts, checked BEFORE a JWT is signed or an OAuth exchange is started; a redirect is REFUSED rather than followed (a
+// 307/308 would replay the signed service-account assertion, or the integrity token, to whatever host it names); and every call carries a
+// wall-clock bound (`http.timeoutMs`). A refusal is a retryable 503-class `VendorUnavailableError`, never a clean reading.
 
 import { pemToDer, signJwtRs256, type VendorHttp } from "./vendor-http.ts";
 import { VendorForbiddenError, VendorNotConfiguredError, VendorRejectedError, VendorUnavailableError } from "./types.ts";
@@ -48,6 +53,31 @@ export interface IntegrityDecoder {
 const SCOPE = "https://www.googleapis.com/auth/playintegrity";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
+export interface PlayIntegrityEndpoints {
+  /** The OAuth token endpoint (the service-account JWT-bearer exchange). */
+  tokenUrl: string;
+  /** The Play Integrity API origin; the decode URL is `${apiBase}/v1/{package}:decodeIntegrityToken`. */
+  apiBase: string;
+}
+
+const ENDPOINTS: PlayIntegrityEndpoints = { tokenUrl: TOKEN_URL, apiBase: "https://playintegrity.googleapis.com" };
+
+/** The ONLY hosts a Play Integrity call may reach: Google's OAuth host and the Play Integrity API host, lowercase. */
+export const PLAY_INTEGRITY_ALLOWED_HOSTS: readonly string[] = ["oauth2.googleapis.com", "playintegrity.googleapis.com"];
+
+/** True only for an `https` URL with no userinfo and no explicit port whose HOSTNAME (parsed, never pattern-matched, so
+ * `https://playintegrity.googleapis.com.evil.test/` and `https://evil.test/#@playintegrity.googleapis.com` are refused) is on the allow-list.
+ * The same shape of check as `isAllowedDeviceCheckUrl` and the sign-in modules' `safe-fetch.ts`. */
+export function isAllowedPlayIntegrityUrl(rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  return url.protocol === "https:" && url.username === "" && url.password === "" && url.port === "" && PLAY_INTEGRITY_ALLOWED_HOSTS.includes(url.hostname.toLowerCase());
+}
+
 export function isCompletePlayIntegrityConfig(c: PlayIntegrityConfig | null): c is PlayIntegrityConfig {
   return (
     c !== null &&
@@ -59,12 +89,36 @@ export function isCompletePlayIntegrityConfig(c: PlayIntegrityConfig | null): c 
   );
 }
 
-export function createIntegrityDecoder(config: PlayIntegrityConfig | null, http: VendorHttp): IntegrityDecoder {
+/** `endpoints` exists ONLY so a test can prove the call-site allow-list check refuses a host that is not on the list; production wiring never
+ * passes it (`play-integrity-egress.test.ts` pins that every call site in `supabase/functions` passes exactly two arguments). */
+export function createIntegrityDecoder(config: PlayIntegrityConfig | null, http: VendorHttp, endpoints: PlayIntegrityEndpoints = ENDPOINTS): IntegrityDecoder {
   const notConfigured = (why: string) => new VendorNotConfiguredError(`Play Integrity is not configured: ${why}`);
   let cached: { token: string; expiresAtMs: number } | null = null;
 
+  /** Refuses a URL that is not on the host allow-list; called BEFORE anything is signed or sent. */
+  function requireAllowedHost(url: string, what: string): void {
+    if (!isAllowedPlayIntegrityUrl(url)) throw new VendorUnavailableError(`${what}: host not allowed`);
+  }
+
+  /** One POST under the egress guard: a refused redirect (`redirect: "error"` rejects), a redirected response and our own timeout are all
+   * unavailable. Never log the token, the assertion or the integrity token. */
+  async function post(url: string, what: string, headers: Record<string, string>, body: string): Promise<Response> {
+    let res: Response;
+    try {
+      res = await http.fetch(url, { method: "POST", headers, body, signal: AbortSignal.timeout(http.timeoutMs), redirect: "error" });
+    } catch {
+      throw new VendorUnavailableError(`${what} did not complete`);
+    }
+    if (res.redirected) {
+      await res.body?.cancel().catch(() => {});
+      throw new VendorUnavailableError(`${what} was redirected`);
+    }
+    return res;
+  }
+
   async function accessToken(cfg: PlayIntegrityConfig): Promise<string> {
     if (cached && cached.expiresAtMs - 60_000 > http.nowMs()) return cached.token;
+    requireAllowedHost(endpoints.tokenUrl, "Google OAuth token request");
     const der = pemToDer(cfg.serviceAccountPrivateKeyPem);
     if (!der) throw notConfigured("the service-account key is not a PKCS#8 PEM");
     const iat = Math.floor(http.nowMs() / 1000);
@@ -74,17 +128,12 @@ export function createIntegrityDecoder(config: PlayIntegrityConfig | null, http:
     } catch {
       throw notConfigured("the service-account key could not be used to sign (not an RSA key?)");
     }
-    let res: Response;
-    try {
-      res = await http.fetch(TOKEN_URL, {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${encodeURIComponent(assertion)}`,
-        signal: AbortSignal.timeout(http.timeoutMs),
-      });
-    } catch {
-      throw new VendorUnavailableError("Google OAuth token request did not complete");
-    }
+    const res = await post(
+      endpoints.tokenUrl,
+      "Google OAuth token request",
+      { "content-type": "application/x-www-form-urlencoded" },
+      `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${encodeURIComponent(assertion)}`,
+    );
     const text = await res.text().catch(() => "");
     if (res.status === 400 || res.status === 401 || res.status === 403) throw notConfigured(`Google rejected the service-account credentials (${res.status})`);
     if (res.status !== 200) throw new VendorUnavailableError(`Google OAuth token request answered ${res.status}`);
@@ -107,18 +156,11 @@ export function createIntegrityDecoder(config: PlayIntegrityConfig | null, http:
       if (!isCompletePlayIntegrityConfig(config)) {
         throw notConfigured("package name, certificate digests and service-account credentials are all required");
       }
+      // the decode host is checked BEFORE the OAuth exchange: a refused host must not cost an OAuth round trip or sign anything
+      const decodeUrl = `${endpoints.apiBase}/v1/${encodeURIComponent(config.packageName)}:decodeIntegrityToken`;
+      requireAllowedHost(decodeUrl, "Play Integrity decodeIntegrityToken");
       const bearer = await accessToken(config);
-      let res: Response;
-      try {
-        res = await http.fetch(`https://playintegrity.googleapis.com/v1/${encodeURIComponent(config.packageName)}:decodeIntegrityToken`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
-          body: JSON.stringify({ integrity_token: integrityToken }),
-          signal: AbortSignal.timeout(http.timeoutMs),
-        });
-      } catch {
-        throw new VendorUnavailableError("Play Integrity decodeIntegrityToken did not complete");
-      }
+      const res = await post(decodeUrl, "Play Integrity decodeIntegrityToken", { authorization: `Bearer ${bearer}`, "content-type": "application/json" }, JSON.stringify({ integrity_token: integrityToken }));
       const text = await res.text().catch(() => "");
       if (res.status === 400) throw new VendorRejectedError("Play Integrity could not decode the token");
       if (res.status === 401) {
