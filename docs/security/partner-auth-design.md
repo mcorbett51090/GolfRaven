@@ -4686,7 +4686,38 @@ Numbering: **migration n/a (Edge shared code + portal), matrix n/a (vitest), thi
 
 ### 115.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `35866d8` / #155). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `35866d8` / #155). Squash-merged as `580bd7e` (#156).
 
 - vitest: `partner-resolve-statuses` + `partner-review-handler` 24/24, `apps/partners` `messages` 47/47; the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exits 0.
 - **Mutation proof** — dropping the status from the shared list (3 cells red), dropping the handler case (2), dropping the portal mapping (1) and corrupting the 0061 status literal (3) each fail; all files restored byte-identical (sha256).
+
+## 116. As built: Edge -> portal error contract (`cold_start_cap`, credential-add 409)
+
+Numbering: **migration n/a (Edge shared code + portal), matrix n/a (vitest), this section 116.** The third finding of the code-first re-scout (§114, §115): two places where the Edge and the portal each had unit tests that agreed with themselves while disagreeing with each other. No migration; no UI flag flips; no CAMERA / OCR.
+
+- **Cold-start cap.** The portal explains the cap on the code `cold_start_cap` (`attest.coldStart`, `handover.coldStart`, `offerRedeem.coldStart`; design 26.1 "429 `cold_start_cap`", 28.2), but the Edge answered every cap through the one `rateLimited()` helper, whose code is always `rate_limited`. The explanation could never be shown, and staff were told to try again in 3600 s for a rolling 24 hour cap.
+- **Adding a passkey.** The 409 refusals of `registrationRefusal` (`credential_exists`, `credential_in_use`, `already_registered`, `other_membership`) fell into the `credentials` context's `kind === "conflict"` fallback and read "That passkey was already revoked." That fallback exists for revoke (whose 409 the server names `already_revoked`).
+
+### 116.1 What was built
+
+- **`coldStartCapped(decision)`** in `partner/handler-kit.ts` — still a `429` with the same `Retry-After` (3600) as every other cap, with its own `code`; the attest, entitlements (hand-over redeem) and offers-redeem handlers use it for `cold_start_cap`. The generic caps (`rate_limited`) are unchanged. The three handler tests' third column changed from `rate_limited` to `cold_start_cap`.
+- **Portal** — in the `credentials` context the four add refusals map to the existing `enrol.conflict` ("A passkey cannot be added in the current state. Ask a manager for help." — no new copy, EN and fr-CA already there), ahead of the generic conflict; `too_many` and a real revoke conflict are unchanged.
+- **Contract test** — `supabase/tests/unit/partner-edge-pwa-error-contract.test.ts` runs the Edge's own `Response`s through the same three steps as the portal's client (`error.code`, `kindForStatus`, `Retry-After` only on a 429) and then the portal's real `messageForError`, in all three cold-start contexts and for every add refusal; the generic cap is asserted to stay the generic wait, and an `already_revoked` conflict to stay "already revoked".
+
+### 116.2 Decisions and departures
+
+- **The Edge moved, not the portal.** The design table and the portal were written to the same contract (`cold_start_cap`); the Edge helper was the odd one out. The portal is the only client of the partner lane (`apps/mobile`'s recorded contract covers the player lane and its drift check still passes), so changing a code on the wire has no other consumer.
+- **A real flow, not two copies of a literal.** The earlier shape (each side pins the string independently) is what let them diverge; the contract test makes one Edge response drive the portal mapper.
+- **No new strings** — reusing `enrol.conflict` keeps the catalogue (and its pending native fr-CA review, §20.9) unchanged.
+
+### 116.3 Not built, honestly
+
+- **Self-attest.** The portal keys on `self_attestation_refused`, which the Edge never emits: the database raises a generic `22023` for it, so the Edge can only answer `422 invalid_request` and the portal falls back to "the code was not accepted". Fixing it means the database distinguishing the case (a returned status from `partner_attest_write`, i.e. a new migration `0108+`); not done here. The key is not removed, because it is the portal's half of that future contract.
+- A generic inventory of every code the portal keys on against every code the Edge can emit; the contract test covers the two known flows only. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 116.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `580bd7e` / #156). Squash SHA recorded after merge.
+
+- vitest: contract test + the three updated handler suites 126/126; full server unit suite 1865/1865; `apps/partners` unit 1172/1172; the mobile edge-contract drift check passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exits 0.
+- **Mutation proof** — `coldStartCapped` emitting `rate_limited` (8 cells red), a wrong `Retry-After` (4), the attest handler bypassing the helper (2), the offers-redeem handler bypassing it (1), the portal dropping `credential_in_use` (1) and dropping the add-refusal mapping (1) each fail; all files restored byte-identical (sha256).

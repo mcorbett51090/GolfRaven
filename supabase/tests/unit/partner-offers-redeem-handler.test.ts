@@ -221,7 +221,7 @@ describe("partner-offers-redeem handler", () => {
       ["budget_short", 422, "budget_short"],
       ["name_unconfirmed", 422, "name_unconfirmed"],
       ["verification_failed", 422, "verification_failed"],
-      ["cold_start_cap", 429, "rate_limited"],
+      ["cold_start_cap", 429, "cold_start_cap"],
       ["rate_limited", 429, "rate_limited"],
     ];
     for (const [status, http, code] of cases) {
