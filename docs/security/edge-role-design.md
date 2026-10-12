@@ -371,7 +371,7 @@ PR3 did the delegate flow and the importer repo as edge_system (section 13). PR4
 - **One-way columns (PR1b):** a consume of an already-consumed `checkin_token` and an `attest_counter` decrease are
   `23514`. The verifier's `WHERE attest_counter < $new` and the consume's `WHERE consumed_at IS NULL` already avoid
   both; a retry that re-sets the same value on a consumed token now fails loudly instead of being a no-op.
-- **App Attest key re-registration (not built yet) needs a definer.** `device.attest_key_id` / `attest_public_key` are not in
+- **App Attest key re-registration needs a definer (BUILT in 0034: `register_attest_key_for_actor`, described above).** This was the PR1b-era statement of the need; it is kept as written. `device.attest_key_id` / `attest_public_key` are not in
   edge_actor's UPDATE grant, and the monotonic trigger (0032 M2) refuses an `attest_counter` reset, so registering a NEW key for a
   device (which restarts its counter) must be a purpose-built definer that does both, in one place, for the bound actor's own device.
 - **Own-device references (PR1b):** inserting `checkin_challenge`, `checkin_token`, `evidence` or `push_token`

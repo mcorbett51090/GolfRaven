@@ -4744,7 +4744,57 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 117.** The auth-al
 
 ### 117.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash-merged as `4e54da1` (#158), together with the sign-out e2e fix recorded in §117.1.
 
 - vitest: 5/5 on the real tree (23 kinds in `0107`, EN and fr-CA); full server unit suite green.
 - **Mutation proof** — a missing EN label, a missing fr-CA label, a stale label, a kind dropped from the shape CHECK (in a copy of `0107`) and a new kind with no label each fail (1, 1, 1, 1 and 3 cells red); all files restored byte-identical (sha256).
+
+## 118. As built: three stale statements corrected (lock, partners README, App Attest re-registration)
+
+Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-scout (§114 on) kept finding places where the *prose* had fallen behind the code, because this log is append-only and later sections close earlier items without editing them. Three were worth fixing in place, because a reader acts on them: one is a comment in security code, one tells a reader that shipped screens do not exist, one contradicts the paragraph above it. Comment and documentation only; no behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 118.1 What was corrected
+
+- **`supabase/functions/_shared/partner/session-handler.ts` (header comment).** `POST lock` was described as "clears every step-up grant now (the session stays live)". Since 0085 (§72) it **revokes** the presented session (`revoke_reason = 'lock'`) and the portal wipes its token (§73), so a locked page must sign in again. Verified against the `lock` case (`s.lock()`), the migration and §73 before the edit.
+- **`apps/partners/README.md`.** Hand-over, stock, offer redeem, the manager / operator / admin screens, settlement export and the camera scan of check-in tokens were listed under "Not built" / "paste-only"; all are built (§29, §31, §33, §34, §36, §39). The camera row was the one to be careful with: §39 already built the partners staff-app scan (`BarcodeDetector` into the existing paste field, paste as the fallback), so the correction records what exists and builds nothing.
+- **`docs/security/edge-role-design.md`.** "App Attest key re-registration (not built yet) needs a definer" contradicted the paragraph above it describing 0034's `register_attest_key_for_actor`. Marked built, with the original sentence kept.
+
+### 118.2 Decisions and departures
+
+- **In place, with the original kept where it was a statement of need.** The App Attest bullet keeps its PR1b-era text and says it was built; the README and the comment are rewritten because nothing else in the log depends on their old wording.
+- **Left alone on purpose:** §21.4's "Not built here" for PA-29 (built in 0054, pinned by matrix 32) and the other closed seams in the append-only sections; those are history, and each is closed by a later section that names it.
+
+### 118.3 Not built, honestly
+
+- A check that would catch this class of drift mechanically; prose has no gate. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 118.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
+
+- `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
+
+## 119. As built: the migrations-immutable self-test no longer loses a SIGPIPE race
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 119.** Found when this PR's own first CI run failed: the `player-plane DB` job died in 20 ms at its first step, `tools/db/check-migrations-immutable.sh --self-test`, with **exit 141** (128 + SIGPIPE), on a documentation-only diff the self-test does not even read. It had passed on the four PRs before. Not a flake to re-run away: a defect in the script. CI-script hardening only; no behaviour change to the product; no UI flag flips; no CAMERA / OCR.
+
+### 119.1 Root cause and fix
+
+- **Cause.** `self_test()` picked a sample migration with `git ls-tree -r --name-only … | head -n1` under `set -euo pipefail`. `head -n1` quits after one line; `git ls-tree`'s listing (5.5 KB, 107 files — more than git's 4 KB stdout buffer, so it needs a second `write`) can still be writing, takes SIGPIPE, exits 141, and `pipefail` makes that the pipeline's status, so `set -e` aborts the script. Whether it does depends on a race between two processes.
+- **Measured, not assumed.** The exact pipeline exits 141 in **31 of 3000** runs (~1%); the whole `--self-test` fails **14 of 600** (~2.3%) on the original script and **0 of 400** after the fix. The replacement, `sed -n '1p'`, reads all of its input, so the writer never takes the signal (0 of 3000 for the pipeline).
+- **Pin.** `supabase/tests/unit/ci-script-sigpipe.test.ts` shows the mechanism deterministically (a producer still writing after the reader has quit: `head -n1` → 141, `sed -n 1p` → 0, no timing luck needed; and that an `if … | grep -q` reads a *match* as no match), then pins the script (the sample pick uses `sed -n '1p'`, and the script has no `| head` at all). Restoring the original line fails exactly the script pin.
+
+### 119.2 Decisions and departures
+
+- **Fix the script, don't retry it.** A retry would hide a 1-in-40 failure on every PR; the cause is two characters.
+- **The same class has a worse instance, recorded for the next section rather than fixed here:** the H2 gate in `tools/db/test.sh` (`grep -v '^\s*--' "$f" | grep -q 'migration_owner'`) *fails open*: for a violation near the top of a file larger than the pipe buffer (7 migrations are) it detected **0 of 1500** runs, and the corrected form 1500 of 1500. A scan of all 107 migrations with the corrected check finds no violation, so nothing has been missed so far.
+
+### 119.3 Not built, honestly
+
+- The H2 gate fix (§120, own PR). The fallback `echo "$OUTPUT" | grep -qE …` in `test.sh` (only reached without `pg_prove`, which CI installs). A general lint for early-exit readers under `pipefail`: the many `echo "$small" | grep -q` sites are not at risk, and a blanket ban would flag them.
+
+### 119.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158, with §118 in the same PR). Squash SHA recorded after merge.
+
+- vitest: `ci-script-sigpipe` 5/5; the real `--self-test` passes; full server unit suite green. Mutation: restoring `head -n1` fails the script pin; script restored byte-identical (sha256).
