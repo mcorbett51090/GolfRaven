@@ -5557,6 +5557,66 @@ Why it matters, in the order of how sure I am: **(observation)** `partner_offer_
 
 ### 137.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eb89f39 / #177`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eb89f39 / #177`). Merged as `@@SHA178@@` (#178).
 
 - Per-file runs: matrix 87 24/24 and the integration file 3/3 in `superuser` and `restricted` (the integration file); the full harness as above; the unit suite 103 files / 1925 tests (unchanged: the SQL call-text pins and the account-label pin pass over the new migration and the new file); `check-migrations-immutable.sh` OK (107 files byte-identical to the base). Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 138. Observed, not fixed: an operator can give itself reach to any facility (the programme rows are both the operator's to write and the definition of its reach)
+
+Numbering: **migration n/a, matrix n/a, this section 138. Documentation only; no code changed.** Found by asking what the neighbours of §137's two definers trust. **This is the most serious finding of this P5 keep-going stretch**, and I have deliberately not fixed it, because the fix is a decision about what "a facility of the trail" means; that decision is the owner's. Everything below marked _observed_ was run on the real database; everything marked _read_ is from the code and was not run.
+
+### 138.1 What is wrong
+
+- **_Read_ (`0007_private_helpers.sql:75-105`, E6):** `private.has_facility_scope(uid, facility, roles)` lets an **operator** reach a facility when `app.facility_programme` holds **any** row `(trail, facility)` for a trail the operator is scoped to (no filter on `participation`, G3).
+- **_Read_ (`0059_partner_programme_sponsors.sql`, `partner_facility_programme_upsert_for_partner`):** the operator writes those rows, class A3, for **any** `p_facility_id`. The only checks are the argument shapes, that the trail has a `trail_programme` row, and the table's foreign key to `catalog_facility`. Nothing asks whether the facility is on the trail.
+- **_Read_ (this log):** the intended boundary is the opposite: PA-15 (§12) and §6.1 say _"operator at a facility not on its trail: 403"_; the S2a as-built section (item 10) says the scan consults the programme, never the roster, and that _"keeping the two in step is the programme editor's job (S6)"_. The editor does not keep them in step; it keeps nothing.
+- **_Observed_ (a probe on matrix 37's fixture: an operator of `trl_t` bound to a real session at aal 2 with a fresh passkey assertion; a facility `fac_z` that no roster of any trail names; a facility organisation at `fac_z`):**
+
+  | step                                                                  | result                                                                         |
+  | --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+  | rows of any roster naming a course of `fac_z`                          | 0                                                                              |
+  | `has_facility_scope(operator, 'fac_z', {operator})`                    | `false`                                                                        |
+  | the operator invites a **manager** / **staff** at the organisation of `fac_z` | 42501 "the grant is not a subset of the inviter reach", both                  |
+  | the operator calls `partner_facility_programme_upsert_for_partner('trl_t', 'fac_z', 'accepted', ...)` | **`ok`**                                                       |
+  | `has_facility_scope(operator, 'fac_z', {operator})`                    | **`true`**                                                                     |
+  | the operator invites a **manager** / **staff** at the organisation of `fac_z` | **`ok`, `ok`**: two invites exist at `fac_z`                                  |
+
+- **_Read_, not run:** the same reach is what the other facility-scoped operator actions test: the reach rule for another person's credentials, PIN reset and recovery (`0054` §6.5), the member list (`0090`), and the operator policies on the programme's PIN epoch and on the printed QR (`0055`). So the escalation is not only "invite": an operator could also reset the PIN of, revoke the passkeys of, and (with the member's own mailbox) recover members of a facility that has nothing to do with its trail, and rotate that facility's PIN. Only the invites were exercised.
+
+### 138.2 Who can do it, what would show it, how bad
+
+- **Who:** an _operator_ account (a passkey and a TOTP, class A3 for the programme write, A2 for an invite). Not staff, not a manager, not a player. That is a trusted but **scoped** role, and the scope is precisely what is bypassed.
+- **What would show it:** the invite raises an `invite_create` alarm (0101) and every programme write is audited (`partner.facility_programme_upsert`); the programme write itself raises **no** alarm `[read: the definer has no alarm insert]`.
+- **How bad:** high _within the partner model_ (one tenant acting on another's facility, including by inviting its own mailbox as a manager there), contained today by the fact that nothing is deployed and by the alarm on invites. I have not rated it by exploit chains beyond the invite.
+
+### 138.3 Options, and what each costs (the decision is not mine)
+
+| Option                                                                                                              | What it touches                                                                                                                                                                       | Cost / risk                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A. The programme editor refuses a facility that is not on the trail's current roster** (22023, as in §137)         | `partner_facility_programme_upsert_for_partner` only; the roster test is "a current member (`removed_on IS NULL`, latest `roster_version`) naming the facility, or a course / hole / `any_of_course_ids` of it" | Smallest, and implements what the S2a as-built section (item 10) already says the editor is for. Needs the roster to exist before the programme, and `removed_on` maintained by the importer `[unverified: the importer is out of scope of 0002]`. Every test that gives a trail of its own programme rows through this definer (the §133 programme test does, with trails that have no roster) would need roster rows in its fixture. |
+| **B. The operator reach leg also requires the facility to be on the roster**                                          | `has_facility_scope` (shared by every facility-scoped policy and definer)                                                                                                              | Fixes the root for every consumer at once, but the blast radius is the widest in the schema and every matrix that seeds programme rows without a roster changes.         |
+| **C. Only an admin creates a programme row; an operator edits existing ones**                                         | the same definer plus an Edge screen                                                                                                                                                   | Changes who onboards facilities (a workflow decision).                                                                                                                   |
+| **D. The facility consents (`participation` is set by the facility's own manager, and only `accepted` gives reach)** | a new facility-side route, `has_facility_scope`, the G3 filter                                                                                                                         | The most faithful to "participates", and the most work; also settles G3.                                                                                                 |
+
+My recommendation is **A**, with the G3 filter (`declined` / `left` give no reach) as a separate one-line change; but A fixes the _write_, and a row written before the fix stays a grant, so whoever ships it should also list the existing rows whose facility is not on the roster (`[unverified]` that any exist: nothing is deployed).
+
+### 138.4 Reproduction
+
+On matrix 37's setup and helpers (its principals, `seed_step`, `mk_cred`, `mk_session`; `seed_step` gains `reauth_until` for the A2 invite), as the owner, in a rolled-back transaction:
+
+```sql
+INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES ('fac_z', 'facility', 'verified', 1);
+INSERT INTO app.catalog_facility (id, slug, name, region, tz, catalog_version) VALUES ('fac_z', 'facility-z', 'Facility Z', 'US-TN', 'America/Chicago', 1);
+INSERT INTO app.partner_org (id, kind, name) VALUES ('10000000-0000-0000-0000-00000000007a', 'facility', 'Facility Z Pro Shop');
+INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('10000000-0000-0000-0000-00000000007a', 'fac_z');
+-- bind the operator (c1) at aal 2 with mfa_until and reauth_until live, then, as edge_partner:
+SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-00000000007a', 'manager', 'a@example.test', repeat('ab', 32)); -- 42501
+SELECT * FROM private.partner_facility_programme_upsert_for_partner('trl_t', 'fac_z', 'accepted', true, false, 'ok', true, NULL, 'rotating');   -- ok
+SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-00000000007a', 'manager', 'a@example.test', repeat('ab', 32)); -- ok
+```
+
+(The role is passed as an unknown-typed literal: `edge_partner` has no USAGE on schema `app`, so a `::app.partner_role` cast in the caller is 42501, §129. My first run of this probe made exactly that slip.)
+
+### 138.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `@@SHA178@@ / #178`). Squash SHA recorded after merge. No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
