@@ -4821,15 +4821,42 @@ Numbering: **migration n/a, matrix n/a (vitest + a shell self-test), this sectio
 
 ### 120.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash-merged as `cb5230c` (#160).
 
 - `ci-h2-gate` 6/6; the real `test.sh` runs the self-test and the scan before the cluster is created and the full harness (pgTAP 106 files / 6294 tests, then the Deno suite) passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
 
-## 121. As built: partner TOTP consecutive-failure ceiling (hard lock at 20)
+## 121. As built: the service-role lint refuses a root it cannot lint instead of reporting `clean`
 
-Numbering: **migration `0108`, matrix `86`, this section 121** (§114 to §117 landed on `main` while this was built; none added a migration, so `0108` and matrix `86` stayed free). Closes a finding raised by the S1.4 gate on a separate, superseded build of the TOTP slice and re-verified here against `main`: **the partner (staff) TOTP had no ceiling on consecutive failures.** `partner_totp_attempt` (0053, never redefined) reset `failed_count` to 0 at every 15-minute lock, so a person holding a valid aal 1 session (a coworker at a shared iPad whose passkey session is open) could loop `POST step-up/totp` for ever: **5 guesses per 15 minutes = 20 an hour = 480 a day**, with no consecutive-failure ceiling and no Edge-side limit on the route. Each guess is checked against three codes (the plus or minus 1 step window), about 3 chances in 10^6, so roughly **0.14% a day and about 40% a year against one targeted person**. A success gives `aal` 2 and `mfa_until` (class A3), which also stands in for the PIN of a PIN-less operator or admin (6.3). The PIN already had the ceiling (20 failures in a day lock it, S1.3 / 0052). Reproduced on the unfixed 0107 schema before the fix: 40 consecutive wrong codes, every lock waited out, then the **correct** code answered `ok|0|true` (the session is raised); after 0108 the 20th failure hard-locks and the same correct code is refused.
+Numbering: **migration n/a, matrix n/a (vitest), this section 121.** The same family as §119–§120 — a gate that can pass over nothing — in the secrets lint. `tools/service-role-lint` (build plan §4.7.1a: service-role client construction and privileged calls are confined to `withOwnership()`) reports `clean` whenever it finds nothing, and a run over a path that does not exist, is not a directory or holds no files finds nothing. CI-tooling hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
 
-### 121.1 What was built
+### 121.1 Root cause
+
+- **`clean` meant "found nothing", not "looked at something".** The CLI refused a path with no `.git` ancestor (`deriveRepoRoot`), but a path _inside_ the repo that was wrong — `supabase/functionz`, a functions directory that moved, an empty checkout — walked zero files and printed `service-role-lint: clean (<root>)`, exit 0.
+- **Not reachable today.** `tools/db/test.sh` passes the computed absolute path of the real `supabase/functions` tree, which holds 171 files, so nothing was hit. The hole is the day that directory is renamed or relocated: the gate would stay green while linting nothing.
+
+### 121.2 What was built
+
+- **`checkLintRoot(root)`** (`tools/service-role-lint/src/index.ts`) — `{ ok:false, reason }` when the root does not exist, is not a directory, or has no file anywhere under it (a tree of empty directories included); otherwise `{ ok:true, fileCount }`.
+- **`cli.ts`** calls it before linting and exits **2** (distinct from a finding's exit 1) with `service-role-lint: refusing to lint <root>: <reason>`. A clean run now says how many files it covered: `service-role-lint: clean (supabase/functions, 171 file(s))`. `lintDirectory` itself is unchanged — its own tests lint small synthetic trees.
+- **`tools/service-role-lint/test/lint-root.test.ts`** (9 cells) — the function across missing / file / empty / nested-empty / populated / the real tree (so the guard cannot lock the gate out of its own subject); the built CLI end to end (a typo'd in-repo path and an empty directory exit 2 with the reason, the real tree exits 0 with a file count; fails loudly with the build command if `dist/cli.js` is absent — CI builds before it tests); and a pin that the root is checked before it is linted.
+- **Mutation proof** — accepting an empty directory, accepting a missing root, and removing the CLI check each fail the cells that cover them; all files restored byte-identical (sha256).
+
+### 121.3 Not built, honestly
+
+- The lint still trusts what is _in_ the tree: a file moved out of `supabase/functions` is simply not linted, which is the gate's contract (the path is the scope), not a hole this closes. A minimum file count was not added — any threshold would be a number to maintain, and "holds at least one file" is the claim a pass-over-nothing violates.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 121.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `cb5230c` / #160). Squash SHA recorded after merge.
+
+- `lint-root` 9/9; the lint package suite 436/436 and typecheck clean; the real tree reports `clean (supabase/functions, 171 file(s))`; manual probes — typo'd in-repo path, empty directory and a file path each exit 2, the real tree exits 0. Full server unit suite and the CI frozen-lockfile `deno check` (exit measured directly) green.
+
+## 122. As built: partner TOTP consecutive-failure ceiling (hard lock at 20)
+
+Numbering: **migration `0108`, matrix `86`, this section 122** (§114 to §117 landed on `main` while this was built; none added a migration, so `0108` and matrix `86` stayed free). Closes a finding raised by the S1.4 gate on a separate, superseded build of the TOTP slice and re-verified here against `main`: **the partner (staff) TOTP had no ceiling on consecutive failures.** `partner_totp_attempt` (0053, never redefined) reset `failed_count` to 0 at every 15-minute lock, so a person holding a valid aal 1 session (a coworker at a shared iPad whose passkey session is open) could loop `POST step-up/totp` for ever: **5 guesses per 15 minutes = 20 an hour = 480 a day**, with no consecutive-failure ceiling and no Edge-side limit on the route. Each guess is checked against three codes (the plus or minus 1 step window), about 3 chances in 10^6, so roughly **0.14% a day and about 40% a year against one targeted person**. A success gives `aal` 2 and `mfa_until` (class A3), which also stands in for the PIN of a PIN-less operator or admin (6.3). The PIN already had the ceiling (20 failures in a day lock it, S1.3 / 0052). Reproduced on the unfixed 0107 schema before the fix: 40 consecutive wrong codes, every lock waited out, then the **correct** code answered `ok|0|true` (the session is raised); after 0108 the 20th failure hard-locks and the same correct code is refused.
+
+### 122.1 What was built
 
 - **Columns** — `app.partner_totp.consecutive_failed integer NOT NULL DEFAULT 0` and `hard_locked_at timestamptz`, with two CHECKs: `consecutive_failed BETWEEN 0 AND 20` and `(hard_locked_at IS NOT NULL) = (consecutive_failed = 20)` (the two move together). **No grant moved:** `partner_totp_verifier` already holds table-level SELECT / INSERT / UPDATE and is the table's only writer (`private.partner_owner_privilege` is unchanged), so the new columns inherit exactly that; the migration asserts that no other role (`private_definer`, `edge_partner`, `service_role`, ...) can reach them.
 - **`private.partner_totp_attempt`** (`CREATE OR REPLACE`, same owner / ACL / `search_path` / VOLATILE) — a hard-locked row is refused **first**, before any code is compared; wrong codes add to `consecutive_failed` (the 5th, 10th and 15th still lock for 15 minutes exactly as before, and the lock no longer erases the count); the **20th** sets `hard_locked_at` (and the same 15-minute lock) and returns the internal status `hard_lock_set`; a success clears `consecutive_failed`. The plus or minus 1 window, the replay rule, the HMAC compare, the compare-and-set on `last_step`, the `FOR UPDATE` row lock and "failures during a lock are not counted" are untouched.
@@ -4855,20 +4882,20 @@ ID -> fix -> test:
 | F10 | the redefinition changes nothing else | catalogue-equality self-check | live-drift and text-drift runs below (the migration aborts) |
 | F11 | no grant widened | none added | 86 A (no other role reaches the columns; verifier still S / I / U only; ACLs and comments of the five functions) |
 
-### 121.2 Decisions and defaults
+### 122.2 Decisions and defaults
 
 - **20 consecutive, cleared only by a success, an admin reset or a re-enrol.** The PIN's day counter is 20 as well. The count is per person, across all of the person's sessions.
 - **Hard lock until an admin reset, no timeout.** Time never clears it (a timeout would restore a slower version of the bug). The way out is the existing A3 `members/{id}/totp-reset` (an admin for an operator, another admin for an admin) — no new route. After the reset the person re-enrols under an email proof as before; the pgTAP cell runs that whole path.
 - **The 20th failure is also the 5th of its group** (for a row whose `failed_count` and `consecutive_failed` started together; a row carried over from before 0108 with `failed_count > 0` can differ, which is harmless because the hard check runs first), so the ordinary 15-minute lock still applies to it; "5 wrong -> 15 minutes" is exactly as it was for every group.
 - **HTTP mapping: 403 `totp_hard_locked`, no `Retry-After`.** The alternative the brief offered — reuse `locked` with a large `retry_after` — needs no Edge change but is wrong: the Edge answers `locked` with `Retry-After` and the PWA turns that into "try again in N s", for a lock that nothing time-based will clear (and the handler clamps the header to at least 1). The PIN lock already maps its permanent lock to a bare 403 `pin_locked` with no header; this follows it. Cost: one status in three Edge places and one PWA message.
-- **An internal status carries "newly set".** `partner_totp_attempt` cannot gain an OUT column under `CREATE OR REPLACE` (a different row type needs `DROP` and `CREATE`, which would lose its owner and ACL), so the transition is the status `hard_lock_set` and every later attempt is `hard_locked`. The wrapper translates `hard_lock_set` to `hard_locked`, so the Edge never sees it; if it ever did, `privileged.ts` would throw "returned no usable status" inside the transaction, which rolls the whole attempt back. **That is not fail closed for the counter:** the failure that was just counted vanishes with the rollback, so a status the deployed Edge does not know would let an attacker guess without being counted (see "Deploy order" in 121.3). The existing soft-lock alarm uses `retry_after = 900` as its "newly" marker and so can fire on an already-locked attempt in the first second; the hard lock does not inherit that.
+- **An internal status carries "newly set".** `partner_totp_attempt` cannot gain an OUT column under `CREATE OR REPLACE` (a different row type needs `DROP` and `CREATE`, which would lose its owner and ACL), so the transition is the status `hard_lock_set` and every later attempt is `hard_locked`. The wrapper translates `hard_lock_set` to `hard_locked`, so the Edge never sees it; if it ever did, `privileged.ts` would throw "returned no usable status" inside the transaction, which rolls the whole attempt back. **That is not fail closed for the counter:** the failure that was just counted vanishes with the rollback, so a status the deployed Edge does not know would let an attacker guess without being counted (see "Deploy order" in 122.3). The existing soft-lock alarm uses `retry_after = 900` as its "newly" marker and so can fire on an already-locked attempt in the first second; the hard lock does not inherit that.
 - **A distinct alarm kind, not `totp_locked` with a flag.** An operator needs to see that an admin reset is required, and the 5th / 10th / 15th soft locks must not be confused with it. The 20th failure raises `totp_hard_locked` only (no `totp_locked` for the same event).
-- **Refusals on a hard-locked row write nothing.** A loop of guesses cannot grow `audit_log`. (The existing soft-lock path still audits every refused attempt during a lock; that is unchanged and noted in 121.3.)
+- **Refusals on a hard-locked row write nothing.** A loop of guesses cannot grow `audit_log`. (The existing soft-lock path still audits every refused attempt during a lock; that is unchanged and noted in 122.3.)
 - **Confirm failures are not counted toward the hard lock.** A confirm code is checked against a seed only the enrolling session was shown, so guessing it gains nothing, and a typo during enrolment must not need an admin. Confirm failures keep the 5-in-15-minutes soft lock. Pinned: 20 wrong confirm codes lock softly at 5 / 10 / 15 / 20 and never hard-lock.
 - **No session revocation at the hard lock.** An aal 1 operator session can reach nothing but step-up (PA-20), which is exactly what is refused; revoking would evict the legitimate user as well.
 - **CHECK on the range** (`0..20`) as defence in depth: a code path that forgot the early refusal would raise `23514` instead of counting past 20.
 
-### 121.3 Departures and honest limits
+### 122.3 Departures and honest limits
 
 - **A lock lever, and the sole-admin case (gate ruling: accepted, admins are NOT exempt).** The same ceiling that stops guessing lets an attacker with a live aal 1 session **hard-lock the victim's TOTP in 20 tries**, which is a denial and nothing more; the precondition (a live aal 1 session) is the same as for the PIN lock lever (R-P5). Exempting admins from the hard lock would restore the unbounded-guessing exposure (about 40% a year against a targeted person) on exactly the highest-value accounts, so **no exemption and no break-glass reset is built.**
   - **Operating rule: production keeps at least two admins.** For an operator or an admin who is not alone, another admin runs the A3 `members/{id}/totp-reset`.
@@ -4881,7 +4908,7 @@ ID -> fix -> test:
 - **The drift self-check is a post-check (gate L3).** The pre-check only matches the listed edit fragments, so drift outside a fragment is caught only by the post-check, which runs **after** the `CREATE OR REPLACE` statements. The header's "aborts instead of silently reverting" therefore holds only under a **transactional runner** (one transaction per migration file). The gate reproduced the other case: a comment injected into the live `partner_totp_verify_for_partner` on a 0107 database, then 0108 applied with `psql -f` (the harness mode), aborted correctly at the final assertion but only after the drifted function had already been overwritten, and the inventory and allow-list updates had not run. No role-membership or schema residue was left. Remedy if it ever happens: restore the function from the previous migration's definition and re-run. A pre-DDL md5 pin of each expected pre-image would remove the caveat and is a possible follow-up, not built here.
 - **Two NITs, not changed:** an admin reset can deadlock with the victim's step-up (0053's verify locks the session row then the TOTP row; the reset locks the TOTP row then revokes sessions); either outcome is safe, and in the forced interleaving the reset won. A widened alarm INSERT policy is caught only by the `definer_policy_exprs.txt` fixture compare, not by a behavioural cell.
 
-### 121.4 Verification
+### 122.4 Verification
 
 Branch: `totp-hardlock` (created from `a364aa8`; `main` merged three times with a plain merge, at `580bd7e`, `17490a4` and `4e54da1`; none added a migration or a fixture row, so nothing was hand-merged and `0108` / matrix `86` stayed free).
 
