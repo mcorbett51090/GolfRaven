@@ -38,7 +38,7 @@
 #      row lock (`FOR UPDATE` in private.partner_pin_attempt) every call reads the same count and evaluates, so both cases fail.
 #   9. SAME-SESSION CONCURRENCY (S1.3 gate LOW-1): eight parallel CORRECT verifies on ONE freshly-seen session all answer ok and none deadlocks. Under class A0 each call took the session row FOR SHARE and then
 #      UPDATEd it (the grant): two FOR SHARE holders that both upgrade deadlock. Class A0_WRITE takes FOR NO KEY UPDATE up front, so the calls queue. 9b: four overlapping session locks (class SESSION); since 0085 lock revokes, expect one ok and three not-live, zero deadlocks.
-#  10. THE PARTNER TOTP HARD LOCK UNDER CONCURRENCY (0108, §116): real concurrent step-ups of ONE person, spread over four of that person's sessions (so the serialiser is the TOTP row's FOR UPDATE, not the session
+#  10. THE PARTNER TOTP HARD LOCK UNDER CONCURRENCY (0108, §117): real concurrent step-ups of ONE person, spread over four of that person's sessions (so the serialiser is the TOTP row's FOR UPDATE, not the session
 #      row). 10a: twelve parallel WRONG codes on a fresh row evaluate exactly five (four wrong, the 5th starts the 15-minute lock) and are refused uncounted after it: the consecutive count ends at exactly 5.
 #      10b: eight parallel wrong codes at 17 consecutive failures count exactly three (wrong, wrong, then the 20th hard-locks) and the other five are refused uncounted: the count ends at exactly 20, the hard
 #      lock is set ONCE (ONE partner.totp.hard_locked audit row, ONE totp_hard_locked alarm). 10c: five parallel CORRECT codes on the hard-locked row are all refused and none is evaluated. Without the
@@ -727,7 +727,7 @@ if [ "$FAILED" -eq 0 ]; then echo "PASS: 3 rounds of 4 overlapping session locks
 
 
 # ---------------------------------------------------------------------------
-# 10. THE PARTNER TOTP HARD LOCK UNDER CONCURRENCY (0108, §116)
+# 10. THE PARTNER TOTP HARD LOCK UNDER CONCURRENCY (0108, §117)
 # ---------------------------------------------------------------------------
 # One person (an admin: no membership needed), four live sessions of theirs, one confirmed TOTP row. The calls are spread over the four sessions so they do NOT queue on a session row: what serialises them is
 # the TOTP row's FOR UPDATE in private.partner_totp_attempt. The correct code is computed here from the Vault key by an independent HMAC (RFC 4226), not by the function under test.

@@ -1,6 +1,6 @@
 // supabase/tests/integration/partner-totp.deno.test.ts
 //
-// 0108 (docs/security/partner-auth-design.md §116): the partner TOTP's ceiling on CONSECUTIVE failures, through the REAL `partner-session` handler and the REAL privileged.ts (`withPartnerSession`), with REAL
+// 0108 (docs/security/partner-auth-design.md §117): the partner TOTP's ceiling on CONSECUTIVE failures, through the REAL `partner-session` handler and the REAL privileged.ts (`withPartnerSession`), with REAL
 // sessions minted by the REAL mint from the software authenticator's REAL assertions, against the REAL database tools/db/test.sh builds (connected as the provisioned `edge_gateway` login, as `edge_partner`
 // through SET LOCAL ROLE). The pgTAP file (86_partner_totp_hard_lock.sql) proves the database half inside one rolled-back transaction; what only this file can show is the half in between:
 //   * privileged.ts accepts the status `hard_locked` (its allow-list of TOTP statuses would otherwise turn it into a 500 "returned no usable status"),
@@ -157,7 +157,7 @@ async function failRun(p: Person, n: number): Promise<string[]> {
 const NINETEEN = Array.from({ length: 19 }, (_, i) => ((i + 1) % 5 === 0 ? "403:totp_locked:900" : "403:totp_wrong:-"));
 
 // =============================================================================================================================================================
-// 0108 (§116)
+// 0108 (§117)
 // =============================================================================================================================================================
 
 Deno.test("0108: 19 consecutive wrong codes across three 15-minute locks are counted (the lock no longer erases the count), a success clears it, 19 more are still no hard lock; the 20th answers 403 totp_hard_locked with NO Retry-After", DT, async () => {

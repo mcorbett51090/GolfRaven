@@ -9,6 +9,10 @@ import { handlePartnerSessionRequest } from "../../functions/_shared/partner/ses
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
 import { buildOtpauthUrl, encodeTotpSeed } from "../../functions/_shared/partner/totp-contract.ts";
 import { authed, bytes, makeFakes, ORIGIN, req, SESSION_TOKEN } from "./partner-fakes.ts";
+import { kindForStatus, PartnerApiError } from "../../../apps/partners/src/api/errors.ts";
+import { messageForError } from "../../../apps/partners/src/app/messages.ts";
+import { en } from "../../../apps/partners/src/i18n/messages/en.ts";
+import { frCA } from "../../../apps/partners/src/i18n/messages/fr-CA.ts";
 
 const CODE = "123456";
 const post = (path: string, body: unknown, f: ReturnType<typeof makeFakes>) => handlePartnerSessionRequest(req("POST", path, { headers: authed(), body }), f.deps);
@@ -207,6 +211,23 @@ describe("COMMIT ON EVERY STATUS: confirm and verify map statuses like PIN", () 
     // the plain 15-minute lock keeps its header: the two are different answers
     const soft = makeFakes({ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } });
     expect((await post("step-up/totp", { code: CODE }, soft)).headers.get("retry-after")).toBe("900");
+  });
+
+  it("Edge -> portal (0108): the hard-lock 403 reaches the member as 'ask an admin to reset it' with no wait, the 15-minute lock as the wait; neither reads as the other, and both strings exist in EN and fr-CA", async () => {
+    const asPortalError = async (res: Response): Promise<PartnerApiError> => {
+      const code = ((await res.json()) as { error?: { code?: string } }).error?.code ?? null;
+      return new PartnerApiError(kindForStatus(res.status, code), { status: res.status, code, retryAfterSeconds: null });
+    };
+    const hard = await asPortalError(await post("step-up/totp", { code: CODE }, makeFakes({ totpVerify: { status: "hard_locked", retryAfterSeconds: 0, mfaUntil: null } })));
+    const soft = await asPortalError(await post("step-up/totp", { code: CODE }, makeFakes({ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } })));
+    expect([hard.kind, hard.code]).toEqual(["forbidden", "totp_hard_locked"]);
+    expect([soft.kind, soft.code]).toEqual(["forbidden", "totp_locked"]);
+    expect(messageForError(hard, "totp")).toEqual({ key: "totp.hardLocked" });
+    expect(messageForError(soft, "totp")).toEqual({ key: "totp.locked" });
+    for (const key of ["totp.hardLocked", "totp.locked", "review.authAlarms.kind.totp_hard_locked"]) {
+      expect(Object.keys(en), `${key} in en`).toContain(key);
+      expect(Object.keys(frCA), `${key} in fr-CA`).toContain(key);
+    }
   });
 
   it("a dead session is the one 401; a definer refusal (42501) is 403; a database fault is a constant 500 with no detail", async () => {
