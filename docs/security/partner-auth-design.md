@@ -4744,16 +4744,92 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 117.** The auth-al
 
 ### 117.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash-merged as `4e54da1` (#158), together with the sign-out e2e fix recorded in §117.1.
 
 - vitest: 5/5 on the real tree (23 kinds in `0107`, EN and fr-CA); full server unit suite green.
 - **Mutation proof** — a missing EN label, a missing fr-CA label, a stale label, a kind dropped from the shape CHECK (in a copy of `0107`) and a new kind with no label each fail (1, 1, 1, 1 and 3 cells red); all files restored byte-identical (sha256).
 
-## 118. As built: partner TOTP consecutive-failure ceiling (hard lock at 20)
+## 118. As built: three stale statements corrected (lock, partners README, App Attest re-registration)
 
-Numbering: **migration `0108`, matrix `86`, this section 118** (§114 to §117 landed on `main` while this was built; none added a migration, so `0108` and matrix `86` stayed free). Closes a finding raised by the S1.4 gate on a separate, superseded build of the TOTP slice and re-verified here against `main`: **the partner (staff) TOTP had no ceiling on consecutive failures.** `partner_totp_attempt` (0053, never redefined) reset `failed_count` to 0 at every 15-minute lock, so a person holding a valid aal 1 session (a coworker at a shared iPad whose passkey session is open) could loop `POST step-up/totp` for ever: **5 guesses per 15 minutes = 20 an hour = 480 a day**, with no consecutive-failure ceiling and no Edge-side limit on the route. Each guess is checked against three codes (the plus or minus 1 step window), about 3 chances in 10^6, so roughly **0.14% a day and about 40% a year against one targeted person**. A success gives `aal` 2 and `mfa_until` (class A3), which also stands in for the PIN of a PIN-less operator or admin (6.3). The PIN already had the ceiling (20 failures in a day lock it, S1.3 / 0052). Reproduced on the unfixed 0107 schema before the fix: 40 consecutive wrong codes, every lock waited out, then the **correct** code answered `ok|0|true` (the session is raised); after 0108 the 20th failure hard-locks and the same correct code is refused.
+Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-scout (§114 on) kept finding places where the *prose* had fallen behind the code, because this log is append-only and later sections close earlier items without editing them. Three were worth fixing in place, because a reader acts on them: one is a comment in security code, one tells a reader that shipped screens do not exist, one contradicts the paragraph above it. Comment and documentation only; no behaviour change; no UI flag flips; no CAMERA / OCR.
 
-### 118.1 What was built
+### 118.1 What was corrected
+
+- **`supabase/functions/_shared/partner/session-handler.ts` (header comment).** `POST lock` was described as "clears every step-up grant now (the session stays live)". Since 0085 (§72) it **revokes** the presented session (`revoke_reason = 'lock'`) and the portal wipes its token (§73), so a locked page must sign in again. Verified against the `lock` case (`s.lock()`), the migration and §73 before the edit.
+- **`apps/partners/README.md`.** Hand-over, stock, offer redeem, the manager / operator / admin screens, settlement export and the camera scan of check-in tokens were listed under "Not built" / "paste-only"; all are built (§29, §31, §33, §34, §36, §39). The camera row was the one to be careful with: §39 already built the partners staff-app scan (`BarcodeDetector` into the existing paste field, paste as the fallback), so the correction records what exists and builds nothing.
+- **`docs/security/edge-role-design.md`.** "App Attest key re-registration (not built yet) needs a definer" contradicted the paragraph above it describing 0034's `register_attest_key_for_actor`. Marked built, with the original sentence kept.
+
+### 118.2 Decisions and departures
+
+- **In place, with the original kept where it was a statement of need.** The App Attest bullet keeps its PR1b-era text and says it was built; the README and the comment are rewritten because nothing else in the log depends on their old wording.
+- **Left alone on purpose:** §21.4's "Not built here" for PA-29 (built in 0054, pinned by matrix 32) and the other closed seams in the append-only sections; those are history, and each is closed by a later section that names it.
+
+### 118.3 Not built, honestly
+
+- A check that would catch this class of drift mechanically; prose has no gate. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 118.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
+
+- `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
+
+## 119. As built: the migrations-immutable self-test no longer loses a SIGPIPE race
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 119.** Found when this PR's own first CI run failed: the `player-plane DB` job died in 20 ms at its first step, `tools/db/check-migrations-immutable.sh --self-test`, with **exit 141** (128 + SIGPIPE), on a documentation-only diff the self-test does not even read. It had passed on the four PRs before. Not a flake to re-run away: a defect in the script. CI-script hardening only; no behaviour change to the product; no UI flag flips; no CAMERA / OCR.
+
+### 119.1 Root cause and fix
+
+- **Cause.** `self_test()` picked a sample migration with `git ls-tree -r --name-only … | head -n1` under `set -euo pipefail`. `head -n1` quits after one line; `git ls-tree`'s listing (5.5 KB, 107 files — more than git's 4 KB stdout buffer, so it needs a second `write`) can still be writing, takes SIGPIPE, exits 141, and `pipefail` makes that the pipeline's status, so `set -e` aborts the script. Whether it does depends on a race between two processes.
+- **Measured, not assumed.** The exact pipeline exits 141 in **31 of 3000** runs (~1%); the whole `--self-test` fails **14 of 600** (~2.3%) on the original script and **0 of 400** after the fix. The replacement, `sed -n '1p'`, reads all of its input, so the writer never takes the signal (0 of 3000 for the pipeline).
+- **Pin.** `supabase/tests/unit/ci-script-sigpipe.test.ts` shows the mechanism deterministically (a producer still writing after the reader has quit: `head -n1` → 141, `sed -n 1p` → 0, no timing luck needed; and that an `if … | grep -q` reads a *match* as no match), then pins the script (the sample pick uses `sed -n '1p'`, and the script has no `| head` at all). Restoring the original line fails exactly the script pin.
+
+### 119.2 Decisions and departures
+
+- **Fix the script, don't retry it.** A retry would hide a 1-in-40 failure on every PR; the cause is two characters.
+- **The same class has a worse instance, recorded for the next section rather than fixed here:** the H2 gate in `tools/db/test.sh` (`grep -v '^\s*--' "$f" | grep -q 'migration_owner'`) *fails open*: for a violation near the top of a file larger than the pipe buffer (7 migrations are) it detected **0 of 1500** runs, and the corrected form 1500 of 1500. A scan of all 107 migrations with the corrected check finds no violation, so nothing has been missed so far.
+
+### 119.3 Not built, honestly
+
+- The H2 gate fix (§120, own PR). The fallback `echo "$OUTPUT" | grep -qE …` in `test.sh` (only reached without `pg_prove`, which CI installs). A general lint for early-exit readers under `pipefail`: the many `echo "$small" | grep -q` sites are not at risk, and a blanket ban would flag them.
+
+### 119.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158, with §118 in the same PR). Squash-merged as `a47e6e5` (#159).
+
+- vitest: `ci-script-sigpipe` 5/5; the real `--self-test` passes; full server unit suite green. Mutation: restoring `head -n1` fails the script pin; script restored byte-identical (sha256).
+
+## 120. As built: the H2 gate (no migration names the harness-only role) no longer fails open
+
+Numbering: **migration n/a, matrix n/a (vitest + a shell self-test), this section 120.** The worse instance of the class §119 found. `tools/db/test.sh` enforces H2 — *no migration may reference the harness-only `migration_owner` role by name outside a comment; a real deploy has no such role* (0016 and 0017 both did, and failed outright on a real deploy) — with an inline loop, `grep -v '^\s*--' "$f" | grep -q 'migration_owner'`. CI-script hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 120.1 Root cause
+
+- **It failed open.** Under `set -o pipefail`, `grep -q` exits at its first match. For a file larger than the pipe buffer (64 KB — 7 of the 107 migrations are) the writer, `grep -v`, is still writing, takes SIGPIPE and exits 141; `pipefail` makes 141 the pipeline's status, so the `if` evaluates **false on a real match**. Unlike §119's flake this is not a race: on a must-fail fixture (a `migration_owner` grant on line 2 of a 670 KB file) the old form detected the violation in **0 of 1500** runs, and the corrected form in **1500 of 1500**.
+- **Nothing has been missed.** A scan of all 107 migrations with the corrected check finds no violation, so the hole has not been hiding an existing problem; it was only waiting for the first large migration with an early reference.
+
+### 120.2 What was built
+
+- **`tools/db/check-no-migration-owner-refs.sh`** — the same check (comment lines stripped first) with a second `grep` that has **no `-q`** and sends its output to `/dev/null`, so it reads all of its input and the writer never takes the signal. An empty directory is refused rather than passed vacuously.
+- **`--self-test`** — a violation near the top of a >64 KB file, one at the bottom, a small one (all must be found) and a large clean file, a comment-only mention (also indented) and an empty file (none may be). `test.sh` runs the self-test first and then the scan, so a gate that cannot fail is not trusted.
+- **`supabase/tests/unit/ci-h2-gate.test.ts`** — end to end through the real script: a >64 KB migration with an early violation exits 1 and names the file; late and small violations are found; comment-only passes; an empty directory exits 2; the self-test and the real tree pass; and static pins that `test.sh` calls the self-test then the scan and no longer carries the inline loop.
+- **Mutation proof** — the old `grep -q` form restored in the gate fails the end-to-end cell and the script's own self-test; dropping the self-test call, or bringing the inline loop back, fails the `test.sh` pins; all files restored byte-identical (sha256).
+
+### 120.3 Not built, honestly
+
+- The fallback `echo "$OUTPUT" | grep -qE '^not ok|ERROR|…'` in `test.sh` has the same shape on a large variable, but is reached only when `pg_prove` is absent (CI installs it) — left alone, and recorded. The many small `echo "$small" | grep -q` sites are not at risk. A general lint for early-exit readers under `pipefail` was not built: it would flag the safe sites. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 120.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash SHA recorded after merge.
+
+- `ci-h2-gate` 6/6; the real `test.sh` runs the self-test and the scan before the cluster is created and the full harness (pgTAP 106 files / 6294 tests, then the Deno suite) passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
+
+## 121. As built: partner TOTP consecutive-failure ceiling (hard lock at 20)
+
+Numbering: **migration `0108`, matrix `86`, this section 121** (§114 to §117 landed on `main` while this was built; none added a migration, so `0108` and matrix `86` stayed free). Closes a finding raised by the S1.4 gate on a separate, superseded build of the TOTP slice and re-verified here against `main`: **the partner (staff) TOTP had no ceiling on consecutive failures.** `partner_totp_attempt` (0053, never redefined) reset `failed_count` to 0 at every 15-minute lock, so a person holding a valid aal 1 session (a coworker at a shared iPad whose passkey session is open) could loop `POST step-up/totp` for ever: **5 guesses per 15 minutes = 20 an hour = 480 a day**, with no consecutive-failure ceiling and no Edge-side limit on the route. Each guess is checked against three codes (the plus or minus 1 step window), about 3 chances in 10^6, so roughly **0.14% a day and about 40% a year against one targeted person**. A success gives `aal` 2 and `mfa_until` (class A3), which also stands in for the PIN of a PIN-less operator or admin (6.3). The PIN already had the ceiling (20 failures in a day lock it, S1.3 / 0052). Reproduced on the unfixed 0107 schema before the fix: 40 consecutive wrong codes, every lock waited out, then the **correct** code answered `ok|0|true` (the session is raised); after 0108 the 20th failure hard-locks and the same correct code is refused.
+
+### 121.1 What was built
 
 - **Columns** — `app.partner_totp.consecutive_failed integer NOT NULL DEFAULT 0` and `hard_locked_at timestamptz`, with two CHECKs: `consecutive_failed BETWEEN 0 AND 20` and `(hard_locked_at IS NOT NULL) = (consecutive_failed = 20)` (the two move together). **No grant moved:** `partner_totp_verifier` already holds table-level SELECT / INSERT / UPDATE and is the table's only writer (`private.partner_owner_privilege` is unchanged), so the new columns inherit exactly that; the migration asserts that no other role (`private_definer`, `edge_partner`, `service_role`, ...) can reach them.
 - **`private.partner_totp_attempt`** (`CREATE OR REPLACE`, same owner / ACL / `search_path` / VOLATILE) — a hard-locked row is refused **first**, before any code is compared; wrong codes add to `consecutive_failed` (the 5th, 10th and 15th still lock for 15 minutes exactly as before, and the lock no longer erases the count); the **20th** sets `hard_locked_at` (and the same 15-minute lock) and returns the internal status `hard_lock_set`; a success clears `consecutive_failed`. The plus or minus 1 window, the replay rule, the HMAC compare, the compare-and-set on `last_step`, the `FOR UPDATE` row lock and "failures during a lock are not counted" are untouched.
@@ -4779,20 +4855,20 @@ ID -> fix -> test:
 | F10 | the redefinition changes nothing else | catalogue-equality self-check | live-drift and text-drift runs below (the migration aborts) |
 | F11 | no grant widened | none added | 86 A (no other role reaches the columns; verifier still S / I / U only; ACLs and comments of the five functions) |
 
-### 118.2 Decisions and defaults
+### 121.2 Decisions and defaults
 
 - **20 consecutive, cleared only by a success, an admin reset or a re-enrol.** The PIN's day counter is 20 as well. The count is per person, across all of the person's sessions.
 - **Hard lock until an admin reset, no timeout.** Time never clears it (a timeout would restore a slower version of the bug). The way out is the existing A3 `members/{id}/totp-reset` (an admin for an operator, another admin for an admin) — no new route. After the reset the person re-enrols under an email proof as before; the pgTAP cell runs that whole path.
 - **The 20th failure is also the 5th of its group** (for a row whose `failed_count` and `consecutive_failed` started together; a row carried over from before 0108 with `failed_count > 0` can differ, which is harmless because the hard check runs first), so the ordinary 15-minute lock still applies to it; "5 wrong -> 15 minutes" is exactly as it was for every group.
 - **HTTP mapping: 403 `totp_hard_locked`, no `Retry-After`.** The alternative the brief offered — reuse `locked` with a large `retry_after` — needs no Edge change but is wrong: the Edge answers `locked` with `Retry-After` and the PWA turns that into "try again in N s", for a lock that nothing time-based will clear (and the handler clamps the header to at least 1). The PIN lock already maps its permanent lock to a bare 403 `pin_locked` with no header; this follows it. Cost: one status in three Edge places and one PWA message.
-- **An internal status carries "newly set".** `partner_totp_attempt` cannot gain an OUT column under `CREATE OR REPLACE` (a different row type needs `DROP` and `CREATE`, which would lose its owner and ACL), so the transition is the status `hard_lock_set` and every later attempt is `hard_locked`. The wrapper translates `hard_lock_set` to `hard_locked`, so the Edge never sees it; if it ever did, `privileged.ts` would throw "returned no usable status" inside the transaction, which rolls the whole attempt back. **That is not fail closed for the counter:** the failure that was just counted vanishes with the rollback, so a status the deployed Edge does not know would let an attacker guess without being counted (see "Deploy order" in 118.3). The existing soft-lock alarm uses `retry_after = 900` as its "newly" marker and so can fire on an already-locked attempt in the first second; the hard lock does not inherit that.
+- **An internal status carries "newly set".** `partner_totp_attempt` cannot gain an OUT column under `CREATE OR REPLACE` (a different row type needs `DROP` and `CREATE`, which would lose its owner and ACL), so the transition is the status `hard_lock_set` and every later attempt is `hard_locked`. The wrapper translates `hard_lock_set` to `hard_locked`, so the Edge never sees it; if it ever did, `privileged.ts` would throw "returned no usable status" inside the transaction, which rolls the whole attempt back. **That is not fail closed for the counter:** the failure that was just counted vanishes with the rollback, so a status the deployed Edge does not know would let an attacker guess without being counted (see "Deploy order" in 121.3). The existing soft-lock alarm uses `retry_after = 900` as its "newly" marker and so can fire on an already-locked attempt in the first second; the hard lock does not inherit that.
 - **A distinct alarm kind, not `totp_locked` with a flag.** An operator needs to see that an admin reset is required, and the 5th / 10th / 15th soft locks must not be confused with it. The 20th failure raises `totp_hard_locked` only (no `totp_locked` for the same event).
-- **Refusals on a hard-locked row write nothing.** A loop of guesses cannot grow `audit_log`. (The existing soft-lock path still audits every refused attempt during a lock; that is unchanged and noted in 118.3.)
+- **Refusals on a hard-locked row write nothing.** A loop of guesses cannot grow `audit_log`. (The existing soft-lock path still audits every refused attempt during a lock; that is unchanged and noted in 121.3.)
 - **Confirm failures are not counted toward the hard lock.** A confirm code is checked against a seed only the enrolling session was shown, so guessing it gains nothing, and a typo during enrolment must not need an admin. Confirm failures keep the 5-in-15-minutes soft lock. Pinned: 20 wrong confirm codes lock softly at 5 / 10 / 15 / 20 and never hard-lock.
 - **No session revocation at the hard lock.** An aal 1 operator session can reach nothing but step-up (PA-20), which is exactly what is refused; revoking would evict the legitimate user as well.
 - **CHECK on the range** (`0..20`) as defence in depth: a code path that forgot the early refusal would raise `23514` instead of counting past 20.
 
-### 118.3 Departures and honest limits
+### 121.3 Departures and honest limits
 
 - **A lock lever, and the sole-admin case (gate ruling: accepted, admins are NOT exempt).** The same ceiling that stops guessing lets an attacker with a live aal 1 session **hard-lock the victim's TOTP in 20 tries**, which is a denial and nothing more; the precondition (a live aal 1 session) is the same as for the PIN lock lever (R-P5). Exempting admins from the hard lock would restore the unbounded-guessing exposure (about 40% a year against a targeted person) on exactly the highest-value accounts, so **no exemption and no break-glass reset is built.**
   - **Operating rule: production keeps at least two admins.** For an operator or an admin who is not alone, another admin runs the A3 `members/{id}/totp-reset`.
@@ -4805,7 +4881,7 @@ ID -> fix -> test:
 - **The drift self-check is a post-check (gate L3).** The pre-check only matches the listed edit fragments, so drift outside a fragment is caught only by the post-check, which runs **after** the `CREATE OR REPLACE` statements. The header's "aborts instead of silently reverting" therefore holds only under a **transactional runner** (one transaction per migration file). The gate reproduced the other case: a comment injected into the live `partner_totp_verify_for_partner` on a 0107 database, then 0108 applied with `psql -f` (the harness mode), aborted correctly at the final assertion but only after the drifted function had already been overwritten, and the inventory and allow-list updates had not run. No role-membership or schema residue was left. Remedy if it ever happens: restore the function from the previous migration's definition and re-run. A pre-DDL md5 pin of each expected pre-image would remove the caveat and is a possible follow-up, not built here.
 - **Two NITs, not changed:** an admin reset can deadlock with the victim's step-up (0053's verify locks the session row then the TOTP row; the reset locks the TOTP row then revokes sessions); either outcome is safe, and in the forced interleaving the reset won. A widened alarm INSERT policy is caught only by the `definer_policy_exprs.txt` fixture compare, not by a behavioural cell.
 
-### 118.4 Verification
+### 121.4 Verification
 
 Branch: `totp-hardlock` (created from `a364aa8`; `main` merged three times with a plain merge, at `580bd7e`, `17490a4` and `4e54da1`; none added a migration or a fixture row, so nothing was hand-merged and `0108` / matrix `86` stayed free).
 

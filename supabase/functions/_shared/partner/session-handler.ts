@@ -9,7 +9,7 @@
 //                         the opaque `gr_ps_` token comes back exactly once, in a 201
 //   GET  session          who am I (class PEEK: it never extends the idle timer)
 //   POST sign-out         revokes the presented session
-//   POST lock             clears every step-up grant now (the session stays live)
+//   POST lock             revokes the presented session (revoke_reason 'lock'; 0085, design 72), so a locked page must sign in again
 //   POST reauth/options   a reauth challenge bound to the session
 //   POST reauth           { challengeToken, credential }: a fresh passkey assertion by a credential of THE SESSION'S person (PA-27) sets reauth_until
 //   GET  pin              the PBKDF2 inputs (salt, iterations) the browser derives the PIN key with, or `unset` / `must_change` / `locked` (S1.3)
