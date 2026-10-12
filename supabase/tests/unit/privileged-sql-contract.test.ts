@@ -728,6 +728,111 @@ describe("checking a call against the current signatures", () => {
 });
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// What edge_partner may NAME (design 129). Calling a `private.*` function is not the only thing a template does: a `::app.partner_role` cast, or a table, resolves a name in schema `app`, which needs USAGE on it.
+// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/** The roles every migration grants USAGE (or ALL) on a schema to, lower-cased, comments removed; `public` is kept as a role name. A REVOKE is deliberately not subtracted: a grant that a later REVOKE undoes is still a reason to re-read the rule below. */
+export function schemaUsageGrants(
+  files: ReadonlyArray<{ name: string; sql: string }>,
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  for (const { sql } of files) {
+    const text = sql.replace(/--[^\n]*/g, " ");
+    for (const m of text.matchAll(
+      /\bGRANT\s+([^;]*?)\s+ON\s+SCHEMA\s+([^;]*?)\s+TO\s+([^;]*?)\s*(?:WITH\s+GRANT\s+OPTION\s*)?;/gis,
+    )) {
+      if (!/\b(USAGE|ALL)\b/i.test(m[1]!)) continue;
+      const roles = m[3]!
+        .split(",")
+        .map((r) => r.trim().replace(/^"|"$/g, "").toLowerCase())
+        .filter((r) => r !== "");
+      for (const schema of m[2]!
+        .split(",")
+        .map((x) => x.trim().toLowerCase())
+        .filter((x) => x !== "")) {
+        const set = out.get(schema) ?? new Set<string>();
+        for (const r of roles) set.add(r);
+        out.set(schema, set);
+      }
+    }
+  }
+  return out;
+}
+
+/** Templates that call a `private.*partner*` function (the partner lanes run as edge_partner or edge_partner_minter; so does the bucket hit `private.hit_partner_rate_limit`) and ALSO name something in schema `app` themselves: a `::app.<type>` cast, a table, a function. Comments are ignored. */
+export function appNamesInPartnerCalls(
+  templates: ReadonlyArray<Template>,
+): Array<{ line: number; names: string[] }> {
+  const out: Array<{ line: number; names: string[] }> = [];
+  for (const { line, text } of templates) {
+    const bare = text.replace(/--[^\n]*/g, " ");
+    if (!/\bprivate\.[a-z_0-9]*partner[a-z_0-9]*\s*\(/i.test(bare)) continue;
+    const names = [...bare.matchAll(/\bapp\.[a-z_][a-z_0-9]*/gi)].map((m) =>
+      m[0].toLowerCase(),
+    );
+    if (names.length > 0) out.push({ line, names });
+  }
+  return out;
+}
+
+describe("reading schema grants and the names a partner template uses", () => {
+  const files = (sql: string) => [{ name: "0001.sql", sql }];
+  it("reads a multi-line grant, several schemas, ALL, PUBLIC and WITH GRANT OPTION, and ignores a comment and a non-USAGE grant", () => {
+    const g = schemaUsageGrants(
+      files(`
+        -- GRANT USAGE ON SCHEMA app TO edge_partner;
+        GRANT USAGE ON SCHEMA app, private TO
+          role_a, "Role_B";
+        GRANT ALL ON SCHEMA extra TO PUBLIC WITH GRANT OPTION;
+        GRANT CREATE ON SCHEMA only_create TO role_c;
+      `),
+    );
+    expect([...(g.get("app") ?? [])].sort()).toEqual(["role_a", "role_b"]);
+    expect([...(g.get("private") ?? [])].sort()).toEqual(["role_a", "role_b"]);
+    expect([...(g.get("extra") ?? [])]).toEqual(["public"]);
+    expect(g.has("only_create")).toBe(false);
+  });
+
+  const names = (sql: string) =>
+    appNamesInPartnerCalls(sqlTemplates(`const x = trx\`${sql}\`;`));
+  it("flags an app type cast and an app table in a template that calls a private.partner_* function", () => {
+    expect(
+      names(
+        "select o_status from private.partner_invite_create_for_partner(${a}::uuid, ${r}::app.partner_role)",
+      ),
+    ).toEqual([{ line: 1, names: ["app.partner_role"] }]);
+    expect(
+      names(
+        "select 1 from app.partner_member m, private.partner_x_for_partner(${a}::uuid)",
+      ),
+    ).toEqual([{ line: 1, names: ["app.partner_member"] }]);
+  });
+  it("passes an untyped argument, a comment that mentions app., and a template that calls no partner function", () => {
+    expect(
+      names(
+        "select o_status from private.partner_invite_create_for_partner(${a}::uuid, ${r}, ${e}::text)",
+      ),
+    ).toEqual([]);
+    expect(
+      names(
+        "-- the app.partner_role type is not named here\nselect 1 from private.partner_x(${a}::uuid)",
+      ),
+    ).toEqual([]);
+    expect(
+      names(
+        "select ${a}::app.ledger_status from private.hit_system_rate_limit(${k})",
+      ),
+    ).toEqual([]);
+    // the bucket hit of the partner lane is named for the partner but not prefixed by it, and runs as edge_partner too
+    expect(
+      names(
+        "select private.hit_partner_rate_limit(${k}, ${w}::interval, ${m}::int), ${a}::app.ledger_status",
+      ),
+    ).toEqual([{ line: 1, names: ["app.ledger_status"] }]);
+  });
+});
+
+// ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 // The real tree.
 // ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -799,5 +904,24 @@ describe("privileged.ts against the migrations", () => {
     };
     walk(join(supabaseDir, "functions"));
     expect(strays).toEqual([]);
+  });
+});
+
+describe("what edge_partner may name, against the real tree", () => {
+  it("premise: no migration grants USAGE on schema app to edge_partner, edge_partner_minter or PUBLIC (0047), and the parser does see the grants that exist", () => {
+    const usage = schemaUsageGrants(migrations);
+    const app = usage.get("app") ?? new Set<string>();
+    for (const role of ["edge_partner", "edge_partner_minter", "public"])
+      expect(app.has(role), `${role} was granted USAGE on schema app`).toBe(
+        false,
+      );
+    // controls: the same parser finds the USAGE edge_partner DOES hold (private) and one the player lane holds on app (0030)
+    expect(usage.get("private")?.has("edge_partner")).toBe(true);
+    expect(usage.get("private")?.has("edge_partner_minter")).toBe(true);
+    expect(app.has("edge_actor")).toBe(true);
+  });
+
+  it("rule: no template that calls a private.partner_* function names anything in schema app (edge_partner would answer 42501 permission denied for schema app, which the Edge maps to a 403)", () => {
+    expect(appNamesInPartnerCalls(templates)).toEqual([]);
   });
 });
