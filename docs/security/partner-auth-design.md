@@ -4950,13 +4950,20 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 124.** Two leftove
 
 - **Mutation proof (4 killed, and what each did):** an unprefixed new function importing the partner modules fails _only_ the new cell (the existing name-based cells pass it, which is the hole); a `partner-*` one fails the existing name-based cell and the new one; a player function that starts importing the partner modules fails the new cell; `stock-admin` dropped from the list fails the existing cells and the new one.
 
-### 124.3 Not built, honestly
+### 124.3 A timeout flake in §121's CLI cells (found by this PR's first CI run)
+
+`install / typecheck / build / test` failed on this PR's first run: `tools/service-role-lint/test/lint-root.test.ts › the CLI › still reports the real functions tree as clean` timed out at vitest's 5000 ms default (the cell took 5136 ms). It spawns the built linter over the real functions tree (~170 files parsed with typescript-estree), which takes about **1.9 s alone and about 4 s with four copies running at once** on a 4-core machine; a 2-core CI runner running every package's tests in parallel lands on the default. It had passed in #161's and #164's runs, so it is load-dependent, not logic, and it is a defect of the test §121 added, not of this PR's diff.
+
+- **Reproduced, then fixed.** Six busy loops on 4 cores: the unfixed cell failed with the same `Test timed out in 5000ms` (it took 6326 ms); with the fix, the same load passes 9/9. The three cells that spawn the linter now carry a 60 s test timeout and the child a 55 s bound (`spawnSync`'s `timeout`), so a hung linter fails the cell (its status is null) instead of waiting out the test timeout. No test was skipped, loosened or retried.
+- **The same class elsewhere:** the other process-spawning cells added in §119–§124 (`ci-h2-gate`, `ci-tap-verdict`, `ci-script-sigpipe`) run small shell scripts that finish in tens of milliseconds; none walks a real tree.
+
+### 124.4 Not built, honestly
 
 - The fallback is still an untested-in-CI path (CI has `pg_prove`); this section ran it once, end to end, and pinned its verdict logic with unit cells. It was not removed: that is a decision about developer workflow, and the fallback now works.
 - `config.toml` is not checked against anything beyond `verify_jwt` for the partner set (no `entrypoint` / `import_map` checks).
 - U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
 
-### 124.4 Verification
+### 124.5 Verification
 
 Branch: `claude/golfraven-p5-113-next-ft2plx` (base `72ec764` / #164). Squash SHA recorded after merge.
 
