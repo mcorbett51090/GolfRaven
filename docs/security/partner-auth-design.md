@@ -4998,7 +4998,40 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 125.** T
 
 ### 125.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `143f61e` / #165). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `143f61e` / #165). Squash-merged as `c4208a0` (#166).
 
 - The full, unpatched harness on this tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs: **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **398 passed, 0 failed** in each (the 393 that were there plus these 5); `service-role-lint` clean. Nothing the five cells leave behind (drafts and ended offers on `trl_t` at `fac_x`) disturbed any other file.
 - Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 126. As built: the offers-redeem lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 126.** The same shape as §122 and §125, for the lane that moves money. A staff member redeems a player's issued offer code against the player's check-in token: the database consumes the offer's budget, writes the attestation, spends the token and marks the code redeemed. The unit suite hands the handler a _mocked_ port and the pgTAP matrix calls the definers directly, so nothing ran the Edge's own call (`::uuid` / `::text` arguments, the status list, the row mapping of the queue) end to end, or read the effects back. §123 shows the call text could resolve against the current schema; this runs it. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 126.1 What was built
+
+- **`supabase/tests/integration/offers-redeem.deno.test.ts`** (5 cells): the REAL `handlePartnerOffersRedeemRequest` over the REAL `privileged.ts` (`partnerDb.withOffersRedeem` = `withPartnerSession`), a REAL staff session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (`edge_gateway` login, `SET LOCAL ROLE edge_partner`). Every effect is read back as `service_role`, not through the code under test:
+  1. the **queue** lists the facility's issued codes with the player's handle, an ISO expiry and the face value as a number;
+  2. a **staff scan redeems** a code: 201 with an attestation id; the code is `redeemed` by that staff member (`redeemed_offline = false`, `redeemed_at` set); the offer's budget moved from reserved 10 to used 10; and the attestation row is `offer_redemption`, staff and player and facility as expected;
+  3. **the same token twice** is 409 `replayed` (the second code stays `issued`, its offer's budget untouched), **another player's token** is 422 `token_invalid` (the code stays `issued`), and a **redeemed code** is 422 `not_issued`;
+  4. a code whose **reservation the offer cannot cover** (cap 5, nothing reserved, reservation 10) is 422 `budget_short` and nothing moves; an **unknown code** is 404;
+  5. **class A1 needs a PIN grant**: without one, 403 and the code is untouched; and a staff member redeeming a code **owned by their own account** is refused with a 422 and nothing is written.
+- **Fixtures.** A staff member of a facility org scoped to `fac_x` (seeded by the harness, on trail `trl_t`, with a timezone), created 60 days ago so the cold-start cap does not apply; a PIN grant (50 s, one per action) written by the owner with the session-guard trigger off for that one statement, as the other partner integration files do; a player with a device and a `checkin_token` at `fac_x` seeded the way `partner-attest.deno.test.ts` seeds it; and, per code, a fresh live offer with an explicit cap and reservation and an `issued` code carrying its `reserved_amount`. A fresh offer per code because `(user, offer)` is unique.
+- **Self-contained on purpose,** as in §125 (the session helpers are copied from the merged files, not shared).
+
+### 126.2 Measured, not assumed
+
+- **No defect found.** 5/5 on the first run in `superuser` and in `restricted` mode: the lane's wiring is correct, which §123's baseline predicted. Recorded because a clean result is still a result, and the money path now has a test that would catch the next change that breaks it.
+- **The cells can fail (4 of 4 Edge-side mutants killed),** each applied to a scratch copy of the Edge source and run through the real harness (the repo's files were never touched): the attestation id returned as `null` fails cell 2; the face value returned as a string and the player handle dropped from the queue each fail cell 1; the handler answering `replayed` as 422 instead of 409 fails cell 3.
+- **Full, unpatched harness on this tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **403 passed, 0 failed** in each (the 393 that were there plus the 5 of §125 and the 5 of this section); `service-role-lint` clean.
+
+### 126.3 Not built, honestly
+
+- **The offline redeem route (`redeem/offline`)** needs the offline-code derivation the attest test uses (a seed derived from the device, an HOTP step); the statuses `verification_failed`, `rate_limited` and `name_unconfirmed` are therefore not driven. `expired`, `wrong_facility` and `cold_start_cap` (a staff member under 7 days old attesting 30 times in 24 hours) are not driven either.
+- **Seven partner lanes still have no real-stack test:** invites, members, entitlements, programme, settlement, sponsorships, stock (review: §122; offers-admin: §125; offers-redeem: this section). Entitlements is the nearest sibling of this lane (redeem and voucher against a stocked entitlement).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 126.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `c4208a0` / #166). Squash SHA recorded after merge.
+
+- Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
