@@ -8,7 +8,8 @@ sections 4.5 and 4.6; what S7a built and why: its "As built: S7a" section.
 helper for later screens, EN and FR-CA strings, the CSP, and the tests that pin all of it. **S7a's second half (this README's "PIN step-up" and
 "Invites and enrolment" sections) closes the seams S1.3 to S1.5 left**: the browser-derived PIN, invite and enrolment acceptance with the first
 passkey and the forced first PIN, and the operator / admin second factor. **S7b adds the attest and course-QR shop-floor screens** (PIN before every A1
-action). Hand-over, stock, manager, operator and admin screens are S7c to S7d; offer redeem and settlement export follow on this slice.
+action). The rest of the portal was built after this README's first draft: hand-over and stock (S7c, design §29), the manager / operator / admin screens (S7d, §31),
+offer redeem and settlement export (§33, offline codes §36), attest and course-QR (S7b, §34) and the camera scan of check-in tokens (§39); each has its own "As built" section.
 
 ## The one rule that shapes everything
 
@@ -65,7 +66,7 @@ inline script, eval, `new Function`, a storage API, a service worker, a source m
 on any bundle input that is not under `src/` or that comes from `node_modules`.
 
 `_headers` also carries `Strict-Transport-Security: max-age=31536000; includeSubDomains`, and marks `/*` `Cache-Control: no-store` (so SPA fallbacks
-such as `/invite` are covered too). Hashed `/assets/*` detach that header (`! Cache-Control`) and stay immutable. `Permissions-Policy: camera=(self)` from S7b (paste-only attest for now; a later scan into the token field can use the camera without another header change).
+such as `/invite` are covered too). Hashed `/assets/*` detach that header (`! Cache-Control`) and stay immutable. `Permissions-Policy: camera=(self)` from S7b (the camera scan of check-in tokens, §39, uses it; paste stays the fallback when `BarcodeDetector` or the camera is missing).
 
 ### Deploy checklist (operator steps; none are code)
 
@@ -170,8 +171,8 @@ dependency) plus the setup key and `otpauth://` link as text. CSP `img-src` stil
 
 | Not built | Seam |
 |---|---|
-| Camera scan of a player check-in QR into the attest token field | `camera=(self)` is open; the field is paste-only today |
-| Hand-over, stock, offer redeem, manager / operator / admin / settlement (S7c–S7) | `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
+| Camera scan of a player check-in QR into the attest token field | **built (§39):** `BarcodeDetector` into the existing paste field on attest, offer redeem and hand-over; paste remains the fallback |
+| Hand-over, stock, offer redeem, manager / operator / admin / settlement (S7c–S7) | **built (§29, §31, §33, §36):** `controller.requirePin` / `reauthWithPasskey` / `openTotp`; `state.work` is the pattern for a shop-floor screen |
 | Invite create / list / revoke, branch E, member recovery, credential list | **built (§81–§89):** session-half surfaces on home / work; pre-session enrol remains for first credential |
 | A QR for the TOTP seed | **built (§90):** canvas QR from the `otpauth://` URI; seed + link remain as text fallback |
 | Offline behaviour | none |

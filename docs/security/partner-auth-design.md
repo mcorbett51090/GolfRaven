@@ -4630,3 +4630,197 @@ staging path probe against a live gateway (§20.12), and OCR / aHash / UI flag f
 CAMERA remain blocked. `totp_confirm` and `pin_change` stay deliberate non-alarms
 (§113.2 / §112.2). Tip remains `0107`.
 
+**Correction, 2026-10-12.** The claim above was wrong, and it was wrong because it was made from this log instead of from the code. It held for the *auth-alarm ceremony trail* (every `partner_audit_write('partner.*')` event that is an operator-facing ceremony now has an alarm; the rest are business operations — attest, offers, sponsorships, stock, handover, programme, course-QR / PIN — or the deliberate non-alarms listed here). It did not hold for the repository: re-reading the code against the design found in-repo leftovers that no section had recorded, closed by §114 (K11) and §115 (`no_active_staff`), with further sections following as each is merged.
+
+
+## 114. As built: Play Integrity egress guard (K11)
+
+Numbering: **migration n/a (Edge shared code), matrix n/a (vitest), this section 114.** Closes the K11 follow-up in `p3-money-path-requirements.md` ("Play Integrity egress is unguarded"), which was the first in-repo leftover found when §113.5's "no further in-repo closable leftover" was re-checked against the code instead of the log: `_shared/rewards/play-integrity-client.ts` called the bare platform `fetch` with no host allow-list and no `redirect: "error"` on **both** its calls, so a 307/308 from Google would have replayed the signed service-account assertion (OAuth POST) or the integrity token (decode POST) to whatever host the redirect named. Defence in depth only (the hosts are fixed constants; exploiting it needs a redirect from Google itself), but it was the one vendor adapter without the guard `devicecheck-client.ts` and `signin/safe-fetch.ts` already carry. No migration; no Edge route change; no UI flag flips; no CAMERA / OCR.
+
+### 114.1 What was built
+
+- **Allow-list** — `PLAY_INTEGRITY_ALLOWED_HOSTS` = `oauth2.googleapis.com`, `playintegrity.googleapis.com`; `isAllowedPlayIntegrityUrl` accepts only `https` with no userinfo and no explicit port and a parsed (never pattern-matched) hostname on the list — the same shape as `isAllowedDeviceCheckUrl`.
+- **Both calls guarded** — the host is checked **before** a JWT is signed or an OAuth exchange starts (a refused decode host costs no OAuth round trip and reads no clock); each POST goes through one `post()` helper that sends `redirect: "error"`, keeps the `AbortSignal.timeout`, and refuses a response flagged `redirected` (a valid-looking body that arrived via a followed redirect is never trusted, and a redirected OAuth answer is not cached).
+- **`VendorHttp.fetch`** — `redirect: "error"` is now **required** in the init type (it was optional "only so the Play Integrity adapter … still type-checks"), so a future vendor adapter cannot forget it.
+- **Test-only override** — `createIntegrityDecoder(config, http, endpoints?)` mirrors `createDeviceCheckClient`'s `hosts` override; `play-integrity-egress.test.ts` pins that no production call site passes it.
+- **Tests** — `supabase/tests/unit/play-integrity-egress.test.ts` (14 cells): allow-list contents; look-alike / userinfo / port / scheme / other-Google-host refusals; request shape on both calls; host refused before signing or any clock read, whatever the key; redirect refused on the OAuth step and on the decode (rejected fetch, flagged `redirected`, 307 / 308 / 302); time bound on both calls; an unconfigured decoder still fails closed as `VendorNotConfiguredError`.
+
+### 114.2 Decisions and departures
+
+- **A refusal is `VendorUnavailableError`, not `VendorNotConfiguredError`** — the same retryable 503-class mapping DeviceCheck uses: a redirect or a wrong host is not evidence about the player's token or about our credentials, so nothing is graded.
+- **Host check before key check** — an unusable key behind a refused host reports the host (Unavailable), and neither signs nor sends; pinned by the "never reads the clock" cell.
+- **JWT `aud` stays the real Google token URL** — it is the audience Google expects, not an address we call.
+
+### 114.3 Not built, honestly
+
+- Live Google verification is still not exercised (no Google credential or route here); the Android build itself and the Play Integrity wire facts stay `[unverified]`. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 114.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a364aa8` / #154). Squash-merged as `35866d8` (#155).
+
+- vitest `play-integrity-egress` 14/14; `vendor-adapters` / `devicecheck-egress` / `play-integrity` unchanged and green; full server unit suite 1847/1847; `deno check` (2.5.2, the CI pin) of the four touched modules and the `verification-ports` consumer; workspace typecheck of `rules`, `service-role-lint`, `catalog-tools`, `mobile`.
+- **Mutation proof** — seven mutants of the client (drop `redirect:"error"`; drop the `redirected` refusal; drop each host check; add a host to the list; allow userinfo; drop the timeout signal) each turn the new test red (1–4 cells each); the unmutated control is 14/14 and the client was restored byte-identical (sha256).
+
+## 115. As built: held-reward resolve learns `no_active_staff`
+
+Numbering: **migration n/a (Edge shared code + portal), matrix n/a (vitest), this section 115.** Found by the same code-first re-scout as §114, not by a log: since 0061 (AT(10)) `private.partner_resolve_held_offer_code_apply` returns the status `no_active_staff` when an admin approves a held offer code at a facility that has no active staff or manager. The Edge validates `o_status` against a closed set (`privileged.ts`) and that set did not list it, so `resolveHeldOf` threw "returned no usable status" — an uncaught 500 for the admin — and neither the review handler nor the portal had a mapping. Only the pgTAP matrix (`39_at10_issuance_staff_gate.sql`) pinned the status; nothing tied the Edge to it. No migration; no UI flag flips; no CAMERA / OCR.
+
+### 115.1 What was built
+
+- **One list** — `RESOLVE_HELD_STATUSES` in `partner/ports.ts`, a runtime `as const` array from which `ResolveHeldStatus` is derived. `privileged.ts` validates the database's `o_status` against it; `review-handler.ts`'s `switch` is exhaustive over the type, so a status the list gains but the handler does not map fails `deno check` with `TS2366` (shown by deleting the case).
+- **Handler** — `no_active_staff` is a `422` with the status as its code, beside `budget_short` (the code cannot be issued as it stands).
+- **Portal** — `admin.noActiveStaff` (EN and fr-CA: "add staff there or reject the code"), mapped in the `review` context ahead of the generic `admin.failed`. The wording is accurate to the SQL: only an approve *into `issued`* needs staff, so a reject still works. fr-CA wording is a draft for a native reviewer, like the rest of the catalogue (§20.9).
+- **Drift pin** — `supabase/tests/unit/partner-resolve-statuses.test.ts` reads the *latest* definition of every `private.partner_resolve_*_apply` across the migrations and requires the statuses they can return to **equal** the Edge list (a status unknown to the Edge, or an Edge entry no SQL returns, both fail); the parser is self-tested so the pin cannot silently see nothing.
+- **Tests** — `partner-review-handler.test.ts` iterates the whole list over all three resolve routes against an explicit status -> HTTP table (a status added without deciding its answer fails); `apps/partners/test/messages.test.ts` pins the portal mapping and both catalogues.
+
+### 115.2 Decisions and departures
+
+- **422, not 409** — nothing is in conflict (the code is still held); the request cannot be applied as asked. The refusal leaves the code held (`39_at10_issuance_staff_gate.sql`: "refused approve leaves the code held"), so the admin can add staff and approve again, or reject.
+- **A shared list, not a second copy** — the first fix would have been one more string in the Set; that is how the gap arose. The list is the single place, and the SQL side is pinned against it.
+- **`o_status` stays validated** — an unknown status is still a thrown error (fail closed); what changed is that the known vocabulary can no longer fall behind the SQL unnoticed.
+
+### 115.3 Not built, honestly
+
+- A Deno integration cell for the review lane against the real database (no `partner-review` integration test exists; the 14 lanes without one are an open coverage item). The SQL <-> Edge link is pinned textually and the Edge <-> portal link by unit cells instead. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 115.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `35866d8` / #155). Squash-merged as `580bd7e` (#156).
+
+- vitest: `partner-resolve-statuses` + `partner-review-handler` 24/24, `apps/partners` `messages` 47/47; the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exits 0.
+- **Mutation proof** — dropping the status from the shared list (3 cells red), dropping the handler case (2), dropping the portal mapping (1) and corrupting the 0061 status literal (3) each fail; all files restored byte-identical (sha256).
+
+## 116. As built: Edge -> portal error contract (`cold_start_cap`, credential-add 409)
+
+Numbering: **migration n/a (Edge shared code + portal), matrix n/a (vitest), this section 116.** The third finding of the code-first re-scout (§114, §115): two places where the Edge and the portal each had unit tests that agreed with themselves while disagreeing with each other. No migration; no UI flag flips; no CAMERA / OCR.
+
+- **Cold-start cap.** The portal explains the cap on the code `cold_start_cap` (`attest.coldStart`, `handover.coldStart`, `offerRedeem.coldStart`; design 26.1 "429 `cold_start_cap`", 28.2), but the Edge answered every cap through the one `rateLimited()` helper, whose code is always `rate_limited`. The explanation could never be shown, and staff were told to try again in 3600 s for a rolling 24 hour cap.
+- **Adding a passkey.** The 409 refusals of `registrationRefusal` (`credential_exists`, `credential_in_use`, `already_registered`, `other_membership`) fell into the `credentials` context's `kind === "conflict"` fallback and read "That passkey was already revoked." That fallback exists for revoke (whose 409 the server names `already_revoked`).
+
+### 116.1 What was built
+
+- **`coldStartCapped(decision)`** in `partner/handler-kit.ts` — still a `429` with the same `Retry-After` (3600) as every other cap, with its own `code`; the attest, entitlements (hand-over redeem) and offers-redeem handlers use it for `cold_start_cap`. The generic caps (`rate_limited`) are unchanged. The three handler tests' third column changed from `rate_limited` to `cold_start_cap`.
+- **Portal** — in the `credentials` context the four add refusals map to the existing `enrol.conflict` ("A passkey cannot be added in the current state. Ask a manager for help." — no new copy, EN and fr-CA already there), ahead of the generic conflict; `too_many` and a real revoke conflict are unchanged.
+- **Contract test** — `supabase/tests/unit/partner-edge-pwa-error-contract.test.ts` runs the Edge's own `Response`s through the same three steps as the portal's client (`error.code`, `kindForStatus`, `Retry-After` only on a 429) and then the portal's real `messageForError`, in all three cold-start contexts and for every add refusal; the generic cap is asserted to stay the generic wait, and an `already_revoked` conflict to stay "already revoked".
+
+### 116.2 Decisions and departures
+
+- **The Edge moved, not the portal.** The design table and the portal were written to the same contract (`cold_start_cap`); the Edge helper was the odd one out. The portal is the only client of the partner lane (`apps/mobile`'s recorded contract covers the player lane and its drift check still passes), so changing a code on the wire has no other consumer.
+- **A real flow, not two copies of a literal.** The earlier shape (each side pins the string independently) is what let them diverge; the contract test makes one Edge response drive the portal mapper.
+- **No new strings** — reusing `enrol.conflict` keeps the catalogue (and its pending native fr-CA review, §20.9) unchanged.
+
+### 116.3 Not built, honestly
+
+- **Self-attest.** The portal keys on `self_attestation_refused`, which the Edge never emits: the database raises a generic `22023` for it, so the Edge can only answer `422 invalid_request` and the portal falls back to "the code was not accepted". Fixing it means the database distinguishing the case (a returned status from `partner_attest_write`, i.e. a new migration `0108+`); not done here. The key is not removed, because it is the portal's half of that future contract.
+- A generic inventory of every code the portal keys on against every code the Edge can emit; the contract test covers the two known flows only. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 116.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `580bd7e` / #156). Squash-merged as `17490a4` (#157).
+
+- vitest: contract test + the three updated handler suites 126/126; full server unit suite 1865/1865; `apps/partners` unit 1172/1172; the mobile edge-contract drift check passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exits 0.
+- **Mutation proof** — `coldStartCapped` emitting `rate_limited` (8 cells red), a wrong `Retry-After` (4), the attest handler bypassing the helper (2), the offers-redeem handler bypassing it (1), the portal dropping `credential_in_use` (1) and dropping the add-refusal mapping (1) each fail; all files restored byte-identical (sha256).
+
+## 117. As built: guard the auth-alarm kind trail (database CHECK <-> portal labels)
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 117.** The auth-alarm trail (§95 .. §113) grew one `kind` per seam, and each seam widened the same two `app.partner_auth_alarm` constraints and added a portal label. The §112 / §113 review that opened this log's re-scout found the packaging *correct*, but only because it was checked by hand: nothing enforced it. `apps/partners/test/auth-alarms.test.ts` hard-codes a subset of kinds, so a kind added to the database without its `review.authAlarms.kind.*` label would reach an admin as a raw token (`authAlarmKindLabel` falls back to the kind), in either language. Test-only; no behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 117.1 What was built
+
+- **`supabase/tests/unit/partner-auth-alarm-kinds.test.ts`** reads the *latest* migration that defines `partner_auth_alarm_kind_check` and `partner_auth_alarm_bucket_shape_check` (a balanced-parenthesis parse that skips quoted strings; the later migration's drop-and-re-add wins), so the next alarm seam is covered the moment its migration lands. It requires: every kind the database allows has an EN **and** an fr-CA label; no label names a kind the database cannot hold; and every allowed kind is named by the shape CHECK (a kind in the first and in no branch of the second can never be inserted).
+- **Incidental, found by this PR's own CI: a race in the partners sign-out e2e.** `partners.e2e.test.ts` › "sign-out: back to sign-in, the session revoked on the server and its token refused afterwards" asserted `signOutCalls` and then a 401 on the old token *synchronously* after the signed-out screen appeared. By design the page ends the session first and tells the server after (`api/client.ts`: "ending a session is immediate"), so the screen can be up before the sign-out reaches the server; the test passed on #155 – #157 only because the request usually wins. Reproduced deterministically by giving the fake server's `signOut` a 400 ms delay (unfixed: `expected +0 to be 1`, CI's exact error); fixed by waiting for the recorded revoke first, `await expect.poll(() => server.state.revokedSessions.size).toBe(1)`, the same sync point the lock test uses. The product code is unchanged. Test-only; unrelated to the alarm kinds, carried here because it blocked this PR's CI.
+- **The parser is self-tested** on a synthetic pair of migrations (the later definition wins, quoted parentheses are skipped, an unbalanced CHECK or a missing constraint throws), so the guard cannot silently see nothing; a floor on the kind count and two named kinds make the same point against the real tree.
+
+### 117.2 Decisions and departures
+
+- **Derived from the migrations, not a second hand-kept list** — a list in the test would be the same drift one file over. It reads the migration text because that is the schema's source of truth in this repo; the pgTAP cells (matrix 70 .. 85) already prove each kind's *behaviour*.
+- **Not asserted: that the two constraints were redefined in the same migration.** That would be stricter than the invariant (a kind may legitimately be placed by an existing branch); the real invariant is the placement check above.
+- **Dead keys** (`app.loading`, `common.back`, `home.busy`, noted by the scout) are a catalogue-hygiene question, not drift of this trail; left alone.
+
+### 117.3 Not built, honestly
+
+- The trail's *other* inventories stay pinned where they were: `definer_policy_exprs.txt` by the function-inventory verifier (it compares the live allow-list to the fixture by key), the function notes by matrix 10. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 117.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `17490a4` / #157). Squash-merged as `4e54da1` (#158), together with the sign-out e2e fix recorded in §117.1.
+
+- vitest: 5/5 on the real tree (23 kinds in `0107`, EN and fr-CA); full server unit suite green.
+- **Mutation proof** — a missing EN label, a missing fr-CA label, a stale label, a kind dropped from the shape CHECK (in a copy of `0107`) and a new kind with no label each fail (1, 1, 1, 1 and 3 cells red); all files restored byte-identical (sha256).
+
+## 118. As built: three stale statements corrected (lock, partners README, App Attest re-registration)
+
+Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-scout (§114 on) kept finding places where the *prose* had fallen behind the code, because this log is append-only and later sections close earlier items without editing them. Three were worth fixing in place, because a reader acts on them: one is a comment in security code, one tells a reader that shipped screens do not exist, one contradicts the paragraph above it. Comment and documentation only; no behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 118.1 What was corrected
+
+- **`supabase/functions/_shared/partner/session-handler.ts` (header comment).** `POST lock` was described as "clears every step-up grant now (the session stays live)". Since 0085 (§72) it **revokes** the presented session (`revoke_reason = 'lock'`) and the portal wipes its token (§73), so a locked page must sign in again. Verified against the `lock` case (`s.lock()`), the migration and §73 before the edit.
+- **`apps/partners/README.md`.** Hand-over, stock, offer redeem, the manager / operator / admin screens, settlement export and the camera scan of check-in tokens were listed under "Not built" / "paste-only"; all are built (§29, §31, §33, §34, §36, §39). The camera row was the one to be careful with: §39 already built the partners staff-app scan (`BarcodeDetector` into the existing paste field, paste as the fallback), so the correction records what exists and builds nothing.
+- **`docs/security/edge-role-design.md`.** "App Attest key re-registration (not built yet) needs a definer" contradicted the paragraph above it describing 0034's `register_attest_key_for_actor`. Marked built, with the original sentence kept.
+
+### 118.2 Decisions and departures
+
+- **In place, with the original kept where it was a statement of need.** The App Attest bullet keeps its PR1b-era text and says it was built; the README and the comment are rewritten because nothing else in the log depends on their old wording.
+- **Left alone on purpose:** §21.4's "Not built here" for PA-29 (built in 0054, pinned by matrix 32) and the other closed seams in the append-only sections; those are history, and each is closed by a later section that names it.
+
+### 118.3 Not built, honestly
+
+- A check that would catch this class of drift mechanically; prose has no gate. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 118.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
+
+- `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
+
+## 119. As built: the migrations-immutable self-test no longer loses a SIGPIPE race
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 119.** Found when this PR's own first CI run failed: the `player-plane DB` job died in 20 ms at its first step, `tools/db/check-migrations-immutable.sh --self-test`, with **exit 141** (128 + SIGPIPE), on a documentation-only diff the self-test does not even read. It had passed on the four PRs before. Not a flake to re-run away: a defect in the script. CI-script hardening only; no behaviour change to the product; no UI flag flips; no CAMERA / OCR.
+
+### 119.1 Root cause and fix
+
+- **Cause.** `self_test()` picked a sample migration with `git ls-tree -r --name-only … | head -n1` under `set -euo pipefail`. `head -n1` quits after one line; `git ls-tree`'s listing (5.5 KB, 107 files — more than git's 4 KB stdout buffer, so it needs a second `write`) can still be writing, takes SIGPIPE, exits 141, and `pipefail` makes that the pipeline's status, so `set -e` aborts the script. Whether it does depends on a race between two processes.
+- **Measured, not assumed.** The exact pipeline exits 141 in **31 of 3000** runs (~1%); the whole `--self-test` fails **14 of 600** (~2.3%) on the original script and **0 of 400** after the fix. The replacement, `sed -n '1p'`, reads all of its input, so the writer never takes the signal (0 of 3000 for the pipeline).
+- **Pin.** `supabase/tests/unit/ci-script-sigpipe.test.ts` shows the mechanism deterministically (a producer still writing after the reader has quit: `head -n1` → 141, `sed -n 1p` → 0, no timing luck needed; and that an `if … | grep -q` reads a *match* as no match), then pins the script (the sample pick uses `sed -n '1p'`, and the script has no `| head` at all). Restoring the original line fails exactly the script pin.
+
+### 119.2 Decisions and departures
+
+- **Fix the script, don't retry it.** A retry would hide a 1-in-40 failure on every PR; the cause is two characters.
+- **The same class has a worse instance, recorded for the next section rather than fixed here:** the H2 gate in `tools/db/test.sh` (`grep -v '^\s*--' "$f" | grep -q 'migration_owner'`) *fails open*: for a violation near the top of a file larger than the pipe buffer (7 migrations are) it detected **0 of 1500** runs, and the corrected form 1500 of 1500. A scan of all 107 migrations with the corrected check finds no violation, so nothing has been missed so far.
+
+### 119.3 Not built, honestly
+
+- The H2 gate fix (§120, own PR). The fallback `echo "$OUTPUT" | grep -qE …` in `test.sh` (only reached without `pg_prove`, which CI installs). A general lint for early-exit readers under `pipefail`: the many `echo "$small" | grep -q` sites are not at risk, and a blanket ban would flag them.
+
+### 119.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158, with §118 in the same PR). Squash-merged as `a47e6e5` (#159).
+
+- vitest: `ci-script-sigpipe` 5/5; the real `--self-test` passes; full server unit suite green. Mutation: restoring `head -n1` fails the script pin; script restored byte-identical (sha256).
+
+## 120. As built: the H2 gate (no migration names the harness-only role) no longer fails open
+
+Numbering: **migration n/a, matrix n/a (vitest + a shell self-test), this section 120.** The worse instance of the class §119 found. `tools/db/test.sh` enforces H2 — *no migration may reference the harness-only `migration_owner` role by name outside a comment; a real deploy has no such role* (0016 and 0017 both did, and failed outright on a real deploy) — with an inline loop, `grep -v '^\s*--' "$f" | grep -q 'migration_owner'`. CI-script hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 120.1 Root cause
+
+- **It failed open.** Under `set -o pipefail`, `grep -q` exits at its first match. For a file larger than the pipe buffer (64 KB — 7 of the 107 migrations are) the writer, `grep -v`, is still writing, takes SIGPIPE and exits 141; `pipefail` makes 141 the pipeline's status, so the `if` evaluates **false on a real match**. Unlike §119's flake this is not a race: on a must-fail fixture (a `migration_owner` grant on line 2 of a 670 KB file) the old form detected the violation in **0 of 1500** runs, and the corrected form in **1500 of 1500**.
+- **Nothing has been missed.** A scan of all 107 migrations with the corrected check finds no violation, so the hole has not been hiding an existing problem; it was only waiting for the first large migration with an early reference.
+
+### 120.2 What was built
+
+- **`tools/db/check-no-migration-owner-refs.sh`** — the same check (comment lines stripped first) with a second `grep` that has **no `-q`** and sends its output to `/dev/null`, so it reads all of its input and the writer never takes the signal. An empty directory is refused rather than passed vacuously.
+- **`--self-test`** — a violation near the top of a >64 KB file, one at the bottom, a small one (all must be found) and a large clean file, a comment-only mention (also indented) and an empty file (none may be). `test.sh` runs the self-test first and then the scan, so a gate that cannot fail is not trusted.
+- **`supabase/tests/unit/ci-h2-gate.test.ts`** — end to end through the real script: a >64 KB migration with an early violation exits 1 and names the file; late and small violations are found; comment-only passes; an empty directory exits 2; the self-test and the real tree pass; and static pins that `test.sh` calls the self-test then the scan and no longer carries the inline loop.
+- **Mutation proof** — the old `grep -q` form restored in the gate fails the end-to-end cell and the script's own self-test; dropping the self-test call, or bringing the inline loop back, fails the `test.sh` pins; all files restored byte-identical (sha256).
+
+### 120.3 Not built, honestly
+
+- The fallback `echo "$OUTPUT" | grep -qE '^not ok|ERROR|…'` in `test.sh` has the same shape on a large variable, but is reached only when `pg_prove` is absent (CI installs it) — left alone, and recorded. The many small `echo "$small" | grep -q` sites are not at risk. A general lint for early-exit readers under `pipefail` was not built: it would flag the safe sites. U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 120.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `a47e6e5` / #159). Squash SHA recorded after merge.
+
+- `ci-h2-gate` 6/6; the real `test.sh` runs the self-test and the scan before the cluster is created and the full harness (pgTAP 106 files / 6294 tests, then the Deno suite) passes; `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).

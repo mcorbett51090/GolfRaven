@@ -75,7 +75,11 @@ self_test() {
   local base_ref
   base_ref="$(resolve_base_ref)"
   local sample
-  sample="$(git ls-tree -r --name-only "$base_ref" -- supabase/migrations/ | head -n1)"
+  # `sed -n 1p`, NOT `head -n1`: under `set -o pipefail` an early-exit reader makes the pipeline fail with 141 (SIGPIPE) whenever `git ls-tree`
+  # is still writing after the reader quit. The listing is a few KB (more than git's 4 KB stdout buffer, so it is written in more than one
+  # chunk), and `head -n1` lost that race in about 1 of 100 runs (31 of 3000 measured), failing the CI database job in milliseconds with exit
+  # 141 on PRs that had nothing to do with migrations. `sed` reads all of its input, so the writer never takes the signal.
+  sample="$(git ls-tree -r --name-only "$base_ref" -- supabase/migrations/ | sed -n '1p')"
   if [ -z "$sample" ]; then
     echo "tools/db/check-migrations-immutable.sh --self-test: no migration files found on ${base_ref} to build a fixture from" >&2
     exit 2

@@ -115,6 +115,7 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
     if (code === "bad_sponsor") return { key: "admin.badSponsor" };
     if (code === "stock_short") return { key: "admin.stockShort" };
     if (code === "budget_short") return { key: "admin.budgetShort" };
+    if (code === "no_active_staff") return { key: "admin.noActiveStaff" };
     if (code === "no_trail") return { key: "admin.noTrailRow" };
     if (code === "invalid_eligibility") return { key: "admin.invalidEligibility" };
     if (code === "not_held") return { key: "admin.notHeld" };
@@ -129,6 +130,8 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
   }
   if (context === "credentials") {
     if (code === "too_many") return { key: "credentials.tooMany" };
+    // POST credentials (add): the server's closed 409 refusals (`registrationRefusal`) are about ADDING, not about a revoke; they must not read as "already revoked"
+    if (code === "credential_exists" || code === "credential_in_use" || code === "already_registered" || code === "other_membership") return { key: "enrol.conflict" };
     if (code === "already_revoked" || kind === "conflict") return { key: "credentials.alreadyRevoked" };
     if (code === "not_found" || kind === "not_found") return { key: "credentials.notFound" };
   }
