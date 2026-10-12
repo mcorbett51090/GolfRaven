@@ -4770,7 +4770,7 @@ Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-sc
 
 ### 118.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash-merged together with §119 as `a47e6e5` (#159).
 
 - `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
 
@@ -5067,6 +5067,38 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 127.** T
 
 ### 127.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `0490057` / #167). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `0490057` / #167). Squash-merged as `eff6e34` (#168).
+
+- Per-file runs of this test as above; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 128. As built: `withTemporaryOwnerAccess` stops stripping the table owner's own privileges
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 128.** §127 found, and deliberately left, a standing hazard in the shared test helper `withTemporaryOwnerAccess` (`supabase/tests/integration/_helpers.ts`): it granted privileges to `current_user` and **revoked the same ones afterwards**. In `HARNESS_MODE=restricted` the connecting role (`migration_owner`) is the table's **owner**, so the revoke stripped the owner's _own_ privileges, and PostgreSQL runs a foreign-key check with the privileges of the referenced table's owner: after the first use, every later insert that references the table failed `permission denied for table …`. In `HARNESS_MODE=superuser` nothing can be stripped, so the defect never shows there. This section fixes the helper and pins the behaviour. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 128.1 What was built
+
+- **`_helpers.ts#withTemporaryOwnerAccess`** now asks `has_table_privilege(current_user, <table>, <privilege>)` for each privilege it was asked for, grants **only the ones the role lacks**, and revokes **only those** afterwards (the policy it creates is still always dropped, even on failure). For a role that already holds everything it is asked for (the owner in `restricted`, any superuser) it neither grants nor revokes; for a role that holds nothing it behaves as before.
+- **`supabase/tests/integration/owner-access-helper.deno.test.ts`** (2 cells):
+  1. for four tables (`app.special_marker_stock`, `app.partner_org`, `app.catalog_facility`, `app.offer`) the connecting role's `SELECT` / `INSERT` / `UPDATE` / `DELETE` privileges are **identical before and after** the helper with all four asked for. This is the cell that carries the regression: it can only fail in `restricted`;
+  2. (`restricted` only; a superuser holds every privilege, so the cell returns early there) on a probe table in schema `app` whose owner has revoked **its own** privileges, the helper holds exactly the asked-for privileges (`insert, update`) for the duration of the call and **none** after it, so the grant-then-revoke path is still exercised where it is reachable.
+- Two comments that described the hazard as standing now say it is fixed: the helper's own doc comment, and `ownerRows` in `partner-entitlements.deno.test.ts` (which keeps its policy-only helper because it needs no privilege at all).
+- Design log: §118.4 and §127.4 now record their squash SHAs (`a47e6e5` / #159, `eff6e34` / #168).
+
+### 128.2 Measured, not assumed
+
+- **Revert-and-run (the cells can fail).** The new test file against the **previous** `_helpers.ts` (main's), in a scratch copy through the real harness: `superuser` — 2/2 pass (the defect is invisible there, as §127 said); `restricted` — **cell 1 fails** on the first table, `app.special_marker_stock: the privileges after the helper are the privileges before it`, with all four privileges `true` before and all four `false` after, which is exactly the stripping §127 found. Cell 2 passes on the old helper too: the grant-then-revoke path was always right where it was reachable, so it is a control, not a regression cell. Against the new helper: 2/2 in both modes.
+- **A defect in my first version of cell 2, found by running it:** the probe table was created in `public`, and in `restricted` the owner has no `CREATE` on schema `public` (`permission denied for schema public`). It now lives in `app`, whose owner is the connecting role. Cell 1 was unaffected.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **410 passed, 0 failed** in each (the 408 that were there plus these 2); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 101 files, 1911 tests) passes.
+
+### 128.3 Not built, honestly
+
+- The persistent `grant select, update on app.partner_credential, app.partner_org to current_user` lines in nine integration files (`course-qr`, `offers-admin`, `offers-redeem`, `partner-attest`, `partner-entitlements`, `partner-pin`, `partner-review`, `partner-session`, `partner-signin-mint`; the last two grant on `partner_credential` only) were added for this same hazard and are probably redundant now. **I did not remove them and did not test removing them**; removing them buys nothing and each removal would need its own two-mode run.
+- Eight integration files call the shared helper. Four of them (`partner-attest`, `partner-pin`, `partner-session`, `partner-signin-mint`) reach it through a local wrapper that passes a privilege subset (`insert, delete` for the tables on which the file already holds the persistent `select, update` grant); the other four (`offers-admin`, `offers-redeem`, `partner-review`, `partner-entitlements`) call it directly. By the same mechanism the old helper would have stripped the owner's `INSERT` / `DELETE` on those tables in `restricted` mode after every use (inferred from reading the helper; I measured the stripping only on the stock table, in §127 and in the revert-and-run above) without any visible effect, because each call grants again first; nothing there needed a change, and none of those files was edited. They are all exercised by the full-harness run above.
+- **Six partner lanes still have no real-stack test:** invites, members, programme, settlement, sponsorships, stock (review: §122; offers-admin: §125; offers-redeem: §126; entitlements: §127).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 128.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eff6e34` / #168). Squash SHA recorded after merge.
 
 - Per-file runs of this test as above; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.

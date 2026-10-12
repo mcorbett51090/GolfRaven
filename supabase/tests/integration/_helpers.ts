@@ -127,18 +127,33 @@ export function rawOwnerSql(): AdminSql {
  * — the exact pattern 0016/0017/0019's own migrations use to seed a row
  * into a FORCE-RLS table with no policy for the connecting role, via
  * `rawOwnerSql()` (never `service_role`, which has no write grant here at
- * all). Always drops the policy and revokes the grant afterward, even on
- * failure. */
+ * all). Always drops the policy afterward, even on failure, and revokes only
+ * the privileges THIS call granted.
+ *
+ * "Only what this call granted" matters in HARNESS_MODE=restricted, where the
+ * connecting role (`migration_owner`) IS the table's owner and already holds
+ * every privilege: a blanket `revoke ... from current_user` then strips the
+ * OWNER'S OWN privileges, and PostgreSQL runs a foreign-key check with the
+ * owner's privileges, so every later insert that references the table fails
+ * "permission denied for table ..." (found by partner-entitlements.deno.test.ts,
+ * design 127; HARNESS_MODE=superuser never shows it). That is also why several
+ * files carry a persistent `grant select, update` on the tables they reference. */
 export async function withTemporaryOwnerAccess<T>(schemaTable: string, fn: (sql: AdminSql) => Promise<T>, privileges = "insert, update, delete"): Promise<T> {
   const sql = rawOwnerSql();
   const policyName = `integration_suite_temp_${schemaTable.replace(/\W/g, "_")}`;
-  await sql.unsafe(`grant ${privileges} on ${schemaTable} to current_user`);
+  const wanted = privileges.split(",").map((p) => p.trim().toUpperCase()).filter((p) => p !== "");
+  const granted: string[] = [];
+  for (const p of wanted) {
+    const held = (await sql`select has_table_privilege(current_user, ${schemaTable}, ${p}) as held`)[0]!.held as boolean;
+    if (!held) granted.push(p);
+  }
+  if (granted.length > 0) await sql.unsafe(`grant ${granted.join(", ")} on ${schemaTable} to current_user`);
   await sql.unsafe(`create policy ${policyName} on ${schemaTable} for all to current_user using (true) with check (true)`);
   try {
     return await fn(sql);
   } finally {
     await sql.unsafe(`drop policy if exists ${policyName} on ${schemaTable}`);
-    await sql.unsafe(`revoke ${privileges} on ${schemaTable} from current_user`);
+    if (granted.length > 0) await sql.unsafe(`revoke ${granted.join(", ")} on ${schemaTable} from current_user`);
   }
 }
 

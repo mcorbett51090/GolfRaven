@@ -237,10 +237,10 @@ const sha256 = async (s: string): Promise<string> =>
   );
 
 /**
- * Owner access WITHOUT the grant/revoke of `withTemporaryOwnerAccess`. That helper revokes what it granted from `current_user`; in HARNESS_MODE=restricted `current_user` is the table's OWNER, so the revoke strips the
- * owner's OWN privileges, and PostgreSQL runs a foreign-key check with the owner's privileges: after the first use, every insert that references the table (a stock movement references the stock row) fails
- * "permission denied for table special_marker_stock" (found by running this file in both harness modes; HARNESS_MODE=superuser never shows it). The existing files keep a persistent `select, update` grant on the two
- * tables they reference for the same reason. A FORCE-RLS table still needs a policy for the owner, so that is all this creates.
+ * Owner access WITHOUT any grant or revoke. This file found (design 127) that `withTemporaryOwnerAccess` used to revoke what it had granted from `current_user`; in HARNESS_MODE=restricted `current_user` is the table's OWNER, so the revoke
+ * stripped the owner's OWN privileges, and PostgreSQL runs a foreign-key check with the owner's privileges: after the first use, every insert that references the table (a stock movement references the stock row) failed
+ * "permission denied for table special_marker_stock" (HARNESS_MODE=superuser never shows it). The shared helper now revokes only what it granted (design 128, pinned by owner-access-helper.deno.test.ts); this file keeps its own
+ * policy-only helper because it needs no privilege at all. A FORCE-RLS table still needs a policy for the owner, so that is all this creates.
  */
 async function ownerRows<T>(
   table: string,
