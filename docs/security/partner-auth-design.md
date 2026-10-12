@@ -5256,6 +5256,52 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 131.** T
 
 ### 131.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b5cc39f` / #171). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b5cc39f` / #171). Squash-merged as `035af7d` (#172).
 
 - Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 132. As built: the settlement lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 132.** The same shape as §122, §125 to §127 and §129 to §131, for the `settlement-export` lane: an operator's monthly export of redeemed offer codes (AT(17), AT(20)), a class A3 route that also writes (an offline redemption past its confirm-by time is marked as a fraud signal). **No defect was found in the lane.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 132.1 What was built
+
+- **`supabase/tests/integration/partner-settlement.deno.test.ts`** (4 cells): the REAL `handleSettlementExportRequest` over the REAL `privileged.ts` (`partnerDb.withSettlementExport` = `withPartnerSession`, `hitRateLimit`), a REAL operator session from the REAL partner-session mint, REAL database. **The exports bucket is the one thing not real**: the harness has no Supabase Storage, so the storage port is a recorder that keeps what the handler uploads. Redeemed offer codes are seeded by the owner, in a month (2031-03) no other integration file redeems in, so the aggregates are this file's alone.
+  1. **the aggregate, the upload, the side effect:** at `fac_x`, two offers (10.00 and 7.50) with five redeemed codes in the month (one online and one offline-within-its-confirm-by on the first, one offline **overdue**, two online on the second) plus a code redeemed in another month and a code never redeemed; the export's line is `{redemptions: 5, offlineCount: 2, unconfirmedCount: 1, faceValueTotal: 45}` with the month as the database truncated it (`2031-03-01`) and `sponsorshipId: null`; a facility that is **not in the trail's programme** is not exported (the redeemed-code policy is keyed on `facility_programme`), and with `fac_y` put into the programme for the rest of the cell (and taken out again: the row is shared state) a second line appears, ordered after the first, with a fractional total (`4.25`); the upload is one object at `settlement/trl_t/<month as typed>/<uuid>.csv`, `text/csv`, 604 800 seconds, whose bytes are the header plus exactly those lines; **the overdue offline redemption got one `offer_offline_unconfirmed` fraud signal from the first export and still has exactly one after two more**; the same month typed as its first day gives the same lines;
+  2. **an empty month** is 404 `empty` and nothing is uploaded;
+  3. **class A3 and the role rule:** a control first (the operator, with the step-up, exports); then a manager, an operator at aal 1, an operator whose second factor has lapsed, and an unknown trail are each 403 with nothing uploaded; four malformed bodies (`2031-3-1`, `March 2031`, no month, an extra key) are 400; no bearer is 401;
+  4. **the per-member cap:** 60 exports an hour, then 429 with a `Retry-After`; another member is not slowed.
+- Design log: §131.4 now records its squash SHA (`035af7d`, #172).
+
+### 132.2 Measured, not assumed
+
+- **No defect found in the lane.** The aggregate, the CSV, the side effect and the three refusals were right at the first complete run in both modes, after one correction to my own fixture (below).
+- **A wrong assumption of mine, found by running it:** I put a second facility (`fac_y`) on the trail and expected a second line; the export returned one. The harness gives the trail a programme at `fac_x` only, and the definer's redeemed-code policy (0060, 2f) is keyed on `facility_programme`, so redemptions at a facility outside the programme are not part of the export — by design (an offer at such a facility cannot be created through the Edge either: `no_trail`). The cell now asserts that exclusion first and then adds the programme row for the rest of the cell.
+- **The cells can fail (8 of 8 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (4 passed) |
+  | M1 the face-value total is truncated to a whole number | 1 |
+  | M2 the unconfirmed count reads the offline count | 1 |
+  | M3 the line month is the month as typed, not the database's | 1 |
+  | M4 the CSV writes the facility where the funder belongs | 1 |
+  | M5 an empty month is answered 200 | 2 and 4 |
+  | M6 the per-member cap is 61, not 60 | 4 |
+  | M7 the signed URL lasts one day, not seven | 1 |
+  | M8 the object path drops the month | 1 |
+
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **433 passed, 0 failed** in each (the 429 that were there plus these 4); `service-role-lint` clean. No unit test changed.
+
+### 132.3 Not built, honestly
+
+- **The real exports adapter** (`exportsStorage` in `privileged.ts`: the upload, the signed URL, the purge) is not exercised: the harness has no Storage. A defect there would not be seen here.
+- **The sponsor attribution column (AT(20)) is exercised with `sponsorshipId: null` only:** no sponsor-funded offer is seeded (it needs a sponsorship and a sponsor organisation). The admin path (an admin may export any trail) is not driven either.
+- **Two partner lanes still have no real-stack test:** programme and sponsorships (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock §131; settlement: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 132.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `035af7d` / #172). Squash SHA recorded after merge.
+
+- Per-file runs of this test: 4/4 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
