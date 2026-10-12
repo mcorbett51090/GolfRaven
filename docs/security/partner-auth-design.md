@@ -5408,6 +5408,56 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 134.** T
 
 ### 134.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4641a85` / #174). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4641a85` / #174). Squash-merged as `5320483` (#175). The first CI attempt of that PR failed in `marker-scan.deno.test.ts` (the existing M1 test: a rotated-out PIN tried now was accepted); the failed job was re-run once, unchanged, and passed (see §135.2).
 
 - Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the unit pin 4/4; the full harness and the unit suite as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 135. As built: the new person's way in (invite and recovery) is driven end to end against the real database
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 135.** §129 left branch N of the invites lane — accept/start, accept/verify, `credentials`, and the enrolment variant — undriven, because the only thing the harness lacks is GoTrue's email OTP. That is a port (`EmailOtpPort`). This section drives everything on both sides of it for real and fakes only the port. **No defect was found.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 135.1 What was built
+
+- **`supabase/tests/integration/partner-onboarding.deno.test.ts`** (5 cells): the REAL `handlePartnerInvitesRequest` over the REAL `privileged.ts` (`partnerDb.withInviteMint`, `hitSystemRateLimit`) and the REAL `registrationVerifier`, against the real database as `edge_partner_minter` (the unbound lane). **The OTP port is a recording fake** that does for the database what `verifyOtp` does: for an invite it creates the account (confirmed) if the address has none, and it inserts a REAL `auth.sessions` row for the proven person, which the handler closes after the proof (the pattern `partner-pin.deno.test.ts` already uses for the PIN's email proof). What is **not** driven is the GoTrue adapter itself (`partnerInviteEmailOtp` / `partnerEmailOtp`).
+  1. **a new person's whole way in:** `accept/start` answers an unknown token and a real one with the **same body** and sends exactly one mail, to the address on the invite; a wrong code is the one 403 and creates no GoTrue session; the right code yields the accepted person, the creation **options carrying the database's nonce unchanged** (the same bytes as the challenge token), the right RP, user handle and address, attestation `none`, user verification required, nothing excluded; the invite is spent with `attempts` 1 and the **membership exists** (role, inviter, organisation) before any credential does; the GoTrue session is closed after the definer on the success path too; a **real passkey registration** from a software authenticator is verified by the real wrapper and stores **exactly the credential id and public key the authenticator holds**, links it to the invite and mints the **first session** (a `gr_ps_` token, aal 1, ISO expiry and enrolment-until); that session works (lists its own credential; staff are 403 on the manager's list); a replayed verify is the one 403 and a replayed registration is 409 and stores nothing;
+  2. **refusals of the proof:** an address that already holds a passkey is 409 `existing_member_sign_in`; a member without a passkey is 409 `recover_required`; a GoTrue session older than the freshness window is 403 `accept_refused`; each is **counted** on the invite, none accepts it, and **every verify that created a GoTrue session closed it, refusals included**; the control — the same invite with a fresh session — is accepted;
+  3. **the recovery variant:** a manager recovers a member (the partner-members route); the code goes to the member's own address through the **enrolment** port (the invite port sends nothing); the proof names `refKind: enrolment`, the token id and the purpose `recover`; a real registration stores the new key, **consumes the token** and points it at the new credential, leaves exactly one live credential (the old ones stay revoked), and mints a session that works while the **old session is dead**; the token cannot be used again;
+  4. **a registration the database refuses leaves the acceptance usable:** a tampered challenge, a different person, the wrong reference kind, the wrong reference id and a ceremony over a challenge the browser did not sign are each 403 `registration_refused`; a clock past the challenge's expiry is the Edge's own 410 `expired`; no refusal stored a credential or marked the invite registered, and the correct registration then succeeds;
+  5. **the two caps on a token:** five `accept/start` calls send three mails (3 an hour); twelve wrong-code attempts reach the mail provider ten times (10 an hour), each answered with the same constant refusal.
+- Design log: §134.4 now records its squash SHA (`5320483`, #175).
+
+### 135.2 Measured, not assumed
+
+- **No defect found in the path.** The first complete run was 4 of 5 (see below, none of it the lane's) and every run after the fixes was 5/5 in `superuser` and in `restricted`, six runs in all.
+- **The one CI failure in this stretch was not in this lane.** The first CI attempt of #175 failed in `marker-scan.deno.test.ts` M1 (an existing file, which sorts before every file of mine and did not change): a PIN rotated out by thirty wrong guesses was accepted when tried afterwards. It passed in every local run (a dozen or more in both modes) and in CI for #168 to #174; the failed job was re-run once, unchanged, and passed. The PINs are four digits (`HMAC … % 10000`), so the epoch-0 and epoch-1 PINs of a fresh shop coincide in about 1 run in 10,000 — that is the one cause I can name, and it is an inference `[unverified]`, not a measurement. The test is not changed here.
+- **Slips of my own, found by running it:** (1) the credentials route is `credentials`, not `invites/credentials` (404); (2) the members call that issues the recovery is class A2 and my helper did not seed the step-up (403); (3) **a flaky tamper**: to corrupt the challenge MAC I chose the replacement character from the _last_ character but replaced the _second-to-last_, so about one run in 64 left the token unchanged, and a genuine registration succeeded where a refusal was expected. It showed up as one `restricted` failure of 201 for 403. The tamper now always changes a character, and the cell passed four consecutive runs afterwards.
+- **The cells can fail (10 of 10 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (5 passed) |
+  | M1 the creation options carry a nonce other than the database's | 1 |
+  | M2 the code of an invite goes through the enrolment mail port | 1, 3 and 5 |
+  | M3 the GoTrue session is not closed after the proof | 1, 2 and 3 |
+  | M4 `accept/start` answers an unknown token differently | 1 |
+  | M5 the reference kinds are swapped on the wire | 1, 3 and 4 |
+  | M6 the code-mail cap is 4, not 3 | 5 |
+  | M7 the code-attempt cap is 11, not 10 | 5 |
+  | M8 the Edge no longer refuses an expired challenge itself | 4 |
+  | M9 an expired acceptance is answered 403, not 410 | 4 |
+  | M10 the first registration binds the challenge expiry off by one (the MAC no longer matches) | 1, 3 and 4 |
+
+  (The first attempt at this table did not apply nine of its ten mutants: my runner reused one variable name for the scratch directory and for a source path, each reported "mutation did not apply" and none was counted. Its patch step also ran in the real worktree and left two stray edits to `tools/db/test.sh` and `tools/db/test-deno-integration.sh`; they were never committed and were restored before the commit. The table is from the corrected runner.)
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **448 passed, 0 failed** in each (the 443 that were there plus these 5); `service-role-lint` clean. No unit test changed (103 files / 1925 tests as in §134).
+
+### 135.3 Not built, honestly
+
+- **The GoTrue adapter** (`partnerInviteEmailOtp`, `partnerEmailOtp`: the real `verifyOtp`, its account creation and its session) is faked, so a defect in how it creates the account or reports the session id would not be seen here. The class-A3 members routes (`totp-reset`, `admin/enrolments`) and the admin enrolment purpose are not driven either.
+- A brand-new person is created by the fake with a confirmed address and no profile row; whether the real GoTrue-created account looks like that is `[unverified — I did not run GoTrue]`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 135.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `5320483 / #175`). Squash SHA recorded after merge.
+
+- Per-file runs: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
