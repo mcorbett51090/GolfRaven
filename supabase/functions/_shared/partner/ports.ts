@@ -132,7 +132,7 @@ export interface TotpConfirmResult {
 }
 
 /** POST step-up/totp (partner_totp_verify_for_partner): on `ok` the session is aal 2 with mfa_until. */
-export type TotpVerifyStatus = "ok" | "wrong" | "locked" | "unset" | "unconfirmed" | "retry_after";
+export type TotpVerifyStatus = "ok" | "wrong" | "locked" | "hard_locked" | "unset" | "unconfirmed" | "retry_after";
 export interface TotpVerifyResult {
   readonly status: TotpVerifyStatus;
   readonly retryAfterSeconds: number;

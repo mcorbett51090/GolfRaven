@@ -52,6 +52,7 @@ describe("messageForError", () => {
       ["conflict", "otp_unavailable", "proof", "proof.unavailable"],
       ["forbidden", "totp_wrong", "totp", "totp.wrong"],
       ["forbidden", "totp_locked", "totp", "totp.locked"],
+      ["forbidden", "totp_hard_locked", "totp", "totp.hardLocked"],
       ["rate_limited", "totp_backoff", "totp", "totp.backoff"],
       ["conflict", "totp_not_set", "totp", "totp.notSet"],
       ["conflict", "totp_unconfirmed", "totp", "totp.unconfirmed"],

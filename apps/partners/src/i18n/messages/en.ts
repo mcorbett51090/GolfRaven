@@ -160,6 +160,7 @@ export const en = {
   "totp.confirm.button": "Confirm authenticator",
   "totp.wrong": "That code is not correct.",
   "totp.locked": "Too many wrong codes. Wait a while and try again.",
+  "totp.hardLocked": "This authenticator is locked after too many wrong codes. Ask an admin to reset it.",
   "totp.backoff": "Too many wrong codes. Wait a moment and try again.",
   "totp.backoff.wait": "Too many wrong codes. Try again in {seconds} s.",
   "totp.notSet": "No authenticator is added yet. Add one first.",
@@ -471,6 +472,7 @@ export const en = {
   "review.authAlarms.kind.credential_register": "First passkey registered",
   "review.authAlarms.kind.pin_set": "PIN set",
   "review.authAlarms.kind.totp_enrol": "TOTP enrolled",
+  "review.authAlarms.kind.totp_hard_locked": "TOTP hard-locked",
   "notice.reviewResolved": "Review item resolved.",
 
   "rollups.title": "Rollups",
