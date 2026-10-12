@@ -5557,7 +5557,7 @@ Why it matters, in the order of how sure I am: **(observation)** `partner_offer_
 
 ### 137.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eb89f39 / #177`). Merged as `@@SHA178@@` (#178).
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eb89f39 / #177`). Merged as `23aafa1` (#178).
 
 - Per-file runs: matrix 87 24/24 and the integration file 3/3 in `superuser` and `restricted` (the integration file); the full harness as above; the unit suite 103 files / 1925 tests (unchanged: the SQL call-text pins and the account-label pin pass over the new migration and the new file); `check-migrations-immutable.sh` OK (107 files byte-identical to the base). Local Node is 22 (repo pins `>=24`); CI uses Node 24.
 
@@ -5619,4 +5619,4 @@ SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-000000
 
 ### 138.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `@@SHA178@@ / #178`). Squash SHA recorded after merge. No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `23aafa1 / #178`). Squash SHA recorded after merge. No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
