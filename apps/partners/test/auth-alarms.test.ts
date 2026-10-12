@@ -42,6 +42,8 @@ describe("authAlarmKindLabel", () => {
     expect(authAlarmKindLabel("fr-CA", "pin_set")).toBe("NIP défini");
     expect(authAlarmKindLabel("en", "totp_enrol")).toBe("TOTP enrolled");
     expect(authAlarmKindLabel("fr-CA", "totp_enrol")).toBe("TOTP inscrit");
+    expect(authAlarmKindLabel("en", "totp_hard_locked")).toBe("TOTP hard-locked");
+    expect(authAlarmKindLabel("fr-CA", "totp_hard_locked")).toBe("TOTP verrouillé durablement");
   });
 
   it("falls back to the raw kind for an unknown token", () => {

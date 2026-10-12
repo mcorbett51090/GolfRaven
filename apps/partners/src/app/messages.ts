@@ -50,6 +50,7 @@ function messageForCode(kind: string, code: string | null, context: ErrorContext
   if (context === "totp") {
     if (code === "totp_wrong") return { key: "totp.wrong" };
     if (code === "totp_locked") return { key: "totp.locked" };
+    if (code === "totp_hard_locked") return { key: "totp.hardLocked" };
     if (code === "totp_backoff") return wait("totp.backoff", "totp.backoff.wait");
     if (code === "totp_not_set") return { key: "totp.notSet" };
     if (code === "totp_unconfirmed") return { key: "totp.unconfirmed" };

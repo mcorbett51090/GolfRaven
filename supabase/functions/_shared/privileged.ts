@@ -4073,7 +4073,7 @@ function pinWriteResult(r: Record<string, unknown> | undefined, fn: string): Pin
 }
 const TOTP_ENROL_STATUSES: ReadonlySet<string> = new Set(["ok", "already_confirmed"]);
 const TOTP_CONFIRM_STATUSES: ReadonlySet<string> = new Set(["ok", "wrong", "locked", "unset", "already_confirmed", "wrong_session"]);
-const TOTP_VERIFY_STATUSES: ReadonlySet<string> = new Set(["ok", "wrong", "locked", "unset", "unconfirmed", "retry_after"]);
+const TOTP_VERIFY_STATUSES: ReadonlySet<string> = new Set(["ok", "wrong", "locked", "hard_locked", "unset", "unconfirmed", "retry_after"]);
 const TOTP_RESET_STATUSES: ReadonlySet<string> = new Set(["ok", "unset"]);
 function isTotpEnrolStatus(v: unknown): v is TotpEnrolStatus {
   return typeof v === "string" && TOTP_ENROL_STATUSES.has(v);

@@ -178,10 +178,11 @@ describe("COMMIT ON EVERY STATUS: confirm and verify map statuses like PIN", () 
     expect((await post("totp/confirm", { code: CODE }, locked)).headers.get("retry-after")).toBe("900");
   });
 
-  it("step-up/totp: wrong→403, locked→403 with Retry-After, retry_after→429, unset/unconfirmed→409", async () => {
+  it("step-up/totp: wrong→403, locked→403 with Retry-After, hard_locked→403 with NO Retry-After, retry_after→429, unset/unconfirmed→409", async () => {
     const cases: Array<[Parameters<typeof makeFakes>[0], number, string, string | null]> = [
       [{ totpVerify: { status: "wrong", retryAfterSeconds: 0, mfaUntil: null } }, 403, "totp_wrong", null],
       [{ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } }, 403, "totp_locked", "900"],
+      [{ totpVerify: { status: "hard_locked", retryAfterSeconds: 0, mfaUntil: null } }, 403, "totp_hard_locked", null],
       [{ totpVerify: { status: "retry_after", retryAfterSeconds: 17, mfaUntil: null } }, 429, "totp_backoff", "17"],
       [{ totpVerify: { status: "unset", retryAfterSeconds: 0, mfaUntil: null } }, 409, "totp_not_set", null],
       [{ totpVerify: { status: "unconfirmed", retryAfterSeconds: 0, mfaUntil: null } }, 409, "totp_unconfirmed", null],
@@ -194,6 +195,18 @@ describe("COMMIT ON EVERY STATUS: confirm and verify map statuses like PIN", () 
       expect(f.tx, code).toEqual([{ kind: "session", committed: true }]);
       if (retry !== null) expect(res.headers.get("retry-after"), code).toBe(retry);
     }
+  });
+
+  it("step-up/totp hard_locked: 403 totp_hard_locked and no Retry-After at all, even when the database port reports a retry figure (time never clears it), committed", async () => {
+    const f = makeFakes({ totpVerify: { status: "hard_locked", retryAfterSeconds: 900, mfaUntil: null } });
+    const res = await post("step-up/totp", { code: CODE }, f);
+    expect(res.status).toBe(403);
+    expect(res.headers.get("retry-after")).toBeNull();
+    expect((await body(res)).error?.code).toBe("totp_hard_locked");
+    expect(f.tx).toEqual([{ kind: "session", committed: true }]);
+    // the plain 15-minute lock keeps its header: the two are different answers
+    const soft = makeFakes({ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } });
+    expect((await post("step-up/totp", { code: CODE }, soft)).headers.get("retry-after")).toBe("900");
   });
 
   it("a dead session is the one 401; a definer refusal (42501) is 403; a database fault is a constant 500 with no detail", async () => {
