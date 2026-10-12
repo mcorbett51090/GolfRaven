@@ -59,6 +59,12 @@ describe("checkLintRoot", () => {
   });
 });
 
+// The CLI cells spawn the built linter, and the one over the real functions tree parses ~170 files with typescript-estree: about 2 s alone and about 4 s with four copies running at once on a 4-core
+// machine. A 2-core CI runner running every package's tests in parallel took 5136 ms and failed vitest's 5000 ms default (design 124), so these cells are given the time a loaded runner needs and
+// the child is bounded below it, so a hung linter fails the cell (status null) instead of waiting out the test timeout.
+const CLI_TEST_TIMEOUT_MS = 60_000;
+const CLI_CHILD_TIMEOUT_MS = 55_000;
+
 describe("the CLI", () => {
   const cli = join(here, "..", "dist", "cli.js");
   const run = (root: string) => {
@@ -69,6 +75,7 @@ describe("the CLI", () => {
     return spawnSync(process.execPath, [cli, root], {
       encoding: "utf8",
       cwd: repoRoot,
+      timeout: CLI_CHILD_TIMEOUT_MS,
     });
   };
 
@@ -77,11 +84,11 @@ describe("the CLI", () => {
     expect(r.status, r.stdout + r.stderr).toBe(2);
     expect(r.stderr).toMatch(/refusing to lint supabase\/functionz/);
     expect(r.stdout).not.toMatch(/clean/);
-  });
+  }, CLI_TEST_TIMEOUT_MS);
 
   it("exits 2 for an empty directory", () => {
     expect(run(scratch()).status).toBe(2);
-  });
+  }, CLI_TEST_TIMEOUT_MS);
 
   it("still reports the real functions tree as clean, with the number of files it covered", () => {
     const r = run("supabase/functions");
@@ -89,7 +96,7 @@ describe("the CLI", () => {
     expect(r.stdout).toMatch(
       /service-role-lint: clean \(supabase\/functions, \d+ file\(s\)\)/,
     );
-  });
+  }, CLI_TEST_TIMEOUT_MS);
 
   it("checks the root BEFORE linting it (pins the order in cli.ts)", () => {
     const src = readFileSync(join(here, "..", "src", "cli.ts"), "utf8");

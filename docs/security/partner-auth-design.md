@@ -4925,6 +4925,46 @@ Two controls must pass and do: an overload _added_ without dropping the old sign
 
 ### 123.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `3d88f5b` / #163). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `3d88f5b` / #163). Squash-merged as `72ec764` (#164).
 
 - `privileged-sql-contract` 19/19; full server unit suite **100 files / 1900 tests, 0 failed** (1881 + 19). Local Node is 22 (repo pins `>=24`), run with `--config.engine-strict=false`; CI uses Node 24.
+
+## 124. As built: the psql fallback of `test.sh` gets a real verdict; the partner-function set is derived from the code
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 124.** Two leftovers from earlier sections, closed together because both are "a gate that a hand-kept thing or a path nobody runs can fool". CI-tooling and test hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 124.1 The `pg_prove`-less fallback of `tools/db/test.sh`
+
+§120.3 recorded the fallback (`echo "$OUTPUT" | grep -qE '^not ok|ERROR|Looks like you (failed|planned)'`) as the same shape as the H2 gate and left it alone because it is reached only without `pg_prove`, which CI installs. This section ran it end to end (the `if command -v pg_prove …` condition forced false in a scratch copy, the rest of the harness untouched) and found it was wrong in a way that matters more than the shape.
+
+- **It false-failed two of the 106 matrix files, with every test green.** `52_partner_auth_alarm_purge.sql` and `67_partner_credential_list_reach.sql` printed `ok 1` … `ok 13` / `ok 1` … `ok 11` and then `# Looks like you planned 13 tests but ran 4`. Their groups are each a `BEGIN … ROLLBACK`, which rolls pgTAP's own counter back, so `finish()` reports a count lower than the `ok` lines that were printed. `pg_prove` ignores that comment and compares the `ok` lines with the `1..N` plan; the fallback matched the comment's text. So the documented fallback fails closed on a correct run for those two files; CI never takes this path, so nothing there would have said so.
+- **The shape was real, but is not reachable with today's matrix.** Under `set -o pipefail`, an early-exit `grep -q` after `echo "$big"` reads a match as no match once the variable is larger than the 64 KB pipe buffer (measured: 268 KB with the failure on line 1, the old form missed it in 300 of 300 runs, a form that reads everything in 0 of 300). But the largest real output is `16_edge_role.sql` at **50,403 bytes** (measured across all 106 files; the next are 36,076 / 33,215 / 23,408 / 22,682), so no file crosses the buffer today. An earlier estimate in this section's first draft of about 71 KB was an inference, and the measurement refutes it. It is hardening against growth, not a hole.
+- **What was built.** `tools/db/tap-verdict.sh` reads one file's output on stdin and judges it the way `pg_prove` does: no `not ok` line, no `ERROR` line, a `1..N` plan, and exactly N `ok` / `not ok` lines; exit 1 with the reason otherwise. It is a single `awk` that reads all of its input, so no writer can take SIGPIPE. `test.sh`'s fallback pipes each file's output through it and prints the reason with the file name.
+- **`supabase/tests/unit/ci-tap-verdict.test.ts`** (9 cells): a complete file passes; the rolled-back-groups shape of the two files above passes; a `not ok`, a psql `ERROR` line with every test `ok`, a missing plan, empty output and a count that is not the plan's (fewer and more) each fail with the reason; an output over 200 KB held in a variable under `pipefail` is judged correctly in both directions (an early `not ok` found, a clean one passed); and three pins on `test.sh` (the fallback calls the script, has no `grep` after `echo` / `printf` of `$OUTPUT`, and the script is executable). `ci-script-sigpipe.test.ts` gains the mechanism cell for the large-variable case.
+- **Mutation proof (5 of 5 killed):** the script treating pgTAP's "Looks like you planned" comment as a failure again; the plan comparison removed; ERROR lines no longer judged; the fallback restored to the old `grep -qE`; the script losing its executable bit. All files restored byte-identical.
+- **End to end:** the whole harness with the fallback forced and this branch's `test.sh` and `tap-verdict.sh`: `pg_prove not found — falling back…`, then **all 106 matrix files judged and none `FAILED`** (the two that used to false-fail included) and `all pgTAP matrix files passed`, then the Deno integration suite **393 passed, 0 failed**. (The scratch copy is a `git archive` with no `.git`, so the harness's later `service-role-lint` step refuses to run there with the §121 message; that is the guard working, and CI runs from a checkout.)
+
+### 124.2 `PARTNER_FUNCTIONS` is derived from the code
+
+`partner-modules.test.ts` pins `supabase/config.toml` to `verify_jwt = false` for the partner functions, because a partner session token is opaque and not a Supabase JWT, so a partner function deployed with `verify_jwt = true` has every request answered 401 by the gateway, which CI never goes through. The list it pins against was hand-kept, and the cell that checks the list ("lists exactly the partner functions that exist") finds functions by _name_: `partner-*`, plus a hand list of seven unprefixed ones. A new function named for its resource, like `stock-admin`, absent from both lists and from `config.toml`, passed every cell. A new cell derives the set from what each `index.ts` imports (`../_shared/partner/`) and requires it to equal `PARTNER_FUNCTIONS`, both ways. Measured today: 14 imports, 14 listed, equal.
+
+- **Mutation proof (4 killed, and what each did):** an unprefixed new function importing the partner modules fails _only_ the new cell (the existing name-based cells pass it, which is the hole); a `partner-*` one fails the existing name-based cell and the new one; a player function that starts importing the partner modules fails the new cell; `stock-admin` dropped from the list fails the existing cells and the new one.
+
+### 124.3 A timeout flake in §121's CLI cells (found by this PR's first CI run)
+
+`install / typecheck / build / test` failed on this PR's first run: `tools/service-role-lint/test/lint-root.test.ts › the CLI › still reports the real functions tree as clean` timed out at vitest's 5000 ms default (the cell took 5136 ms). It spawns the built linter over the real functions tree (~170 files parsed with typescript-estree), which takes about **1.9 s alone and about 4 s with four copies running at once** on a 4-core machine; a 2-core CI runner running every package's tests in parallel lands on the default. It had passed in #161's and #164's runs, so it is load-dependent, not logic, and it is a defect of the test §121 added, not of this PR's diff.
+
+- **Reproduced, then fixed.** Six busy loops on 4 cores: the unfixed cell failed with the same `Test timed out in 5000ms` (it took 6326 ms); with the fix, the same load passes 9/9. The three cells that spawn the linter now carry a 60 s test timeout and the child a 55 s bound (`spawnSync`'s `timeout`), so a hung linter fails the cell (its status is null) instead of waiting out the test timeout. No test was skipped, loosened or retried.
+- **The same class elsewhere:** the other process-spawning cells added in §119–§124 (`ci-h2-gate`, `ci-tap-verdict`, `ci-script-sigpipe`) run small shell scripts that finish in tens of milliseconds; none walks a real tree.
+
+### 124.4 Not built, honestly
+
+- The fallback is still an untested-in-CI path (CI has `pg_prove`); this section ran it once, end to end, and pinned its verdict logic with unit cells. It was not removed: that is a decision about developer workflow, and the fallback now works.
+- `config.toml` is not checked against anything beyond `verify_jwt` for the partner set (no `entrypoint` / `import_map` checks).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 124.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `72ec764` / #164). Squash SHA recorded after merge.
+
+- `ci-tap-verdict` 9/9, `ci-script-sigpipe` 6/6, `partner-modules` 39/39; full server unit suite **101 files / 1911 tests, 0 failed** (1900 on `main` before this section + 11 new). Local Node is 22 (repo pins `>=24`), run with `--config.engine-strict=false`; CI uses Node 24. `bash -n` clean on both scripts.
