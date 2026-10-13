@@ -6121,7 +6121,65 @@ Numbering: **migration 0112, matrix 90, this section 143.** §137 made a sponsor
 
 ### 143.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `22d16a6`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `22d16a6`). Merged as `e8cddc0` (#186).
 
 - Matrix 90 47/47 in `superuser` (its own run, and in the full harness) and in `restricted` (the full harness); the new integration file 4/4 in both modes; the full harness as above; `check-migrations-immutable.sh` OK. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
 - Not run: the staging path probe against a live gateway (§20.12), anything on a hosted database, the portal's rendering of the 422 `invalid_request` an admin now gets on approving an out-of-rule offer, and the settlement export with a sponsor-funded offer (§137.3, next).
+
+## 144. As built: the settlement export of a sponsor-funded offer is driven end to end (test only)
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 144.** §132.3, §133.3, §134.3 and §137.3 each named the same gap: the settlement export had only ever been seen with `sponsorshipId: null`, and §137.1 marked its claim about attribution `[unverified: the export was not driven with a sponsor-funded offer]`. This section closes it. **No defect was found** in the path. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 144.1 What was built
+
+- **`supabase/tests/integration/partner-settlement-sponsor.deno.test.ts`** (1 cell): everything on the partner side is real. The REAL `sponsorships-admin` handler makes and approves two sponsorships of `trl_t` (scopes `offers` and `both`); the REAL `offers-admin` handler makes three sponsor-funded offers at `fac_x` (two on the first sponsorship, 12.25 and 7.5, one on the second, 5) and the seeded admin approves them (so they pass the §143 rules); the REAL `partner-offers-redeem` handler redeems one code of each with a staff member's PIN grant (a staff scan; the budget moves from reserved to used: 12.25, 0); the REAL `settlement-export` handler exports the month for the operator. Only the exports bucket (a recorder, as in `partner-settlement.deno.test.ts`) and the seeds below are not real.
+  - **The lines**: the first sponsorship is **one** line, `{facilityId: fac_x, funder: sponsor, sponsorshipId, redemptions: 2, offlineCount: 0, unconfirmedCount: 0, faceValueTotal: 19.75}` (grouped by sponsorship, not by offer; the numeric total summed over the wire); the second is its own line (`redemptions: 1`, total 5); on every line `funder = sponsor` holds exactly when `sponsorshipId` is not null; and the CSV carries the same ids in its `sponsorship_id` column (`fac_x,<month>,sponsor,<id>,2,0,0,19.75`).
+  - **What is still seeded, and why**: the reservation an activation makes (the offer's `budget_reserved`, the issued code's `reserved_amount`), the issued code and the check-in token are written by the **owner** as the player-lane activation would leave them (the same seeds as `offers-redeem.deno.test.ts`); activation is a player-lane flow with its own cells.
+  - **Shared state**: redemptions are dated **now**, so the export is the current month and the shared database holds other files' redemptions in it; every assertion is about the lines that **name this file's sponsorships**. The month sent is read back from the database (`date_trunc('month', redeemed_at)`).
+
+### 144.2 Measured, not assumed
+
+- **The cell passed on its first run, so the evidence that it can fail is the mutants.** 7 of 7 mutants fail it (scratch copy through the real harness, only this file, a trivially passing matrix; control passes). For E1–E6 I read the failure message (the failing assertion is in the table); for E7 the failure is a 500 from the export, not an assertion about a line:
+
+  | Mutant                                                                             | Fails at                                                           |
+  | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+  | E1 the export's SQL does not return the sponsorship id                             | the first sponsorship's line                                       |
+  | E2 the SQL groups by offer as well                                                 | the first sponsorship's line (two rows where one is expected)      |
+  | E3 the SQL's face-value total is the largest, not the sum                          | the first sponsorship's line (12.25 where 19.75 is expected)       |
+  | E4 the SQL reports every line as operator-funded                                   | the first sponsorship's line                                       |
+  | E5 the Edge's line body drops `sponsorshipId`                                      | the first sponsorship's line                                       |
+  | E6 the Edge's CSV leaves the `sponsorship_id` column empty                         | the CSV row                                                        |
+  | E7 the SQL's line query skips sponsor-funded rows (its count query does not)       | the export is a 500 `internal_error` (the handler gets no lines)   |
+
+- **Slips of my own, found by running it:** my first mutation runner never started (the script was not executable; the `nohup` error went to its log and I waited on a flag it never wrote), so ten minutes passed with nothing running; and my first draft of the "funder and sponsorship go together" assertion was a convoluted array comparison that I replaced with the plain `funder === "sponsor"` equals `sponsorshipId !== null`.
+
+### 144.3 Not built, honestly
+
+- **Activation is not driven** (see 144.1); an **offline** redemption of a sponsor-funded offer (the `unconfirmed` count and the fraud signal) is not driven with a sponsorship; the real exports adapter and Storage remain a recorder.
+- **A month boundary.** The month sent is read back in the database's own terms and the export buckets with `date_trunc('month', redeemed_at)` in its connection's time zone; if the two connections ever used different zones, a run in the first or last hours of a month could disagree `[unverified: I did not set a zone per connection; both use the database default]`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- **§137.3's third bullet and the `[unverified]` in §137.1 are closed by this section.**
+
+## 145. As built: the marker-scan PIN-rotation tests no longer fail when two epochs share a PIN (test only)
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 145.** The `M1 end to end` cell of `marker-scan.deno.test.ts` failed once in CI, on §135's PR (#175): `Values are not equal`, `refused` expected, at the assertion that a rotated-out PIN tried now is a wrong guess; the same job passed unchanged on a re-run (§135.2). Test-only; no product behaviour change.
+
+### 145.1 What was wrong, and what was built
+
+- **The mechanism, reproduced.** A PIN has four digits, so the epoch-0 and epoch-1 PINs of one facility and day coincide in about 1 shop in 10,000, and the facility id is random per run. When they coincide, "the old PIN is refused after the rotation" is false by construction. I forced it: in a scratch copy, the first shop of the `M1` and `Q2 caps ... ROTATE` tests was searched for a facility id whose two PINs coincide. The **unchanged tests then fail exactly as in CI**: `M1 end to end` at the `refused` assertion (`Values are not equal`) and the rotation test at its `assertNotEquals(pin0, pin1)` (`Expected actual: 5448 not to be: 5448`). **What this does not prove:** that this was the cause on that CI run. The actual value of the failed assertion was not captured there, so the cause stays an inference that fits the symptom `[unverified]`; a 1-in-10,000 event is improbable for any one run, which is a reason to hold the explanation loosely, though it is the only mechanism I could reproduce.
+- **`supabase/tests/integration/marker-scan.deno.test.ts`**: a helper `createShopWithDistinctPins` makes a shop and re-rolls it (up to 8 times) until its epoch-0 and epoch-1 PINs for the day differ; the two tests use it (the rotation test's `assertNotEquals` is gone; the import with it). The extra shops are harmless: each is its own facility. The `M1` assertion now says that the two PINs differ by construction, so a future failure there is not read as a collision.
+
+### 145.2 Measured, not assumed
+
+- With the forced collision: **the unchanged tests fail 2 of 22**; **the hardened tests pass 22 of 22** (the first shop collides, the second does not). Without the forced collision: 22 of 22.
+
+### 145.3 Not built, honestly
+
+- Nothing prevents another reason for a PIN to be accepted after a rotation; this removes one. The tests also compute the PIN of "today" in the facility's zone just before and just after; a run that crosses that zone's midnight between the two is a separate, rarer flake that I did not touch.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 145.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `e8cddc0`). Squash SHA recorded after merge.
+
+- The settlement cell 1/1 and the marker-scan file 22/22 in `superuser` and `restricted` (the full harness). **Full, unpatched harness on the tree of the code commit (`9b65ff7`; the commits after it change only this log), `superuser` then `restricted`, in a scratch copy of the worktree: exit 0 in both modes.** pgTAP **111 files / 6636 tests PASS** (unchanged: no matrix was touched); the race and concurrency scripts pass; the Deno integration suite **463 passed, 0 failed** in each (the 462 of §143 plus the settlement cell); `verify-function-inventory` OK; `service-role-lint` clean. No unit test, migration or product file changed; the unit suite ran in CI's `install / typecheck / build / test` job. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
