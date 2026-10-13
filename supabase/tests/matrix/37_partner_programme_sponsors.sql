@@ -142,6 +142,13 @@ SELECT pg_temp.mk_session('ad', '00000000-0000-0000-0000-4000000000d0', :'c_ad',
 INSERT INTO app.partner_org (id, kind, name)
 VALUES ('10000000-0000-0000-0000-000000003701', 'sponsor', 'Matrix Sponsor Org');
 
+-- 0110 (section 141): the facility programme editor refuses a facility that is not on the trail's current roster. trl_t's roster (helpers.sql) names fac_x and fac_y through their courses;
+-- trl_u has none, so the admin's facility cell below needs one that names fac_x (the roster rows are the OWNER's, planted as service_role like the rest of the catalogue).
+SET LOCAL ROLE service_role;
+INSERT INTO app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, effective_from) VALUES ('trl_u', 1, 'facility', 'facility', now());
+INSERT INTO app.catalog_roster_member (trail_id, roster_version, unit, facility_id, stop_order) VALUES ('trl_u', 1, 'facility', 'fac_x', 1);
+RESET ROLE;
+
 INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, face_value, valid_from, valid_to, status)
 VALUES ('60000000-0000-0000-0000-000000003701', 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 250, 15, current_date, current_date + 30, 'draft');
 
