@@ -54,7 +54,8 @@ export interface AppController extends StepUp {
   getState(): AppState;
   subscribe(listener: (state: AppState) => void): () => void;
   signIn(): Promise<void>;
-  cancelSignIn(): void;
+  /** Cancel (the button), or the hidden-time auto-lock (`keepalive`: the page is hidden and may be frozen next, so the revoke of a session already opened must be able to outlive it). */
+  cancelSignIn(opts?: { keepalive?: boolean }): void;
   refresh(): Promise<void>;
   signOut(): Promise<void>;
   lock(opts?: LockOptions): Promise<void>;
@@ -423,13 +424,13 @@ export function createController(deps: ControllerDeps): AppController {
       }
     },
 
-    cancelSignIn() {
+    cancelSignIn(opts = {}) {
       if (state.screen !== "signing-in" || abort === null) return;
       abort.abort();
       abort = null;
       // the screen leaves "signing-in" at once, whatever the request on the wire is doing; a token that already exists is revoked now, and one that is
       // still on its way is revoked on arrival (api.verify)
-      void dropSession();
+      void dropSession(opts.keepalive === true);
       set({ screen: "signed-out", notice: CANCELLED });
     },
 

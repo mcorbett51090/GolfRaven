@@ -1144,6 +1144,56 @@ suite("apps/partners in Chromium", () => {
       expect(await w.page.evaluate(() => (window as unknown as { __pageshows: boolean[] }).__pageshows)).toEqual([false]);
     });
 
+    describe("an enrolment left at the passkey step", () => {
+      const INVITEE = "new.hire@partners.example.test";
+      const wire = () => server.log.filter((r) => r.method !== "OPTIONS");
+      /** Invite link -> email me a code -> the code -> the Create passkey button is up. */
+      const toPasskeyStep = async () => {
+        const { token } = server.addInvite({ email: INVITEE });
+        const w = await openFakeClock(`/invite#${token}`);
+        await w.page.getByTestId("enrol-send-code").click();
+        await w.page.locator("#enrol-code").fill(server.state.otpCode);
+        await w.page.locator("#enrol-code").press("Enter");
+        await w.page.getByTestId("enrol-create-passkey").waitFor();
+        return w;
+      };
+
+      it("hidden for 120 000 ms: back to sign-in, no Create passkey button, no credential and no session for the invitee (before this, whoever picked the iPad up could press it and be signed in as the invitee)", async () => {
+        const w = await toPasskeyStep();
+        await setVisibility(w, "hidden");
+        await wallClockJump(w, 120_000);
+        await setVisibility(w, "visible");
+        await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+        expect(await w.page.getByTestId("enrol-create-passkey").count()).toBe(0);
+        expect(await w.page.getByTestId("sign-in").isEnabled()).toBe(true);
+        expect(await w.auth.credentials()).toHaveLength(1); // only the preloaded one: nothing was created
+        expect(server.credentialsOf(server.userByEmail(INVITEE)!.id)).toEqual([]);
+        expect(server.sessions()).toEqual([]);
+        expect(wire().filter((r) => r.path.endsWith("/partner-invites/credentials"))).toEqual([]);
+        expect(await w.violations()).toEqual([]);
+      });
+
+      it("hidden for the limit with the timer (the page still hidden): the same", async () => {
+        const w = await toPasskeyStep();
+        await setVisibility(w, "hidden");
+        await w.page.clock.runFor(120_000);
+        await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+        expect(await w.page.getByTestId("enrol-create-passkey").count()).toBe(0);
+        expect(server.sessions()).toEqual([]);
+      });
+
+      it("119 999 ms hidden changes nothing: the button is still there and completes the enrolment (the forced first PIN)", async () => {
+        const w = await toPasskeyStep();
+        await setVisibility(w, "hidden");
+        await wallClockJump(w, 119_999);
+        await setVisibility(w, "visible");
+        expect(await screen(w)).toBe("enrol");
+        await w.page.getByTestId("enrol-create-passkey").click();
+        await w.page.locator('[data-screen="pin-setup"]').waitFor();
+        expect(server.sessions()).toHaveLength(1);
+      });
+    });
+
     it("signed out: a long hide changes nothing and sends nothing", async () => {
       const w = await openFakeClock();
       await setVisibility(w, "hidden");

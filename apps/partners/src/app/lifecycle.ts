@@ -28,7 +28,7 @@
  *
  * Only continuous hidden time counts: a visible page is never locked by this (that is the server's idle expiry), and two short hides do not add up.
  * What it does in each state: signed in, lock; signing in, nothing for a short hide and Cancel (a session already opened is revoked) for a long one;
- * anything else (signed out, an enrolment in progress), nothing. The decision and the reasoning: docs/security/partner-auth-design.md, the auto-lock section.
+ * an enrolment at the passkey step, nothing for a short hide and Cancel for a long one; anything else (signed out, the earlier enrolment steps), nothing. The decision and the reasoning: docs/security/partner-auth-design.md, the auto-lock section.
  */
 
 import type { PartnerApi } from "../api/client";
@@ -86,10 +86,15 @@ export function installAutoLock(controller: AppController, deps: AutoLockDeps): 
 
   /** The page has been away long enough. `stillHidden`: this runs from the timer, so the page may be about to be frozen and the revoke must be able to outlive it. */
   function awayTooLong(stillHidden: boolean): void {
-    const screen = controller.getState().screen;
-    if (screen === "signed-in") void controller.lock({ away: true, keepalive: stillHidden });
-    else if (screen === "signing-in") controller.cancelSignIn(); // the same as pressing Cancel: the screen leaves signing-in now, a session already opened is revoked
-    // signed-out, or the enrolment screens: nothing holds a session, so there is nothing to lock
+    const state = controller.getState();
+    if (state.screen === "signed-in") void controller.lock({ away: true, keepalive: stillHidden });
+    // the same as pressing Cancel: the screen leaves signing-in now, a session already opened is revoked (as a keepalive request when the page is hidden)
+    else if (state.screen === "signing-in") controller.cancelSignIn({ keepalive: stillHidden });
+    // An enrolment at the PASSKEY step holds a verified registration challenge (good for minutes): whoever picked the iPad up could press "Create passkey" and
+    // be signed in as the invitee. Cancel drops the challenge and aborts a ceremony in progress. The earlier steps hold only a one-time token that still needs
+    // a code mailed to the invitee, so there is nothing for a bystander to complete.
+    else if (state.screen === "enrol" && state.step === "passkey") controller.cancelEnrol();
+    // signed out, or an enrolment before the passkey step: nothing completable is held
   }
 
   function stopTimer(): void {

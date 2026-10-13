@@ -170,7 +170,7 @@ function fakeClock(start = 1_800_000_000_000) {
 }
 
 /** A passkey prompt that stays open until `release()`, and rejects with an AbortError when the page cancels it (as the browser does). */
-function openPasskeySheet(inner: Pick<CredentialsContainer, "get" | "create">) {
+function openPasskeySheet(inner: Pick<CredentialsContainer, "get" | "create">, which: "get" | "create" = "get") {
   let release!: () => void;
   const released = new Promise<void>((r) => {
     release = r;
@@ -179,17 +179,20 @@ function openPasskeySheet(inner: Pick<CredentialsContainer, "get" | "create">) {
   const isOpen = new Promise<void>((r) => {
     entered = r;
   });
-  const credentials: Pick<CredentialsContainer, "get" | "create"> = {
-    create: inner.create.bind(inner),
-    get: (req?: CredentialRequestOptions) =>
+  const sheet =
+    (answer: (req?: never) => Promise<Credential | null>) =>
+    (req?: { signal?: AbortSignal }) =>
       new Promise<Credential | null>((resolve, reject) => {
         const fail = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
         const signal = req?.signal;
         entered();
         if (signal?.aborted) return fail();
         signal?.addEventListener("abort", fail, { once: true });
-        void released.then(() => inner.get(req).then(resolve, reject));
-      }),
+        void released.then(() => answer(req as never).then(resolve, reject));
+      });
+  const credentials: Pick<CredentialsContainer, "get" | "create"> = {
+    create: which === "create" ? (sheet((req) => inner.create(req)) as CredentialsContainer["create"]) : inner.create.bind(inner),
+    get: which === "get" ? (sheet((req) => inner.get(req)) as CredentialsContainer["get"]) : inner.get.bind(inner),
   };
   return { credentials, release, isOpen };
 }
@@ -223,9 +226,10 @@ interface SentRequest {
 }
 
 /** The real client, controller, page-lifecycle handlers and auto-lock, over the fake server, with a fake document, a fake clock and fake timers. */
-function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?: boolean } = {}) {
+function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?: boolean; createSheet?: boolean } = {}) {
   const w = makeWorld();
   const sheet = opts.sheet === true ? openPasskeySheet(w.auth.credentials) : null;
+  const createSheet = opts.createSheet === true ? openPasskeySheet(w.auth.credentials, "create") : null;
   const sent: SentRequest[] = [];
   const holder: { api?: ReturnType<typeof createPartnerApi>; controller?: AppController } = {};
   const recording = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -240,7 +244,7 @@ function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?
     return w.fetch(input, init);
   }) as typeof fetch;
   const api = createPartnerApi({ baseUrl: API_BASE, fetch: opts.wrapFetch ? opts.wrapFetch(recording) : recording });
-  const controller = createController({ api, webauthn: { credentials: sheet?.credentials ?? w.auth.credentials, supported: true } });
+  const controller = createController({ api, webauthn: { credentials: sheet?.credentials ?? createSheet?.credentials ?? w.auth.credentials, supported: true } });
   holder.api = api;
   holder.controller = controller;
   const states: AppState[] = [];
@@ -254,22 +258,23 @@ function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?
   const pageshow = (persisted: boolean) => target.dispatchEvent(Object.assign(new Event("pageshow"), { persisted }));
   /** The requests that revoke a session: POST lock / POST sign-out, which carry a bearer. */
   const revokes = () => sent.filter((r) => r.authorization !== null && /\/(lock|sign-out)$/.test(r.url));
-  return { w, api, controller, states, doc, clock, sent, sheet, revokes, pagehide, pageshow };
+  return { w, api, controller, states, doc, clock, sent, sheet, createSheet, revokes, pagehide, pageshow };
 }
 
 const noticeKind = (st: AppState): string | null => (st.screen === "signed-out" ? (st.notice?.kind ?? null) : null);
 const CANCELLED = { screen: "signed-out", notice: { kind: "error", message: { key: "error.cancelled" } } } as const;
 
 /** A stand-in controller that only records what the auto-lock asks of it. */
-function stubController(screen: AppState["screen"]) {
+function stubController(state: { screen: AppState["screen"]; step?: string }) {
   const calls: string[] = [];
   const controller = {
-    getState: () => ({ screen }) as AppState,
+    getState: () => state as AppState,
     lock: (o?: unknown) => {
       calls.push(`lock ${JSON.stringify(o)}`);
       return Promise.resolve();
     },
-    cancelSignIn: () => void calls.push("cancelSignIn"),
+    cancelSignIn: (o?: unknown) => void calls.push(`cancelSignIn ${JSON.stringify(o)}`),
+    cancelEnrol: () => void calls.push("cancelEnrol"),
     reset: () => void calls.push("reset"),
     signOut: () => void calls.push("signOut"),
   } as unknown as AppController;
@@ -382,11 +387,11 @@ describe("auto-lock: what a lock is (exactly what Lock is today)", () => {
   });
 
   it("it is controller.lock with { away: true, keepalive: <timer path> }: not reset(), not signOut(), not a second implementation", () => {
-    const timer = stubController("signed-in");
+    const timer = stubController({ screen: "signed-in" });
     timer.doc.hide();
     timer.clock.advance(AUTO_LOCK_HIDDEN_MS);
     expect(timer.calls).toEqual(['lock {"away":true,"keepalive":true}']);
-    const back = stubController("signed-in");
+    const back = stubController({ screen: "signed-in" });
     back.doc.hide();
     back.clock.jump(AUTO_LOCK_HIDDEN_MS);
     back.doc.show();
@@ -722,8 +727,8 @@ describe("auto-lock: states that hold no session", () => {
     expect(w.server.log.length).toBe(logged);
   });
 
-  it("any other screen (an enrolment in progress) is left alone", () => {
-    const { calls, doc, clock } = stubController("enrol");
+  it.each(["token", "code"])("an enrolment still at the %s step holds nothing a bystander could complete (a one-time token that still needs the code mailed to the invitee): left alone", (step) => {
+    const { calls, doc, clock } = stubController({ screen: "enrol", step });
     doc.hide();
     clock.advance(AUTO_LOCK_HIDDEN_MS);
     doc.show();
@@ -731,6 +736,38 @@ describe("auto-lock: states that hold no session", () => {
     clock.jump(AUTO_LOCK_HIDDEN_MS);
     doc.show();
     expect(calls).toEqual([]);
+  });
+});
+
+describe("auto-lock: what it asks of the controller in each state (stub controller)", () => {
+  it("signing in: Cancel, as a keepalive request from the timer (the page is hidden) and a plain one on return; never lock, reset or sign-out", () => {
+    const timer = stubController({ screen: "signing-in" });
+    timer.doc.hide();
+    timer.clock.advance(AUTO_LOCK_HIDDEN_MS);
+    expect(timer.calls).toEqual(['cancelSignIn {"keepalive":true}']);
+    const back = stubController({ screen: "signing-in" });
+    back.doc.hide();
+    back.clock.jump(AUTO_LOCK_HIDDEN_MS);
+    back.doc.show();
+    expect(back.calls).toEqual(['cancelSignIn {"keepalive":false}']);
+  });
+
+  it("an enrolment at the passkey step: cancelEnrol on both paths, nothing for a hide under the limit", () => {
+    const timer = stubController({ screen: "enrol", step: "passkey" });
+    timer.doc.hide();
+    timer.clock.advance(AUTO_LOCK_HIDDEN_MS - 1);
+    expect(timer.calls).toEqual([]);
+    timer.clock.advance(1);
+    expect(timer.calls).toEqual(["cancelEnrol"]);
+    const back = stubController({ screen: "enrol", step: "passkey" });
+    back.doc.hide();
+    back.clock.jump(119_999);
+    back.doc.show();
+    expect(back.calls).toEqual([]);
+    back.doc.hide();
+    back.clock.jump(AUTO_LOCK_HIDDEN_MS);
+    back.doc.show();
+    expect(back.calls).toEqual(["cancelEnrol"]);
   });
 });
 
@@ -802,6 +839,134 @@ describe("auto-lock while a sign-in is in progress (the OS passkey sheet may hid
     expect(w.server.sessions()).toEqual([]);
     const revoke = sent.find((r) => r.authorization !== null && /\/sign-out$/.test(r.url));
     expect(revoke?.authorization).toBe(`Bearer ${w.server.issuedTokens[0]}`);
+  });
+});
+
+describe("auto-lock while a sign-in holds a token that GET session has not yet confirmed (NIT: the revoke of the cancel)", () => {
+  it.each([
+    ["timer", true],
+    ["return", undefined],
+  ] as const)("hidden for the limit (%s path): the session already opened is revoked with the OLD token, wiped first, as a keepalive request only from the hidden page", async (path, keepalive) => {
+    let armed = false;
+    const hold = holdResponses((u, m) => armed && u.endsWith("/session") && m === "GET", { abortable: true });
+    const { controller, doc, clock, api, w, sent } = autoSetup({ wrapFetch: hold.wrap });
+    armed = true;
+    const p = controller.signIn();
+    await vi.waitFor(() => expect(hold.pending()).toBe(1)); // verify answered: the token is held, GET session is hanging
+    expect(api.hasSession()).toBe(true);
+    expect(controller.getState().screen).toBe("signing-in");
+    doc.hide();
+    if (path === "return") {
+      clock.jump(AUTO_LOCK_HIDDEN_MS);
+      doc.show();
+    } else clock.advance(AUTO_LOCK_HIDDEN_MS);
+    expect(controller.getState()).toEqual(CANCELLED);
+    expect(api.hasSession()).toBe(false);
+    await p;
+    await tick();
+    const revoke = sent.filter((r) => r.authorization !== null && /\/sign-out$/.test(r.url));
+    expect(revoke).toHaveLength(1);
+    expect(revoke[0]).toMatchObject({ authorization: `Bearer ${w.server.issuedTokens[0]}`, keepalive, hasSessionAtSend: false });
+    expect(w.server.state.revokedSessions.size).toBe(1);
+  });
+});
+
+describe("auto-lock: an enrolment left at the passkey step is not completable by whoever picks the iPad up", () => {
+  const EMAIL = "new.hire@partners.example.test";
+  const CODE = "123456";
+
+  async function toPasskeyStep(t: ReturnType<typeof autoSetup>) {
+    const { token } = t.w.server.addInvite({ email: EMAIL });
+    t.controller.startEnrol({ token });
+    await t.controller.requestEnrolCode();
+    await t.controller.submitEnrolCode(CODE);
+    expect(t.controller.getState()).toMatchObject({ screen: "enrol", step: "passkey" });
+  }
+  const credentialPosts = (t: ReturnType<typeof autoSetup>) => t.sent.filter((r) => r.method === "POST" && r.url.endsWith("/partner-invites/credentials"));
+
+  it.each(["return", "timer"] as const)("hidden for the limit (%s path): back to sign-in, and pressing Create passkey afterwards does nothing: the challenge is gone, no request is sent, no session or credential exists", async (path) => {
+    const t = autoSetup();
+    await toPasskeyStep(t);
+    t.doc.hide();
+    if (path === "return") {
+      t.clock.jump(AUTO_LOCK_HIDDEN_MS);
+      t.doc.show();
+    } else t.clock.advance(AUTO_LOCK_HIDDEN_MS);
+    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    await t.controller.createPasskey(); // the button is gone; this is the controller refusing it
+    await t.controller.submitEnrolCode(CODE);
+    await tick();
+    expect(credentialPosts(t)).toEqual([]);
+    expect(t.w.server.sessions()).toEqual([]);
+    expect(t.w.server.credentialsOf(t.w.server.userByEmail(EMAIL)!.id)).toEqual([]);
+    expect(t.api.hasSession()).toBe(false);
+  });
+
+  it("a hide of 119 999 ms leaves the enrolment where it was, and Create passkey then completes it (signed in with the forced first PIN)", async () => {
+    const t = autoSetup();
+    await toPasskeyStep(t);
+    t.doc.hide();
+    t.clock.jump(119_999);
+    t.doc.show();
+    expect(t.controller.getState()).toMatchObject({ screen: "enrol", step: "passkey" });
+    await t.controller.createPasskey();
+    expect(t.controller.getState()).toMatchObject({ screen: "signed-in", panel: { kind: "pin-setup", forced: true } });
+  });
+
+  it("the earlier steps are left alone: the same state object after a long hide, and nothing is sent", async () => {
+    const t = autoSetup();
+    const { token } = t.w.server.addInvite({ email: EMAIL });
+    t.controller.startEnrol({ token });
+    const atToken = t.controller.getState();
+    t.doc.hide();
+    t.clock.jump(AUTO_LOCK_HIDDEN_MS);
+    t.doc.show();
+    expect(t.controller.getState()).toBe(atToken);
+    await t.controller.requestEnrolCode();
+    const atCode = t.controller.getState();
+    expect(atCode).toMatchObject({ step: "code" });
+    t.doc.hide();
+    t.clock.advance(AUTO_LOCK_HIDDEN_MS);
+    expect(t.controller.getState()).toBe(atCode);
+  });
+
+  it.each(["return", "timer"] as const)("the passkey ceremony is open when the limit passes (%s path): it is aborted, and the credentials request is never sent", async (path) => {
+    const t = autoSetup({ createSheet: true });
+    await toPasskeyStep(t);
+    const p = t.controller.createPasskey();
+    await t.createSheet!.isOpen;
+    expect(t.controller.getState()).toMatchObject({ screen: "enrol", busy: true });
+    t.doc.hide();
+    if (path === "return") {
+      t.clock.jump(AUTO_LOCK_HIDDEN_MS);
+      t.doc.show();
+    } else t.clock.advance(AUTO_LOCK_HIDDEN_MS);
+    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    await p;
+    t.createSheet!.release(); // the browser answers late: nothing may come of it
+    await tick(60);
+    expect(credentialPosts(t)).toEqual([]);
+    expect(t.w.server.sessions()).toEqual([]);
+    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+  });
+
+  it("the credentials request is already on the wire when the limit passes: cancelled, and the first session the server opens is revoked on arrival and never held", async () => {
+    const hold = holdResponses((u, m) => u.endsWith("/partner-invites/credentials") && m === "POST");
+    const t = autoSetup({ wrapFetch: hold.wrap });
+    await toPasskeyStep(t);
+    const p = t.controller.createPasskey();
+    await vi.waitFor(() => expect(hold.pending()).toBe(1));
+    t.doc.hide();
+    t.clock.jump(AUTO_LOCK_HIDDEN_MS);
+    t.doc.show();
+    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    hold.release();
+    await p;
+    await tick(60);
+    expect(t.api.hasSession()).toBe(false);
+    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    expect(t.w.server.state.revokedSessions.size).toBe(1);
+    expect(t.w.server.sessions()).toEqual([]);
   });
 });
 
