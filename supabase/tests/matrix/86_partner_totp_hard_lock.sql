@@ -1,5 +1,5 @@
 -- 86_partner_totp_hard_lock.sql
--- 0108_partner_totp_hard_lock.sql (P5 §122): the partner TOTP gets a ceiling on CONSECUTIVE failures. Before it, partner_totp_attempt reset its count at every lock: 5 guesses per
+-- 0108_partner_totp_hard_lock.sql (P5 §139): the partner TOTP gets a ceiling on CONSECUTIVE failures. Before it, partner_totp_attempt reset its count at every lock: 5 guesses per
 -- 15 minutes for ever (480 a day) for anyone holding a valid aal 1 session. Now consecutive_failed survives the 15-minute locks and only a success, an admin reset or a re-enrol
 -- clears it, and the 20th consecutive failure sets hard_locked_at: every later code is refused BEFORE it is compared, until an admin resets the TOTP.
 --
@@ -257,7 +257,7 @@ SELECT tests.authenticate_as('service_role', '{}'::jsonb);
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist WHERE policy_name IN ('pd_partner_totp_hard_locked_alarm_insert', 'pd_partner_totp_hard_locked_alarm_select')
              AND (using_expr IS NOT NULL OR with_check_expr IS NOT NULL)), 2, 'A: both policies are in the definer allow-list with their expressions derived');
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name IN ('partner_totp_attempt', 'partner_totp_enrol_apply', 'partner_totp_confirm_apply', 'partner_totp_reset_apply', 'partner_totp_verify_for_partner')
-             AND note LIKE '%§122%'), 5, 'A: the inventory notes of the five redefined functions name §122');
+             AND note LIKE '%§139%'), 5, 'A: the inventory notes of the five redefined functions name §139');
 SELECT is((SELECT count(*)::int FROM private.function_inventory WHERE function_name = 'partner_totp_verify_for_partner' AND note LIKE '%§110%'), 1,
   'A: the step-up note still names §110 (matrix 82 reads it)');
 SELECT tests.clear_actor();

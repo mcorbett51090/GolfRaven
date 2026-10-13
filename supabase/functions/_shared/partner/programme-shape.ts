@@ -56,10 +56,13 @@ function parseOptionalNumber(v: unknown): number | null | undefined | false {
   return typeof v === "number" && Number.isFinite(v) ? v : false;
 }
 
-function parseOptionalBool(v: unknown): boolean | null | undefined | false {
+/** The "this is not a boolean" answer of `parseOptionalBool`. It is NOT `false`: `false` is a legitimate value of these fields ("this facility does not stock markers"), and returning it as the marker for an invalid one made every `false` a 400. */
+const NOT_A_BOOLEAN = Symbol("not a boolean");
+
+function parseOptionalBool(v: unknown): boolean | null | undefined | typeof NOT_A_BOOLEAN {
   if (v === undefined) return undefined;
   if (v === null) return null;
-  return typeof v === "boolean" ? v : false;
+  return typeof v === "boolean" ? v : NOT_A_BOOLEAN;
 }
 
 export function parseTrailQuery(url: string): ParseResult<{ readonly trailId: string }> {
@@ -245,15 +248,15 @@ export function parseFacilityProgrammeUpsertBody(raw: unknown): ParseResult<Faci
   if (facilityId === null) issues.push({ path: "facilityId", message: "must be a facility id" });
   if (participation === null) issues.push({ path: "participation", message: "must be invited, accepted, declined or left" });
   if (qrMode === null) issues.push({ path: "qrMode", message: "must be rotating, static_pin or both" });
-  if (stocksMarkers === false) issues.push({ path: "stocksMarkers", message: "must be a boolean or null" });
-  if (holdsSpecialMarker === false) issues.push({ path: "holdsSpecialMarker", message: "must be a boolean or null" });
-  if (staffNetwork === false) issues.push({ path: "staffNetwork", message: "must be a boolean or null" });
+  if (stocksMarkers === NOT_A_BOOLEAN) issues.push({ path: "stocksMarkers", message: "must be a boolean or null" });
+  if (holdsSpecialMarker === NOT_A_BOOLEAN) issues.push({ path: "holdsSpecialMarker", message: "must be a boolean or null" });
+  if (staffNetwork === NOT_A_BOOLEAN) issues.push({ path: "staffNetwork", message: "must be a boolean or null" });
   if (!connectivityOk) issues.push({ path: "connectivity", message: "must be ok, weak, none or null" });
   if (wifiNote === false) issues.push({ path: "wifiNote", message: "must be text of at most 500 characters or null" });
 
   if (
     issues.length > 0 || trailId === null || facilityId === null || participation === null || qrMode === null ||
-    stocksMarkers === false || holdsSpecialMarker === false || staffNetwork === false || wifiNote === false
+    stocksMarkers === NOT_A_BOOLEAN || holdsSpecialMarker === NOT_A_BOOLEAN || staffNetwork === NOT_A_BOOLEAN || wifiNote === false
   ) {
     return { ok: false, issues };
   }

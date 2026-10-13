@@ -4,7 +4,7 @@
 // behavioural test cannot state as strongly (they read the source, like marker-scan-entrypoint.test.ts): no `console` anywhere in the partner modules (PA-11), `verify_jwt = false` for the function,
 // the partner function never calls `getActorFromRequest`, and the entrypoint reads no environment.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { baseHeaders, decideOrigin, parseAllowedOrigin, preflightResponse } from "../../functions/_shared/partner/cors.ts";
@@ -351,5 +351,17 @@ describe("the entrypoints and the configuration", () => {
     }
     const others = [...toml.matchAll(/\[functions\.([a-z-]+)\]/g)].map((x) => x[1]);
     expect(others).toEqual([...PARTNER_FUNCTIONS]);
+  });
+
+  it("PARTNER_FUNCTIONS is what the code says, not a hand list: an Edge function whose index.ts imports the partner modules is a partner function, and every listed one is (design 124)", () => {
+    // The "lists exactly" cell above finds partner functions by NAME (`partner-*`, plus the hand list UNPREFIXED_PARTNER_FUNCTIONS), so a new function named for its resource, like stock-admin, that is
+    // absent from both lists and from config.toml passes every cell. It would deploy with verify_jwt = true and have every partner request answered 401 by the gateway (a partner session token is
+    // opaque, not a Supabase JWT) and CI never goes through the gateway to see it. Deriving the set from what the entrypoint IMPORTS needs no list to be kept.
+    const dirs = readdirSync(FUNCTIONS, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !d.name.startsWith("_") && existsSync(join(FUNCTIONS, d.name, "index.ts")))
+      .map((d) => d.name);
+    const importsPartner = dirs.filter((d) => /from\s+"\.\.\/_shared\/partner\//.test(readFileSync(join(FUNCTIONS, d, "index.ts"), "utf8")));
+    expect(importsPartner.sort()).toEqual([...PARTNER_FUNCTIONS].sort());
+    expect(dirs.length).toBeGreaterThan(PARTNER_FUNCTIONS.length); // the player-lane functions are in the tree, so "no function matches" cannot pass for the wrong reason
   });
 });

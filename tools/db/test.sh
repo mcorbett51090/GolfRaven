@@ -251,8 +251,10 @@ else
     echo "  -> $(basename "$f")"
     OUTPUT="$(run_as_pg "'${PSQL[0]}' -h '$PGSOCK' -p '$PGPORT' -U '$DBUSER' -A -t -d '$DBNAME' -f '$f'" 2>&1)"
     echo "$OUTPUT"
-    if echo "$OUTPUT" | grep -qE '^not ok|ERROR|Looks like you (failed|planned)'; then
-      echo "FAILED: $f" >&2
+    # Judged by tap-verdict.sh the way pg_prove judges (no `not ok`, no ERROR, the ok lines match the `1..N` plan), never by `grep -q` on a variable: under `set -o pipefail` that lets an early match
+    # end the reader while the writer is still writing, so a match reads as no match, and pgTAP's own "Looks like you planned N tests but ran M" comment is not a verdict (design 124).
+    if ! VERDICT="$(printf '%s\n' "$OUTPUT" | bash "$ROOT_DIR/tools/db/tap-verdict.sh")"; then
+      echo "FAILED: $f ($VERDICT)" >&2
       FAILED=1
     fi
   done

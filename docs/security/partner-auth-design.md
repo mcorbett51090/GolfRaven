@@ -4770,7 +4770,7 @@ Numbering: **migration n/a, matrix n/a, this section 118.** The code-first re-sc
 
 ### 118.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4e54da1` / #158). Squash-merged together with §119 as `a47e6e5` (#159).
 
 - `service-role-lint` clean and the CI frozen-lockfile `deno check` over all 33 Edge entrypoints exit 0 (the only code-adjacent change is a comment); full server unit suite green.
 
@@ -4848,15 +4848,784 @@ Numbering: **migration n/a, matrix n/a (vitest), this section 121.** The same fa
 
 ### 121.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `cb5230c` / #160). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `cb5230c` / #160). Squash-merged as `040e54e` (#161).
 
 - `lint-root` 9/9; the lint package suite 436/436 and typecheck clean; the real tree reports `clean (supabase/functions, 171 file(s))`; manual probes — typo'd in-repo path, empty directory and a file path each exit 2, the real tree exits 0. Full server unit suite and the CI frozen-lockfile `deno check` (exit measured directly) green.
 
-## 122. As built: partner TOTP consecutive-failure ceiling (hard lock at 20)
+## 122. As built: the review lane gets a real-stack integration test (handler + privileged.ts + database)
 
-Numbering: **migration `0108`, matrix `86`, this section 122** (§114 to §117 landed on `main` while this was built; none added a migration, so `0108` and matrix `86` stayed free). Closes a finding raised by the S1.4 gate on a separate, superseded build of the TOTP slice and re-verified here against `main`: **the partner (staff) TOTP had no ceiling on consecutive failures.** `partner_totp_attempt` (0053, never redefined) reset `failed_count` to 0 at every 15-minute lock, so a person holding a valid aal 1 session (a coworker at a shared iPad whose passkey session is open) could loop `POST step-up/totp` for ever: **5 guesses per 15 minutes = 20 an hour = 480 a day**, with no consecutive-failure ceiling and no Edge-side limit on the route. Each guess is checked against three codes (the plus or minus 1 step window), about 3 chances in 10^6, so roughly **0.14% a day and about 40% a year against one targeted person**. A success gives `aal` 2 and `mfa_until` (class A3), which also stands in for the PIN of a PIN-less operator or admin (6.3). The PIN already had the ceiling (20 failures in a day lock it, S1.3 / 0052). Reproduced on the unfixed 0107 schema before the fix: 40 consecutive wrong codes, every lock waited out, then the **correct** code answered `ok|0|true` (the session is raised); after 0108 the 20th failure hard-locks and the same correct code is refused.
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 122.** §115 fixed an uncaught 500 on `partner-review` (a database status, `no_active_staff`, that the Edge's closed status list did not know) and pinned it with a SQL↔Edge string pin and a handler table. Neither of those runs the path _between_ the handler and the database. This section adds the one cell that does. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
 
 ### 122.1 What was built
+
+- **`supabase/tests/integration/partner-review.deno.test.ts`** (3 cells) — the REAL `handlePartnerReviewRequest` over the REAL `privileged.ts` (`partnerDb.withReview` = `withPartnerSession`), a REAL admin session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (the provisioned `edge_gateway` login, `SET LOCAL ROLE edge_partner`):
+  1. an admin **approves** a held offer code at a facility with **no active staff** → HTTP **422** `no_active_staff`, and the code is still `held_review` in the table (read back);
+  2. the same admin **rejects** it → 200 `void` (rejection needs no staff);
+  3. the same approve first answers 422 (no staff yet), then, once an active staff member is added, the same approve → 200 `issued` and the code is `issued` in the table.
+- **Fixtures are `service_role`-made.** The facility (`catalog_id_ledger` + `catalog_facility`) and the held offer code are inserted as `service_role`; the admin is seeded rather than created after sign-in (an `admin_user` insert after a sign-in revokes that user's sessions, §5.2).
+
+### 122.2 Measured, not assumed
+
+- **Pre-fix tree** (the Edge before §115): in **both** `HARNESS_MODE=superuser` and `restricted`, **1 pass / 2 fail**. The reject cell passes; the two cells that approve at a facility with no active staff fail on that first approve, with HTTP **500** `internal_error` where 422 was expected (cell 3 fails at its own "no staff yet" assertion, before staff is added), which is exactly the production defect. **Post-fix tree: 3/3 in both modes.** The full harness with this file added: Deno integration **393 passed**.
+
+### 122.3 Decisions and departures
+
+- **`service_role` fixtures, not the owner path.** In `restricted` mode (the NOSUPERUSER `migration_owner`, which is what a real deploy resembles) an owner-path `catalog_facility` insert did not persist, so the first draft passed in `superuser` mode and failed in `restricted`. Making the fixtures `service_role` made the two modes agree, and the pre/post matrix above is the proof they do.
+- **Only the review lane.** The other ~13 Edge lanes have no real-stack cell either; a sweep of all of them was not built (each needs its own fixtures), and this lane was chosen because it is the one with a measured production defect behind it.
+- **A sweep for other SQL↔Edge status drift was measured, and found none.** `privileged.ts` holds ~35 closed `*_STATUSES` sets, and only the resolve one has a pin (§115). A one-off sweep (not committed) compared each set with the literal statuses its definer and the definers it calls can return. It flagged three sets, and all three are branches the lane cannot reach, not drift: `OFFER_REDEEM_STATUSES` vs `no_programme` (`partner_attest_write` returns it only for `p_kind = 'marker_purchase'`, `0056:243-249`; offer redemption passes `'offer_redemption'`) and the two invite-accept sets (`partner_invite_accept_core` returns `session_stale` / `existing_member_sign_in` / `recover_required` only in mode `'new'` and `already_member` only in mode `'member'`, `0054:651-716`, and the two Edge sets split exactly on that line). **What this does not cover:** about eight sets the sweep could not map to a definer (`ATTEST`, the PIN and TOTP sets, the receipt sets) were not checked, and no permanent pin was built — a generic one needs a per-set exception table for these argument-dependent branches, which is more code than a measured zero drift justifies today.
+
+### 122.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `040e54e` / #161). Squash-merged as `3d88f5b` (#163).
+
+- Pre/post matrix as above (both harness modes). Re-run on `cb5230c` plus this file, in `superuser` and then `restricted`: pgTAP 106 files / 6294 tests PASS and Deno integration **393 passed, 0 failed** in each (the 3 review-lane cells included); the only change on `main` since is the lint root guard (§121); `service-role-lint` clean; the CI frozen-lockfile `deno check` exits 0 (measured directly).
+
+## 123. As built: the Edge's SQL call text is pinned to the migrations' signatures and result columns
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 123.** Every privileged lane reaches the database through SQL written in tagged templates in `supabase/functions/_shared/privileged.ts` (`trx\`select o_status from private.partner_stock_move_for_partner(${a}::text, …)\``). Until now nothing tied that text to the migrations. The pgTAP matrix calls the SQL functions directly, and the Edge unit suites hand the handlers a _mocked_ port, so a migration that renames a function, adds a required argument, changes an argument's type or drops a returned column left every suite green and failed only at runtime, as an uncaught 500, in the one lane that calls it — and nine partner lanes have no real-stack test (§122). This is the same failure class as design 115 (a status the SQL learned and the Edge did not), one layer down. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 123.1 What was built
+
+- **`supabase/tests/unit/privileged-sql-contract.test.ts`** (19 cells). It replays the migrations in order into the _current_ set of function signatures — `CREATE [OR REPLACE] FUNCTION` and `DROP FUNCTION`, overloads included, comments stripped — then tokenises `privileged.ts` so that only SQL _inside a template literal_ counts (comments, ordinary strings, `${…}` expressions and regular-expression literals do not). Every `private.*` / `app.*` call must:
+  1. name a function some migration defines and none later dropped (a rename or typo is "no such function" at runtime);
+  2. pass an argument count the current signature accepts (defaults make trailing arguments optional);
+  3. cast each argument it casts to a type the parameter accepts — the same type, or an implicit widening PostgreSQL would apply (`int → bigint`, `date → timestamptz`, …);
+  4. select only `o_*` columns the function returns (`RETURNS TABLE` or `OUT` parameters; an `as` alias names an output column and is not one).
+- **Cells beyond the check itself.** Fixtures for the migration replay (later definition wins whatever the file order; an overload is kept; a `DROP` removes exactly its overload, with or without parameter names; a `CREATE` inside a comment is ignored); for the tokenizer (a call in a comment, string or `${…}` is not a call; `insert into app.t (cols)` is not a call; line numbers; an unterminated template throws instead of seeing nothing; regex literals holding a quote or backtick, and a division, are read correctly); for the checker (each of the four failure kinds, the widening, the optional argument, and that with no migrations every call is _reported_, never passed). Real-tree floors make a vacuous pass impossible (>100 migrations, >300 functions, >150 call sites, >100 distinct functions, >70 sites with a column list) and pin that `partner_offers_redeem_apply_offline`, created with 7 arguments in 0062 and dropped and recreated with 8 in 0063, has exactly one current signature.
+- **A sweep that the pin is the whole picture:** no other `.ts` file under `supabase/functions` contains a call of this shape (service-role-lint confines privileged calls to `privileged.ts`; this fails if that stops being true, because the pin would then be missing sites).
+- **Found while building it:** `settlement-handler.ts` has regex literals such as `/[",\n\r]/` and `/"/g`; the first tokenizer read the quote as a string opener and lost its place on that file. `privileged.ts` has none today, but a pin that silently breaks when someone adds `/"/g` there would be a poor one, so the tokenizer now recognises regex literals from the preceding token and has cells for them.
+
+### 123.2 Measured baseline (nothing to fix)
+
+- **107 migrations replay to 339 current signatures on 337 functions** (2 overloaded). `privileged.ts` holds **331** SQL templates with **162 call sites to 154 distinct functions**, 101 of them with a column list; **0 problems**. An independent count (comments stripped, `insert into` column lists excluded, regex-based, no tokenizer) gives the same 162 — the tokenizer neither invents nor drops sites.
+- The earlier ad-hoc scans that led here, recorded so they are not repeated: signatures 0 mismatches over 195 raw matches (33 were mentions in comments); selected columns 0 real mismatches (one apparent hit was a JSDoc line containing the words "select private.\*("); and the status vocabulary of §122.3.
+
+### 123.3 Mutation proof
+
+Seven mutants, each killed by exactly the real-tree cell with a message that names the line, the function and the cause, and each restored byte-identical (sha256):
+
+| Mutant                                                       | Message                                                             |
+| ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| Edge: `${qty}::int` → `::uuid`                               | `argument type mismatch … #4 cast ::uuid for int`                   |
+| Edge: last argument removed                                  | `called with 4 argument(s) but the current signature(s) take 5..5`  |
+| Edge: selected `o_availability` → `o_availabilityx`          | `selects ["o_availabilityx"] but 0058 returns […]`                  |
+| Edge: function name → `…x`                                   | `no migration defines this function`                                |
+| Migration: `DROP` + `CREATE` with a required 6th parameter   | `called with 5 argument(s) but the current signature(s) take 6..6`  |
+| Migration: `DROP` + `CREATE` that no longer returns a column | `selects ["o_availability"] but … returns ["o_status","o_on_hand"]` |
+| Migration: `DROP` with no replacement                        | `no migration defines this function`                                |
+
+Two controls must pass and do: an overload _added_ without dropping the old signature (PostgreSQL allows it, so the Edge's call to the old one still resolves), and a `CREATE OR REPLACE` with the same identity and columns. The scratch migration used for the migration-side mutants was untracked and removed.
+
+### 123.4 Not built, honestly
+
+- **What it cannot see:** an argument the call does not cast (25 of the 162 sites have at least one — the bound value's type is then whatever the driver sends); the _order_ of two same-typed arguments (two `::text` swapped); a `select *`; SQL assembled from strings (none exists). A `${…}` expression that itself contains a template is skipped, not read.
+- **Not a replacement for the real stack.** This proves the text _could_ resolve against the current schema; it does not run it. Nine partner lanes (invites, members, entitlements, offers-redeem, offers, programme, settlement, sponsorships, stock) still have no integration test — the review lane (§122) is the only one added.
+- **The status vocabulary** stays pinned only for the resolve set (§115); the sweep of the other closed sets (§122.3) found no drift, but about eight sets could not be mapped to a definer and none has a permanent pin.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 123.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `3d88f5b` / #163). Squash-merged as `72ec764` (#164).
+
+- `privileged-sql-contract` 19/19; full server unit suite **100 files / 1900 tests, 0 failed** (1881 + 19). Local Node is 22 (repo pins `>=24`), run with `--config.engine-strict=false`; CI uses Node 24.
+
+## 124. As built: the psql fallback of `test.sh` gets a real verdict; the partner-function set is derived from the code
+
+Numbering: **migration n/a, matrix n/a (vitest), this section 124.** Two leftovers from earlier sections, closed together because both are "a gate that a hand-kept thing or a path nobody runs can fool". CI-tooling and test hardening only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 124.1 The `pg_prove`-less fallback of `tools/db/test.sh`
+
+§120.3 recorded the fallback (`echo "$OUTPUT" | grep -qE '^not ok|ERROR|Looks like you (failed|planned)'`) as the same shape as the H2 gate and left it alone because it is reached only without `pg_prove`, which CI installs. This section ran it end to end (the `if command -v pg_prove …` condition forced false in a scratch copy, the rest of the harness untouched) and found it was wrong in a way that matters more than the shape.
+
+- **It false-failed two of the 106 matrix files, with every test green.** `52_partner_auth_alarm_purge.sql` and `67_partner_credential_list_reach.sql` printed `ok 1` … `ok 13` / `ok 1` … `ok 11` and then `# Looks like you planned 13 tests but ran 4`. Their groups are each a `BEGIN … ROLLBACK`, which rolls pgTAP's own counter back, so `finish()` reports a count lower than the `ok` lines that were printed. `pg_prove` ignores that comment and compares the `ok` lines with the `1..N` plan; the fallback matched the comment's text. So the documented fallback fails closed on a correct run for those two files; CI never takes this path, so nothing there would have said so.
+- **The shape was real, but is not reachable with today's matrix.** Under `set -o pipefail`, an early-exit `grep -q` after `echo "$big"` reads a match as no match once the variable is larger than the 64 KB pipe buffer (measured: 268 KB with the failure on line 1, the old form missed it in 300 of 300 runs, a form that reads everything in 0 of 300). But the largest real output is `16_edge_role.sql` at **50,403 bytes** (measured across all 106 files; the next are 36,076 / 33,215 / 23,408 / 22,682), so no file crosses the buffer today. An earlier estimate in this section's first draft of about 71 KB was an inference, and the measurement refutes it. It is hardening against growth, not a hole.
+- **What was built.** `tools/db/tap-verdict.sh` reads one file's output on stdin and judges it the way `pg_prove` does: no `not ok` line, no `ERROR` line, a `1..N` plan, and exactly N `ok` / `not ok` lines; exit 1 with the reason otherwise. It is a single `awk` that reads all of its input, so no writer can take SIGPIPE. `test.sh`'s fallback pipes each file's output through it and prints the reason with the file name.
+- **`supabase/tests/unit/ci-tap-verdict.test.ts`** (9 cells): a complete file passes; the rolled-back-groups shape of the two files above passes; a `not ok`, a psql `ERROR` line with every test `ok`, a missing plan, empty output and a count that is not the plan's (fewer and more) each fail with the reason; an output over 200 KB held in a variable under `pipefail` is judged correctly in both directions (an early `not ok` found, a clean one passed); and three pins on `test.sh` (the fallback calls the script, has no `grep` after `echo` / `printf` of `$OUTPUT`, and the script is executable). `ci-script-sigpipe.test.ts` gains the mechanism cell for the large-variable case.
+- **Mutation proof (5 of 5 killed):** the script treating pgTAP's "Looks like you planned" comment as a failure again; the plan comparison removed; ERROR lines no longer judged; the fallback restored to the old `grep -qE`; the script losing its executable bit. All files restored byte-identical.
+- **End to end:** the whole harness with the fallback forced and this branch's `test.sh` and `tap-verdict.sh`: `pg_prove not found — falling back…`, then **all 106 matrix files judged and none `FAILED`** (the two that used to false-fail included) and `all pgTAP matrix files passed`, then the Deno integration suite **393 passed, 0 failed**. (The scratch copy is a `git archive` with no `.git`, so the harness's later `service-role-lint` step refuses to run there with the §121 message; that is the guard working, and CI runs from a checkout.)
+
+### 124.2 `PARTNER_FUNCTIONS` is derived from the code
+
+`partner-modules.test.ts` pins `supabase/config.toml` to `verify_jwt = false` for the partner functions, because a partner session token is opaque and not a Supabase JWT, so a partner function deployed with `verify_jwt = true` has every request answered 401 by the gateway, which CI never goes through. The list it pins against was hand-kept, and the cell that checks the list ("lists exactly the partner functions that exist") finds functions by _name_: `partner-*`, plus a hand list of seven unprefixed ones. A new function named for its resource, like `stock-admin`, absent from both lists and from `config.toml`, passed every cell. A new cell derives the set from what each `index.ts` imports (`../_shared/partner/`) and requires it to equal `PARTNER_FUNCTIONS`, both ways. Measured today: 14 imports, 14 listed, equal.
+
+- **Mutation proof (4 killed, and what each did):** an unprefixed new function importing the partner modules fails _only_ the new cell (the existing name-based cells pass it, which is the hole); a `partner-*` one fails the existing name-based cell and the new one; a player function that starts importing the partner modules fails the new cell; `stock-admin` dropped from the list fails the existing cells and the new one.
+
+### 124.3 A timeout flake in §121's CLI cells (found by this PR's first CI run)
+
+`install / typecheck / build / test` failed on this PR's first run: `tools/service-role-lint/test/lint-root.test.ts › the CLI › still reports the real functions tree as clean` timed out at vitest's 5000 ms default (the cell took 5136 ms). It spawns the built linter over the real functions tree (~170 files parsed with typescript-estree), which takes about **1.9 s alone and about 4 s with four copies running at once** on a 4-core machine; a 2-core CI runner running every package's tests in parallel lands on the default. It had passed in #161's and #164's runs, so it is load-dependent, not logic, and it is a defect of the test §121 added, not of this PR's diff.
+
+- **Reproduced, then fixed.** Six busy loops on 4 cores: the unfixed cell failed with the same `Test timed out in 5000ms` (it took 6326 ms); with the fix, the same load passes 9/9. The three cells that spawn the linter now carry a 60 s test timeout and the child a 55 s bound (`spawnSync`'s `timeout`), so a hung linter fails the cell (its status is null) instead of waiting out the test timeout. No test was skipped, loosened or retried.
+- **The same class elsewhere:** the other process-spawning cells added in §119–§124 (`ci-h2-gate`, `ci-tap-verdict`, `ci-script-sigpipe`) run small shell scripts that finish in tens of milliseconds; none walks a real tree.
+
+### 124.4 Not built, honestly
+
+- The fallback is still an untested-in-CI path (CI has `pg_prove`); this section ran it once, end to end, and pinned its verdict logic with unit cells. It was not removed: that is a decision about developer workflow, and the fallback now works.
+- `config.toml` is not checked against anything beyond `verify_jwt` for the partner set (no `entrypoint` / `import_map` checks).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 124.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `72ec764` / #164). Squash-merged as `143f61e` (#165).
+
+- `ci-tap-verdict` 9/9, `ci-script-sigpipe` 6/6, `partner-modules` 39/39; full server unit suite **101 files / 1911 tests, 0 failed** (1900 on `main` before this section + 11 new). Local Node is 22 (repo pins `>=24`), run with `--config.engine-strict=false`; CI uses Node 24. `bash -n` clean on both scripts.
+
+## 125. As built: the offers-admin lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 125.** The same shape as §122, for the next lane. The `offers-admin` unit suite hands the handler a _mocked_ port and the pgTAP matrix calls the definers directly, so nothing ran the Edge's own binding of an offer's eligibility (a nested JSON rule through `trx.json(...)::jsonb`), its numeric and date parameters (`::numeric`, `::date`), or the way the returned rows are read back (numerics and dates as the wire carries them). §123 shows the call text _could_ resolve against the current schema; this runs it. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 125.1 What was built
+
+- **`supabase/tests/integration/offers-admin.deno.test.ts`** (5 cells): the REAL `handlePartnerOffersAdminRequest` over the REAL `privileged.ts` (`partnerDb.withOffersAdmin` = `withPartnerSession`), a REAL operator and a REAL admin session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (`edge_gateway` login, `SET LOCAL ROLE edge_partner`):
+  1. an operator **drafts** an offer with a nested eligibility rule, `budgetCap` 250.5, `faceValue` 12.25, `maxRedemptions` 40 and fixed dates: the row (read as `service_role`, not through the code under test) holds the eligibility as a JSON **object** (`jsonb_typeof = 'object'`, equal to what was sent), the numerics exact and the dates `2031-03-01` / `2031-09-30`; `GET offers` reads them back as numbers and plain dates;
+  2. a draft is **edited in place** by its id (same id, one row, new values), an **operator's approve is a 403** and the offer stays a draft, an admin's approve is 200 and the row is `live`, a second approve is 422 `not_draft`;
+  3. a **live offer is not editable** (422 `not_draft`, the row untouched); it is **ended** once (200, `ended`), a second end is 422 `not_live`, an unknown id is 422 `not_found`;
+  4. the **funder rules** are the database's (a sponsor offer without a sponsorship, and a non-sponsor offer with one, are each 422 `bad_funder`) and the Edge's **eligibility gate** stops an unrepresentable rule (`minConfidence`) with a 422 before the database is opened; the offer count is unchanged after all three;
+  5. **A3 needs the second factor**: an operator whose session is at aal 1 gets a 403 on draft and on end, nothing is written and the existing draft is untouched.
+- **Fixtures.** An operator org scoped to trail `trl_t` (which `fac_x` is on, both seeded by the harness), role `operator`, a real credential, and a session from the real mint; the second-factor state (aal 2, a live `mfa_until`) is written by the owner with the session-guard trigger off for that statement only, as the other partner integration files do. The admin is the harness-seeded one, as in §122. Everything the code under test must not be trusted to report is read back as `service_role`.
+- **Self-contained on purpose.** Like `course-qr`, `partner-attest` and the review test, the file carries its own session helpers (about 100 lines duplicated) instead of a shared module: touching the merged files to extract one is a larger change than this section, and a shared fixture module is worth a section of its own if more lanes follow.
+
+### 125.2 Measured, not assumed
+
+- **No defect found.** 5/5 on the first run in `superuser` and again in `restricted` mode: the lane's binding is correct, which is what the §123 baseline (0 drift over 162 call sites) predicted. Recorded because a clean result is still a result, and because the lane now has a test that would catch the next change that breaks it.
+- **The cells can fail (4 of 4 Edge-side mutants killed),** each applied to a scratch copy of `privileged.ts` and run through the real harness: the eligibility bound as `trx.json(JSON.stringify(eligibility))` (a JSON string scalar) fails cell 1 on its `"stored as a JSON object, not a JSON string scalar"` assertion; the budget rounded (`Math.round(budgetCap)`) fails cells 1 and 2; `validFrom` taking `validTo` fails cell 1; the list returning the budget as a string fails cell 1. The repo's `privileged.ts` was never touched.
+- **What the offers leave behind:** drafts and ended offers on `trl_t` at `fac_x`; the cell that approves one ends it again, so no `live` offer is left for the files that share the database. The harness's cluster is throwaway.
+
+### 125.3 Not built, honestly
+
+- **Eight partner lanes still have no real-stack test:** invites, members, entitlements, offers-redeem, programme, settlement, sponsorships, stock (review: §122; offers-admin: this section). Offers-redeem is the money path and the next candidate; it needs a PIN grant, a player's check-in token and an `issued` offer code.
+- This file does not exercise a real sponsorship (`funder = 'sponsor'` with a sponsorship id that exists and has stock), only the refusals around it; the approve-time budget reservation for sponsor offers is not driven.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 125.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `143f61e` / #165). Squash-merged as `c4208a0` (#166).
+
+- The full, unpatched harness on this tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs: **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **398 passed, 0 failed** in each (the 393 that were there plus these 5); `service-role-lint` clean. Nothing the five cells leave behind (drafts and ended offers on `trl_t` at `fac_x`) disturbed any other file.
+- Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 126. As built: the offers-redeem lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 126.** The same shape as §122 and §125, for the lane that moves money. A staff member redeems a player's issued offer code against the player's check-in token: the database consumes the offer's budget, writes the attestation, spends the token and marks the code redeemed. The unit suite hands the handler a _mocked_ port and the pgTAP matrix calls the definers directly, so nothing ran the Edge's own call (`::uuid` / `::text` arguments, the status list, the row mapping of the queue) end to end, or read the effects back. §123 shows the call text could resolve against the current schema; this runs it. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 126.1 What was built
+
+- **`supabase/tests/integration/offers-redeem.deno.test.ts`** (5 cells): the REAL `handlePartnerOffersRedeemRequest` over the REAL `privileged.ts` (`partnerDb.withOffersRedeem` = `withPartnerSession`), a REAL staff session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (`edge_gateway` login, `SET LOCAL ROLE edge_partner`). Every effect is read back as `service_role`, not through the code under test:
+  1. the **queue** lists the facility's issued codes with the player's handle, an ISO expiry and the face value as a number;
+  2. a **staff scan redeems** a code: 201 with an attestation id; the code is `redeemed` by that staff member (`redeemed_offline = false`, `redeemed_at` set); the offer's budget moved from reserved 10 to used 10; and the attestation row is `offer_redemption`, staff and player and facility as expected;
+  3. **the same token twice** is 409 `replayed` (the second code stays `issued`, its offer's budget untouched), **another player's token** is 422 `token_invalid` (the code stays `issued`), and a **redeemed code** is 422 `not_issued`;
+  4. a code whose **reservation the offer cannot cover** (cap 5, nothing reserved, reservation 10) is 422 `budget_short` and nothing moves; an **unknown code** is 404;
+  5. **class A1 needs a PIN grant**: without one, 403 and the code is untouched; and a staff member redeeming a code **owned by their own account** is refused with a 422 and nothing is written.
+- **Fixtures.** A staff member of a facility org scoped to `fac_x` (seeded by the harness, on trail `trl_t`, with a timezone), created 60 days ago so the cold-start cap does not apply; a PIN grant (50 s, one per action) written by the owner with the session-guard trigger off for that one statement, as the other partner integration files do; a player with a device and a `checkin_token` at `fac_x` seeded the way `partner-attest.deno.test.ts` seeds it; and, per code, a fresh live offer with an explicit cap and reservation and an `issued` code carrying its `reserved_amount`. A fresh offer per code because `(user, offer)` is unique.
+- **Self-contained on purpose,** as in §125 (the session helpers are copied from the merged files, not shared).
+
+### 126.2 Measured, not assumed
+
+- **No defect found.** 5/5 on the first run in `superuser` and in `restricted` mode: the lane's wiring is correct, which §123's baseline predicted. Recorded because a clean result is still a result, and the money path now has a test that would catch the next change that breaks it.
+- **The cells can fail (4 of 4 Edge-side mutants killed),** each applied to a scratch copy of the Edge source and run through the real harness (the repo's files were never touched): the attestation id returned as `null` fails cell 2; the face value returned as a string and the player handle dropped from the queue each fail cell 1; the handler answering `replayed` as 422 instead of 409 fails cell 3.
+- **Full, unpatched harness on this tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **403 passed, 0 failed** in each (the 393 that were there plus the 5 of §125 and the 5 of this section); `service-role-lint` clean.
+
+### 126.3 Not built, honestly
+
+- **The offline redeem route (`redeem/offline`)** needs the offline-code derivation the attest test uses (a seed derived from the device, an HOTP step); the statuses `verification_failed`, `rate_limited` and `name_unconfirmed` are therefore not driven. `expired`, `wrong_facility` and `cold_start_cap` (a staff member under 7 days old attesting 30 times in 24 hours) are not driven either.
+- **Seven partner lanes still have no real-stack test:** invites, members, entitlements, programme, settlement, sponsorships, stock (review: §122; offers-admin: §125; offers-redeem: this section). Entitlements is the nearest sibling of this lane (redeem and voucher against a stocked entitlement).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 126.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `c4208a0` / #166). Squash-merged as `0490057` (#167).
+
+- Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 127. As built: the entitlements lane gets a real-stack integration test (and with it the hand-over token's hash contract)
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 127.** The same shape as §122, §125 and §126, for the last lane that moves a physical good: a special-marker entitlement handed over at a facility, with the stock lock and the voucher path. This lane has one contract that a mocked port cannot check at all. The hand-over token is generated by the **Edge**: it passes the database only the SHA-256 of the token (`mintHandover`), and at redeem it hashes the plaintext the player was shown before the database sees it (`sha256Hex(credential)`). If the two sides disagreed on the hash — its encoding, its case, or what is hashed — the mint would succeed and every redeem-by-token would answer `token_invalid`, and no existing suite would say so: the unit suite hands the handler a mocked port that returns what it is told, and the pgTAP matrix presents its own hashes. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 127.1 What was built
+
+- **`supabase/tests/integration/partner-entitlements.deno.test.ts`** (5 cells): the REAL `handlePartnerEntitlementsRequest` over the REAL `privileged.ts` (`partnerDb.withEntitlements` = `withPartnerSession`), a REAL staff session minted by the REAL partner-session handler from the software authenticator's assertion, against the REAL database `tools/db/test.sh` builds (`edge_gateway` login, `SET LOCAL ROLE edge_partner`). Every effect is read back as `service_role` or the owner, not through the code under test:
+  1. the **collect queue** lists the facility's redeemable special markers with the player's handle, the state, `voucherIssuedAt: null` and an ISO activation time;
+  2. **the hand-over token round trip:** `handover/mint` returns a `gr_ho_…` token that expires in about 15 minutes; the stored `token_hash` equals an **independent SHA-256 of the plaintext** (computed in the test with WebCrypto), and the plaintext appears nowhere in the row; redeeming with that plaintext is 201 with `movement: "redeemed"`; the entitlement is `redeemed` by that staff member with `redemption_method = hand_over_token` and `redemption_jti = "handover:" + hash`; stock goes 5 → 4; exactly one `redeemed` movement of −1 by that member is written; the token row is consumed by that member; and the same token again is 422 `not_redeemable` with the stock unchanged;
+  3. a **staff scan** with the player's check-in token redeems (`redemption_method = staff_scan`, `redemption_jti` = the jti, stock 3 → 2); **another player's token** is 422 `token_invalid` with nothing moved; an **unknown entitlement** is 404;
+  4. **out of stock:** with stock 0 a redeem is 409 `out_of_stock` and nothing changes; the **voucher** makes the entitlement `vouchered` at this facility (200, an ISO `voucherIssuedAt`); once restocked, the vouchered entitlement redeems as a `voucher_redeemed` movement (stock 2 → 1);
+  5. **class A1 needs a PIN grant** (403 without one, nothing moves), and a staff member can neither **redeem nor mint** for an entitlement of their **own account** (each a 422; no token row is written).
+- **Fixtures.** A staff member of a facility org scoped to `fac_x`, created 60 days ago (no cold-start cap); a PIN grant (50 s, one per action) written by the owner with the session-guard trigger off for that one statement, as the other partner integration files do; a fresh player per entitlement (`(user, kind, trail)` is unique) with a device, an `activated_at` and, for the staff scan, a `checkin_token` seeded as in `partner-attest.deno.test.ts`; and the one shared stock row for `(trl_t, fac_x)`, which every cell sets exactly before it acts. Self-contained on purpose, as in §125 and §126.
+
+### 127.2 Measured, not assumed
+
+- **No defect found in the lane.** 5/5 on the first run in `superuser` mode: the mint and the redeem agree on the hash, which is the contract above. Recorded because a clean result is still a result, and because that contract is now pinned by a test that would fail on the day either side changes its encoding.
+- **Two defects in the test itself, found only by running it the way CI does** (both modes, then the whole suite), both fixed here:
+  1. **`restricted` mode failed 3 of 5 cells while `superuser` passed 5/5.** Every successful redeem answered 403. The database error, printed from a scratch copy of the Edge, was `permission denied for table special_marker_stock` raised by a foreign-key check (`SELECT 1 FROM ONLY app.special_marker_stock … FOR KEY SHARE`). PostgreSQL runs a foreign-key check with the privileges of the _owner_ of the table, and `withTemporaryOwnerAccess` grants privileges to `current_user` and **revokes the same ones afterwards**: in `restricted` mode `current_user` is the owner, so the revoke stripped the owner's own `SELECT` / `UPDATE` on the stock table and the next stock movement (which references it) could not be inserted. The existing files already keep a persistent `select, update` grant on the two tables they reference, for this reason. This file now uses a small `ownerRows` that creates only the RLS policy a FORCE-RLS table needs and touches no privileges. **A standing hazard, not fixed here:** `withTemporaryOwnerAccess` on any table that something else references will do the same in `restricted` mode.
+  2. **Two cells failed in the full suite and passed alone:** `users_email_key` — the account labels (`rd-staff-N`, `rd-plr-N`) were inherited from the offers-redeem file the helpers were copied from, and every integration file shares one database, so the two files' counters collided on `<label>@integration.test`. This file now has its own prefix (`ent-`), as each existing file already has one.
+- **The cells can fail (5 of 5 Edge-side mutants killed),** each applied to a scratch copy of the Edge source and run through the real harness (the repo's files were never touched): the redeem no longer hashing the hand-over plaintext (`const dbCredential = credential`) fails cell 2; the mint passing an UPPERCASE hash fails cell 2 (the database requires lowercase hex); the queue dropping the player handle fails cell 1; the handler answering `out_of_stock` as 422 instead of 409 fails cell 4; the redeem dropping the movement kind fails cells 2 and 4. All five were run in `superuser` mode on the first version of the file; the two that carry the hash contract were run again in `restricted` mode after the helper fix and are killed there too. The repo's files were never touched.
+- **Full, unpatched harness on this tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **408 passed, 0 failed** in each (the 403 that were there plus these 5); `service-role-lint` clean. (The first full run failed the two cells above; this is the second.)
+
+### 127.3 Not built, honestly
+
+- **Six partner lanes still have no real-stack test:** invites, members, programme, settlement, sponsorships, stock (review: §122; offers-admin: §125; offers-redeem: §126; entitlements: this section).
+- Not driven: `no_stock_row` (a facility with no stock row for the trail), `no_programme` and `cold_start_cap` on the redeem; the stock lock's race for the last unit (`36_partner_stock_handover.sql` covers it in the database, with real concurrent connections); an expired hand-over token; `token_exists` (a hash collision).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 127.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `0490057` / #167). Squash-merged as `eff6e34` (#168).
+
+- Per-file runs of this test as above; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 128. As built: `withTemporaryOwnerAccess` stops stripping the table owner's own privileges
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 128.** §127 found, and deliberately left, a standing hazard in the shared test helper `withTemporaryOwnerAccess` (`supabase/tests/integration/_helpers.ts`): it granted privileges to `current_user` and **revoked the same ones afterwards**. In `HARNESS_MODE=restricted` the connecting role (`migration_owner`) is the table's **owner**, so the revoke stripped the owner's _own_ privileges, and PostgreSQL runs a foreign-key check with the privileges of the referenced table's owner: after the first use, every later insert that references the table failed `permission denied for table …`. In `HARNESS_MODE=superuser` nothing can be stripped, so the defect never shows there. This section fixes the helper and pins the behaviour. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 128.1 What was built
+
+- **`_helpers.ts#withTemporaryOwnerAccess`** now asks `has_table_privilege(current_user, <table>, <privilege>)` for each privilege it was asked for, grants **only the ones the role lacks**, and revokes **only those** afterwards (the policy it creates is still always dropped, even on failure). For a role that already holds everything it is asked for (the owner in `restricted`, any superuser) it neither grants nor revokes; for a role that holds nothing it behaves as before.
+- **`supabase/tests/integration/owner-access-helper.deno.test.ts`** (2 cells):
+  1. for four tables (`app.special_marker_stock`, `app.partner_org`, `app.catalog_facility`, `app.offer`) the connecting role's `SELECT` / `INSERT` / `UPDATE` / `DELETE` privileges are **identical before and after** the helper with all four asked for. This is the cell that carries the regression: it can only fail in `restricted`;
+  2. (`restricted` only; a superuser holds every privilege, so the cell returns early there) on a probe table in schema `app` whose owner has revoked **its own** privileges, the helper holds exactly the asked-for privileges (`insert, update`) for the duration of the call and **none** after it, so the grant-then-revoke path is still exercised where it is reachable.
+- Two comments that described the hazard as standing now say it is fixed: the helper's own doc comment, and `ownerRows` in `partner-entitlements.deno.test.ts` (which keeps its policy-only helper because it needs no privilege at all).
+- Design log: §118.4 and §127.4 now record their squash SHAs (`a47e6e5` / #159, `eff6e34` / #168).
+
+### 128.2 Measured, not assumed
+
+- **Revert-and-run (the cells can fail).** The new test file against the **previous** `_helpers.ts` (main's), in a scratch copy through the real harness: `superuser` — 2/2 pass (the defect is invisible there, as §127 said); `restricted` — **cell 1 fails** on the first table, `app.special_marker_stock: the privileges after the helper are the privileges before it`, with all four privileges `true` before and all four `false` after, which is exactly the stripping §127 found. Cell 2 passes on the old helper too: the grant-then-revoke path was always right where it was reachable, so it is a control, not a regression cell. Against the new helper: 2/2 in both modes.
+- **A defect in my first version of cell 2, found by running it:** the probe table was created in `public`, and in `restricted` the owner has no `CREATE` on schema `public` (`permission denied for schema public`). It now lives in `app`, whose owner is the connecting role. Cell 1 was unaffected.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **410 passed, 0 failed** in each (the 408 that were there plus these 2); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 101 files, 1911 tests) passes.
+
+### 128.3 Not built, honestly
+
+- The persistent `grant select, update on app.partner_credential, app.partner_org to current_user` lines in nine integration files (`course-qr`, `offers-admin`, `offers-redeem`, `partner-attest`, `partner-entitlements`, `partner-pin`, `partner-review`, `partner-session`, `partner-signin-mint`; the last two grant on `partner_credential` only) were added for this same hazard and are probably redundant now. **I did not remove them and did not test removing them**; removing them buys nothing and each removal would need its own two-mode run.
+- Eight integration files call the shared helper. Four of them (`partner-attest`, `partner-pin`, `partner-session`, `partner-signin-mint`) reach it through a local wrapper that passes a privilege subset (`insert, delete` for the tables on which the file already holds the persistent `select, update` grant); the other four (`offers-admin`, `offers-redeem`, `partner-review`, `partner-entitlements`) call it directly. By the same mechanism the old helper would have stripped the owner's `INSERT` / `DELETE` on those tables in `restricted` mode after every use (inferred from reading the helper; I measured the stripping only on the stock table, in §127 and in the revert-and-run above) without any visible effect, because each call grants again first; nothing there needed a change, and none of those files was edited. They are all exercised by the full-harness run above.
+- **Six partner lanes still have no real-stack test:** invites, members, programme, settlement, sponsorships, stock (review: §122; offers-admin: §125; offers-redeem: §126; entitlements: §127).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 128.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eff6e34` / #168). Squash-merged as `b50d058` (#169).
+
+- Per-file runs of this test as above; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 129. As built: the invites lane gets a real-stack integration test — and with it the first defect a lane test has found: an invite could not be created
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 129.** The same shape as §122 and §125 to §127, for the `partner-invites` lane: create, list, revoke, and branch E (an existing member accepts an invite to another organisation). It is the first of those tests to find a defect in the lane rather than in the test. One Edge line is fixed (`privileged.ts`), the defect class is pinned statically, and no migration, product behaviour other than that fix, UI flag or CAMERA / OCR is touched.
+
+### 129.1 The defect, and the fix
+
+- **What.** `buildPartnerInvitesTx.inviteCreate` (`supabase/functions/_shared/privileged.ts`) bound the role as `${role}::app.partner_role`. It runs as `edge_partner` (`SET LOCAL ROLE`), and `edge_partner` has **no USAGE on schema `app`** — deliberately: 0047 says so in as many words (`NO USAGE on schema app`, line 68) and grants only `USAGE ON SCHEMA private` to `edge_partner` and `edge_partner_minter`. A cast that names a type in `app` has to resolve that name, so every `POST invites` raised `42501 permission denied for schema app`, which the Edge's error mapper answers as **403 `forbidden`**, whoever asked and however fresh their step-up (the integration run below shows exactly that: 403 with `{"error":{"code":"forbidden"}}` for a manager with a live reauth and PIN grant). No invite could be created through the Edge, so none could be listed, accepted or revoked either.
+- **Observed, not inferred** (a probe run as `edge_partner` against the live cluster, in both harness modes): `select 'staff'::app.partner_role` → `42501 permission denied for schema app`; `has_schema_privilege('edge_partner','app','USAGE')` = `false`, `('edge_partner','private','USAGE')` = `true`, `('edge_partner_minter','app','USAGE')` = `false`, `('edge_actor','app','USAGE')` = `true`.
+- **Since when** (this clone was deepened to its full history to answer it): the builder entered `privileged.ts` with the cast already in it, in `4cfb5ec` (#73, 2026-10-09); `edge_partner`'s lack of `USAGE` on `app` dates from `8baa81d` (#54, 2026-10-04). The partners portal's invite action (`apps/partners/src/app/work.ts:144`, "class A2: reauth + PIN, then POST invites") posts to this route; I did not run the portal, so what a manager saw there is the 403, read from the handler, not observed.
+- **Why nothing saw it.** The unit suite hands the handler a mocked port; the pgTAP matrix calls the definers with its own SQL, not the Edge's text; and §123's call-text pin compares the cast's _type_ with the parameter's (`app.partner_role` against `app.partner_role`: equal), which is right and says nothing about whether the _role_ may name that type.
+- **Fix.** `${role}` is passed with no cast. The driver (postgres.js) sends a string as an untyped parameter, so the definer's own declared parameter type applies; the run shows the definer accepting it (the 20 creates of cell 6 among them). The comment on the line says why. The other `::app.*` casts in `privileged.ts` all sit above the partner section of the file (by position: the player and system lanes, which run as `edge_actor` / `edge_system`, and those roles do have `USAGE` on `app`, 0030), and the rule cell below finds none in a partner template.
+
+### 129.2 What was built
+
+- **`supabase/tests/integration/partner-invites.deno.test.ts`** (6 cells): the REAL `handlePartnerInvitesRequest` over the REAL `privileged.ts`, REAL manager and member sessions from the REAL partner-session mint, against the REAL database `tools/db/test.sh` builds. Effects are read back as the owner, not through the code under test.
+  1. **create + list:** 201 with a `gr_inv_…` token, an `inviteUrl` carrying it in the fragment, 72 hours; the row holds the **independent SHA-256** of the token, the **normalised** address (`"  New.Hire+Tag@Integration.TEST "` → `new.hire+tag@integration.test`), the role, the facility, the inviter, `attempts` 0, and the plaintext token nowhere; the list shows it with no token or hash in the body; a manager of an organisation at another facility (`fac_y`) sees nothing, with or without `?orgId=`; **control:** a manager of another organisation at the _same_ facility does see it (see 129.3); no bearer is 401;
+  2. **branch E round trip:** an existing staff member of another organisation, with a GoTrue-confirmed address, accepts with the token → 200 `{orgId, role}`; the membership row carries the inviter; the other membership is untouched; the invite is spent (`accepted_by`, `attempts` 1); the same token again is 403 `invite_refused` and writes no second membership;
+  3. **PA-14, a refusal commits its attempt count:** a wrong mailbox is 403 with `attempts` 0 → 1 on the row; the right mailbox still gets in (`attempts` 2); an unconfirmed address is 403 and counted, with no membership; and **ten refusals lock the invite**: the eleventh attempt, from the _right_ mailbox, is refused and `attempts` stays 10;
+  4. **`already_member` and the revoke vocabulary:** inviting an address that is already an active member is 409 `already_member` (any case; no invite written); accepting into an organisation you are already in is 409 `already_member`; revoke is 200 `{revoked: true}`, then 409 `invite_revoked`; an accepted invite is 409 `invite_accepted`; an unknown id **and another facility's invite** are the same 404; a revoked token joins nobody;
+  5. **class A2 and the role rules:** a **control** first (the same manager creates an invite); then a staff member (403), a manager inviting a manager (403, the grant must be a subset of the inviter's reach) and a manager inviting an operator (403, only an admin does) each write nothing; a create with the reauth but no PIN grant, and with the PIN grant but no reauth, are each 403 and write nothing; four malformed bodies are 400;
+  6. **the two daily caps:** three invites to one address, then 429 `rate_limited` with a `Retry-After` and no fourth invite; twenty invites from one inviter, then 429 and no twenty-first; another inviter is not slowed.
+- **`supabase/tests/unit/privileged-sql-contract.test.ts`** (19 → 24 cells): the static pin of the defect class. A **premise** cell: no migration grants `USAGE` on schema `app` to `edge_partner`, `edge_partner_minter` or `PUBLIC` (with controls that the same parser does see `edge_partner`'s `USAGE` on `private` and `edge_actor`'s on `app`). A **rule** cell: no template that calls a `private.*partner*` function names anything in schema `app`. Three synthetic cells cover the readers (multi-line grants, `ALL`, `PUBLIC`, a comment, an untyped argument, the `hit_partner_rate_limit` bucket hit).
+- Design log: §128.4 now records its squash SHA (`b50d058`, #169).
+
+### 129.3 Measured, not assumed
+
+- **Revert-and-run (the cells can fail).** Each mutant is a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** the pre-fix Edge (the cast), otherwise unmutated | **6 of 6** (0 passed) |
+  | M1 control: the fixed Edge, unmutated | none (6 passed) |
+  | M2 the invite link carries the token in the query, not the fragment | 1 |
+  | M3 branch E answers without the role | 2 |
+  | M4 an accepted invite is reported as revoked | 4 |
+  | M5 a refusal rolls its attempt count back, answer unchanged (`ROLLBACK` after the definer returns) | 3 only |
+  | M6 the per-address cap is 4, not 3 | 6 |
+  | M7 the per-inviter cap is 21, not 20 | 6 |
+  | M8 branch E sends the token hash upper-cased | 2, 3 and 4 |
+
+- **The pin's mutants** (the real `privileged.ts` or a throwaway `supabase/migrations/9999_mut.sql`, each restored or deleted; `privileged.ts` byte-identical by SHA-256 afterwards): the fix reverted (rule cell fails, naming the template's line) and an `app` table named beside a partner call (rule cell fails) are killed; a migration granting `USAGE` on `app` to `edge_partner`, and one granting it to `PUBLIC`, fail the premise cell; **controls that must pass and do:** a comment that mentions `app.partner_role`, and `USAGE` on `app` granted to some other role.
+- **Three things in my own first version, found by running it:** (1) the fixture confirmed the invitee's address with an `UPDATE` of `email_confirmed_at`, which `service_role` may not do in the shim (it may update only `last_sign_in_at`): the users are now inserted already confirmed or not, and the "once confirmed, accepted" half of the unconfirmed cell is not written (the confirmed `right` member of the same cell is its control); (2) two cells failed because both organisations sat on `fac_x`: the policies filter by **facility** scope (`pd_read_partner_invite_scope` and `pd_revoke_partner_invite` in 0054: the inviter, an admin, or a manager or operator of the invite's facility), so two organisations on one facility see _and can revoke_ each other's invites — by design, recorded here as a property and pinned as the cell-1 control, not a defect; the cross-organisation assertions use `fac_y`; (3) cell 5 **passed vacuously** on the pre-fix Edge, because its refusals expect a 403 and the bug answered 403 to everything: it now opens with a control that the same manager can create, and it fails with the rest (M0).
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **416 passed, 0 failed** in each (the 410 that were there plus these 6); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 101 files, **1916** tests, the 1911 that were there plus the 5 new pin cells) passes.
+
+### 129.4 Not built, honestly
+
+- **Branch N** (`accept/start`, `accept/verify`, `credentials`, and the enrolment variants) needs GoTrue's email OTP and a fresh GoTrue session, neither of which the harness has. It stays covered by the unit suite and the pgTAP matrix and is **not** driven here; a defect like this one could sit there too.
+- **The pin is narrow.** It reads `GRANT … ON SCHEMA … TO …` statements (no later `REVOKE` is subtracted, and role membership / inheritance is not modelled), and it looks only for a name in schema `app` inside a template that calls a `private.*partner*` function. It does not check table or column privileges, other schemas (`auth`, `storage`), or a partner template that calls no such function. The integration test is the other half: it would have failed on this defect in any lane that drives the path.
+- **Five partner lanes still have no real-stack test:** members, programme, settlement, sponsorships, stock (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites: this section). The members lane is the invites lane's sibling (same file shape, same bound transaction) and the likeliest next.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 129.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b50d058` / #169). Squash-merged as `41781cc` (#170).
+
+- Per-file runs of the invites test: 6/6 in `superuser` and in `restricted`; the unit file 24/24; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 130. As built: the members lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 130.** The same shape as §122, §125 to §127 and §129, for the `partner-members` lane: the roster, revoking a membership, recovering a person, resetting a PIN, the stolen-iPad button, and a person's own credentials (list, note, a second credential through a real ceremony, the add-notice, revoke). **No defect was found in the lane**, recorded because a clean result is still a result and because §129 found one in the sibling lane that looked just like this one. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 130.1 What was built
+
+- **`supabase/tests/integration/partner-members.deno.test.ts`** (8 cells): the REAL `handlePartnerMembersRequest` over the REAL `privileged.ts` (`partnerDb.withMembers`, `withMint`, `hitRateLimit`) and the REAL `registrationVerifier`, REAL manager and staff sessions from the REAL partner-session mint, REAL database. Effects are read back as the owner.
+  1. **roster:** a manager's roster lists the facility's active members with role, facility, `invitedBy` and an ISO time; with no `orgId`, everything in scope and nothing outside it; a manager of another facility (`fac_y`) sees none of them; staff are 403, an unknown query parameter 400, no bearer 401;
+  2. **revoke:** acting on oneself is 422, another facility's manager is 403 and nothing changes, an unknown member is 404; a revoke is 200 `{revoked: true}`, the membership row is revoked, the person is off the roster, **the revoked person's very next call is 401** (control: another member's session is untouched), and the same call again is 404;
+  3. **recover (the hash contract only the real stack shows):** `gr_enr_…` once, in an `enrolUrl` fragment, 24 hours; the database holds the **independent SHA-256** of the token for that person with `purpose = recover` and `issued_by` that manager, and the plaintext nowhere; every credential of the person is revoked and their session is dead; a second recovery revokes the first token and leaves exactly one live; an address-less person is 409 `no_email` with nothing written and nothing revoked; another facility's manager is 403 and nothing is written;
+  4. **PIN reset:** no PIN is 409 `pin_not_set`; a locked PIN (five failures, a backoff, `locked_at`) is cleared to counters 0, no lock, no backoff and `must_change = true`, and the reset raises its alarm row; another facility's manager is 403 and the lock stays; oneself is 422. (The PIN row is planted by the owner: the verifier bytes are a placeholder, because this cell does not verify a PIN.)
+  5. **the stolen-iPad button:** another facility's manager is 403 and nobody is signed out; an unknown organisation is 404; a time in the future is 422 and signs nobody out; a real call answers `{revokedSessions: 3, revokedCredentials: 0}` (the three live sessions of the organisation, the caller's own included) and all three sessions are dead with no credential revoked; with `createdAfter` the other covered members' credentials are revoked as well (`{3, 2}`), the caller's own is not;
+  6. **a person's own credentials:** the list (label, note, ISO time, backup flags), setting and clearing the display note (a padded note is trimmed; `null` and blanks clear it), a stranger's credential id or an unknown one is 404 and nothing is written, a manager lists a covered person's credentials and a manager outside the reach rule gets an empty list, not an error;
+  7. **a second credential through a real ceremony:** the Edge's creation options exclude the credential the person already holds; a REAL registration from a software authenticator is verified by the REAL wrapper; the database stores **exactly the credential id and public key the authenticator holds**; **a real sign-in with the second credential works** (which only holds if the stored key is the authenticator's) and its session lists both credentials; the add-notice reaches the person and, through the reach list, the manager; each acknowledges once (200, then 409 `already_acked`, an unknown notice 404);
+  8. **credential revoke:** a stranger's or an unknown id is 404 and nothing is revoked; the person's own second credential is 200, then 409 `already_revoked`; the revoked credential can no longer sign in, and the first credential and its session are untouched.
+- Design log: §129.5 now records its squash SHA (`41781cc`, #170).
+
+### 130.2 Measured, not assumed
+
+- **No defect found in the lane.** After one correction of my own (below) the file was 8/8 in `superuser` and in `restricted` on its first complete run.
+- **Four of eight cells failed the first time, all on one wrong expectation of mine:** I expected a 400 for acting on oneself (`22023`) and for a `createdAfter` in the future; the Edge answers a database `22023` as **422 `invalid_request`** (the handler's header says a 22023 "throws: nothing was written"; the 400 is for a malformed body, which cell 1 and the invites test cover). The four assertions now say 422.
+- **The cells can fail (10 of 10 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (8 passed) |
+  | M1 recover passes an UPPERCASE token hash (the database requires lowercase hex) | 3 |
+  | M2 the enrolment link carries the token in the query, not the fragment | 3 |
+  | M3 a revoked membership is answered `revoked: false` | 2 |
+  | M4 revoke-all swaps its two counts | 5 |
+  | M5 the credential list drops the note | 6 |
+  | M6 register binds the challenge expiry off by one (the MAC no longer matches) | 7 and 8 |
+  | M7 a PIN reset is answered `reset: false` | 4 |
+  | M8 the roster drops the facility | 1 |
+  | M9 `already_revoked` is answered 404 | 8 |
+  | M10 `already_acked` is answered 404 | 7 |
+
+  (M6's first attempt did not apply: its anchor line occurs four times. It was re-run with the two-line anchor that is unique.)
+- **Observed, not judged.** `orgs/{id}/sessions/revoke-all` answers 404 for an organisation that does not exist and 403 for one outside the caller's reach, because the definer returns `not_found` (0054, line 1455) before the scope check (line 1460): a manager who is not an admin can tell the two apart. Organisation ids are random UUIDs, so the practical reach is small; the invites lane's revoke made the opposite choice on purpose ("an unknown id and an id outside the actor's scope are one answer", 0054 7c). Changing it is a migration; cell 5 pins the current answers and says so, so a change will show up as a failing cell to update on purpose.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **424 passed, 0 failed** in each (the 416 that were there plus these 8); `service-role-lint` clean. No unit test changed (the server unit suite was last run at 1916 tests for §129).
+
+### 130.3 Not built, honestly
+
+- **Not driven:** `totp-reset` and `admin/enrolments` (class A3: aal 2 and a live TOTP; the other integration files write that state, but neither route has a cell here); the PIN reset's _PIN_ (a row is planted); the redemption of the recovery token (branch N of the invites lane: GoTrue's email OTP); the credential bucket (10 an hour per member) and the `too_many` ceiling on credentials; a credential-add notice for a credential that has since been revoked.
+- **Why a revoked member is signed out was not traced** (the definer that revokes a membership only sets `revoked_at`; the 401 is the binder's single answer for a dead session, and I did not read which of its checks fires).
+- **Four partner lanes still have no real-stack test:** programme, settlement, sponsorships, stock (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 130.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `41781cc` / #170). Squash-merged as `b5cc39f` (#171).
+
+- Per-file runs of this test: 8/8 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 131. As built: the stock lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 131.** The same shape as §122, §125 to §127, §129 and §130, for the `stock-admin` lane: reading a facility's stock and moving it (delivered, transfer in / out, count adjustment, damaged), the lane that decides what the player-facing availability says. **No defect was found in the lane.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 131.1 What was built
+
+- **`supabase/tests/integration/partner-stock.deno.test.ts`** (5 cells): the REAL `handlePartnerStockRequest` over the REAL `privileged.ts` (`partnerDb.withStock` = `withPartnerSession`, `hitRateLimit`), REAL staff and manager sessions from the REAL partner-session mint, REAL database. The stock row, the movement rows and the availability row are read back as the owner.
+  1. **read:** staff of the facility see the stock row with on-hand, threshold, projected availability and last count (`status: null`, never counted, before any movement; `in_stock` and an ISO last-counted time after a count adjustment); a manager of the facility may read and move too; staff of another facility are 403, a missing facility or an unknown query parameter 400, no bearer 401;
+  2. **every kind of movement:** `delivered`, `transfer_in`, `transfer_out`, `damaged` and both signs of `count_adjustment` in one run (10 → 15 → 16 → 10 → 3 → 7 → 3 → 0): the sign (a `damaged` or `transfer_out` of 7 is a movement of −7; only a count adjustment may be negative), the stock row after each call, **one movement row per call** with the signed quantity, the note and no entitlement, the projected availability after each call (`in_stock` above the threshold, `low` at or under it, `out` at zero) in both the response and the availability row, and the last-counted time stamped by a count adjustment;
+  3. **refusals change nothing:** a `transfer_out` or a negative count adjustment below zero is 422 `short`; one over the cap is 422 `over_cap` (and exactly the cap, 1,000,000, is allowed); a trail with no stock row is 422 `no_stock_row`; in each the stock is unchanged, nothing is projected and no movement is written;
+  4. **class A1 — one PIN per action:** a movement without a grant is 403 and changes nothing; with one it succeeds and **consumes the grant** (the session's `pin_grant_until` is null afterwards), so the next movement without a new grant is 403; staff of another facility with a grant are 403; seven malformed bodies (zero, negative for a non-count kind, an unknown kind, a fraction, over 100,000, a 201-character note, an extra key) are 400 and move nothing;
+  5. **the per-member cap:** 240 reads an hour, then 429 with a `Retry-After`; a movement counts against the same bucket; another member is not slowed.
+- Design log: §130.4 now records its squash SHA (`b5cc39f`, #171).
+
+### 131.2 Measured, not assumed
+
+- **No defect found in the lane.** The first complete run was 5/5 in both modes once one slip of my own was fixed: I ordered the movement rows by `created_at`, and the column is `at` (found by running it, before anything else).
+- **The cells can fail (7 of 7 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (5 passed) |
+  | M1 `short` is answered 409 | 3 |
+  | M2 the stock list reports a zero threshold | 1 |
+  | M3 a `damaged` movement is sent to the database as `transfer_out` | 2 |
+  | M4 the per-member cap is 241, not 240 | 5 |
+  | M5 a movement answers without the availability | 2 |
+  | M6 a negative count adjustment is sent as its absolute value | 2 and 3 |
+  | M7 the stock list drops the last-counted time | 1 |
+
+- **Shared state.** Every integration file shares one database, so each cell sets the one stock row (`trl_t`, `fac_x`) exactly, and removes its availability row so the projection starts from nothing; staff and manager accounts use their own `stk-` prefix.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **429 passed, 0 failed** in each (the 424 that were there plus these 5); `service-role-lint` clean. No unit test changed.
+
+### 131.3 Not built, honestly
+
+- **The stock lock's race** for the last unit (`SELECT … FOR UPDATE`, `36_partner_stock_handover.sql` covers it in the database with real concurrent connections): not driven through the Edge.
+- The PIN itself (a grant is written by the owner); a sponsor or operator role on this lane (the definer allows staff and manager only; neither was tried); movement notes of exactly 200 characters (201 is the refused edge).
+- **Three partner lanes still have no real-stack test:** programme, settlement, sponsorships (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 131.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `b5cc39f` / #171). Squash-merged as `035af7d` (#172).
+
+- Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 132. As built: the settlement lane gets a real-stack integration test
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 132.** The same shape as §122, §125 to §127 and §129 to §131, for the `settlement-export` lane: an operator's monthly export of redeemed offer codes (AT(17), AT(20)), a class A3 route that also writes (an offline redemption past its confirm-by time is marked as a fraud signal). **No defect was found in the lane.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 132.1 What was built
+
+- **`supabase/tests/integration/partner-settlement.deno.test.ts`** (4 cells): the REAL `handleSettlementExportRequest` over the REAL `privileged.ts` (`partnerDb.withSettlementExport` = `withPartnerSession`, `hitRateLimit`), a REAL operator session from the REAL partner-session mint, REAL database. **The exports bucket is the one thing not real**: the harness has no Supabase Storage, so the storage port is a recorder that keeps what the handler uploads. Redeemed offer codes are seeded by the owner, in a month (2031-03) no other integration file redeems in, so the aggregates are this file's alone.
+  1. **the aggregate, the upload, the side effect:** at `fac_x`, two offers (10.00 and 7.50) with five redeemed codes in the month (one online and one offline-within-its-confirm-by on the first, one offline **overdue**, two online on the second) plus a code redeemed in another month and a code never redeemed; the export's line is `{redemptions: 5, offlineCount: 2, unconfirmedCount: 1, faceValueTotal: 45}` with the month as the database truncated it (`2031-03-01`) and `sponsorshipId: null`; a facility that is **not in the trail's programme** is not exported (the redeemed-code policy is keyed on `facility_programme`), and with `fac_y` put into the programme for the rest of the cell (and taken out again: the row is shared state) a second line appears, ordered after the first, with a fractional total (`4.25`); the upload is one object at `settlement/trl_t/<month as typed>/<uuid>.csv`, `text/csv`, 604 800 seconds, whose bytes are the header plus exactly those lines; **the overdue offline redemption got one `offer_offline_unconfirmed` fraud signal from the first export and still has exactly one after two more**; the same month typed as its first day gives the same lines;
+  2. **an empty month** is 404 `empty` and nothing is uploaded;
+  3. **class A3 and the role rule:** a control first (the operator, with the step-up, exports); then a manager, an operator at aal 1, an operator whose second factor has lapsed, and an unknown trail are each 403 with nothing uploaded; four malformed bodies (`2031-3-1`, `March 2031`, no month, an extra key) are 400; no bearer is 401;
+  4. **the per-member cap:** 60 exports an hour, then 429 with a `Retry-After`; another member is not slowed.
+- Design log: §131.4 now records its squash SHA (`035af7d`, #172).
+
+### 132.2 Measured, not assumed
+
+- **No defect found in the lane.** The aggregate, the CSV, the side effect and the three refusals were right at the first complete run in both modes, after one correction to my own fixture (below).
+- **A wrong assumption of mine, found by running it:** I put a second facility (`fac_y`) on the trail and expected a second line; the export returned one. The harness gives the trail a programme at `fac_x` only, and the definer's redeemed-code policy (0060, 2f) is keyed on `facility_programme`, so redemptions at a facility outside the programme are not part of the export — by design (an offer at such a facility cannot be created through the Edge either: `no_trail`). The cell now asserts that exclusion first and then adds the programme row for the rest of the cell.
+- **The cells can fail (8 of 8 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (4 passed) |
+  | M1 the face-value total is truncated to a whole number | 1 |
+  | M2 the unconfirmed count reads the offline count | 1 |
+  | M3 the line month is the month as typed, not the database's | 1 |
+  | M4 the CSV writes the facility where the funder belongs | 1 |
+  | M5 an empty month is answered 200 | 2 and 4 |
+  | M6 the per-member cap is 61, not 60 | 4 |
+  | M7 the signed URL lasts one day, not seven | 1 |
+  | M8 the object path drops the month | 1 |
+
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **433 passed, 0 failed** in each (the 429 that were there plus these 4); `service-role-lint` clean. No unit test changed.
+
+### 132.3 Not built, honestly
+
+- **The real exports adapter** (`exportsStorage` in `privileged.ts`: the upload, the signed URL, the purge) is not exercised: the harness has no Storage. A defect there would not be seen here.
+- **The sponsor attribution column (AT(20)) is exercised with `sponsorshipId: null` only:** no sponsor-funded offer is seeded (it needs a sponsorship and a sponsor organisation). The admin path (an admin may export any trail) is not driven either.
+- **Two partner lanes still have no real-stack test:** programme and sponsorships (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock §131; settlement: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 132.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `035af7d` / #172). Squash-merged as `68e62fa` (#173).
+
+- Per-file runs of this test: 4/4 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 133. As built: the programme lane gets a real-stack integration test — and the second defect a lane test has found: a facility programme could not say "no"
+
+Numbering: **migration n/a, matrix n/a (Deno integration + unit), this section 133.** The same shape as §122, §125 to §127 and §129 to §132, for the `programme-config` lane: an operator's trail programme and facility programme (class A3 writes, class A0 reads) and the two rollups. The second lane test to find a defect in the lane rather than in itself; one Edge parser is fixed, and no migration, UI flag or CAMERA / OCR is touched.
+
+### 133.1 The defect, and the fix
+
+- **What.** `parseOptionalBool` (`supabase/functions/_shared/partner/programme-shape.ts`) answered an invalid value with the literal `false`, and `parseFacilityProgrammeUpsertBody` read `stocksMarkers === false`, `holdsSpecialMarker === false` and `staffNetwork === false` as "invalid". But `false` is also a **legitimate value** of those three nullable booleans ("this facility does not stock markers / does not hold the special marker / has no staff network"), so every body that said so was a **400 `bad_request`**. The facility programme could be written with `true`, `null` or nothing, and never with `false`. The same file's other `parseOptional*` helpers use `false` as their marker too, but their values (a string, a uuid, a number) can never be `false`, so only the boolean one collided; the trail body reads its two booleans with a plain `typeof` and was never affected.
+- **Reach, stated carefully.** The partners portal's programme form sends `stocks === "true"` (`apps/partners/src/ui/views-admin.ts:149-152`), i.e. `false` for a typed "false", so an operator who tried to record a "no" was refused. The columns hold `false` fine (nullable booleans; the harness seeds `true`). The one consumer of these columns I found outside the programme definers and the portal form is the **sponsorship approval** (0059, `partner_sponsorship_approve_for_partner`), which reads `holds_special_marker IS TRUE`: a special-marker sponsorship is refused `stock_short` while a facility of the trail that holds the marker has no stock. `null` behaves like `false` there, so an operator could have worked around the defect by leaving the field empty; but the record could not say "no", and the form's "false" was a 400. This is a data-entry defect, not a security or money defect.
+- **Since when** (the clone has full history): the parser entered with the lane in `4cfb5ec` (#73, 2026-10-09), the same commit that brought the invite-create cast of §129.
+- **Why nothing saw it.** The only unit test that touches these fields (`partner-programme-handler.test.ts`) hands the handler a parsed value or a mock and never sends a `false`; the pgTAP matrix calls the definer with its own SQL; and the portal's tests run against a fake server.
+- **Fix.** `parseOptionalBool` returns a distinct sentinel (`NOT_A_BOOLEAN`, a symbol) for a value that is not a boolean, and the three call sites compare with it. `false`, `true`, `null` and an omitted field now mean what they say.
+
+### 133.2 What was built
+
+- **`supabase/tests/unit/partner-programme-shape.test.ts`** (5 cells): `false` and `true` accepted for each of the three booleans; `null` and an omitted field read as `null`; `"false"`, `"true"`, `0`, `1`, `[]` and `{}` refused with the field named; the rest of the facility body unchanged (participation, QR mode, the 500-character note, an unknown key); the trail body's two booleans accept `false`.
+- **`supabase/tests/integration/partner-programme.deno.test.ts`** (5 cells): the REAL `handlePartnerProgrammeRequest` over the REAL `privileged.ts` (`partnerDb.withProgramme` = `withPartnerSession`, `hitRateLimit`), REAL operator and manager sessions from the REAL partner-session mint, REAL database. Every cell works on **its own trail** (a ledger row and a catalog trail made here), because `trail_programme` and `facility_programme` are shared state.
+  1. **a trail's programme round trip:** the thirteen values upserted through the handler read back the same through the handler **and** as the owner (a numeric fee as a number, dates as `YYYY-MM-DD`, nullable fields as null); no programme yet is 422 `not_found`; a second upsert replaces every field including the ones it nulls; `webPlayerFlow: true` is refused (a database 22023 answered 422) and changes nothing;
+  2. **a facility's programme:** before the trail's own it is 422 `no_trail` and writes nothing; two facilities upserted through the handler (one with every field set, including the three `false`s of the second upsert, one with every nullable field null) are listed and match the owner's rows; a second upsert replaces a row rather than adding one; five malformed bodies are 400;
+  3. **class A3, and the assurance level gates every class:** a control first (the operator with the step-up writes); then a manager, an operator at aal 1 and an operator of another trail are each 403 on both write routes and write nothing; **an operator at aal 1 cannot even read** (`partner_authorize` step 4, M2: the aal gates every class including A0), the same operator at aal 2 can; a manager and another trail's operator are 403 on a read; no bearer 401; five malformed trail bodies 400;
+  4. **the rollups:** the operator rollup lists a trail's rows newest month first with the numeric value and the cohort size; another trail's operator is 403; the sponsor rollup lists a sponsorship's rows (a sponsor organisation and a sponsorship are seeded by the owner); another trail's operator is 403; a malformed id is 400; **observed, not judged:** a sponsorship that does not exist is an empty list while one outside the caller's scope is 403, so an operator can tell the two apart (the definer returns before the scope check when the row is missing; ids are random UUIDs);
+  5. **the per-member cap:** 240 requests an hour, then 429 with a `Retry-After`; another member is not slowed.
+- Design log: §132.4 now records its squash SHA (`68e62fa`, #173).
+
+### 133.3 Measured, not assumed
+
+- **Revert-and-run.** The unit cells against the **old** parser: 1 fails (`stocksMarkers: false: expected false to be true`) and 4 pass, the four being the controls above. The integration file against the **pre-fix Edge** (the old parser, otherwise unmutated): **cells 2 and 3 fail**, cells 1, 4 and 5 pass; against the fixed Edge: 5/5 in `superuser` and in `restricted`.
+- **Mutants** (8 of 8 killed), each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** the pre-fix Edge | 2 and 3 |
+  | M1 control: the fixed Edge, unmutated | none (5 passed) |
+  | M2 the trail read drops the fee amount | 1 |
+  | M3 the fee amount is rounded to a whole number on the way in | 1 |
+  | M4 `stocks_markers` and `holds_special_marker` are swapped on the way in | 2 |
+  | M5 the facility list drops the QR mode | 2 |
+  | M6 `no_trail` is answered 409 | 2 |
+  | M7 the operator rollup truncates the value | 4 |
+  | M8 the per-member cap is 241, not 240 | 5 |
+  | M9 a missing programme is answered 404 | 1 |
+
+- **Three slips of my own, found by running it:** (1) the first run failed all five cells, because I assumed an operator's read needed only the operator's scope; `partner_authorize` gates the assurance level for every class (the rule is now a cell); (2) my default facility body said `holdsSpecialMarker: false`, which is how the defect surfaced — the 400 was the parser, not the fixture; (3) the first version of the trail fixture needed a catalog ledger row (the upsert answers `not_found` for a trail the ledger does not know).
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **438 passed, 0 failed** in each (the 433 that were there plus these 5); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 102 files, **1921** tests, the 1916 that were there plus the 5 new shape cells) passes.
+
+### 133.4 Not built, honestly
+
+- A programme with a **sponsor-funded** special marker (`specialMarkerFundedBy: "sponsor"` and a `specialMarkerSponsorshipId`) is not driven; the sponsorship seeded for the rollup cell is not used by the trail upsert. The admin path (an admin may configure any trail) is not driven either.
+- **One partner lane still has no real-stack test:** sponsorships (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock §131; settlement §132; programme: this section).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 133.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `68e62fa` / #173). Squash-merged as `4641a85` (#174).
+
+- Per-file runs: the integration file 5/5 in `superuser` and in `restricted`; the unit file 5/5; the full harness and the unit suite as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 134. As built: the sponsorships lane gets a real-stack integration test (and the last partner lane has one)
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 134.** The same shape as §122, §125 to §127 and §129 to §133, for the `sponsorships-admin` lane: an operator's draft sponsorships (class A3), their approval (draft to live, with the AT(20) stock rule) and the list (class A0). **No defect was found in the lane.** With this section every partner lane has a real-stack test. Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 134.1 What was built
+
+- **`supabase/tests/integration/partner-sponsorships.deno.test.ts`** (5 cells): the REAL `handlePartnerSponsorshipsRequest` over the REAL `privileged.ts` (`partnerDb.withSponsorships` = `withPartnerSession`, `hitRateLimit`), a REAL operator session from the REAL partner-session mint, REAL database. Every cell works on **its own trail** (a ledger row and a catalog trail made here), because the programme and stock tables are shared state.
+  1. **create, list, edit:** a draft upserted through the handler is stored and listed with every value (a numeric fee as a number, dates as `YYYY-MM-DD`, the approval time `null`); an edit by `id` replaces the draft in place, including the fields it nulls (one row, not two); a sponsor organisation of kind `facility` is 422 `bad_sponsor` and an unknown id 422 `not_found`, each writing nothing;
+  2. **approve:** a draft goes live and the approval time is stamped (and listed); approving it again, or editing it, is 422 `not_draft` and the live row is not edited; an unknown id is 422 `not_found`;
+  3. **the AT(20) stock rule, which reaches across lanes:** with a programme in which `fac_x` holds the special marker (`true`) and `fac_y` does not (`false`), a `special_marker` or `both` sponsorship is 422 `stock_short` and stays a draft while `fac_x` has no stock, an `offers`-only one is never blocked, and once `fac_x` has stock the same approval succeeds; stock is read at the moment of approval (zeroed again, the next approval is `stock_short` again), and a facility that **stops holding the marker** (`holds_special_marker` set to `false`) stops blocking. (`holds_special_marker` is the column §133 made writable as `false` through the Edge; here it is seeded by the owner, so this cell stands apart from that fix.)
+  4. **class A3 and the aal gate:** a control first (the operator with the step-up creates); then a manager, an operator at aal 1 (a read too) and an operator of another trail are 403 and write nothing; another trail's operator cannot approve this trail's sponsorship (403); no bearer is 401; seven malformed bodies (category, scope, a blank name, a negative fee, a malformed date, a malformed sponsor id, an extra key), a malformed approve id and a missing trail are 400;
+  5. **the per-member cap:** 240 requests an hour, then 429 with a `Retry-After`; another member is not slowed.
+- **`supabase/tests/unit/integration-account-labels.test.ts`** (4 cells): a pin against the slip below. Every Deno integration file shares one database and `createTestUser(uid, label)` inserts `<label>@integration.test`, which is unique, so two files that build their labels from the same prefix collide in the full suite and never in a per-file run. The pin reads every `createTestUser` call in the integration directory (47 call sites, all seen) and requires that no literal label prefix is used by more than one file. Two cells cover the reader on synthetic input; two cover the real tree (a floor on files and calls, so a reader that saw nothing cannot pass; and the rule).
+- Design log: §133.5 now records its squash SHA (`4641a85`, #174).
+
+### 134.2 Measured, not assumed
+
+- **No defect found in the lane.** 5/5 on the first complete run in `superuser` and in `restricted`.
+- **The cells can fail (8 of 8 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (5 passed) |
+  | M1 the placement fee is rounded to a whole number on the way in | 1 |
+  | M2 the list drops the approval time | 2 |
+  | M3 `not_draft` on approve is answered 409 | 2 |
+  | M4 `stock_short` is answered 409 | 3 |
+  | M5 every sponsorship is stored with the scope `offers` | 1 and 3 |
+  | M6 `bad_sponsor` is answered 409 | 1 |
+  | M7 the per-member cap is 241, not 240 | 5 |
+  | M8 the list drops the start date | 1 |
+
+- **A slip of my own, found only by the full harness (the per-file runs were 5/5):** the helpers were copied from the programme file and kept its account-label prefix `prg-`, so the two files collided on `users_email_key` in the shared database — three cells failed in the full `superuser` run. It is the second time (§127: `rd-` from offers-redeem). The file has its own prefix (`spn-`) and the pin above now makes the class a failing cell.
+- **The pin's mutants** (the integration files edited and restored byte-identical by SHA-256): the sponsorships file keeping `prg-` fails the rule cell, naming `prg-` and both files; the entitlements file keeping `rd-staff-` fails it; **controls that must pass and do:** the unmutated tree, and a new unique prefix in the stock file.
+- **Observed, not judged.** Approving a sponsorship that does not exist is 422 `not_found`, while approving one that exists on another trail is 403: the definer returns `not_found` before it checks the trail scope (0059), so an operator can tell the two apart. Sponsorship ids are random UUIDs. It is the same shape as the revoke-all of §130 and the sponsor rollup of §133.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **443 passed, 0 failed** in each (the 438 that were there plus these 5; the first full `superuser` run, before the prefix fix, failed three cells); `service-role-lint` clean. The server unit suite (`supabase/tests/unit`: 103 files, **1925** tests, the 1921 that were there plus the 4 new label cells) passes.
+
+### 134.3 Not built, honestly
+
+- The label pin sees only literal prefixes in `createTestUser(uid, <label>)`: not a label built from a variable, not a prefix that is a strict prefix of another file's (`rv-` against `rv-staff-` is safe only because the suffixes differ in kind), and not users created some other way.
+- The admin path (an admin may approve any trail's sponsorship) is not driven; neither is a sponsor-funded special marker or offer **using** the approved sponsorship (the sponsorship is the object under test here, not its consumers).
+- **Every partner lane now has a real-stack test** (review §122; offers-admin §125; offers-redeem §126; entitlements §127; invites §129; members §130; stock §131; settlement §132; programme §133; sponsorships: this section). That is coverage of what the tests drive: branch N of the invites lane (GoTrue's email OTP), the class-A3 routes of the members lane, the real exports adapter and the real Storage, and the admin role are not driven anywhere in these files.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 134.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `4641a85` / #174). Squash-merged as `5320483` (#175). The first CI attempt of that PR failed in `marker-scan.deno.test.ts` (the existing M1 test: a rotated-out PIN tried now was accepted); the failed job was re-run once, unchanged, and passed (see §135.2).
+
+- Per-file runs of this test: 5/5 in `superuser` and in `restricted`; the unit pin 4/4; the full harness and the unit suite as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 135. As built: the new person's way in (invite and recovery) is driven end to end against the real database
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 135.** §129 left branch N of the invites lane — accept/start, accept/verify, `credentials`, and the enrolment variant — undriven, because the only thing the harness lacks is GoTrue's email OTP. That is a port (`EmailOtpPort`). This section drives everything on both sides of it for real and fakes only the port. **No defect was found.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 135.1 What was built
+
+- **`supabase/tests/integration/partner-onboarding.deno.test.ts`** (5 cells): the REAL `handlePartnerInvitesRequest` over the REAL `privileged.ts` (`partnerDb.withInviteMint`, `hitSystemRateLimit`) and the REAL `registrationVerifier`, against the real database as `edge_partner_minter` (the unbound lane). **The OTP port is a recording fake** that does for the database what `verifyOtp` does: for an invite it creates the account (confirmed) if the address has none, and it inserts a REAL `auth.sessions` row for the proven person, which the handler closes after the proof (the pattern `partner-pin.deno.test.ts` already uses for the PIN's email proof). What is **not** driven is the GoTrue adapter itself (`partnerInviteEmailOtp` / `partnerEmailOtp`).
+  1. **a new person's whole way in:** `accept/start` answers an unknown token and a real one with the **same body** and sends exactly one mail, to the address on the invite; a wrong code is the one 403 and creates no GoTrue session; the right code yields the accepted person, the creation **options carrying the database's nonce unchanged** (the same bytes as the challenge token), the right RP, user handle and address, attestation `none`, user verification required, nothing excluded; the invite is spent with `attempts` 1 and the **membership exists** (role, inviter, organisation) before any credential does; the GoTrue session is closed after the definer on the success path too; a **real passkey registration** from a software authenticator is verified by the real wrapper and stores **exactly the credential id and public key the authenticator holds**, links it to the invite and mints the **first session** (a `gr_ps_` token, aal 1, ISO expiry and enrolment-until); that session works (lists its own credential; staff are 403 on the manager's list); a replayed verify is the one 403 and a replayed registration is 409 and stores nothing;
+  2. **refusals of the proof:** an address that already holds a passkey is 409 `existing_member_sign_in`; a member without a passkey is 409 `recover_required`; a GoTrue session older than the freshness window is 403 `accept_refused`; each is **counted** on the invite, none accepts it, and **every verify that created a GoTrue session closed it, refusals included**; the control — the same invite with a fresh session — is accepted;
+  3. **the recovery variant:** a manager recovers a member (the partner-members route); the code goes to the member's own address through the **enrolment** port (the invite port sends nothing); the proof names `refKind: enrolment`, the token id and the purpose `recover`; a real registration stores the new key, **consumes the token** and points it at the new credential, leaves exactly one live credential (the old ones stay revoked), and mints a session that works while the **old session is dead**; the token cannot be used again;
+  4. **a registration the database refuses leaves the acceptance usable:** a tampered challenge, a different person, the wrong reference kind, the wrong reference id and a ceremony over a challenge the browser did not sign are each 403 `registration_refused`; a clock past the challenge's expiry is the Edge's own 410 `expired`; no refusal stored a credential or marked the invite registered, and the correct registration then succeeds;
+  5. **the two caps on a token:** five `accept/start` calls send three mails (3 an hour); twelve wrong-code attempts reach the mail provider ten times (10 an hour), each answered with the same constant refusal.
+- Design log: §134.4 now records its squash SHA (`5320483`, #175).
+
+### 135.2 Measured, not assumed
+
+- **No defect found in the path.** The first complete run was 4 of 5 (see below, none of it the lane's) and every run after the fixes was 5/5 in `superuser` and in `restricted`, six runs in all.
+- **The one CI failure in this stretch was not in this lane.** The first CI attempt of #175 failed in `marker-scan.deno.test.ts` M1 (an existing file, which sorts before every file of mine and did not change): a PIN rotated out by thirty wrong guesses was accepted when tried afterwards. It passed in every local run (a dozen or more in both modes) and in CI for #168 to #174; the failed job was re-run once, unchanged, and passed. The PINs are four digits (`HMAC … % 10000`), so the epoch-0 and epoch-1 PINs of a fresh shop coincide in about 1 run in 10,000 — that is the one cause I can name, and it is an inference `[unverified]`, not a measurement. The test is not changed here.
+- **Slips of my own, found by running it:** (1) the credentials route is `credentials`, not `invites/credentials` (404); (2) the members call that issues the recovery is class A2 and my helper did not seed the step-up (403); (3) **a flaky tamper**: to corrupt the challenge MAC I chose the replacement character from the _last_ character but replaced the _second-to-last_, so about one run in 64 left the token unchanged, and a genuine registration succeeded where a refusal was expected. It showed up as one `restricted` failure of 201 for 403. The tamper now always changes a character, and the cell passed four consecutive runs afterwards.
+- **The cells can fail (10 of 10 Edge-side mutants killed),** each a scratch copy of the Edge source through the real harness, `superuser` mode; the repo's files were never touched:
+
+  | Mutant | Cells that fail |
+  | --- | --- |
+  | **M0** control: unmutated | none (5 passed) |
+  | M1 the creation options carry a nonce other than the database's | 1 |
+  | M2 the code of an invite goes through the enrolment mail port | 1, 3 and 5 |
+  | M3 the GoTrue session is not closed after the proof | 1, 2 and 3 |
+  | M4 `accept/start` answers an unknown token differently | 1 |
+  | M5 the reference kinds are swapped on the wire | 1, 3 and 4 |
+  | M6 the code-mail cap is 4, not 3 | 5 |
+  | M7 the code-attempt cap is 11, not 10 | 5 |
+  | M8 the Edge no longer refuses an expired challenge itself | 4 |
+  | M9 an expired acceptance is answered 403, not 410 | 4 |
+  | M10 the first registration binds the challenge expiry off by one (the MAC no longer matches) | 1, 3 and 4 |
+
+  (The first attempt at this table did not apply nine of its ten mutants: my runner reused one variable name for the scratch directory and for a source path, each reported "mutation did not apply" and none was counted. Its patch step also ran in the real worktree and left two stray edits to `tools/db/test.sh` and `tools/db/test-deno-integration.sh`; they were never committed and were restored before the commit. The table is from the corrected runner.)
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **448 passed, 0 failed** in each (the 443 that were there plus these 5); `service-role-lint` clean. No unit test changed (103 files / 1925 tests as in §134).
+
+### 135.3 Not built, honestly
+
+- **The GoTrue adapter** (`partnerInviteEmailOtp`, `partnerEmailOtp`: the real `verifyOtp`, its account creation and its session) is faked, so a defect in how it creates the account or reports the session id would not be seen here. The class-A3 members routes (`totp-reset`, `admin/enrolments`) and the admin enrolment purpose are not driven either.
+- A brand-new person is created by the fake with a confirmed address and no profile row; whether the real GoTrue-created account looks like that is `[unverified — I did not run GoTrue]`.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 135.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `5320483 / #175`). Merged as `614b1e7` (#176).
+
+- Per-file runs: 5/5 in `superuser` and in `restricted`; the full harness as above. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 136. As built: the admin-only members routes (TOTP reset, admin enrolment) are driven against the real database
+
+Numbering: **migration n/a, matrix n/a (Deno integration), this section 136.** §135 named the class-A3 members routes (`totp-reset`, `admin/enrolments`) and the admin enrolment purpose as undriven. Every earlier real-stack lane file was written as a staff or manager; none exercised an _admin_ or an _operator_, and the A3 class (aal 2 **and** a live `mfa_until`) was proved only in pgTAP and against mocked ports. **No defect was found.** Test-only; no product behaviour change; no UI flag flips; no CAMERA / OCR.
+
+### 136.1 What was built
+
+- **`supabase/tests/integration/partner-admin-routes.deno.test.ts`** (4 cells): the REAL `handlePartnerMembersRequest` and, for the redemption, the REAL `handlePartnerInvitesRequest`, over the REAL `privileged.ts` and the REAL partner-session mint, against the real database as `edge_partner` / `edge_partner_minter`. A real admin session is minted from the software authenticator's real assertion; its step-up state (`reauth_until`, `mfa_until`, aal) is written by the **owner** with the session-guard trigger off for that one statement, the same shortcut as the other lane files. The email OTP is the recording fake from §135 (the GoTrue adapter stays undriven).
+  1. **an admin resets an operator's TOTP:** the row goes from `seed_version` 3, failed count 2, confirmed and locked, to `seed_version` 4 with enrolment, confirmation, enrol session, replay step, failure count and lock all cleared and the factor unrevoked; the target's sessions are **revoked** (alive before, dead after); the answer is `{reset: true}`; a person with no TOTP row is 409 `totp_not_set` and **no row is invented**;
+  2. **who may:** an operator is 403 whoever the target is; a staff member as the target is 403; resetting oneself is 422; an admin at aal 1 and an admin whose second factor lapsed are each 403 — and **no refusal touched the TOTP row or signed anybody out**; the control (the same admin with the step-up) resets;
+  3. **an admin issues an enrolment token for another admin:** the database holds the SHA-256 of the `gr_enr_` token (independently computed here), purpose `admin`, issued by that admin, for the person, not consumed or revoked, expiring in 24 hours; the plaintext is in no column; the link is `<origin>/enrol#<token>` (fragment, not query); the target must be an admin (an operator is 403), oneself is 422, an operator actor is 403, aal 1 is 403, and the body is strict (`{}`, a non-uuid and an extra key are each 400); no refusal issued a token;
+  4. **the redemption:** the admin it was issued for, who has no credential yet, starts (the code goes to **their own address** through the enrolment port), verifies (the proof names `refKind: enrolment`, the token id, purpose `admin`, the person), and registers for real: the stored credential id and public key are exactly the authenticator's; the first session is **alive but 403 at aal 1** (an admin needs the second factor for every class including A0 — 403, not 401) and works once the second factor is raised; the token is consumed and points at the credential; a second verify is the one 403. A token of purpose `admin` for a person who is **not** an admin is refused and consumes nothing.
+- Design log: §135.4 now records its squash SHA.
+
+### 136.2 Measured, not assumed
+
+- **No defect found in the path.** Four of four in `superuser` and in `restricted`.
+- **The cells can fail — 5 of 5 Edge-side mutants killed** (scratch copy of the Edge through the real harness, the repo's files never touched; control 4/4):
+
+  | Mutant                                                                 | Cells that fail |
+  | ---------------------------------------------------------------------- | --------------- |
+  | M1 a TOTP reset is answered `{reset: false}`                           | 1               |
+  | M2 `totp_not_set` is answered 404, not 409                             | 1               |
+  | M3 the admin enrolment passes an UPPERCASE token hash                  | 3 and 4         |
+  | M4 the enrolment link carries the token in the query, not the fragment | 3               |
+  | M5 the admin-enrolment body accepts an extra key                       | 3               |
+
+- **Slips of my own, found by running it:** a new admin's first session is alive but 403 at aal 1 (my first assertion expected 200 — the harness was right: aal gates every class, A0 included); my "alive" helper first treated a 403 as dead (alive is "not 401"); a fixture that put the second admin in `app.admin_user` has to remove it again (the cells delete the row in a `finally`); and the helper I copied from §135 carried the `onb-` account-label prefix, which would have shared a prefix with the onboarding file — every address also carries a per-run id so no collision was possible, but the prefix is now this file's own (`adr-`). `integration-account-labels.test.ts` (§134) stays green over the new file.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP 106 files / 6294 tests PASS; the Deno integration suite **452 passed, 0 failed** in each (the 448 that were there plus these 4); `service-role-lint` clean. The unit suite is unchanged (103 files / 1925 tests) and its `integration-account-labels` pin passes over the new file.
+
+### 136.3 Not built, honestly
+
+- The last assertion of cell 4 accepts **either** 409 or 403 for an `admin`-purpose token whose person is not an admin: the database answers `existing_member_sign_in` (409) first because that person holds a credential, so the branch that would name the missing admin row is not reached with this fixture, and I did not build a second fixture for it. It does check that nothing was consumed.
+- Admin-role paths of the other lanes (what an admin may do in the members, stock, settlement, programme and sponsorship lanes) are not driven; the GoTrue adapters, the real exports adapter / Storage and the sponsor-funded consumers of approved sponsorships remain undriven.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 136.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `614b1e7 / #176`). Merged as `eb89f39` (#177).
+
+- Per-file runs: 4/4 in `superuser` and in `restricted`; the full harness as above; unit suite 103 files / 1925 tests green. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 137. As built: the sponsorship that funds an offer, or a trail's special marker, must be a sponsorship of that trail (migration 0109)
+
+Numbering: **migration 0109, matrix 87, this section 137.** Migration 0108 and matrix 86 are left to the open draft PR #162 (its §122); nothing here depends on it and it depends on nothing here. I found no gate that requires contiguous migration numbers (a search of `tools/db` and the workflows for contiguity checks came back empty, and `tools/db/check-migrations-immutable.sh` compares only files already on the base); a hosted `supabase db push` of 0109 ahead of a later 0108 may need the CLI's `--include-all` `[unverified: training knowledge, not checked this session]`, which does not matter while nothing is deployed. **A real defect**, found while scouting the "sponsor-funded consumers of approved sponsorships" that §132.3, §133.3 and §134.3 each named as undriven. Product behaviour changes for the two refusals below only; the Edge is unchanged; no UI flag flips; no CAMERA / OCR.
+
+### 137.1 What was wrong, and what was built
+
+**Observed on the real database** (a probe: matrix 37's principals, an operator of `trl_t` bound to a real partner session, sponsorships planted by the owner; then, through the real handlers, the integration cells below run against the schema _without_ 0109):
+
+| As the operator of `trl_t`, before 0109                                                                                   | Result                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| offer, funder `sponsor`, a live `offers` sponsorship **of `trl_t`** (control)                                              | `ok`                                                                                     |
+| the same, a sponsorship **of another trail** (`trl_u`)                                                                     | **`ok`**: a draft offer on `trl_t` naming `trl_u`'s sponsorship; through the Edge: 200   |
+| the same, a sponsorship of `trl_t` that is draft, special-marker-only, or ended                                            | `ok` in all three (not changed here, 137.3)                                              |
+| the same, an id that names no sponsorship                                                                                  | a raw foreign-key violation, 23503; through the Edge: **HTTP 500 `internal_error`**      |
+| programme, `special_marker_funded_by = sponsor`, a sponsorship of `trl_u`                                                  | **`ok`**, stored                                                                         |
+| programme, an id that names no sponsorship                                                                                 | 23503; through the Edge: **HTTP 500 `internal_error`**                                   |
+| programme, `sponsor` with no id; `trail` with a foreign id                                                                 | `ok` and stored (not changed here, 137.3)                                                |
+
+Why it matters, in the order of how sure I am: **(observation)** `partner_offer_upsert_for_partner` (0059) checked that a sponsor offer names a sponsorship and that any other does not, and nothing else, and `partner_offer_approve_for_partner` reads nothing about the sponsorship; the settlement export (0060 / 0062) returns one line per facility, funder and `o.sponsorship_id`; the sponsorship list shows ids to the operators of that trail. **(inference)** so an operator of trail A who learns an id of trail B's sponsorship can have trail A's redemptions attributed to trail B's sponsor, and a special marker shown with trail B's sponsor `[unverified: the export was not driven with a sponsor-funded offer, see 137.3]`. The ids are random UUIDs and an admin must approve an offer before it goes live, so I rate this low to moderate, not high; it is still a cross-tenant reference the database should refuse.
+
+- **`supabase/migrations/0109_partner_sponsorship_trail_binding.sql`**: `CREATE OR REPLACE` of the two definers, the bodies of 0059 verbatim plus one check each, in the 0107 pattern (`SET ROLE private_definer`, owner / ACL / `search_path` / volatility untouched, comments and `function_inventory` notes updated, a `DO` block that asserts the new text is there and that the EXECUTE set did not move). **Offer:** a non-null `p_sponsorship_id` that is not a sponsorship of `p_trail_id` is the existing status **`bad_funder`** (422 on the Edge, already mapped by `offers-handler.ts` and translated by the portal), and "another trail's" and "no such id" are the **same** answer, so the refusal tells an operator nothing about anyone else's ids. **Programme:** a non-null `p_special_marker_sponsorship_id` that is not a sponsorship of `p_trail_id` is **22023** (the Edge's 422 `invalid_request`), after the trail's own `not_found` check. The statuses of both functions are unchanged, so **the Edge needs no change and there is no deploy-order hazard** (the previous Edge works with the new migration: it already maps both outcomes).
+- **`supabase/tests/matrix/87_partner_sponsorship_trail_binding.sql`** (24 cells): the offer and programme rules at the definer, with controls (a sponsorship of the trail is `ok`, the row names it), the foreign and the unknown id, an edit of a draft to a foreign sponsorship (the draft keeps its sponsorship and its budget), the existing funder rules still standing, scope still checked first (an operator of `trl_t` is 42501 on `trl_u`), refusals write no audit row, and that the ACL, owner and `search_path` did not move.
+- **`supabase/tests/integration/partner-sponsor-binding.deno.test.ts`** (3 cells; the REAL `offers-admin`, `programme-config` and `sponsorships-admin` handlers over the REAL `privileged.ts`, a real operator and the seeded admin with real sessions, every cell on its own trails): **(1)** the whole sponsor-funded life: the sponsorship is made and approved through its own route, an offer funded by it is drafted (the row, the list), edited to another sponsorship of the same trail, approved by the admin and ended by the operator; **(2)** another trail's sponsorship and an unknown id are each 422 `bad_funder`, nothing is written, an edit that tries it leaves the draft as it was, and an admin is held to the same rule; **(3)** the programme: a foreign and an unknown id are each 422 `invalid_request` and the programme keeps what it had, the trail's own sponsorship and no sponsorship are accepted.
+- Design log: §136.4 now records its squash SHA.
+
+### 137.2 Measured, not assumed
+
+- **The cells can fail, and the defect is real, not a fixture artefact.** Run _without_ 0109 the control cell passes and the two refusal cells fail on their first assertion (200 where 422 is expected, for both routes). A probe through the Edge for a nonexistent id returned **500 `internal_error`** on both routes.
+- **6 of 6 mutants of the migration killed, by the pgTAP cells and, separately, by the Deno cells** (scratch copy through the real harness, the repo's files never touched; controls 24/24 and 3/3). Both layers were run on their own, because a failing pgTAP step aborts the harness before the Deno step and the Deno cells would otherwise never have been tried:
+
+  | Mutant                                                                                    | pgTAP cells (87) that fail | Deno cell that fails |
+  | ----------------------------------------------------------------------------------------- | -------------------------- | -------------------- |
+  | M1 the offer check is switched off (the text stays)                                       | 3–7, 24                    | 2                    |
+  | M2 the programme check is switched off                                                    | 13–15                      | 3                    |
+  | M3 the offer check asks only that the sponsorship exists (the trail test made vacuous)    | 3, 4, 6, 7, 24             | 2                    |
+  | M4 the programme check asks only that the sponsorship exists                              | 13, 15                     | 3                    |
+  | M5 the offer refusal is `not_found`, not `bad_funder`                                     | 3, 5, 6                    | 2                    |
+  | M6 the programme refusal is 42501, not 22023                                              | 13, 14                     | 3                    |
+
+  (My first attempt at M1–M4 deleted or rewrote the very text the migration's own `DO` block looks for, so the migration aborted and none of the cells ran: that shows the post-check works, not that the cells do. They were redone as mutants that keep the checked text and disable the behaviour.)
+- **Slips of my own, found by running it:** my first draft of a matrix cell called the helper twice (creating a second row) to compare it with itself, and the plan count was 25 for 24 cells; both fixed before the first run that counted. A scratch tree I reuse for the harness still held two probe files from this section's scouting (a pgTAP file and a Deno file); I found them by listing the files the scratch tree held that the worktree does not track, deleted them, and only then started the full run, so they are in none of the numbers below.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs:** **exit 0 in both modes**: pgTAP **107 files / 6318 tests PASS** (the 106 / 6294 of §136 plus matrix 87's 24); the Deno integration suite **455 passed, 0 failed** in each (the 452 that were there plus these 3); the function-inventory checks and `service-role-lint` clean.
+
+### 137.3 Not built, honestly
+
+- **Whether a sponsorship must be live, in scope, or current to fund an offer is a product call.** The probe shows a draft, a special-marker-only and an ended sponsorship are all accepted for an offer. The natural place for such a rule may be the admin's approve (a human gate that today reads nothing about the sponsorship) rather than the operator's draft. Not changed.
+- **`special_marker_funded_by` and the sponsorship id are not tied to each other** (`sponsor` with no id and `trail` with an id are both stored). Whether a programme may say `sponsor` before the sponsorship exists is a product call. Not changed.
+- **The settlement export is still not driven with a sponsor-funded offer:** the control cell makes such an offer exist and go live, but nothing is redeemed under it, so the AT(20) attribution column (§132.3) is still seen with `sponsorshipId: null` only, and the inference in 137.1 about attribution rests on reading 0060 / 0062, not on running them.
+- **Existing rows are not repaired.** Nothing is deployed, so none are expected `[unverified: there is no production database to ask]`; the migration changes writes only.
+- The admin paths of the other lanes, the GoTrue adapters and the real exports adapter / Storage remain undriven (§136.3).
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 137.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `eb89f39 / #177`). Merged as `23aafa1` (#178).
+
+- Per-file runs: matrix 87 24/24 and the integration file 3/3 in `superuser` and `restricted` (the integration file); the full harness as above; the unit suite 103 files / 1925 tests (unchanged: the SQL call-text pins and the account-label pin pass over the new migration and the new file); `check-migrations-immutable.sh` OK (107 files byte-identical to the base). Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 138. Observed, not fixed: an operator can give itself reach to any facility (the programme rows are both the operator's to write and the definition of its reach)
+
+Numbering: **migration n/a, matrix n/a, this section 138. Documentation only; no code changed.** Found by asking what the neighbours of §137's two definers trust. **This is the most serious finding of this P5 keep-going stretch**, and I have deliberately not fixed it, because the fix is a decision about what "a facility of the trail" means; that decision is the owner's. Everything below marked _observed_ was run on the real database; everything marked _read_ is from the code and was not run.
+
+### 138.1 What is wrong
+
+- **_Read_ (`0007_private_helpers.sql:75-105`, E6):** `private.has_facility_scope(uid, facility, roles)` lets an **operator** reach a facility when `app.facility_programme` holds **any** row `(trail, facility)` for a trail the operator is scoped to (no filter on `participation`, G3).
+- **_Read_ (`0059_partner_programme_sponsors.sql`, `partner_facility_programme_upsert_for_partner`):** the operator writes those rows, class A3, for **any** `p_facility_id`. The only checks are the argument shapes, that the trail has a `trail_programme` row, and the table's foreign key to `catalog_facility`. Nothing asks whether the facility is on the trail.
+- **_Read_ (this log):** the intended boundary is the opposite: PA-15 (§12) and §6.1 say _"operator at a facility not on its trail: 403"_; the S2a as-built section (item 10) says the scan consults the programme, never the roster, and that _"keeping the two in step is the programme editor's job (S6)"_. The editor does not keep them in step; it keeps nothing.
+- **_Observed_ (a probe on matrix 37's fixture: an operator of `trl_t` bound to a real session at aal 2 with a fresh passkey assertion; a facility `fac_z` that no roster of any trail names; a facility organisation at `fac_z`):**
+
+  | step                                                                  | result                                                                         |
+  | --------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+  | rows of any roster naming a course of `fac_z`                          | 0                                                                              |
+  | `has_facility_scope(operator, 'fac_z', {operator})`                    | `false`                                                                        |
+  | the operator invites a **manager** / **staff** at the organisation of `fac_z` | 42501 "the grant is not a subset of the inviter reach", both                  |
+  | the operator calls `partner_facility_programme_upsert_for_partner('trl_t', 'fac_z', 'accepted', ...)` | **`ok`**                                                       |
+  | `has_facility_scope(operator, 'fac_z', {operator})`                    | **`true`**                                                                     |
+  | the operator invites a **manager** / **staff** at the organisation of `fac_z` | **`ok`, `ok`**: two invites exist at `fac_z`                                  |
+
+- **_Read_, not run:** the same reach is what the other facility-scoped operator actions test: the reach rule for another person's credentials, PIN reset and recovery (`0054` §6.5), the member list (`0090`), and the operator policies on the programme's PIN epoch and on the printed QR (`0055`). So the escalation is not only "invite": an operator could also reset the PIN of, revoke the passkeys of, and (with the member's own mailbox) recover members of a facility that has nothing to do with its trail, and rotate that facility's PIN. Only the invites were exercised.
+
+### 138.2 Who can do it, what would show it, how bad
+
+- **Who:** an _operator_ account (a passkey and a TOTP, class A3 for the programme write, A2 for an invite). Not staff, not a manager, not a player. That is a trusted but **scoped** role, and the scope is precisely what is bypassed.
+- **What would show it:** the invite raises an `invite_create` alarm (0101) and every programme write is audited (`partner.facility_programme_upsert`); the programme write itself raises **no** alarm `[read: the definer has no alarm insert]`.
+- **How bad:** high _within the partner model_ (one tenant acting on another's facility, including by inviting its own mailbox as a manager there), contained today by the fact that nothing is deployed and by the alarm on invites. I have not rated it by exploit chains beyond the invite.
+
+### 138.3 Options, and what each costs (the decision is not mine)
+
+| Option                                                                                                              | What it touches                                                                                                                                                                       | Cost / risk                                                                                                                                                              |
+| ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A. The programme editor refuses a facility that is not on the trail's current roster** (22023, as in §137)         | `partner_facility_programme_upsert_for_partner` only; the roster test is "a current member (`removed_on IS NULL`, latest `roster_version`) naming the facility, or a course / hole / `any_of_course_ids` of it" | Smallest, and implements what the S2a as-built section (item 10) already says the editor is for. Needs the roster to exist before the programme, and `removed_on` maintained by the importer `[unverified: the importer is out of scope of 0002]`. Every test that gives a trail of its own programme rows through this definer (the §133 programme test does, with trails that have no roster) would need roster rows in its fixture. |
+| **B. The operator reach leg also requires the facility to be on the roster**                                          | `has_facility_scope` (shared by every facility-scoped policy and definer)                                                                                                              | Fixes the root for every consumer at once, but the blast radius is the widest in the schema and every matrix that seeds programme rows without a roster changes.         |
+| **C. Only an admin creates a programme row; an operator edits existing ones**                                         | the same definer plus an Edge screen                                                                                                                                                   | Changes who onboards facilities (a workflow decision).                                                                                                                   |
+| **D. The facility consents (`participation` is set by the facility's own manager, and only `accepted` gives reach)** | a new facility-side route, `has_facility_scope`, the G3 filter                                                                                                                         | The most faithful to "participates", and the most work; also settles G3.                                                                                                 |
+
+My recommendation is **A**, with the G3 filter (`declined` / `left` give no reach) as a separate one-line change; but A fixes the _write_, and a row written before the fix stays a grant, so whoever ships it should also list the existing rows whose facility is not on the roster (`[unverified]` that any exist: nothing is deployed).
+
+### 138.4 Reproduction
+
+On matrix 37's setup and helpers (its principals, `seed_step`, `mk_cred`, `mk_session`; `seed_step` gains `reauth_until` for the A2 invite), as the owner, in a rolled-back transaction:
+
+```sql
+INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES ('fac_z', 'facility', 'verified', 1);
+INSERT INTO app.catalog_facility (id, slug, name, region, tz, catalog_version) VALUES ('fac_z', 'facility-z', 'Facility Z', 'US-TN', 'America/Chicago', 1);
+INSERT INTO app.partner_org (id, kind, name) VALUES ('10000000-0000-0000-0000-00000000007a', 'facility', 'Facility Z Pro Shop');
+INSERT INTO app.partner_scope (org_id, facility_id) VALUES ('10000000-0000-0000-0000-00000000007a', 'fac_z');
+-- bind the operator (c1) at aal 2 with mfa_until and reauth_until live, then, as edge_partner:
+SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-00000000007a', 'manager', 'a@example.test', repeat('ab', 32)); -- 42501
+SELECT * FROM private.partner_facility_programme_upsert_for_partner('trl_t', 'fac_z', 'accepted', true, false, 'ok', true, NULL, 'rotating');   -- ok
+SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-00000000007a', 'manager', 'a@example.test', repeat('ab', 32)); -- ok
+```
+
+(The role is passed as an unknown-typed literal: `edge_partner` has no USAGE on schema `app`, so a `::app.partner_role` cast in the caller is 42501, §129. My first run of this probe made exactly that slip.)
+
+### 138.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `23aafa1 / #178`). Merged as `59dc9a8` (#179). No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
+
+## 139. As built: partner TOTP consecutive-failure ceiling (hard lock at 20)
+
+Numbering: **migration `0108`, matrix `86`, this section 139** (§114 to §117 landed on `main` while this was built; none added a migration, so `0108` and matrix `86` stayed free). Closes a finding raised by the S1.4 gate on a separate, superseded build of the TOTP slice and re-verified here against `main`: **the partner (staff) TOTP had no ceiling on consecutive failures.** `partner_totp_attempt` (0053, never redefined) reset `failed_count` to 0 at every 15-minute lock, so a person holding a valid aal 1 session (a coworker at a shared iPad whose passkey session is open) could loop `POST step-up/totp` for ever: **5 guesses per 15 minutes = 20 an hour = 480 a day**, with no consecutive-failure ceiling and no Edge-side limit on the route. Each guess is checked against three codes (the plus or minus 1 step window), about 3 chances in 10^6, so roughly **0.14% a day and about 40% a year against one targeted person**. A success gives `aal` 2 and `mfa_until` (class A3), which also stands in for the PIN of a PIN-less operator or admin (6.3). The PIN already had the ceiling (20 failures in a day lock it, S1.3 / 0052). Reproduced on the unfixed 0107 schema before the fix: 40 consecutive wrong codes, every lock waited out, then the **correct** code answered `ok|0|true` (the session is raised); after 0108 the 20th failure hard-locks and the same correct code is refused.
+
+### 139.1 What was built
 
 - **Columns** — `app.partner_totp.consecutive_failed integer NOT NULL DEFAULT 0` and `hard_locked_at timestamptz`, with two CHECKs: `consecutive_failed BETWEEN 0 AND 20` and `(hard_locked_at IS NOT NULL) = (consecutive_failed = 20)` (the two move together). **No grant moved:** `partner_totp_verifier` already holds table-level SELECT / INSERT / UPDATE and is the table's only writer (`private.partner_owner_privilege` is unchanged), so the new columns inherit exactly that; the migration asserts that no other role (`private_definer`, `edge_partner`, `service_role`, ...) can reach them.
 - **`private.partner_totp_attempt`** (`CREATE OR REPLACE`, same owner / ACL / `search_path` / VOLATILE) — a hard-locked row is refused **first**, before any code is compared; wrong codes add to `consecutive_failed` (the 5th, 10th and 15th still lock for 15 minutes exactly as before, and the lock no longer erases the count); the **20th** sets `hard_locked_at` (and the same 15-minute lock) and returns the internal status `hard_lock_set`; a success clears `consecutive_failed`. The plus or minus 1 window, the replay rule, the HMAC compare, the compare-and-set on `last_step`, the `FOR UPDATE` row lock and "failures during a lock are not counted" are untouched.
@@ -4882,20 +5651,20 @@ ID -> fix -> test:
 | F10 | the redefinition changes nothing else | catalogue-equality self-check | live-drift and text-drift runs below (the migration aborts) |
 | F11 | no grant widened | none added | 86 A (no other role reaches the columns; verifier still S / I / U only; ACLs and comments of the five functions) |
 
-### 122.2 Decisions and defaults
+### 139.2 Decisions and defaults
 
 - **20 consecutive, cleared only by a success, an admin reset or a re-enrol.** The PIN's day counter is 20 as well. The count is per person, across all of the person's sessions.
 - **Hard lock until an admin reset, no timeout.** Time never clears it (a timeout would restore a slower version of the bug). The way out is the existing A3 `members/{id}/totp-reset` (an admin for an operator, another admin for an admin) — no new route. After the reset the person re-enrols under an email proof as before; the pgTAP cell runs that whole path.
 - **The 20th failure is also the 5th of its group** (for a row whose `failed_count` and `consecutive_failed` started together; a row carried over from before 0108 with `failed_count > 0` can differ, which is harmless because the hard check runs first), so the ordinary 15-minute lock still applies to it; "5 wrong -> 15 minutes" is exactly as it was for every group.
 - **HTTP mapping: 403 `totp_hard_locked`, no `Retry-After`.** The alternative the brief offered — reuse `locked` with a large `retry_after` — needs no Edge change but is wrong: the Edge answers `locked` with `Retry-After` and the PWA turns that into "try again in N s", for a lock that nothing time-based will clear (and the handler clamps the header to at least 1). The PIN lock already maps its permanent lock to a bare 403 `pin_locked` with no header; this follows it. Cost: one status in three Edge places and one PWA message.
-- **An internal status carries "newly set".** `partner_totp_attempt` cannot gain an OUT column under `CREATE OR REPLACE` (a different row type needs `DROP` and `CREATE`, which would lose its owner and ACL), so the transition is the status `hard_lock_set` and every later attempt is `hard_locked`. The wrapper translates `hard_lock_set` to `hard_locked`, so the Edge never sees it; if it ever did, `privileged.ts` would throw "returned no usable status" inside the transaction, which rolls the whole attempt back. **That is not fail closed for the counter:** the failure that was just counted vanishes with the rollback, so a status the deployed Edge does not know would let an attacker guess without being counted (see "Deploy order" in 122.3). The existing soft-lock alarm uses `retry_after = 900` as its "newly" marker and so can fire on an already-locked attempt in the first second; the hard lock does not inherit that.
+- **An internal status carries "newly set".** `partner_totp_attempt` cannot gain an OUT column under `CREATE OR REPLACE` (a different row type needs `DROP` and `CREATE`, which would lose its owner and ACL), so the transition is the status `hard_lock_set` and every later attempt is `hard_locked`. The wrapper translates `hard_lock_set` to `hard_locked`, so the Edge never sees it; if it ever did, `privileged.ts` would throw "returned no usable status" inside the transaction, which rolls the whole attempt back. **That is not fail closed for the counter:** the failure that was just counted vanishes with the rollback, so a status the deployed Edge does not know would let an attacker guess without being counted (see "Deploy order" in 139.3). The existing soft-lock alarm uses `retry_after = 900` as its "newly" marker and so can fire on an already-locked attempt in the first second; the hard lock does not inherit that.
 - **A distinct alarm kind, not `totp_locked` with a flag.** An operator needs to see that an admin reset is required, and the 5th / 10th / 15th soft locks must not be confused with it. The 20th failure raises `totp_hard_locked` only (no `totp_locked` for the same event).
-- **Refusals on a hard-locked row write nothing.** A loop of guesses cannot grow `audit_log`. (The existing soft-lock path still audits every refused attempt during a lock; that is unchanged and noted in 122.3.)
+- **Refusals on a hard-locked row write nothing.** A loop of guesses cannot grow `audit_log`. (The existing soft-lock path still audits every refused attempt during a lock; that is unchanged and noted in 139.3.)
 - **Confirm failures are not counted toward the hard lock.** A confirm code is checked against a seed only the enrolling session was shown, so guessing it gains nothing, and a typo during enrolment must not need an admin. Confirm failures keep the 5-in-15-minutes soft lock. Pinned: 20 wrong confirm codes lock softly at 5 / 10 / 15 / 20 and never hard-lock.
 - **No session revocation at the hard lock.** An aal 1 operator session can reach nothing but step-up (PA-20), which is exactly what is refused; revoking would evict the legitimate user as well.
 - **CHECK on the range** (`0..20`) as defence in depth: a code path that forgot the early refusal would raise `23514` instead of counting past 20.
 
-### 122.3 Departures and honest limits
+### 139.3 Departures and honest limits
 
 - **A lock lever, and the sole-admin case (gate ruling: accepted, admins are NOT exempt).** The same ceiling that stops guessing lets an attacker with a live aal 1 session **hard-lock the victim's TOTP in 20 tries**, which is a denial and nothing more; the precondition (a live aal 1 session) is the same as for the PIN lock lever (R-P5). Exempting admins from the hard lock would restore the unbounded-guessing exposure (about 40% a year against a targeted person) on exactly the highest-value accounts, so **no exemption and no break-glass reset is built.**
   - **Operating rule: production keeps at least two admins.** For an operator or an admin who is not alone, another admin runs the A3 `members/{id}/totp-reset`.
@@ -4908,7 +5677,7 @@ ID -> fix -> test:
 - **The drift self-check is a post-check (gate L3).** The pre-check only matches the listed edit fragments, so drift outside a fragment is caught only by the post-check, which runs **after** the `CREATE OR REPLACE` statements. The header's "aborts instead of silently reverting" therefore holds only under a **transactional runner** (one transaction per migration file). The gate reproduced the other case: a comment injected into the live `partner_totp_verify_for_partner` on a 0107 database, then 0108 applied with `psql -f` (the harness mode), aborted correctly at the final assertion but only after the drifted function had already been overwritten, and the inventory and allow-list updates had not run. No role-membership or schema residue was left. Remedy if it ever happens: restore the function from the previous migration's definition and re-run. A pre-DDL md5 pin of each expected pre-image would remove the caveat and is a possible follow-up, not built here.
 - **Two NITs, not changed:** an admin reset can deadlock with the victim's step-up (0053's verify locks the session row then the TOTP row; the reset locks the TOTP row then revokes sessions); either outcome is safe, and in the forced interleaving the reset won. A widened alarm INSERT policy is caught only by the `definer_policy_exprs.txt` fixture compare, not by a behavioural cell.
 
-### 122.4 Verification
+### 139.4 Verification
 
 Branch: `totp-hardlock` (created from `a364aa8`; `main` merged three times with a plain merge, at `580bd7e`, `17490a4` and `4e54da1`; none added a migration or a fixture row, so nothing was hand-merged and `0108` / matrix `86` stayed free).
 

@@ -4220,9 +4220,11 @@ const CREDENTIAL_ADD_NOTICE_ACK_STATUSES: ReadonlySet<string> = new Set(["ok", "
 function buildPartnerInvitesTx(trx: TxSql): PartnerInvitesTx {
   return {
     async inviteCreate(orgId: string, role: InviteRole, inviteeEmail: string, tokenHash: string): Promise<InviteCreateResult> {
+      // `${role}` carries NO `::app.partner_role` cast on purpose: edge_partner has no USAGE on schema app (0047), so a cast that names an app type is "permission denied for schema app" (42501, answered 403) and the invite could never be created. The untyped
+      // parameter takes the type the definer declares for it.
       const rows = await trx`
         select o_status, o_invite_id::text as o_invite_id, o_expires_at
-        from private.partner_invite_create_for_partner(${orgId}::uuid, ${role}::app.partner_role, ${inviteeEmail}::text, ${tokenHash}::text)`;
+        from private.partner_invite_create_for_partner(${orgId}::uuid, ${role}, ${inviteeEmail}::text, ${tokenHash}::text)`;
       const r = rows[0];
       if (r?.o_status === "ok") {
         const expiresAt = isoOrNull(r.o_expires_at);

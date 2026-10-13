@@ -1,6 +1,6 @@
 -- 0108_partner_totp_hard_lock.sql
 --
--- P5 §122: a CEILING on consecutive partner (staff) TOTP failures. Until now partner_totp_attempt reset its failure count to 0 at every lock, so a person holding a valid aal 1 session
+-- P5 §139: a CEILING on consecutive partner (staff) TOTP failures. Until now partner_totp_attempt reset its failure count to 0 at every lock, so a person holding a valid aal 1 session
 -- (a coworker at a shared iPad whose passkey session is open) could guess step-up codes for ever: 5 guesses per 15 minutes is 20 an hour and 480 a day, with no consecutive-failure
 -- ceiling and no Edge-side limit on step-up/totp. Each guess is checked against three codes (the +/-1 step window), about 3 chances in 10^6, so roughly 0.14% a day and 40% a year
 -- against one targeted person; a success gives aal 2 and mfa_until (class A3), which also stands in for the PIN of a PIN-less operator or admin. The PIN already had the ceiling
@@ -40,11 +40,11 @@ ALTER TABLE app.partner_totp
   ADD CONSTRAINT partner_totp_hard_lock_iff_twenty CHECK ((hard_locked_at IS NOT NULL) = (consecutive_failed = 20));
 
 COMMENT ON COLUMN app.partner_totp.consecutive_failed IS
-  '0108 (§122). Wrong step-up codes in a row. Only a successful verify or confirm, an admin TOTP reset or a re-enrol clears it: the 15-minute lock (failed_count) does not, which is the point. The 20th sets hard_locked_at. CHECK 0..20.';
+  '0108 (§139). Wrong step-up codes in a row. Only a successful verify or confirm, an admin TOTP reset or a re-enrol clears it: the 15-minute lock (failed_count) does not, which is the point. The 20th sets hard_locked_at. CHECK 0..20.';
 COMMENT ON COLUMN app.partner_totp.hard_locked_at IS
-  '0108 (§122). Set by the 20th consecutive failure and cleared by nothing but an admin TOTP reset (partner_totp_reset_apply) or a re-enrol. While set, partner_totp_attempt refuses every code before comparing it; time does not clear it. NOT NULL exactly when consecutive_failed = 20.';
+  '0108 (§139). Set by the 20th consecutive failure and cleared by nothing but an admin TOTP reset (partner_totp_reset_apply) or a re-enrol. While set, partner_totp_attempt refuses every code before comparing it; time does not clear it. NOT NULL exactly when consecutive_failed = 20.';
 COMMENT ON TABLE app.partner_totp IS
-  '0053/0108 (design 5.1, 6.4, §122). One row per person: seed_version (the seed is DERIVED from Vault partner_totp_key, never stored), enrolment / confirm state, HOTP replay (last_step), the 15-minute lockout (failed_count, locked_until) and the hard cap (consecutive_failed, hard_locked_at: 20 in a row, cleared only by an admin reset). FORCE RLS; no client, edge or service_role privilege. Written only by definers owned by partner_totp_verifier; delete_my_data''s window pair is the only other path.';
+  '0053/0108 (design 5.1, 6.4, §139). One row per person: seed_version (the seed is DERIVED from Vault partner_totp_key, never stored), enrolment / confirm state, HOTP replay (last_step), the 15-minute lockout (failed_count, locked_until) and the hard cap (consecutive_failed, hard_locked_at: 20 in a row, cleared only by an admin reset). FORCE RLS; no client, edge or service_role privilege. Written only by definers owned by partner_totp_verifier; delete_my_data''s window pair is the only other path.';
 
 -- ============================================================================
 -- 2. app.partner_auth_alarm: kind totp_hard_locked (the 0104 / 0107 shape), with the CHECKs proved against what is live
@@ -635,7 +635,7 @@ END
 $$;
 
 COMMENT ON FUNCTION private.partner_totp_verify_for_partner(text) IS
-  '0053/0104/0108 (§110, §122). edge_partner only; POST step-up/totp: class A0_MFA; sets aal 2 and mfa_until on ok; audit wrong/locked; raises partner_auth_alarm kind totp_locked when newly locked (retry_after = 900; one per subject uid per minute). The attempt that sets the HARD lock (the 20th consecutive failure) writes ONE partner.totp.hard_locked audit row and ONE totp_hard_locked alarm; it and every later attempt answer hard_locked (the later ones write nothing).';
+  '0053/0104/0108 (§110, §139). edge_partner only; POST step-up/totp: class A0_MFA; sets aal 2 and mfa_until on ok; audit wrong/locked; raises partner_auth_alarm kind totp_locked when newly locked (retry_after = 900; one per subject uid per minute). The attempt that sets the HARD lock (the 20th consecutive failure) writes ONE partner.totp.hard_locked audit row and ONE totp_hard_locked alarm; it and every later attempt answer hard_locked (the later ones write nothing).';
 
 RESET ROLE;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
@@ -687,23 +687,23 @@ CREATE POLICY current_user_edit_function_inventory_0108 ON private.function_inve
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 
 UPDATE private.function_inventory
-SET note = '0053/0108 (§122): owned by partner_totp_verifier; ONE attempt against a confirmed TOTP: hard lock (20 consecutive failures, admin reset only), 15-minute lock, window +/-1, replay, counters; every outcome a status; EXECUTE for nobody'
+SET note = '0053/0108 (§139): owned by partner_totp_verifier; ONE attempt against a confirmed TOTP: hard lock (20 consecutive failures, admin reset only), 15-minute lock, window +/-1, replay, counters; every outcome a status; EXECUTE for nobody'
 WHERE schema_name = 'private' AND function_name = 'partner_totp_attempt' AND identity_args = 'p_uid uuid, p_code text';
 
 UPDATE private.function_inventory
-SET note = '0053/0108 (§122): owned by partner_totp_verifier; bumps seed_version, gated by enrolment/otp proof; returns seed once; a re-enrol clears the counter and the hard lock; EXECUTE for private_definer only'
+SET note = '0053/0108 (§139): owned by partner_totp_verifier; bumps seed_version, gated by enrolment/otp proof; returns seed once; a re-enrol clears the counter and the hard lock; EXECUTE for private_definer only'
 WHERE schema_name = 'private' AND function_name = 'partner_totp_enrol_apply' AND identity_args = '';
 
 UPDATE private.function_inventory
-SET note = '0053/0108 (§122): owned by partner_totp_verifier; confirm in the enrolling session; a successful confirm clears the counter and the hard lock; EXECUTE for private_definer only'
+SET note = '0053/0108 (§139): owned by partner_totp_verifier; confirm in the enrolling session; a successful confirm clears the counter and the hard lock; EXECUTE for private_definer only'
 WHERE schema_name = 'private' AND function_name = 'partner_totp_confirm_apply' AND identity_args = 'p_code text';
 
 UPDATE private.function_inventory
-SET note = '0053/0108 (§122): owned by partner_totp_verifier; admin reset of another person''s TOTP (bump version, clear confirmed, the counter and the hard lock); EXECUTE for private_definer only'
+SET note = '0053/0108 (§139): owned by partner_totp_verifier; admin reset of another person''s TOTP (bump version, clear confirmed, the counter and the hard lock); EXECUTE for private_definer only'
 WHERE schema_name = 'private' AND function_name = 'partner_totp_reset_apply' AND identity_args = 'p_target uuid';
 
 UPDATE private.function_inventory
-SET note = '0053/0104/0108 (§110, §122): edge_partner only; POST step-up/totp: class A0_MFA; raises totp_locked alarm on newly locked; the 20th consecutive failure hard-locks (one audit row, one totp_hard_locked alarm)'
+SET note = '0053/0104/0108 (§110, §139): edge_partner only; POST step-up/totp: class A0_MFA; raises totp_locked alarm on newly locked; the 20th consecutive failure hard-locks (one audit row, one totp_hard_locked alarm)'
 WHERE schema_name = 'private' AND function_name = 'partner_totp_verify_for_partner' AND identity_args = 'p_code text';
 
 DROP POLICY current_user_edit_function_inventory_0108 ON private.function_inventory;
@@ -714,9 +714,9 @@ CREATE POLICY current_user_seed_definer_policy_allowlist_0108 ON private.definer
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note, role_name) VALUES
   ('app', 'partner_auth_alarm', 'pd_partner_totp_hard_locked_alarm_insert', 'INSERT', true,
-   '0108 (§122): partner-bound private_definer inserts totp_hard_locked for subject uid', 'private_definer'),
+   '0108 (§139): partner-bound private_definer inserts totp_hard_locked for subject uid', 'private_definer'),
   ('app', 'partner_auth_alarm', 'pd_partner_totp_hard_locked_alarm_select', 'SELECT', true,
-   '0108 (§122): partner-bound private_definer reads totp_hard_locked rows for ON CONFLICT', 'private_definer');
+   '0108 (§139): partner-bound private_definer reads totp_hard_locked rows for ON CONFLICT', 'private_definer');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)
