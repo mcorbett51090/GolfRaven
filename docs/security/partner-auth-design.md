@@ -6180,6 +6180,6 @@ Numbering: **migration n/a, matrix n/a (Deno integration), this section 145.** T
 
 ### 145.4 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `e8cddc0`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `e8cddc0`). Merged as `8e90cc7` (#187), §144 and §145 together.
 
 - The settlement cell 1/1 and the marker-scan file 22/22 in `superuser` and `restricted` (the full harness). **Full, unpatched harness on the tree of the code commit (`9b65ff7`; the commits after it change only this log), `superuser` then `restricted`, in a scratch copy of the worktree: exit 0 in both modes.** pgTAP **111 files / 6636 tests PASS** (unchanged: no matrix was touched); the race and concurrency scripts pass; the Deno integration suite **463 passed, 0 failed** in each (the 462 of §143 plus the settlement cell); `verify-function-inventory` OK; `service-role-lint` clean. No unit test, migration or product file changed; the unit suite ran in CI's `install / typecheck / build / test` job. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
