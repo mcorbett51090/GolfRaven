@@ -56,6 +56,8 @@ export type Notice =
   | { readonly kind: "locked" | "locked-away" | "signed-out" | "expired" | "sign-out-offline" | "lock-offline" }
   /** Outcomes of accepting an invite or enrolment: already a member with a passkey, needs a manager's recovery, passkey saved but the first session could not be shown, or a code was sent. */
   | { readonly kind: "enrol-existing-member" | "enrol-recover-required" | "enrol-saved" | "enrol-code-sent" }
+  /** An enrolment at the passkey step was cancelled by the hidden-time auto-lock (the accepted invite is spent: the person needs a new link from a manager). */
+  | { readonly kind: "enrol-stopped" }
   /** Success notices of the signed-in screens. */
   | {
       readonly kind:

@@ -64,7 +64,8 @@ export interface AppController extends StepUp {
 
   /** Invite and enrolment acceptance (pre-session; see enrol-flow.ts). `startEnrol({ token })` is what an invite link calls. */
   startEnrol(opts?: { token?: string }): void;
-  cancelEnrol(): void;
+  /** Back to sign-in. `away`: the hidden-time auto-lock cancelled it, and the screen says the enrolment stopped (the accepted invite is spent). */
+  cancelEnrol(opts?: { away?: boolean }): void;
   requestEnrolCode(pasted?: string): Promise<void>;
   submitEnrolCode(code: string): Promise<void>;
   createPasskey(): Promise<void>;
@@ -457,7 +458,7 @@ export function createController(deps: ControllerDeps): AppController {
     },
 
     startEnrol: (opts) => enrol.start(opts),
-    cancelEnrol: () => enrol.cancel(),
+    cancelEnrol: (opts = {}) => enrol.cancel(opts.away === true ? { kind: "enrol-stopped" } : undefined),
     requestEnrolCode: (pasted) => enrol.requestCode(pasted),
     submitEnrolCode: (code) => enrol.submitCode(code),
     createPasskey: () => enrol.createPasskey(),

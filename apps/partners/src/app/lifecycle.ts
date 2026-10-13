@@ -91,9 +91,10 @@ export function installAutoLock(controller: AppController, deps: AutoLockDeps): 
     // the same as pressing Cancel: the screen leaves signing-in now, a session already opened is revoked (as a keepalive request when the page is hidden)
     else if (state.screen === "signing-in") controller.cancelSignIn({ keepalive: stillHidden });
     // An enrolment at the PASSKEY step holds a verified registration challenge (good for minutes): whoever picked the iPad up could press "Create passkey" and
-    // be signed in as the invitee. Cancel drops the challenge and aborts a ceremony in progress. The earlier steps hold only a one-time token that still needs
-    // a code mailed to the invitee, so there is nothing for a bystander to complete.
-    else if (state.screen === "enrol" && state.step === "passkey") controller.cancelEnrol();
+    // be signed in as the invitee. Cancel drops the challenge and aborts a ceremony in progress, and the screen says why: the invite was accepted at the code
+    // step and an acceptance is final, so the person cannot reopen the same link and needs a new one from a manager (140.8). The earlier steps hold only a
+    // one-time token that still needs a code mailed to the invitee, so there is nothing for a bystander to complete.
+    else if (state.screen === "enrol" && state.step === "passkey") controller.cancelEnrol({ away: true });
     // signed out, or an enrolment before the passkey step: nothing completable is held
   }
 

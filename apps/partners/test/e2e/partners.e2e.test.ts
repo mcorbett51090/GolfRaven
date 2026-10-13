@@ -1165,6 +1165,7 @@ suite("apps/partners in Chromium", () => {
         await setVisibility(w, "visible");
         await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
         expect(await w.page.getByTestId("enrol-create-passkey").count()).toBe(0);
+        expect(await textOf(w.page.getByTestId("notice"))).toBe("Enrolment stopped because the page was left open. Ask a manager for a new link.");
         expect(await w.page.getByTestId("sign-in").isEnabled()).toBe(true);
         expect(await w.auth.credentials()).toHaveLength(1); // only the preloaded one: nothing was created
         expect(server.credentialsOf(server.userByEmail(INVITEE)!.id)).toEqual([]);
@@ -1179,6 +1180,7 @@ suite("apps/partners in Chromium", () => {
         await w.page.clock.runFor(120_000);
         await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
         expect(await w.page.getByTestId("enrol-create-passkey").count()).toBe(0);
+        expect(await textOf(w.page.getByTestId("notice"))).toContain("Enrolment stopped");
         expect(server.sessions()).toEqual([]);
       });
 
@@ -1197,6 +1199,7 @@ suite("apps/partners in Chromium", () => {
         await w.page.waitForTimeout(2500); // the late answer has arrived by now
         expect(await screen(w)).toBe("signed-out");
         expect(await w.page.locator('[data-screen="pin-setup"]').count()).toBe(0);
+        expect(await textOf(w.page.getByTestId("notice"))).toContain("Enrolment stopped"); // still the notice, not replaced by the late answer
         await expect.poll(() => server.state.revokedSessions.size).toBe(1);
         expect(server.sessions()).toEqual([]);
         expect(await heapContains(w.page, server.issuedTokens[0]!)).toBe(false);

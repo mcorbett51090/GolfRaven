@@ -84,6 +84,7 @@ export const frCA: Record<MessageKey, string> = {
   "notice.enrolExistingMember": "Vous avez déjà une clé d'accès. Connectez-vous avec celle-ci, puis rejoignez l'organisme depuis l'écran d'accueil.",
   "notice.enrolRecoverRequired": "Votre compte doit d'abord être récupéré. Demandez l'aide d'un gestionnaire.",
   "notice.enrolSaved": "Votre clé d'accès est enregistrée. Connectez-vous avec celle-ci pour continuer.",
+  "notice.enrolStopped": "L'inscription a été interrompue parce que la page est restée ouverte. Demandez un nouveau lien à un gestionnaire.",
   "notice.enrolCodeSent": "Si l'invitation est valide, un code a été envoyé par courriel à l'adresse visée. Saisissez-le ci-dessous.",
   "notice.pinSet": "Votre NIP est défini.",
   "notice.pinChanged": "Votre NIP est modifié.",

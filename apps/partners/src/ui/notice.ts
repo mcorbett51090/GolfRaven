@@ -15,6 +15,7 @@ const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   "enrol-recover-required": "notice.enrolRecoverRequired",
   "enrol-saved": "notice.enrolSaved",
   "enrol-code-sent": "notice.enrolCodeSent",
+  "enrol-stopped": "notice.enrolStopped",
   "pin-set": "notice.pinSet",
   "pin-changed": "notice.pinChanged",
   "totp-confirmed": "notice.totpConfirmed",

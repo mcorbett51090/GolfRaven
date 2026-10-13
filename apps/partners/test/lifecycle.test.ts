@@ -264,7 +264,7 @@ function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?
 const noticeKind = (st: AppState): string | null => (st.screen === "signed-out" ? (st.notice?.kind ?? null) : null);
 const CANCELLED = { screen: "signed-out", notice: { kind: "error", message: { key: "error.cancelled" } } } as const;
 /** The screen after the auto-lock cancels an enrolment. */
-const STOPPED_SCREEN = { screen: "signed-out", notice: null } as const;
+const STOPPED_SCREEN = { screen: "signed-out", notice: { kind: "enrol-stopped" } } as const;
 
 /** A stand-in controller that only records what the auto-lock asks of it. */
 function stubController(state: { screen: AppState["screen"]; step?: string }) {
@@ -276,7 +276,7 @@ function stubController(state: { screen: AppState["screen"]; step?: string }) {
       return Promise.resolve();
     },
     cancelSignIn: (o?: unknown) => void calls.push(`cancelSignIn ${JSON.stringify(o)}`),
-    cancelEnrol: () => void calls.push("cancelEnrol"),
+    cancelEnrol: (o?: unknown) => void calls.push(`cancelEnrol ${JSON.stringify(o)}`),
     reset: () => void calls.push("reset"),
     signOut: () => void calls.push("signOut"),
   } as unknown as AppController;
@@ -760,7 +760,7 @@ describe("auto-lock: what it asks of the controller in each state (stub controll
     timer.clock.advance(AUTO_LOCK_HIDDEN_MS - 1);
     expect(timer.calls).toEqual([]);
     timer.clock.advance(1);
-    expect(timer.calls).toEqual(["cancelEnrol"]);
+    expect(timer.calls).toEqual(['cancelEnrol {"away":true}']);
     const back = stubController({ screen: "enrol", step: "passkey" });
     back.doc.hide();
     back.clock.jump(119_999);
@@ -769,7 +769,7 @@ describe("auto-lock: what it asks of the controller in each state (stub controll
     back.doc.hide();
     back.clock.jump(AUTO_LOCK_HIDDEN_MS);
     back.doc.show();
-    expect(back.calls).toEqual(["cancelEnrol"]);
+    expect(back.calls).toEqual(['cancelEnrol {"away":true}']);
   });
 });
 
@@ -894,7 +894,7 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
       t.clock.jump(AUTO_LOCK_HIDDEN_MS);
       t.doc.show();
     } else t.clock.advance(AUTO_LOCK_HIDDEN_MS);
-    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
     await t.controller.createPasskey(); // the button is gone; this is the controller refusing it
     await t.controller.submitEnrolCode(CODE);
     await tick();
@@ -902,6 +902,36 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
     expect(t.w.server.sessions()).toEqual([]);
     expect(t.w.server.credentialsOf(t.w.server.userByEmail(EMAIL)!.id)).toEqual([]);
     expect(t.api.hasSession()).toBe(false);
+  });
+
+  it("the screen says why, in the SAME transition as the cancel: one signed-out state carrying the 'enrolment stopped' notice, never a bare sign-in screen first", async () => {
+    const t = autoSetup();
+    await toPasskeyStep(t);
+    t.states.length = 0;
+    t.doc.hide();
+    t.clock.jump(AUTO_LOCK_HIDDEN_MS);
+    t.doc.show();
+    expect(t.states.map((x) => `${x.screen}:${noticeKind(x)}`)).toEqual(["signed-out:enrol-stopped"]);
+  });
+
+  it("the notice has its own wording in both languages (not the Lock text, which promises a passkey the invitee does not have yet), and says to ask a manager for a new link", () => {
+    expect(noticeText({ kind: "enrol-stopped" }, "en")).toBe("Enrolment stopped because the page was left open. Ask a manager for a new link.");
+    expect(noticeText({ kind: "enrol-stopped" }, "fr-CA")).toBe("L'inscription a été interrompue parce que la page est restée ouverte. Demandez un nouveau lien à un gestionnaire.");
+    for (const locale of ["en", "fr-CA"] as const) {
+      expect(noticeText({ kind: "enrol-stopped" }, locale), locale).not.toBe(noticeText({ kind: "locked-away" }, locale));
+      expect(noticeText({ kind: "enrol-stopped" }, locale), locale).not.toBe(noticeText({ kind: "locked" }, locale));
+    }
+  });
+
+  it("the Back button at this step is the same cancel with no notice (its consequence for the accepted invite is the same; it was always so)", async () => {
+    const t = autoSetup();
+    await toPasskeyStep(t);
+    t.controller.cancelEnrol();
+    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    const u = autoSetup();
+    await toPasskeyStep(u);
+    u.controller.cancelEnrol({ away: false });
+    expect(u.controller.getState()).toEqual({ screen: "signed-out", notice: null });
   });
 
   it("a hide of 119 999 ms leaves the enrolment where it was, and Create passkey then completes it (signed in with the forced first PIN)", async () => {
@@ -943,13 +973,13 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
       t.clock.jump(AUTO_LOCK_HIDDEN_MS);
       t.doc.show();
     } else t.clock.advance(AUTO_LOCK_HIDDEN_MS);
-    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
     await p;
     t.createSheet!.release(); // the browser answers late: nothing may come of it
     await tick(60);
     expect(credentialPosts(t)).toEqual([]);
     expect(t.w.server.sessions()).toEqual([]);
-    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
   });
 
   describe.each([
@@ -996,12 +1026,12 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
     t.doc.hide();
     t.clock.jump(AUTO_LOCK_HIDDEN_MS);
     t.doc.show();
-    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
     hold.release();
     await p;
     await tick(60);
     expect(t.api.hasSession()).toBe(false);
-    expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+    expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
     expect(t.w.server.state.revokedSessions.size).toBe(1);
     expect(t.w.server.sessions()).toEqual([]);
   });
