@@ -125,14 +125,17 @@ Errors are `PartnerApiError` with a closed `kind`: `unauthenticated` (401, the o
   until the server's idle expiry. The page now **locks itself** once it has been hidden for `AUTO_LOCK_HIDDEN_MS` = **120 000 ms** (one exported
   constant, `src/app/lifecycle.ts`; the tests pin the literal). It is the same lock as the Lock button (`controller.lock`): the token is wiped and the
   screen is signed-out first, then `POST lock` revokes the session; the notice says "Locked because you were away" (`fr-CA` too). Two paths, because a
-  hidden page's timers can be throttled and a backgrounded iPad page can be frozen: **(1)** on `visibilitychange` to visible, `Date.now()` minus the time
-  it went hidden is compared with the limit (the reliable path: it needs no timer to have run); **(2)** a timer set when the page went hidden locks it
+  hidden page's timers can be throttled and a backgrounded iPad page can be frozen: **(1)** on `visibilitychange` to visible, the time since it went hidden
+  is read on **two clocks**, `Date.now()` and `performance.now()` (the reliable path: it needs no timer to have run); the page stays only if both are
+  below the limit, so a device date set back into the window does not buy time; **(2)** a timer set when the page went hidden locks it
   at the limit if the page is still running (best effort, and the only path that can send the revoke while the page is hidden; that request is a
-  keepalive request). `>=` the limit locks; one millisecond less does not. A clock that went backwards, or a value that is not a number, cannot prove a
-  short absence, so it locks (fail closed). Only **continuous** hidden time counts (two 60 s hides do not add up), and a **visible** page is never locked
+  keepalive request). `>=` the limit on either clock locks; one millisecond less on both does not. A clock that went backwards, or a value that is not a number, cannot prove a
+  short absence, so it locks (fail closed); a wall clock jumping forward past the limit also locks (one passkey tap, never late). Only **continuous** hidden time counts (two 60 s hides do not add up), and a **visible** page is never locked
   by this; that is still the server's idle expiry. While **signing in**, a short hide (the OS passkey sheet may hide the page) changes nothing; a hide of
-  the limit or more cancels the sign-in exactly as Cancel does (a session the server already opened is revoked and never held). Signed out, the 429 wait
-  on the sign-in button, and the enrolment screens are untouched. No server change, no new host, no CSP change.
+  the limit or more cancels the sign-in exactly as Cancel does (a session the server already opened is revoked and never held). An **enrolment at the
+  passkey step** (it holds a verified registration challenge for minutes) is cancelled the same way, so whoever picks the iPad up cannot press Create
+  passkey; the earlier enrolment steps, signed out, and the 429 wait on the sign-in button are untouched. The pilot iPads need Auto-Lock set short (a page
+  left visible is never locked by this) and Guided Access off; design 140.5 records both per iPad. No server change, no new host, no CSP change.
 - **Reauth** (`src/auth/reauth.ts`, `reauthWithPasskey(api, { credentials })`): `POST reauth/options`, a fresh assertion, `POST reauth`; opens
   the server's 5-minute window. Exported for the screens that need it (adding a credential, A2 actions); S7a has no screen of its own for it.
 
@@ -216,7 +219,8 @@ pnpm --filter @golfraven/partners test:e2e      # Playwright only
 - **The auto-lock cells** (`test/lifecycle.test.ts`, `test/controller.test.ts`, and "auto-lock" in `test/e2e/`): the unit cells use a fake document, an
   injected wall clock and injected timers (a `jump` moves the wall clock while no timer runs, which is a frozen page). The Playwright cells run the built
   bundle with Playwright's `page.clock` installed before load and **paused**, so `setSystemTime` (clock moves, no timer) and `runFor` (timers) are exact
-  to the millisecond. **The visibility flip in those cells is synthetic**: nothing in this Chromium (Playwright 1.56.1 / chromium-1194, headless shell,
+  to the millisecond. Playwright cannot move `performance.now()` apart from `Date`, so the one cell that models a date set back on an awake device wraps
+  the fake clock's `performance.now()` (synthetic); the unit cell G1 proves the same without the wrapper. **The visibility flip in those cells is synthetic**: nothing in this Chromium (Playwright 1.56.1 / chromium-1194, headless shell,
   full headless, or headed under Xvfb) flips `document.visibilityState` for real, so the cell makes the page report `hidden` / `visible` and fires the
   real `visibilitychange`. One cell does observe the real events Chromium fires when a page leaves and returns through the back/forward cache. What this
   does **not** prove is that WebKit fires `visibilitychange` on an iPad when the screen locks or an app is switched: that is an on-device pilot check
