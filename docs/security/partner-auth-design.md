@@ -6121,7 +6121,7 @@ Numbering: **migration 0112, matrix 90, this section 143.** §137 made a sponsor
 
 ### 143.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `22d16a6`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `22d16a6`). Merged as `e8cddc0` (#186).
 
 - Matrix 90 47/47 in `superuser` (its own run, and in the full harness) and in `restricted` (the full harness); the new integration file 4/4 in both modes; the full harness as above; `check-migrations-immutable.sh` OK. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
 - Not run: the staging path probe against a live gateway (§20.12), anything on a hosted database, the portal's rendering of the 422 `invalid_request` an admin now gets on approving an out-of-rule offer, and the settlement export with a sponsor-funded offer (§137.3, next).
