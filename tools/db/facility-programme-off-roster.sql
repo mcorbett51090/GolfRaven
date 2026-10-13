@@ -14,17 +14,22 @@
 -- subject to it (the migration owner in a restricted setup, an application role) reads an EMPTY roster and so would list EVERY programme row, or print an empty list that looks like "all clean". The guard
 -- below refuses to go on as such a role (it raises), so a wrong role can never produce an answer.
 --
---   psql "$DATABASE_URL" -f tools/db/facility-programme-off-roster.sql
+--   psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f tools/db/facility-programme-off-roster.sql
+--
+-- The file also switches ON_ERROR_STOP on itself (the first line below), so the guard stops the run even when the flag is forgotten: without it psql prints the guard's
+-- error, carries on, prints "0|0" and an empty list and exits 0 (the Opus gate ran exactly that against the restricted migration owner).
 --
 -- WHAT TO DO WITH A ROW. Decide per row whether the facility belongs on the trail.
 --   * If it does, put it on the roster (the importer's job: a new roster version) and the row is correct.
 --   * If it does not, the row is a stray grant, and there are two different things to stop:
 --       - the PLAYER LANE (check-ins, marker attests, receipts at that facility): they require participation = 'accepted'. The operator can switch them off through the editor even though the facility is off
---         the roster: demote the row to 'left' or 'declined' (0110 allows that on an existing row, and nothing else on it). That is the operator's off-switch for the player lane.
+--         the roster: demote the row to 'left' or 'declined' (0110 allows that on an existing row, and no other participation value; the same call may also change the row's other columns). That is the operator's off-switch for the player lane.
 --       - the REACH: has_facility_scope reads the row and NOT its participation (there is no participation filter, G3, section 138.3, undecided), so a demoted row STILL gives the trail's operator
 --         reach to that facility (invites, PIN resets, credential revocation, the printed QR). Only DELETING the row removes it (there is no route that deletes a programme row, by design):
 --         DELETE FROM app.facility_programme WHERE trail_id = ... AND facility_id = ...; as the owner. Until the G3 filter (or option B) exists, `left` is not a full off-switch.
 -- This script changes nothing.
+
+\set ON_ERROR_STOP on
 
 -- BEGIN rls guard
 DO $guard$

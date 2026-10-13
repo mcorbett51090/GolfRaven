@@ -68,7 +68,10 @@ describe("section 140: the off-roster query and the editor's check are one rule"
     expect(g).toContain("USING ERRCODE = '42501'");
     // nothing that reads or prints a row comes before the guard
     const firstStatement = tool.slice(tool.indexOf("-- END rls guard"));
-    expect(tool.slice(0, tool.indexOf("-- BEGIN rls guard")).split("\n").filter((l) => !l.startsWith("--") && l.trim() !== "")).toEqual([]);
+    // (the one allowed line is the psql meta-command that makes the guard stop the run even when ON_ERROR_STOP was forgotten on the command line)
+    expect(tool.slice(0, tool.indexOf("-- BEGIN rls guard")).split("\n").filter((l) => !l.startsWith("--") && l.trim() !== "")).toEqual(["\\set ON_ERROR_STOP on"]);
+    // the documented command carries the flag too
+    expect(tool).toContain('psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f tools/db/facility-programme-off-roster.sql');
     expect(firstStatement.length).toBeGreaterThan(0);
   });
 
