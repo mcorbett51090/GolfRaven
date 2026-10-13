@@ -5778,6 +5778,7 @@ Numbering: **migration 0110, matrix 88, this section 140.** Closes the finding o
 - **The importer is out of scope** (`[unverified]` beyond what its code and `catalog-promotion.deno.test.ts` show): the check does not depend on `removed_on` being maintained for importer-written rosters (a latest-version member is always `NULL` there), but a roster that never gets imported means no programme can be written for the trail.
 - **A tombstoned or merged ledger id** (`tombstoned_at`, `merged_into`) is not consulted: a facility on the roster counts.
 - **No roster-specific portal message** (140.1).
+- **A refused attempt leaves no trace** (no audit row, no alarm). That is the shape of the brief (a refusal raising 22023), but it has a cost worth naming: an operator deliberately trying to write itself reach is a signal an operator of the system would want, and a `RAISE` rolls back anything the definer wrote, so an alarm cannot be raised from the same call. It would need the refusal to become a **status** (committed with its alarm row, the §110 / §139 pattern: an alarm kind, its two policies, the allow-list rows, an Edge mapping and a portal label), which changes the owner's chosen 22023. Not built; the owner decides.
 - **The race script covers the editor against the importer**, not two editors against each other (the programme row's own upsert is the existing `ON CONFLICT`).
 
 ### 140.5 The existing rows, and the query
@@ -5826,6 +5827,7 @@ All against a clone of the 0109 database, the **unmodified** migration applied w
 - **22023, not a status.** The owner's words; one answer for "off the roster" and "does not exist", so the refusal says nothing about any other trail's facilities (the §137 reasoning).
 - **The roster is the roster of THIS trail, latest version.** A facility that was on an earlier version and is on no later one is refused (the importer would have set `removed_on` on its old member, and the version rule makes the check independent of that).
 - **Narrow reads rather than a broad grant**, and binding-keyed policies rather than `USING (true)`: the hard rule (no policy keyed on a settable GUC bounds an edge role) is kept; no policy of this change reads a setting.
+- **No deploy-order hazard.** The Edge is unchanged and already maps 22023 (`PartnerInvalidArgument`, 422) and 42501 (403) from this definer, so 0110 can be applied before or after any function deploy; the only visible change is that a call that used to be stored is now a 422, and an unknown facility id that used to be a 500 is a 422.
 - **The column list is exact.** Adding a column to the roster tables later does not reach `private_definer`.
 
 ### 140.9 Verification
