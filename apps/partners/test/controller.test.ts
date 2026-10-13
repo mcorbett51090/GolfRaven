@@ -496,14 +496,13 @@ describe("cancelling a sign-in (LOW-4) and a failed first read (LOW-5)", () => {
     const g = gate((u, m) => u.endsWith("/verify") && m === "POST");
     const { controller, api, w } = setup({}, (f) => g.wrap(f));
     const p = controller.signIn();
-    await tick(30);
-    expect(g.pending()).toBe(1);
+    await vi.waitFor(() => expect(g.pending()).toBe(1)); // real crypto signs the assertion first: wait for the condition, not for 30 ms of real time
     expect(controller.getState().screen).toBe("signing-in");
     controller.cancelSignIn();
     expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "error", message: { key: "error.cancelled" } } });
     g.release();
     await p;
-    await tick(20);
+    await vi.waitFor(() => expect(w.server.state.revokedSessions.size).toBe(1));
     expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "error", message: { key: "error.cancelled" } } });
     expect(api.hasSession()).toBe(false);
     expect(w.server.issuedTokens).toHaveLength(1); // the server DID mint a session ...
@@ -515,15 +514,14 @@ describe("cancelling a sign-in (LOW-4) and a failed first read (LOW-5)", () => {
     const g = gate((u, m) => u.endsWith("/session") && m === "GET", { abortable: true });
     const { controller, api, w } = setup({}, (f) => g.wrap(f));
     const p = controller.signIn();
-    await tick(30);
+    await vi.waitFor(() => expect(g.pending()).toBe(1)); // verify has answered and the token is held: GET session is the request that is hanging
     expect(api.hasSession()).toBe(true);
     controller.cancelSignIn();
     expect(api.hasSession()).toBe(false);
     expect(controller.getState().screen).toBe("signed-out");
     await p;
-    await tick(20);
+    await vi.waitFor(() => expect(w.server.state.revokedSessions.size).toBe(1));
     expect(controller.getState().screen).toBe("signed-out");
-    expect(w.server.state.revokedSessions.size).toBe(1);
   });
 
   it("cancelSignIn does nothing when no sign-in is running", async () => {
@@ -629,22 +627,20 @@ describe("reset (pagehide / bfcache restore)", () => {
     controller.reset();
     expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "expired" } });
     expect(api.hasSession()).toBe(false);
-    await tick(30);
-    expect(w.server.state.revokedSessions.size).toBe(1);
+    await vi.waitFor(() => expect(w.server.state.revokedSessions.size).toBe(1));
   });
 
   it("signing-in: the prompt is cancelled and the screen is signed-out", async () => {
     const g = gate((u, m) => u.endsWith("/verify") && m === "POST");
     const { controller, w, api } = setup({}, (f) => g.wrap(f));
     const p = controller.signIn();
-    await tick(30);
+    await vi.waitFor(() => expect(g.pending()).toBe(1));
     controller.reset();
     expect(controller.getState().screen).toBe("signed-out");
     g.release();
     await p;
-    await tick(20);
+    await vi.waitFor(() => expect(w.server.state.revokedSessions.size).toBe(1));
     expect(api.hasSession()).toBe(false);
-    expect(w.server.state.revokedSessions.size).toBe(1);
   });
 
   it("when already signed-out it still redraws (a state is emitted) and sends nothing", async () => {
