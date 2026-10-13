@@ -14,7 +14,7 @@
 // Keys and the pepper are generated AT RUN TIME (never literals). The Ed25519 keys go into app.course_qr_key through the temporary-owner-policy helper (the table has no policy for the harness
 // role); the pepper into the Vault stand-in. Both are removed again by the last test. Every test builds its OWN facility (so the PIN counters and the 30-failure rotation of one test never touch another's).
 
-import { assert, assertEquals, assertNotEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { adminSql, createTestUser, ensureServiceRole, freshUuid, makeActor, NASHVILLE, rawCount, rawOwnerSql } from "./_helpers.ts";
 import { openScopedTx, userBind, withOwnership } from "../../functions/_shared/privileged.ts";
 import { handleChallengeRequest } from "../../functions/_shared/checkin/challenge-handler.ts";
@@ -140,6 +140,22 @@ async function createShop(label: string, qrMode: "rotating" | "static_pin" | "bo
   }
   await sql`insert into app.facility_qr (facility_id, qr_kid, sig) values (${fac}, ${e.prtKid}, ${"printed-" + s})`;
   return { fac, trails };
+}
+
+/**
+ * A shop whose epoch-0 and epoch-1 PINs for `date` differ. A PIN has four digits, so the two epochs of one facility and day coincide in about 1 shop in 10,000; a test that rotates the PIN and then expects the
+ * rotated-out one to be refused fails for no reason when they do (the facility id is random per run, so it is a flake, not a defect). Seen once in CI (the M1 end-to-end test, PR 175: `Values are not equal`,
+ * `refused` expected; the actual value of that run was not captured, so the cause is an inference). The shop is simply re-rolled; the extra shops are harmless, each is its own facility.
+ */
+async function createShopWithDistinctPins(label: string, qrMode: "rotating" | "static_pin" | "both", date: string): Promise<{ shop: Shop; pin0: string; pin1: string }> {
+  const e = await env();
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const shop = await createShop(label, qrMode);
+    const pin0 = await referencePin(e.pepper, shop.fac, date, 0);
+    const pin1 = await referencePin(e.pepper, shop.fac, date, 1);
+    if (pin0 !== pin1) return { shop, pin0, pin1 };
+  }
+  throw new Error("eight shops in a row had the same PIN in epochs 0 and 1: the derivation is not behaving like a hash");
 }
 
 async function freshPlayer(label: string) {
@@ -507,12 +523,8 @@ Deno.test("Q2 caps: a user's SIXTH wrong PIN at a facility in a day is 429 (even
 });
 
 Deno.test("Q2 caps: 30 wrong PINs at one facility in a day ROTATE its PIN (epoch + 1) and raise an operator alarm; the old PIN is then wrong and the new one right", DT, async () => {
-  const e = await env();
-  const shop = await createShop("q2k", "static_pin");
   const date = localDateOf(Date.now());
-  const pin0 = await referencePin(e.pepper, shop.fac, date, 0);
-  const pin1 = await referencePin(e.pepper, shop.fac, date, 1);
-  assertNotEquals(pin0, pin1);
+  const { shop, pin0, pin1 } = await createShopWithDistinctPins("q2k", "static_pin", date);
   // 6 players x 5 wrong guesses (each below the per-user cap) = 30 failures at the facility; every guess is a distinct value that is neither epoch's PIN
   const guesses: string[] = [];
   for (let k = 1; guesses.length < 30; k++) {
@@ -548,12 +560,10 @@ Deno.test("Q2 caps: 30 wrong PINs at one facility in a day ROTATE its PIN (epoch
 // ---------------------------------------------------------------------------------------------------------------------------------------------
 
 Deno.test("M1 end to end: a printed-QR scan CAPTURED before a rotation and uploaded after it is accepted and counts NOTHING against the honest player; the same old PIN tried now is a wrong guess", DT, async () => {
-  const e = await env();
-  const shop = await createShop("m1", "static_pin");
+  const { shop, pin0 } = await createShopWithDistinctPins("m1", "static_pin", localDateOf(Date.now()));
   const honest = await freshPlayer("m1h");
   const jti = await checkinToken(honest, shop);
   const fix = fixOf(); // captured now, BEFORE the rotation below
-  const pin0 = await referencePin(e.pepper, shop.fac, localDateOf(fix.capturedAt), 0);
   await sleep(60);
   // six other accounts, five wrong guesses each: the 30th rotates the PIN
   const guesses: string[] = [];
@@ -575,7 +585,7 @@ Deno.test("M1 end to end: a printed-QR scan CAPTURED before a rotation and uploa
   // the same OLD PIN tried now (no fix: the instant is now, epoch 1 is live) is a wrong guess
   const late = await freshPlayer("m1-late");
   const wrong = await scan(late, shop, { qr: await printedQr(shop, pin0) });
-  assertEquals(wrong.kind, "refused");
+  assertEquals(wrong.kind, "refused", "the rotated-out PIN is refused now (this shop's epoch-0 and epoch-1 PINs differ by construction)");
   assertEquals(await rawCount(`select count(*)::int as n from private.rate_limit_bucket where bucket_key like 'marker-scan:pin-fail:u:${late.uid}:%'`), 1, "a rotated-out PIN tried now IS counted");
 });
 
