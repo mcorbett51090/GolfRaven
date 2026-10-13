@@ -181,7 +181,7 @@ describe("isValidWorkerUrl", () => {
     // The literal TODO(owner) placeholder itself — also correctly "not
     // a valid URL" (isFormsConfigured() below is what treats a
     // placeholder as its own, non-error case).
-    expect(isValidWorkerUrl("TODO(owner): raven-site-kit secure-upload Worker URL")).toBe(false);
+    expect(isValidWorkerUrl("TODO(owner): RavenPower-website-factory secure-upload Worker URL")).toBe(false);
   });
 
   it("re-gate nit: a path other than '/' (or empty) is rejected — the base URL must be bare", () => {
@@ -255,7 +255,7 @@ describe("assertValidFormsConfig — throws at build time for a SET-but-invalid 
   it("does NOT throw for the placeholder (unset is fine)", () => {
     expect(() =>
       assertValidFormsConfig({
-        workerUrl: "TODO(owner): raven-site-kit secure-upload Worker URL",
+        workerUrl: "TODO(owner): RavenPower-website-factory secure-upload Worker URL",
         siteId: "golfraven",
         turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
         contactEmail: "",
@@ -298,7 +298,7 @@ describe("assertValidFormsConfig — throws at build time for a SET-but-invalid 
   it("re-gate nit: does NOT throw for an EMPTY contactEmail (not yet published is fine)", () => {
     expect(() =>
       assertValidFormsConfig({
-        workerUrl: "TODO(owner): raven-site-kit secure-upload Worker URL",
+        workerUrl: "TODO(owner): RavenPower-website-factory secure-upload Worker URL",
         siteId: "golfraven",
         turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
         contactEmail: "",
@@ -325,7 +325,7 @@ describe("assertValidFormsConfig — throws at build time for a SET-but-invalid 
   ])("re-gate nit: THROWS for a SET-but-invalid contactEmail (%s)", (_label, badEmail) => {
     expect(() =>
       assertValidFormsConfig({
-        workerUrl: "TODO(owner): raven-site-kit secure-upload Worker URL",
+        workerUrl: "TODO(owner): RavenPower-website-factory secure-upload Worker URL",
         siteId: "golfraven",
         turnstileSiteKey: "TODO(owner): golfraven Turnstile site key",
         contactEmail: badEmail,

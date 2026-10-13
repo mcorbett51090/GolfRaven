@@ -62,7 +62,7 @@ describe("claim/feedback pages, parameterized on isFormsConfigured() (gate revie
     const workerUrl = envForBuild.GOLFRAVEN_FORMS_WORKER_URL;
     const turnstileSiteKey = envForBuild.GOLFRAVEN_FORMS_TURNSTILE_SITE_KEY;
     const config = {
-      workerUrl: workerUrl ?? "TODO(owner): raven-site-kit secure-upload Worker URL",
+      workerUrl: workerUrl ?? "TODO(owner): RavenPower-website-factory secure-upload Worker URL",
       siteId: "golfraven",
       turnstileSiteKey: turnstileSiteKey ?? "TODO(owner): golfraven Turnstile site key",
       contactEmail: "",

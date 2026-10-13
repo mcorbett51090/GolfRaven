@@ -2,7 +2,7 @@
  * Server-side Cloudflare Turnstile verification (siteverify).
  *
  * Adapted from the owner's production Worker:
- * raven-site-kit/secure-upload/worker/src/turnstile.ts — same siteverify
+ * RavenPower-website-factory/secure-upload/worker/src/turnstile.ts — same siteverify
  * contract (fail closed on network/HTTP/malformed-response error), copied
  * near-verbatim because that shape is already production-proven.
  *

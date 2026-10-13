@@ -3,7 +3,7 @@
 - **Scope:** `apps/signup-worker/**` and the landing-page changes in `apps/landing/**` at branch
   `claude/golf-trails-golfnow-app-lumnqo`, HEAD `66a9b1f`.
 - **Reviewer:** an independent gate. The reviewer did not write this code.
-- **Reference module:** `raven-site-kit/secure-upload/worker/src/`.
+- **Reference module:** `RavenPower-website-factory/secure-upload/worker/src/`.
 - **Counting rule:** decision 0001, Addendum D, R3.
 - **Date:** 2026-09-23.
 

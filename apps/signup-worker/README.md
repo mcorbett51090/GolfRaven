@@ -18,7 +18,7 @@ the K2 signup-count script.
 
 Several modules (`src/turnstile.ts`, `src/ratelimit.ts`, `src/email.ts`)
 are adapted from the owner's production Worker,
-`raven-site-kit/secure-upload/worker/src/{turnstile,ratelimit,email}.ts` —
+`RavenPower-website-factory/secure-upload/worker/src/{turnstile,ratelimit,email}.ts` —
 each file's header comment says exactly what was reused and why.
 
 ## Endpoints
