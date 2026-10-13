@@ -1182,6 +1182,22 @@ suite("apps/partners in Chromium", () => {
         expect(server.sessions()).toEqual([]);
       });
 
+      it("the earlier steps hold nothing a bystander could complete (a one-time token that still needs the code mailed to the invitee), so a long hide leaves them: the token step and the code step are still on screen", async () => {
+        const { token } = server.addInvite({ email: INVITEE });
+        const w = await openFakeClock(`/invite#${token}`);
+        await setVisibility(w, "hidden");
+        await wallClockJump(w, 120_000);
+        await setVisibility(w, "visible");
+        expect(await screen(w)).toBe("enrol");
+        await w.page.getByTestId("enrol-send-code").click();
+        await w.page.locator("#enrol-code").waitFor();
+        await setVisibility(w, "hidden");
+        await w.page.clock.runFor(120_000);
+        await setVisibility(w, "visible");
+        expect(await screen(w)).toBe("enrol");
+        expect(await w.page.locator("#enrol-code").count()).toBe(1);
+      });
+
       it("119 999 ms hidden changes nothing: the button is still there and completes the enrolment (the forced first PIN)", async () => {
         const w = await toPasskeyStep();
         await setVisibility(w, "hidden");
