@@ -3,7 +3,7 @@
  * plus the confirmation-email send limits added for gate findings F5/F6.
  *
  * Adapted from the owner's production Worker
- * (raven-site-kit/secure-upload/worker/src/ratelimit.ts) — same KV
+ * (RavenPower-website-factory/secure-upload/worker/src/ratelimit.ts) — same KV
  * get-then-put counter shape and the same documented limitation: Workers
  * KV is eventually consistent with no atomic increment, so this is an
  * approximate, defense-in-depth limiter, not a hard ceiling. That's

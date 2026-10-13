@@ -79,7 +79,7 @@ OAuth client" (P0 DoD, plan §15).
 ## 7. Custom SMTP with SPF/DKIM/DMARC
 
 **What:** Verify the P0 domain with **Resend** (the provider the K2 signup worker already uses, as in
-raven-site-kit's secure-upload), with SPF, DKIM and DMARC records published. For Supabase Auth's email later,
+RavenPower-website-factory's secure-upload), with SPF, DKIM and DMARC records published. For Supabase Auth's email later,
 point it at Resend's SMTP relay on the same verified domain `[unverified — training knowledge: Resend SMTP
 availability; confirm on Resend's dashboard]`, and raise Supabase Auth's per-hour email limits to match — the built-in SMTP is
 development-only `[unverified — training knowledge]` (plan §7.7, FM-27, G-P1-17, FM-26).

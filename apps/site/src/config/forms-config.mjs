@@ -18,7 +18,7 @@
  *     here. Provisioning `golfraven` into the shared Worker — adding its
  *     entry to `SITES_CONFIG_JSON`, creating its own Turnstile widget —
  *     is an action against a shared, owner-controlled production
- *     resource (`raven-site-kit/secure-upload`) that this build cannot
+ *     resource (`RavenPower-website-factory/secure-upload`) that this build cannot
  *     and must not take on its own.
  *
  * **Two ways the owner can set the two real values (`workerUrl`,
@@ -110,7 +110,7 @@ const DEFAULT_ENV = typeof process !== "undefined" && process.env ? process.env 
  * `GOLFRAVEN_FORMS_TURNSTILE_SITE_KEY` (e.g. in the Cloudflare Pages
  * build's environment variables), OR hand-edit the two `TODO(owner)`
  * string literals below permanently — either is fine, see this file's
- * module doc. Complete `raven-site-kit/secure-upload`'s "Per-site
+ * module doc. Complete `RavenPower-website-factory/secure-upload`'s "Per-site
  * adoption runbook" (its README.md) for `golfraven` first. Nothing else
  * in this file, or in any form page, needs to change once those two
  * values are real.
@@ -123,11 +123,11 @@ export function buildFormsConfig(env = DEFAULT_ENV) {
       // TODO(owner): the shared secure-upload Worker's deployed URL, no
       // trailing slash — e.g. "https://raven-secure-upload.example.workers.dev"
       // (the SAME Worker southern-wine-country and example-site already
-      // use; see raven-site-kit/secure-upload/README.md — do not copy
+      // use; see RavenPower-website-factory/secure-upload/README.md — do not copy
       // their real URLs here, ask the owner for golfraven's own). Add
       // golfraven's entry to that Worker's SITES_CONFIG_JSON first
       // (README.md step 1 of the "Per-site adoption runbook").
-      "TODO(owner): raven-site-kit secure-upload Worker URL",
+      "TODO(owner): RavenPower-website-factory secure-upload Worker URL",
     ),
     // Fixed — golfraven's siteId in the shared Worker's SITES_CONFIG_JSON
     // (build plan §5.1). Not env-overridable: this is an identity, not a

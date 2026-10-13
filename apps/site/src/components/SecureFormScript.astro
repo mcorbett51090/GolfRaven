@@ -43,7 +43,7 @@
  * SECURITY: every control that matters is enforced SERVER-SIDE by the
  * Worker and is NOT reimplemented here — Turnstile siteverify, per-site
  * CORS allow-list, rate-limit, and HTML-escaping of fields into the owner
- * email (`raven-site-kit/secure-upload/README.md`'s security checklist).
+ * email (`RavenPower-website-factory/secure-upload/README.md`'s security checklist).
  * The client's whole job is: collect fields, attach the Turnstile token,
  * and POST once to `workerUrl`. NO SECRETS ship from here — the only
  * credential-shaped value is the PUBLIC Turnstile site key.

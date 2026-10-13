@@ -11,7 +11,7 @@ import {
 } from "./config";
 
 // Deliberately the same pragmatic (not RFC-5322-complete) pattern used by
-// the owner's production Worker (raven-site-kit/secure-upload/worker/src/config.ts) —
+// the owner's production Worker (RavenPower-website-factory/secure-upload/worker/src/config.ts) —
 // good enough to reject obvious garbage; Resend's own delivery is the real
 // backstop for anything more exotic.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

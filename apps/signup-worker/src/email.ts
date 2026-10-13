@@ -3,7 +3,7 @@
  *
  * The low-level `sendViaResend` send path and its "success only after
  * Resend accepts" guarantee are adapted from the owner's production
- * Worker (raven-site-kit/secure-upload/worker/src/email.ts): `ok` requires
+ * Worker (RavenPower-website-factory/secure-upload/worker/src/email.ts): `ok` requires
  * a 2xx AND a provider message id. A 2xx with no id is treated as a
  * failure — reporting "sent" when we can't prove it is exactly the
  * failure mode that guarantee exists to prevent, and it holds here too.
