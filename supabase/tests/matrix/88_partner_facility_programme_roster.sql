@@ -273,7 +273,7 @@ SELECT private.bind_partner_session(:'th_sx');
 RESET ROLE;
 SELECT is(pg_temp.as_definer($q$SELECT (SELECT count(*) FROM app.catalog_roster_member)::text || '/' || (SELECT count(*) FROM app.catalog_roster_version)::text$q$),
   '0/0', 'B3: bound to a STAFF member (operator of no trail): no roster member and no roster version is visible');
-SELECT ok(pg_temp.as_definer($q$SELECT (SELECT count(*) FROM app.catalog_course) > 0 AND (SELECT count(*) FROM app.catalog_hole) > 0$q$)::boolean,
+SELECT is(pg_temp.as_definer($q$SELECT ((SELECT count(*) FROM app.catalog_course) > 0 AND (SELECT count(*) FROM app.catalog_hole) > 0)::text$q$), 'true',
   'B4: but the course / hole -> facility mapping (public catalogue data) is visible under a partner binding');
 ROLLBACK TO SAVEPOINT b_staff;
 
@@ -298,7 +298,7 @@ SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
 RESET ROLE;
-SELECT ok(pg_temp.as_definer($q$SELECT count(*) FILTER (WHERE trail_id <> 'trl_t') >= 15 AND count(*) FILTER (WHERE trail_id = 'trl_t') = 2 FROM app.catalog_roster_member$q$)::boolean,
+SELECT is(pg_temp.as_definer($q$SELECT (count(*) FILTER (WHERE trail_id <> 'trl_t') >= 15 AND count(*) FILTER (WHERE trail_id = 'trl_t') = 2)::text FROM app.catalog_roster_member$q$), 'true',
   'B12: bound to an ADMIN: every trail''s roster (the control that the cells above can fail)');
 ROLLBACK TO SAVEPOINT b_admin;
 
