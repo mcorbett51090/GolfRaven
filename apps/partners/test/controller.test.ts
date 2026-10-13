@@ -241,6 +241,22 @@ describe("lock and sign-out clear state", () => {
     expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "signed-out" } });
   });
 
+  it("the 'away' wording is scoped to the lock that asked for it: after an auto-lock and a new sign-in, a session that ends any OTHER way shows its own notice", async () => {
+    const forgotten = setup();
+    await forgotten.controller.signIn();
+    await forgotten.controller.lock({ away: true });
+    await forgotten.controller.signIn();
+    forgotten.api.forgetSession();
+    expect(forgotten.controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "expired" } });
+    const killed = setup();
+    await killed.controller.signIn();
+    await killed.controller.lock({ away: true });
+    await killed.controller.signIn();
+    killed.w.server.killAllSessions();
+    await killed.controller.refresh(); // the 401 wipes the token and ends the session
+    expect(killed.controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "expired" } });
+  });
+
   it("an unreachable server after an auto-lock: signed-out at once, then the honest 'could not be reached' notice", async () => {
     let offline = false;
     const { controller, api } = setup({}, (f) => (async (input, init) => (offline ? Promise.reject(new TypeError("offline")) : f(input, init))) as typeof fetch);

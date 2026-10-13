@@ -441,6 +441,21 @@ describe("auto-lock: the timer path (best effort; the only one that acts while t
 });
 
 describe("auto-lock: event sequences", () => {
+  it("a timer left over from an EARLIER hide cannot lock a later, shorter one: it was cancelled when the page became visible", async () => {
+    const { controller, doc, clock, revokes } = autoSetup();
+    await controller.signIn();
+    doc.hide(); // the first stretch: its timer would fire at 120 000 ms from here
+    clock.advance(10_000);
+    doc.show();
+    clock.advance(90_000);
+    doc.hide(); // the second stretch starts at 100 000 ms
+    clock.advance(20_000); // 120 000 ms after the FIRST hide, 20 000 ms into the second
+    expect(controller.getState().screen).toBe("signed-in");
+    expect(revokes()).toHaveLength(0);
+    clock.advance(100_000); // 120 000 ms into the second
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked-away" } });
+  });
+
   it("hidden twice in a row: the first start stands (the repeat neither buys more time nor adds a second timer)", async () => {
     const a = autoSetup();
     await a.controller.signIn();

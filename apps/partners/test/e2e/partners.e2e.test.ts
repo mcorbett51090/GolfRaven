@@ -1013,6 +1013,22 @@ suite("apps/partners in Chromium", () => {
       expect(lockRequests()).toHaveLength(0);
     });
 
+    it("a timer left over from an earlier hide cannot lock a later, shorter one: 120 000 ms after the FIRST hide the page is only 20 000 ms into the second and stays signed in; the second one locks at its own limit", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      await setVisibility(w, "hidden");
+      await w.page.clock.runFor(10_000);
+      await setVisibility(w, "visible");
+      await w.page.clock.runFor(90_000);
+      await setVisibility(w, "hidden");
+      await w.page.clock.runFor(20_000);
+      expect(await screen(w)).toBe("signed-in");
+      expect(lockRequests()).toHaveLength(0);
+      await w.page.clock.runFor(100_000);
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+    });
+
     it("a refresh that never answers when the lock fires: the screen is locked at once, the hung request is aborted, the token is out of the heap, and the refresh cannot bring the signed-in screen back", async () => {
       const w = await openFakeClock();
       await signIn(w);
