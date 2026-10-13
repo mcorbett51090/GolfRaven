@@ -134,7 +134,8 @@ Errors are `PartnerApiError` with a closed `kind`: `unauthenticated` (401, the o
   by this; that is still the server's idle expiry. While **signing in**, a short hide (the OS passkey sheet may hide the page) changes nothing; a hide of
   the limit or more cancels the sign-in exactly as Cancel does (a session the server already opened is revoked and never held). An **enrolment at the
   passkey step** (it holds a verified registration challenge for minutes) is cancelled the same way, so whoever picks the iPad up cannot press Create
-  passkey; the earlier enrolment steps, signed out, and the 429 wait on the sign-in button are untouched. The pilot iPads need Auto-Lock set short (a page
+  passkey (a cancel that lands after the first session was adopted revokes that session too: `onSession` checks the run's signal after each read). The
+  screen says "Enrolment stopped ... Ask a manager for a new link": the accepted invite is spent, as it is when Back is pressed. The earlier enrolment steps, signed out, and the 429 wait on the sign-in button are untouched. The pilot iPads need Auto-Lock set short (a page
   left visible is never locked by this) and Guided Access off; design 140.5 records both per iPad. No server change, no new host, no CSP change.
 - **Reauth** (`src/auth/reauth.ts`, `reauthWithPasskey(api, { credentials })`): `POST reauth/options`, a fresh assertion, `POST reauth`; opens
   the server's 5-minute window. Exported for the screens that need it (adding a credential, A2 actions); S7a has no screen of its own for it.
