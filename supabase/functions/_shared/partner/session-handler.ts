@@ -20,7 +20,7 @@
 //   POST otp-proof/verify { code }: proves the mailbox through GoTrue (anon key) and records the proof on the session (5 attempts a member an hour); the GoTrue session is closed AFTER the proof is recorded
 //   POST totp/enrol       {}: enrols (or re-enrols unconfirmed) TOTP; returns base32 seed + otpauthUrl once (S1.4, PA-24). `already_confirmed` is 409; 42501 / 55000 map via PartnerAuthorityRefused / PartnerNotConfigured
 //   POST totp/confirm     { code }: confirms the unconfirmed seed in the same session that enrolled
-//   POST step-up/totp     { code }: raises aal to 2 and sets mfa_until; wrong→403, locked→403 with Retry-After, unset/unconfirmed→409
+//   POST step-up/totp     { code }: raises aal to 2 and sets mfa_until; wrong→403, locked→403 with Retry-After, hard_locked (20 consecutive failures, an admin reset clears it)→403 totp_hard_locked with NO Retry-After, unset/unconfirmed→409
 //
 // THE ORDER, for every request: (1) the Origin check, before routing and for every method (a foreign Origin is a 403 whatever CORS does); (2) `OPTIONS` is answered here, with no port touched;
 // (3) the route and method (404 / 405); (4) for a session route, the bearer: exactly `gr_ps_` + 43 characters, else the ONE 401 with no port touched (a Supabase JWT, any other bearer and no
@@ -562,6 +562,9 @@ function totpVerifyResponse(decision: Decision, r: TotpVerifyResult): Response {
       return partnerError(decision, 403, "totp_locked", "TOTP is locked: wait before trying again", {
         "retry-after": String(Math.max(1, r.retryAfterSeconds)),
       });
+    case "hard_locked":
+      // 20 consecutive failures (0108): time does not clear it, only an admin's TOTP reset does, so there is NO Retry-After (the PIN lock is mapped the same way: 403, no header)
+      return partnerError(decision, 403, "totp_hard_locked", "TOTP is locked: ask an admin to reset it");
     case "retry_after":
       return partnerError(decision, 429, "totp_backoff", "too many attempts: wait before trying again", {
         "retry-after": String(Math.max(1, r.retryAfterSeconds)),

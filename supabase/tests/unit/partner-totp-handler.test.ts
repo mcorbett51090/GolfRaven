@@ -9,6 +9,10 @@ import { handlePartnerSessionRequest } from "../../functions/_shared/partner/ses
 import { PartnerAuthorityRefused, PartnerNotConfigured } from "../../functions/_shared/partner/ports.ts";
 import { buildOtpauthUrl, encodeTotpSeed } from "../../functions/_shared/partner/totp-contract.ts";
 import { authed, bytes, makeFakes, ORIGIN, req, SESSION_TOKEN } from "./partner-fakes.ts";
+import { kindForStatus, PartnerApiError } from "../../../apps/partners/src/api/errors.ts";
+import { messageForError } from "../../../apps/partners/src/app/messages.ts";
+import { en } from "../../../apps/partners/src/i18n/messages/en.ts";
+import { frCA } from "../../../apps/partners/src/i18n/messages/fr-CA.ts";
 
 const CODE = "123456";
 const post = (path: string, body: unknown, f: ReturnType<typeof makeFakes>) => handlePartnerSessionRequest(req("POST", path, { headers: authed(), body }), f.deps);
@@ -178,10 +182,11 @@ describe("COMMIT ON EVERY STATUS: confirm and verify map statuses like PIN", () 
     expect((await post("totp/confirm", { code: CODE }, locked)).headers.get("retry-after")).toBe("900");
   });
 
-  it("step-up/totp: wrong→403, locked→403 with Retry-After, retry_after→429, unset/unconfirmed→409", async () => {
+  it("step-up/totp: wrong→403, locked→403 with Retry-After, hard_locked→403 with NO Retry-After, retry_after→429, unset/unconfirmed→409", async () => {
     const cases: Array<[Parameters<typeof makeFakes>[0], number, string, string | null]> = [
       [{ totpVerify: { status: "wrong", retryAfterSeconds: 0, mfaUntil: null } }, 403, "totp_wrong", null],
       [{ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } }, 403, "totp_locked", "900"],
+      [{ totpVerify: { status: "hard_locked", retryAfterSeconds: 0, mfaUntil: null } }, 403, "totp_hard_locked", null],
       [{ totpVerify: { status: "retry_after", retryAfterSeconds: 17, mfaUntil: null } }, 429, "totp_backoff", "17"],
       [{ totpVerify: { status: "unset", retryAfterSeconds: 0, mfaUntil: null } }, 409, "totp_not_set", null],
       [{ totpVerify: { status: "unconfirmed", retryAfterSeconds: 0, mfaUntil: null } }, 409, "totp_unconfirmed", null],
@@ -193,6 +198,35 @@ describe("COMMIT ON EVERY STATUS: confirm and verify map statuses like PIN", () 
       expect((await body(res)).error?.code).toBe(code);
       expect(f.tx, code).toEqual([{ kind: "session", committed: true }]);
       if (retry !== null) expect(res.headers.get("retry-after"), code).toBe(retry);
+    }
+  });
+
+  it("step-up/totp hard_locked: 403 totp_hard_locked and no Retry-After at all, even when the database port reports a retry figure (time never clears it), committed", async () => {
+    const f = makeFakes({ totpVerify: { status: "hard_locked", retryAfterSeconds: 900, mfaUntil: null } });
+    const res = await post("step-up/totp", { code: CODE }, f);
+    expect(res.status).toBe(403);
+    expect(res.headers.get("retry-after")).toBeNull();
+    expect((await body(res)).error?.code).toBe("totp_hard_locked");
+    expect(f.tx).toEqual([{ kind: "session", committed: true }]);
+    // the plain 15-minute lock keeps its header: the two are different answers
+    const soft = makeFakes({ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } });
+    expect((await post("step-up/totp", { code: CODE }, soft)).headers.get("retry-after")).toBe("900");
+  });
+
+  it("Edge -> portal (0108): the hard-lock 403 reaches the member as 'ask an admin to reset it' with no wait, the 15-minute lock as the wait; neither reads as the other, and both strings exist in EN and fr-CA", async () => {
+    const asPortalError = async (res: Response): Promise<PartnerApiError> => {
+      const code = ((await res.json()) as { error?: { code?: string } }).error?.code ?? null;
+      return new PartnerApiError(kindForStatus(res.status, code), { status: res.status, code, retryAfterSeconds: null });
+    };
+    const hard = await asPortalError(await post("step-up/totp", { code: CODE }, makeFakes({ totpVerify: { status: "hard_locked", retryAfterSeconds: 0, mfaUntil: null } })));
+    const soft = await asPortalError(await post("step-up/totp", { code: CODE }, makeFakes({ totpVerify: { status: "locked", retryAfterSeconds: 900, mfaUntil: null } })));
+    expect([hard.kind, hard.code]).toEqual(["forbidden", "totp_hard_locked"]);
+    expect([soft.kind, soft.code]).toEqual(["forbidden", "totp_locked"]);
+    expect(messageForError(hard, "totp")).toEqual({ key: "totp.hardLocked" });
+    expect(messageForError(soft, "totp")).toEqual({ key: "totp.locked" });
+    for (const key of ["totp.hardLocked", "totp.locked", "review.authAlarms.kind.totp_hard_locked"]) {
+      expect(Object.keys(en), `${key} in en`).toContain(key);
+      expect(Object.keys(frCA), `${key} in fr-CA`).toContain(key);
     }
   });
 

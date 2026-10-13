@@ -161,6 +161,7 @@ export const frCA: Record<MessageKey, string> = {
   "totp.confirm.button": "Confirmer l'application d'authentification",
   "totp.wrong": "Ce code n'est pas le bon.",
   "totp.locked": "Trop de codes erronés. Patientez un moment et réessayez.",
+  "totp.hardLocked": "Cette application d'authentification est verrouillée après trop de codes erronés. Demandez à un administrateur de la réinitialiser.",
   "totp.backoff": "Trop de codes erronés. Patientez un instant et réessayez.",
   "totp.backoff.wait": "Trop de codes erronés. Réessayez dans {seconds} s.",
   "totp.notSet": "Aucune application d'authentification n'est encore ajoutée. Ajoutez-en une d'abord.",
@@ -472,6 +473,7 @@ export const frCA: Record<MessageKey, string> = {
   "review.authAlarms.kind.credential_register": "Première clé d'accès enregistrée",
   "review.authAlarms.kind.pin_set": "NIP défini",
   "review.authAlarms.kind.totp_enrol": "TOTP inscrit",
+  "review.authAlarms.kind.totp_hard_locked": "TOTP verrouillé durablement",
   "notice.reviewResolved": "Élément de revue résolu.",
 
   "rollups.title": "Bilans",
