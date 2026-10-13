@@ -6118,7 +6118,20 @@ Numbering: **migration 0112, matrix 90, this section 143.** §137 made a sponsor
   | M14 the migration is absent (the schema before 0112)        | 5–9, 12, 15–17, 21–23, 28, 29, 33–35, 38–40 |
 
 - **Slips of my own, found by running it:** my first matrix 90 bound the operator, then the admin, then the operator again in one transaction, and the second bind was refused (`partner_session_refused`: a transaction cannot be re-bound), so the file stopped at cell 12; the admin cells now sit in a rolled-back `SAVEPOINT` before the one durable operator bind, and the flow runs entirely as the admin (the operator definers read only the trail's scope, which an admin has). My first mutation run drove the whole harness for every mutant, including the race and concurrency scripts, which made one mutant take several minutes; the runner now stops after the pgTAP step (the Deno layer is run separately below).
-- **Full, unpatched harness: not yet recorded.** The run on this tree was still in progress when this text was committed; its numbers replace this line in the next commit. What is already known: the pgTAP step on this tree, `superuser`, is **111 files / 6636 tests PASS** (110 / 6589 of §142 plus matrix 90's 47).
+- **The Deno layer was mutated separately** (a failing pgTAP step aborts the harness before the Deno step, so the two layers have to be run on their own; the runner swaps in a trivially passing matrix file and runs only the new integration file): **8 of 8 mutants killed** (control 4/4; each cell is named by its leading words):
+
+  | Mutant                                                   | Cells that fail                                    |
+  | -------------------------------------------------------- | -------------------------------------------------- |
+  | D1 offer write: the scope check is switched off          | 2 (scope)                                          |
+  | D3 approve: the whole sponsorship check is switched off  | 1 (draft sponsorship), 4 (the flow)                |
+  | D4 approve: a draft sponsorship is accepted              | 1                                                  |
+  | D5 approve: the scope is not asked                       | 4                                                  |
+  | D8 approve: the refusal is 42501, not 22023              | 1, 4 (403 where 422 `invalid_request` is expected) |
+  | D9 programme: the scope check is switched off            | 2                                                  |
+  | D11 programme: a trail-funded marker with an id accepted | 3                                                  |
+  | D14 the migration is absent                              | 1, 2, 3, 4                                         |
+
+- **Full, unpatched harness on the tree of the code commit (`4d8593f`; the design commit after it changes only this file), `superuser` then `restricted`, in a scratch copy of the worktree: exit 0 in both modes.** pgTAP **111 files / 6636 tests PASS** (the 110 / 6589 of §142 plus matrix 90's 47); the race and concurrency scripts (including the programme roster race of §141) pass; the Deno integration suite **462 passed, 0 failed** in each (the 458 of §141 plus these 4); `verify-function-inventory` OK; `service-role-lint` clean. `tools/db/check-migrations-immutable.sh --base origin/main`: OK, 111 files byte-identical. The unit suite was not run by me this time; the CI job `install / typecheck / build / test` (which runs it) was green on `4d8593f` and on the design commit.
 
 ### 143.4 Not built, honestly
 
@@ -6133,3 +6146,6 @@ Numbering: **migration 0112, matrix 90, this section 143.** §137 made a sponsor
 ### 143.5 Verification
 
 Branch: `claude/golfraven-p5-113-next-ft2plx` (base `22d16a6`). Squash SHA recorded after merge.
+
+- Matrix 90 47/47 in `superuser` (its own run, and in the full harness) and in `restricted` (the full harness); the new integration file 4/4 in both modes; the full harness as above; `check-migrations-immutable.sh` OK. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+- Not run: the staging path probe against a live gateway (§20.12), anything on a hosted database, the portal's rendering of the 422 `invalid_request` an admin now gets on approving an out-of-rule offer, and the settlement export with a sponsor-funded offer (§137.3, next).
