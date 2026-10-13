@@ -983,9 +983,9 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
   });
 
   describe.each([
-    ["GET session", "/partner-session/session"],
-    ["GET pin", "/partner-session/pin"],
-  ] as const)("P1: the first session is open and %s is still being read when the limit passes", (_name, route) => {
+    ["GET session", "/partner-session/session", false],
+    ["GET pin", "/partner-session/pin", true],
+  ] as const)("P1: the first session is open and %s is still being read when the limit passes", (_name, route, pinReadSent) => {
     it.each(["return", "timer"] as const)("(%s path) the cancel is not undone when the read settles: still signed-out, never signed-in again, and the invitee's session is REVOKED with its own token and never held", async (path) => {
       let armed = false;
       const hold = holdResponses((u, m) => armed && u.endsWith(route) && m === "GET"); // the answer arrives AFTER the cancel (a real fetch would too)
@@ -1007,6 +1007,8 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
       await p;
       await tick(80);
       expect(t.states.slice(afterCancel).map((x) => x.screen)).toEqual([]); // nothing was drawn after the cancel
+      // and a cancelled run asks for nothing more: GET pin was already on the wire in the second case, and is never sent in the first
+      expect(t.sent.some((r) => r.method === "GET" && r.url.endsWith("/partner-session/pin"))).toBe(pinReadSent);
       expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
       expect(t.api.hasSession()).toBe(false);
       expect(t.w.server.state.revokedSessions.size).toBe(1);
