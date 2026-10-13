@@ -15,6 +15,10 @@
 --      that names the facility (facility_id), or names a course of it (course_id), a hole of it (hole_id) or a course of it inside any_of_course_ids. "A facility that does not exist"
 --      is the same refusal as "a facility that is not on the roster" (before this a nonexistent facility id was a raw foreign-key error, 23503, which the Edge does not translate).
 --      The rule holds for EVERY caller the definer authorises (an operator of the trail, and an admin); nobody is exempt.
+--      ONE exception, because it cannot add reach: an EXISTING row for the (trail, facility) may be DEMOTED (resulting participation declined or left) whether or not the facility is on the roster.
+--      participation = accepted is the player-lane gate (0046, 0051, 0055, 0056, 0064, 0067), so without the exception an import that drops a facility would take away the operator's only per-facility
+--      off-switch. Creating a row (any participation: a row at all is reach for has_facility_scope) and any call that leaves invited or accepted still need the roster. The existing row is locked first,
+--      FOR NO KEY UPDATE, which decides INSERT or UPDATE under a lock. A demoted row STILL grants has_facility_scope reach (no participation filter, G3): demotion stops the player lane, not the reach.
 --   2. private_definer gains the narrowest read the check needs. The definer runs as private_definer under FORCE ROW LEVEL SECURITY and, until now, could read none of the four catalog
 --      tables the roster is made of. Column-level SELECT (not table-level) on exactly the columns the check reads, and four SELECT policies keyed on the partner BINDING (never a GUC):
 --      the roster rows (catalog_roster_member, catalog_roster_version) only for a trail the bound member operates (or an admin), and the course / hole -> facility mapping
@@ -23,9 +27,9 @@
 --      the function_inventory note and the function comment.
 --
 -- THE SELF-CHECK (the 0051 / 0108 shape, with the drift detection moved BEFORE the DDL). The live source of the function is captured first. Before ANY statement that changes the
--- database: its source must hash to the pinned md5 of the 0059 definition, its owner / SECURITY DEFINER / search_path / volatility / return shape / EXECUTE set / comment must be what 0059
--- left, and the one intended edit must apply to it exactly once. Only then do the grants, the policies and the function change. After the redefinition the migration asserts again that the
--- live source IS that edited source, that every attribute is unchanged, and that the new reads are exactly the intended ones. (A post-check alone leaves the redefinition applied when
+-- database: its source must hash to the pinned md5 of the 0059 definition, its owner / SECURITY DEFINER / search_path / volatility / return shape / EXECUTE set (grantee, privilege, grant option
+-- and grantor) / comment must be what 0059 left, the one intended edit must apply to it exactly once, and private_definer must hold NO privilege and have NO policy on the four tables it is about to be given.
+-- Only then do the grants, the policies and the function change. After the redefinition the migration asserts again that the live source IS that edited source, that every attribute is unchanged, and that the new reads are exactly the intended ones. (A post-check alone leaves the redefinition applied when
 -- a runner does not wrap the file in a transaction; the pin does not.)
 --
 -- DELIBERATELY NOT HERE (section 140): the G3 participation filter (a declined / left facility giving no reach) is a separate decision the owner has not made; rows written BEFORE
@@ -69,9 +73,16 @@ UPDATE r110_fn SET exp_src = pg_temp.r110_edit(old_src,
     RETURN;
   END IF;
   -- 0110 (section 140): the facility is on THIS trail's CURRENT roster: a member of the trail's latest roster version, not removed, that names the facility, a course of it, a hole of it, or a
-  -- course of it inside any_of_course_ids. An unknown facility is the same refusal. The check precedes the write, so a refused call writes (and audits) nothing, and the roster is read in
-  -- THIS statement's snapshot (partner_authorize has already required READ COMMITTED), so a roster version that commits later is seen by the next call and not by this one.
-  IF NOT EXISTS (
+  -- course of it inside any_of_course_ids. An unknown facility is the same refusal. The check precedes the write, so a refused call writes (and audits) nothing.
+  -- ONE exception, because it cannot add reach: an EXISTING row for this (trail, facility) may be DEMOTED (resulting participation declined or left) whether or not the facility is on the roster, so
+  -- the operator keeps its off-switch for the player lane (participation = accepted is the player-lane gate) after an import drops the facility. Creating a row (an INSERT, whatever its participation: a
+  -- row at all is reach for has_facility_scope), and any call that leaves invited or accepted, need the roster.
+  -- The existing row is locked FIRST, FOR NO KEY UPDATE (the lock the upsert's own UPDATE takes). That decides INSERT or UPDATE (FOUND) under a lock: nobody can delete the row between this test and
+  -- the write, which would turn a write judged an UPDATE into an INSERT; a concurrent writer of the row finishes before the roster below is read (partner_authorize has already required READ
+  -- COMMITTED, so the roster is read in THIS statement's snapshot, after the wait). A row created concurrently after the test makes the write an UPDATE of a row that was judged an INSERT, which only
+  -- ever errs toward the roster being required.
+  PERFORM 1 FROM app.facility_programme fp WHERE fp.trail_id = p_trail_id AND fp.facility_id = p_facility_id FOR NO KEY UPDATE;
+  IF NOT (FOUND AND p_participation IN ('declined', 'left')) AND NOT EXISTS (
     SELECT 1
     FROM app.catalog_roster_member rm
     WHERE rm.trail_id = p_trail_id
@@ -111,12 +122,12 @@ BEGIN
   ) THEN
     RAISE EXCEPTION '0110: the live partner_facility_programme_upsert_for_partner has attributes other than 0059 gave it (owner, SECURITY DEFINER, search_path, volatility, return shape). Nothing was changed.';
   END IF;
-  SELECT string_agg(a.grantee::regrole::text || ':' || a.privilege_type, ',' ORDER BY a.grantee::regrole::text)
+  SELECT string_agg(a.grantee::regrole::text || ':' || a.privilege_type || ':' || a.is_grantable::text || ':' || a.grantor::regrole::text, ',' ORDER BY a.grantee::regrole::text, a.privilege_type)
     INTO v_acl
   FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
   WHERE p.oid = r.fn_oid;
-  IF v_acl IS DISTINCT FROM 'edge_partner:EXECUTE,private_definer:EXECUTE' THEN
-    RAISE EXCEPTION '0110: the EXECUTE set of partner_facility_programme_upsert_for_partner is not edge_partner + the owner alone (it is: %). Nothing was changed.', v_acl;
+  IF v_acl IS DISTINCT FROM 'edge_partner:EXECUTE:false:private_definer,private_definer:EXECUTE:false:private_definer' THEN
+    RAISE EXCEPTION '0110: the EXECUTE set of partner_facility_programme_upsert_for_partner is not edge_partner + the owner alone, without grant option (it is: %). Nothing was changed.', v_acl;
   END IF;
   IF r.cmt IS DISTINCT FROM '0059 (S6). edge_partner only; class A3 (operator of the trail). Upsert facility_programme (not pin_epoch). Statuses: ok | no_trail.' THEN
     RAISE EXCEPTION '0110: the comment of partner_facility_programme_upsert_for_partner is not the 0059 comment. Nothing was changed.';
@@ -132,6 +143,18 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM pg_policy pol WHERE pol.polname IN ('pd_partner_roster_read_member', 'pd_partner_roster_read_version', 'pd_partner_roster_read_course', 'pd_partner_roster_read_hole')) THEN
     RAISE EXCEPTION '0110: one of the roster read policies already exists. Nothing was changed.';
+  END IF;
+  -- (d) the privilege surface this migration is about to define is EMPTY now: private_definer holds no privilege of any kind on the four tables and no policy applies to it there. A pre-existing column or
+  --     table grant, or a policy, is drift from what the "exactly 13 columns" claim below is measured against, and is found HERE rather than after the grants.
+  IF EXISTS (SELECT 1 FROM unnest(ARRAY['app.catalog_roster_member', 'app.catalog_roster_version', 'app.catalog_course', 'app.catalog_hole']) t(n)
+             WHERE has_table_privilege('private_definer', t.n, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'))
+     OR EXISTS (SELECT 1 FROM pg_attribute a
+                WHERE a.attrelid IN ('app.catalog_roster_member'::regclass, 'app.catalog_roster_version'::regclass, 'app.catalog_course'::regclass, 'app.catalog_hole'::regclass)
+                  AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('private_definer', a.attrelid, a.attnum, 'SELECT,INSERT,UPDATE,REFERENCES'))
+     OR EXISTS (SELECT 1 FROM pg_policy pol
+                WHERE pol.polrelid IN ('app.catalog_roster_member'::regclass, 'app.catalog_roster_version'::regclass, 'app.catalog_course'::regclass, 'app.catalog_hole'::regclass)
+                  AND (pol.polroles @> ARRAY[0]::oid[] OR pol.polroles @> ARRAY[(SELECT oid FROM pg_roles WHERE rolname = 'private_definer')])) THEN
+    RAISE EXCEPTION '0110: private_definer already holds a privilege, or a policy applies to it, on a roster / course / hole table (drift). Nothing was changed.';
   END IF;
 END
 $r110_pre$;
@@ -192,9 +215,16 @@ BEGIN
     RETURN;
   END IF;
   -- 0110 (section 140): the facility is on THIS trail's CURRENT roster: a member of the trail's latest roster version, not removed, that names the facility, a course of it, a hole of it, or a
-  -- course of it inside any_of_course_ids. An unknown facility is the same refusal. The check precedes the write, so a refused call writes (and audits) nothing, and the roster is read in
-  -- THIS statement's snapshot (partner_authorize has already required READ COMMITTED), so a roster version that commits later is seen by the next call and not by this one.
-  IF NOT EXISTS (
+  -- course of it inside any_of_course_ids. An unknown facility is the same refusal. The check precedes the write, so a refused call writes (and audits) nothing.
+  -- ONE exception, because it cannot add reach: an EXISTING row for this (trail, facility) may be DEMOTED (resulting participation declined or left) whether or not the facility is on the roster, so
+  -- the operator keeps its off-switch for the player lane (participation = accepted is the player-lane gate) after an import drops the facility. Creating a row (an INSERT, whatever its participation: a
+  -- row at all is reach for has_facility_scope), and any call that leaves invited or accepted, need the roster.
+  -- The existing row is locked FIRST, FOR NO KEY UPDATE (the lock the upsert's own UPDATE takes). That decides INSERT or UPDATE (FOUND) under a lock: nobody can delete the row between this test and
+  -- the write, which would turn a write judged an UPDATE into an INSERT; a concurrent writer of the row finishes before the roster below is read (partner_authorize has already required READ
+  -- COMMITTED, so the roster is read in THIS statement's snapshot, after the wait). A row created concurrently after the test makes the write an UPDATE of a row that was judged an INSERT, which only
+  -- ever errs toward the roster being required.
+  PERFORM 1 FROM app.facility_programme fp WHERE fp.trail_id = p_trail_id AND fp.facility_id = p_facility_id FOR NO KEY UPDATE;
+  IF NOT (FOUND AND p_participation IN ('declined', 'left')) AND NOT EXISTS (
     SELECT 1
     FROM app.catalog_roster_member rm
     WHERE rm.trail_id = p_trail_id
@@ -231,7 +261,7 @@ END
 $$;
 
 COMMENT ON FUNCTION private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text) IS
-  '0059/0110 (S6, section 140). edge_partner only; class A3 (operator of the trail, or an admin). Upsert facility_programme (not pin_epoch). The facility must be on the trail''s current roster (the latest roster version, a member not removed that names the facility or a course / hole / any_of course of it), else 22023; no one is exempt. Statuses: ok | no_trail.';
+  '0059/0110 (S6, section 140). edge_partner only; class A3 (operator of the trail, or an admin). Upsert facility_programme (not pin_epoch). The facility must be on the trail''s current roster (the latest roster version, a member not removed that names the facility or a course / hole / any_of course of it), else 22023, for an operator and an admin alike; the one exception is the DEMOTION of an existing row (resulting participation declined or left), which cannot add reach. Statuses: ok | no_trail.';
 
 RESET ROLE;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
@@ -269,11 +299,11 @@ BEGIN
     RAISE EXCEPTION '0110: the roster check must sit after the authorisation call and before the write';
   END IF;
   -- the EXECUTE set did not move
-  SELECT string_agg(a.grantee::regrole::text || ':' || a.privilege_type, ',' ORDER BY a.grantee::regrole::text)
+  SELECT string_agg(a.grantee::regrole::text || ':' || a.privilege_type || ':' || a.is_grantable::text || ':' || a.grantor::regrole::text, ',' ORDER BY a.grantee::regrole::text, a.privilege_type)
     INTO v_acl
   FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
   WHERE p.oid = r.fn_oid;
-  IF v_acl IS DISTINCT FROM 'edge_partner:EXECUTE,private_definer:EXECUTE' THEN
+  IF v_acl IS DISTINCT FROM 'edge_partner:EXECUTE:false:private_definer,private_definer:EXECUTE:false:private_definer' THEN
     RAISE EXCEPTION '0110: the EXECUTE set of partner_facility_programme_upsert_for_partner moved (now: %)', v_acl;
   END IF;
   -- the new reads are exactly the intended ones: no table-level privilege of any kind (SELECT included), and column-level SELECT on exactly the 13 columns the check reads and nothing else
