@@ -589,7 +589,7 @@ SELECT is((SELECT count(*)::int FROM app.facility_programme WHERE trail_id = 'tr
 SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'left', 'static_pin'), 'ok', 'F28: THE OFF-SWITCH: the operator demotes the off-roster fac_z row to left (and changes its qr mode in the same call): ok');
 SELECT is((SELECT participation::text || '/' || qr_mode::text FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z'), 'left/static_pin', 'F29: the row is kept and says left');
 SELECT is((SELECT count(*)::int FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z' AND participation = 'accepted'), 0, 'F30: the trl_t / fac_z row no longer passes participation = accepted, the player-lane gate: check-ins, marker attests and receipts for that trail at fac_z stop');
-SELECT is(pg_temp.reach('fac_z'), true, 'F31: KNOWN LIMIT, pinned: but the reach stays. has_facility_scope reads the row and not its participation (the G3 filter is absent), so the operator still reaches fac_z until the row is deleted or option B / G3 lands (this cell flips to false then)');
+SELECT is(pg_temp.reach('fac_z'), false, 'F31: and the reach goes with it (0111, section 142, the G3 filter: has_facility_scope ignores a left row). This cell was the pinned KNOWN LIMIT of section 141 (it read true until the row was deleted) and flipped when G3 landed');
 SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'left', 'both', 'closed for the winter'), 'ok', 'F32: an update of nothing but the note and the qr mode of the left row is ok');
 SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'accepted'), :'m_roster', 'F33: re-accepting it is refused');
 SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'declined'), 'ok', 'F34: left -> declined is ok (both are demotions)');
