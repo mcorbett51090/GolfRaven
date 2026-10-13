@@ -120,8 +120,12 @@ async function signInAs(uid: string): Promise<Member> {
   return { uid, token, hash: await sha256Hex(token) };
 }
 
-/** A trail of its own: a ledger row and a catalog trail (the programme upsert answers `not_found` for a trail the ledger does not know). */
-async function newTrail(): Promise<string> {
+/**
+ * A trail of its own: a ledger row and a catalog trail (the programme upsert answers `not_found` for a trail the ledger does not know), and, unless `roster` is false, a roster (version 1) that
+ * names fac_x and fac_y as facility members: since 0110 (section 140) the facility programme editor refuses a facility that is not on the trail's current roster, so a trail that is going to be
+ * given facility programmes needs one.
+ */
+async function newTrail(roster = true): Promise<string> {
   seq += 1;
   const id = `trl_pg_${RUN}_${seq}`;
   await rows(
@@ -134,7 +138,59 @@ async function newTrail(): Promise<string> {
     (sql) =>
       sql`insert into app.catalog_trail (id, slug, name, catalog_version) values (${id}, ${id.replaceAll("_", "-")}, ${"Trail " + id}, 1)`,
   );
+  if (roster) await addRoster(id, 1, [{ facility: "fac_x" }, { facility: "fac_y" }]);
   return id;
+}
+/** A roster version of `trailId` with the given members (a facility, a course, a hole, or an any-of list of courses). */
+async function addRoster(
+  trailId: string,
+  version: number,
+  members: ReadonlyArray<{ facility?: string; course?: string; hole?: string; anyOf?: string[] }>,
+): Promise<void> {
+  await rows(
+    "app.catalog_roster_version",
+    (sql) =>
+      sql`insert into app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, effective_from) values (${trailId}, ${version}, 'facility', 'facility', now())`,
+  );
+  let order = 0;
+  for (const m of members) {
+    order += 1;
+    const unit = m.facility !== undefined ? "facility" : m.hole !== undefined ? "hole" : "course";
+    await rows(
+      "app.catalog_roster_member",
+      (sql) =>
+        sql`insert into app.catalog_roster_member (trail_id, roster_version, unit, course_id, any_of_course_ids, facility_id, hole_id, stop_order)
+            values (${trailId}, ${version}, ${unit}::app.roster_unit, ${m.course ?? null}, ${m.anyOf ?? null}::text[], ${m.facility ?? null}, ${m.hole ?? null}, ${order})`,
+    );
+  }
+}
+/** A catalogue facility of its own with one course (and one hole on it), on no roster. */
+async function newFacility(): Promise<{ facility: string; course: string; hole: string }> {
+  seq += 1;
+  const facility = `fac_pg_${RUN}_${seq}`;
+  const course = `crs_pg_${RUN}_${seq}`;
+  const hole = `hol_pg_${RUN}_${seq}`;
+  await rows(
+    "app.catalog_id_ledger",
+    (sql) =>
+      sql`insert into app.catalog_id_ledger (id, kind, status, first_catalog_version) values (${facility}, 'facility', 'verified', 1), (${course}, 'course', 'verified', 1), (${hole}, 'hole', 'verified', 1)`,
+  );
+  await rows(
+    "app.catalog_facility",
+    (sql) =>
+      sql`insert into app.catalog_facility (id, slug, name, region, tz, catalog_version) values (${facility}, ${facility.replaceAll("_", "-")}, ${"Facility " + facility}, 'US-TN', 'America/Chicago', 1)`,
+  );
+  await rows(
+    "app.catalog_course",
+    (sql) =>
+      sql`insert into app.catalog_course (id, facility_id, name, catalog_version) values (${course}, ${facility}, ${"Course " + course}, 1)`,
+  );
+  await rows(
+    "app.catalog_hole",
+    (sql) =>
+      sql`insert into app.catalog_hole (id, course_id, number, catalog_version) values (${hole}, ${course}, 1, 1)`,
+  );
+  return { facility, course, hole };
 }
 /** A member of a fresh org with a real credential and a session from the real mint: an operator of `trailId` (operator org, trail scope), or a manager of fac_x (facility org). */
 async function newMember(
@@ -764,5 +820,154 @@ Deno.test(
       200,
       "another member is not slowed",
     );
+  },
+);
+
+/** The admin the harness seeds (helpers.sql puts this uid in app.admin_user), signed in once with a real credential; the programme editor holds an admin to the same roster rule. */
+const ADMIN_UID = "00000000-0000-0000-0000-4000000000d0";
+let adminSession: Member | null = null;
+async function adminMember(): Promise<Member> {
+  adminSession ??= await signInAs(ADMIN_UID);
+  return adminSession;
+}
+
+Deno.test(
+  "0110 / S6 (section 140): a facility that is not on the trail's current roster is refused through the real handler, 422 invalid_request, and nothing is stored; an unknown facility is the same 422 (it was a 500); each way onto the roster admits it, a later version that drops it refuses the next write and leaves the stored row; a manager is 403 first; an admin is held to the same rule",
+  DT,
+  async () => {
+    const trail = await newTrail(); // roster version 1: fac_x and fac_y
+    const op = await newMember("operator", trail);
+    assertEquals(
+      (await prgCall(op, "POST", "programme/trail", trailBody(trail))).status,
+      200,
+    );
+    const z = await newFacility(); // a real facility on no roster
+
+    // the 138.4 reproduction at the Edge: the operator writes a facility that has nothing to do with its trail
+    const off = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, z.facility),
+    );
+    assertEquals([off.status, await errOf(off)], [422, "invalid_request"]);
+    assertEquals(await facilityRows(trail), [], "nothing is stored");
+    // an id that names no facility is the SAME answer (before 0110 a raw foreign-key error: HTTP 500 internal_error)
+    const none = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, `fac_nope_${RUN}`),
+    );
+    assertEquals([none.status, await errOf(none)], [422, "invalid_request"]);
+    // another trail's roster does not help
+    const elsewhere = await newTrail(false);
+    await addRoster(elsewhere, 1, [{ facility: z.facility }]);
+    const foreign = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, z.facility),
+    );
+    assertEquals([foreign.status, await errOf(foreign)], [422, "invalid_request"]);
+    assertEquals(await facilityRows(trail), []);
+    // the control: a facility that IS on the roster (fac_x) is stored
+    const ok = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, "fac_x"),
+    );
+    assertEquals(ok.status, 200, await ok.clone().text());
+
+    // each way onto the roster admits z: before every leg the latest version holds fac_x only (z refused), then a NEW latest version holds the leg (z stored, with that leg's qr mode)
+    const legs: ReadonlyArray<[string, { facility?: string; course?: string; hole?: string; anyOf?: string[] }, string]> = [
+      ["a facility member", { facility: z.facility }, "static_pin"],
+      ["a course member", { course: z.course }, "both"],
+      ["a hole member (no course)", { hole: z.hole }, "rotating"],
+      ["an any_of_course_ids member", { anyOf: [z.course] }, "static_pin"],
+    ];
+    let version = 1;
+    for (const [name, member, qrMode] of legs) {
+      version += 1;
+      await addRoster(trail, version, [{ facility: "fac_x" }]);
+      const before = await prgCall(
+        op,
+        "POST",
+        "programme/facility",
+        facilityBody(trail, z.facility, { qrMode }),
+      );
+      assertEquals([name, before.status, await errOf(before)], [name, 422, "invalid_request"]);
+      version += 1;
+      await addRoster(trail, version, [member]);
+      const admitted = await prgCall(
+        op,
+        "POST",
+        "programme/facility",
+        facilityBody(trail, z.facility, { qrMode }),
+      );
+      assertEquals([name, admitted.status], [name, 200]);
+      const stored = (await facilityRows(trail)).find((r) => r.facilityId === z.facility);
+      assertEquals([name, stored?.qrMode], [name, qrMode]);
+    }
+
+    // a later version drops z: the next write is refused and the stored row is left exactly as it was (and the list still shows it)
+    version += 1;
+    await addRoster(trail, version, [{ facility: "fac_x" }]);
+    const rowBefore = (await facilityRows(trail)).find((r) => r.facilityId === z.facility);
+    const dropped = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, z.facility, { qrMode: "rotating", participation: "left" }),
+    );
+    assertEquals([dropped.status, await errOf(dropped)], [422, "invalid_request"]);
+    assertEquals((await facilityRows(trail)).find((r) => r.facilityId === z.facility), rowBefore);
+    const listed = await prgCall(op, "GET", `programme?trailId=${trail}`);
+    assertEquals(listed.status, 200);
+    assert(
+      ((await dataOf(listed)).facilities as Array<{ facilityId: string }>).some((f) => f.facilityId === z.facility),
+      "a row written while z was on the roster is still listed after the roster dropped it",
+    );
+
+    // a manager is refused on authority first (403), whatever the facility
+    const manager = await newMember("manager");
+    const mgr = await prgCall(
+      manager,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, z.facility),
+    );
+    assertEquals(mgr.status, 403);
+    const mgr2 = await prgCall(
+      manager,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, "fac_x"),
+    );
+    assertEquals(mgr2.status, 403);
+
+    // an admin may write on any trail, and is held to the same rule
+    const admin = await adminMember();
+    const adminTrail = await newTrail();
+    assertEquals(
+      (await prgCall(admin, "POST", "programme/trail", trailBody(adminTrail))).status,
+      200,
+    );
+    const adminOff = await prgCall(
+      admin,
+      "POST",
+      "programme/facility",
+      facilityBody(adminTrail, z.facility),
+    );
+    assertEquals([adminOff.status, await errOf(adminOff)], [422, "invalid_request"]);
+    assertEquals(await facilityRows(adminTrail), []);
+    const adminOn = await prgCall(
+      admin,
+      "POST",
+      "programme/facility",
+      facilityBody(adminTrail, "fac_y"),
+    );
+    assertEquals(adminOn.status, 200, await adminOn.clone().text());
   },
 );
