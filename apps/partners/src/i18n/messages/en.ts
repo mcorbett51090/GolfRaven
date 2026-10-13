@@ -15,6 +15,7 @@ export const en = {
   "signIn.cancel": "Cancel",
 
   "notice.locked": "Locked. Sign in again with your passkey to continue.",
+  "notice.lockedAway": "Locked because you were away. Sign in again with your passkey to continue.",
   "notice.signedOut": "You are signed out.",
   "notice.expired": "Your session has ended. Sign in again.",
   "notice.signOutOffline": "You are signed out on this device, but the server could not be reached. The session will end on its own.",

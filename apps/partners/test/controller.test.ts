@@ -206,6 +206,68 @@ describe("lock and sign-out clear state", () => {
     expect(w.server.state.revokedSessions.size).toBe(1);
   });
 
+  it("lock({ away: true }) (the hidden-time auto-lock) is the same lock with its own notice: token wiped, session revoked via POST lock, ONE signed-out transition saying 'locked-away'", async () => {
+    const { controller, w, api, states } = setup();
+    await controller.signIn();
+    states.length = 0;
+    await controller.lock({ away: true });
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked-away" } });
+    expect(states.map((x) => `${x.screen}:${noticeOf(x)?.kind}`)).toEqual(["signed-out:locked-away"]);
+    expect(api.hasSession()).toBe(false);
+    expect(w.server.state.lockCalls).toBe(1);
+    expect(w.server.state.signOutCalls).toBe(0);
+    expect(w.server.state.revokedSessions.size).toBe(1);
+  });
+
+  it("lock({ away: true }) is a no-op when signed out, and sends nothing", async () => {
+    const { controller, w } = setup();
+    await controller.lock({ away: true });
+    expect(w.server.log).toEqual([]);
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: null });
+  });
+
+  it("the 'away' wording does not leak: after an auto-lock and a new sign-in, a plain lock says 'locked' and a sign-out says 'signed out'", async () => {
+    const { controller } = setup();
+    await controller.signIn();
+    await controller.lock({ away: true });
+    await controller.signIn();
+    await controller.lock();
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked" } });
+    await controller.signIn();
+    await controller.lock({ away: false });
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked" } });
+    await controller.signIn();
+    await controller.signOut();
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "signed-out" } });
+  });
+
+  it("an unreachable server after an auto-lock: signed-out at once, then the honest 'could not be reached' notice", async () => {
+    let offline = false;
+    const { controller, api } = setup({}, (f) => (async (input, init) => (offline ? Promise.reject(new TypeError("offline")) : f(input, init))) as typeof fetch);
+    await controller.signIn();
+    offline = true;
+    const p = controller.lock({ away: true });
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked-away" } });
+    await p;
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "lock-offline" } });
+    expect(api.hasSession()).toBe(false);
+  });
+
+  it("lock({ keepalive: true }) sends the revoking request as a keepalive request; a plain lock does not", async () => {
+    const seen: Array<boolean | undefined> = [];
+    const wrap = (f: typeof fetch) => (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/lock")) seen.push(init?.keepalive);
+      return f(input, init);
+    }) as typeof fetch;
+    const a = setup({}, wrap);
+    await a.controller.signIn();
+    await a.controller.lock({ keepalive: true });
+    const b = setup({}, wrap);
+    await b.controller.signIn();
+    await b.controller.lock();
+    expect(seen).toEqual([true, undefined]);
+  });
+
   it("after a lock the next sign-in needs a NEW passkey tap and opens a NEW session", async () => {
     const { controller, w } = setup();
     await controller.signIn();

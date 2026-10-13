@@ -17,6 +17,7 @@ export const frCA: Record<MessageKey, string> = {
   "signIn.cancel": "Annuler",
 
   "notice.locked": "Verrouillé. Reconnectez-vous avec votre clé d'accès pour continuer.",
+  "notice.lockedAway": "Verrouillé après une période d'absence. Reconnectez-vous avec votre clé d'accès pour continuer.",
   "notice.signedOut": "Vous êtes déconnecté.",
   "notice.expired": "Votre session est terminée. Reconnectez-vous.",
   "notice.signOutOffline": "Vous êtes déconnecté sur cet appareil, mais le serveur est resté injoignable. La session prendra fin d'elle-même.",

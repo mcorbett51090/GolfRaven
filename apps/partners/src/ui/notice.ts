@@ -6,6 +6,7 @@ import { h } from "./dom";
 
 const NOTICE_KEY: Record<Exclude<Notice["kind"], "error">, MessageKey> = {
   locked: "notice.locked",
+  "locked-away": "notice.lockedAway",
   "signed-out": "notice.signedOut",
   expired: "notice.expired",
   "sign-out-offline": "notice.signOutOffline",

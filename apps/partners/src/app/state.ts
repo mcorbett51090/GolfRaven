@@ -52,7 +52,8 @@ import type { PinSetupMode } from "../auth/pin-setup";
 import type { UiMessage } from "./messages";
 
 export type Notice =
-  | { readonly kind: "locked" | "signed-out" | "expired" | "sign-out-offline" | "lock-offline" }
+  /** `locked-away`: the page locked itself after being hidden for AUTO_LOCK_HIDDEN_MS (lifecycle.ts); `locked` is the Lock button. */
+  | { readonly kind: "locked" | "locked-away" | "signed-out" | "expired" | "sign-out-offline" | "lock-offline" }
   /** Outcomes of accepting an invite or enrolment: already a member with a passkey, needs a manager's recovery, passkey saved but the first session could not be shown, or a code was sent. */
   | { readonly kind: "enrol-existing-member" | "enrol-recover-required" | "enrol-saved" | "enrol-code-sent" }
   /** Success notices of the signed-in screens. */
