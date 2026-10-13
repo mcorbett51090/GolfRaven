@@ -96,6 +96,19 @@ describe("section 140: 0110 is the 0059 function plus the one listed edit, and c
     expect(create![1]).toBe(expected);
   });
 
+  it("the redefinition has 0059's signature, return shape, language, SECURITY DEFINER and search_path, and no volatility or leakproof clause", () => {
+    const head = (t: string, kw: string) => {
+      const m = new RegExp(`${kw} FUNCTION private\\.partner_facility_programme_upsert_for_partner\\(([\\s\\S]*?)\\nAS \\$\\$`).exec(t);
+      expect(m, `${kw} header`).not.toBeNull();
+      return squash(m![1]!);
+    };
+    const h59 = head(mig0059, "CREATE");
+    const h110 = head(mig, "CREATE OR REPLACE");
+    expect(h110).toBe(h59);
+    expect(h110.endsWith("RETURNS TABLE (o_status text) LANGUAGE plpgsql SECURITY DEFINER SET search_path = ''")).toBe(true);
+    expect(/\b(STABLE|IMMUTABLE|LEAKPROOF|PARALLEL|STRICT|SECURITY INVOKER|COST|ROWS)\b/i.test(h110)).toBe(false);
+  });
+
   it("outside function bodies the migration never writes to app.facility_programme (existing rows are untouched)", () => {
     const stripped = mig
       .replace(/\$([A-Za-z0-9_]*)\$[\s\S]*?\$\1\$/g, " ") // every dollar-quoted body / fragment / DO block
