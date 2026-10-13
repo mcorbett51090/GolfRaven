@@ -34,6 +34,16 @@ function marked(text: string, where: string): string {
   return text.slice(a, b);
 }
 
+/** The text between two named marker comments; asserts exactly one pair. */
+function markedAs(text: string, begin: string, end: string, where: string): string {
+  expect(text.split(begin).length - 1, `${where}: exactly one "${begin}"`).toBe(1);
+  expect(text.split(end).length - 1, `${where}: exactly one "${end}"`).toBe(1);
+  const a = text.indexOf(begin) + begin.length;
+  const b = text.indexOf(end);
+  expect(b, `${where}: end after begin`).toBeGreaterThan(a);
+  return text.slice(a, b);
+}
+
 describe("section 140: the off-roster query and the editor's check are one rule", () => {
   const q = squash(marked(tool, "tools/db/facility-programme-off-roster.sql"));
 
@@ -50,14 +60,26 @@ describe("section 140: the off-roster query and the editor's check are one rule"
     expect(squash(marked(design, "partner-auth-design.md"))).toBe(q);
   });
 
+  it("the owner's query is guarded: the guard in the tool is the one matrix 88 runs, and it is the first statement", () => {
+    const g = squash(markedAs(tool, "-- BEGIN rls guard", "-- END rls guard", "tool"));
+    expect(squash(markedAs(matrix, "-- BEGIN rls guard", "-- END rls guard", "matrix 88"))).toBe(g);
+    expect(g.startsWith("DO $guard$")).toBe(true);
+    expect(g).toContain("rolsuper OR rolbypassrls");
+    expect(g).toContain("USING ERRCODE = '42501'");
+    // nothing that reads or prints a row comes before the guard
+    const firstStatement = tool.slice(tool.indexOf("-- END rls guard"));
+    expect(tool.slice(0, tool.indexOf("-- BEGIN rls guard")).split("\n").filter((l) => !l.startsWith("--") && l.trim() !== "")).toEqual([]);
+    expect(firstStatement.length).toBeGreaterThan(0);
+  });
+
   it("the definer's EXISTS is the query's, with the row's columns replaced by the call's arguments", () => {
     const fromQuery = /NOT EXISTS \(\s*(SELECT 1[\s\S]*?)\s*\)\s*ORDER BY/.exec(marked(tool, "tool"));
     expect(fromQuery, "the query has a NOT EXISTS ( SELECT 1 ... ) ORDER BY").not.toBeNull();
     const expected = squash(fromQuery![1]!.replaceAll("fp.trail_id", "p_trail_id").replaceAll("fp.facility_id", "p_facility_id"));
     // the function body written in the CREATE OR REPLACE (the last one in the file), not the listed-edit copy
     const body = mig.slice(mig.lastIndexOf("CREATE OR REPLACE FUNCTION private.partner_facility_programme_upsert_for_partner("));
-    const fromFn = /IF NOT EXISTS \(\s*(SELECT 1\s+FROM app\.catalog_roster_member[\s\S]*?)\s*\)\s*THEN\s*RAISE EXCEPTION 'partner_facility_programme_upsert_for_partner: the facility must be on the current roster/.exec(body);
-    expect(fromFn, "the definer has IF NOT EXISTS ( SELECT 1 ... ) THEN RAISE EXCEPTION ...roster").not.toBeNull();
+    const fromFn = /AND NOT EXISTS \(\s*(SELECT 1\s+FROM app\.catalog_roster_member[\s\S]*?)\s*\)\s*THEN\s*RAISE EXCEPTION 'partner_facility_programme_upsert_for_partner: the facility must be on the current roster/.exec(body);
+    expect(fromFn, "the definer has ... AND NOT EXISTS ( SELECT 1 ... ) THEN RAISE EXCEPTION ...roster").not.toBeNull();
     expect(squash(fromFn![1]!.replaceAll("pg_catalog.", ""))).toBe(expected);
   });
 });
@@ -74,6 +96,17 @@ describe("section 140: 0110 is the 0059 function plus the one listed edit, and c
     expect(createHash("md5").update(src59).digest("hex")).toBe(pinned![1]);
     // the pin and the message agree (the message repeats the expected hash)
     expect(mig.includes(`expected ${pinned![1]}`)).toBe(true);
+  });
+
+  it("the demotion exception is exactly: an existing row (FOUND, after FOR NO KEY UPDATE) AND a resulting participation of declined or left", () => {
+    const body = mig.slice(mig.lastIndexOf("CREATE OR REPLACE FUNCTION private.partner_facility_programme_upsert_for_partner("));
+    const lock = body.indexOf("PERFORM 1 FROM app.facility_programme fp WHERE fp.trail_id = p_trail_id AND fp.facility_id = p_facility_id FOR NO KEY UPDATE;");
+    const cond = body.indexOf("IF NOT (FOUND AND p_participation IN ('declined', 'left')) AND NOT EXISTS (");
+    expect(lock, "the existing row is locked").toBeGreaterThan(-1);
+    expect(cond, "the condition").toBeGreaterThan(lock);
+    // nothing between the lock and the condition (FOUND must still be the lock's)
+    expect(squash(body.slice(lock + "PERFORM 1 FROM app.facility_programme fp WHERE fp.trail_id = p_trail_id AND fp.facility_id = p_facility_id FOR NO KEY UPDATE;".length, cond))).toBe("");
+    expect(body.indexOf("INSERT INTO app.facility_programme (")).toBeGreaterThan(cond);
   });
 
   it("the pin is checked BEFORE the first statement that changes the database", () => {

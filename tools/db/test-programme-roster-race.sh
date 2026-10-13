@@ -11,9 +11,12 @@
 #   * READ COMMITTED. partner_authorize, the first statement of the definer, refuses any other isolation level (42501), so the roster is always read in the snapshot of the CHECK'S OWN statement, never in
 #     an older transaction snapshot.
 #   * The check takes no lock on any roster row. A roster version is immutable and is written whole in one transaction, so a reader sees either the old latest version or the new one, never half of one.
-#   * Consequence, and the one thing it does NOT promise: an upsert that passes the check and commits just BEFORE the importer commits a version that drops the facility leaves a programme row for a facility
-#     that is no longer on the roster. That is the same state "upsert, then import" produces serially (an import never deletes programme rows), so it is not a race the editor can or should close; the owner's
-#     off-roster query (tools/db/facility-programme-off-roster.sql) lists such rows.
+#   * An EXISTING row is locked first (FOR NO KEY UPDATE) and only then is the roster read, so a writer that had to WAIT for a row lock reads the roster AFTER the wait (X2), and nobody can delete the row
+#     between the "is there a row" test and the write (X3).
+#   * Consequence, and what it does NOT promise: an upsert that STARTED before the importer commits a version that drops the facility can still COMMIT after it, when its INSERT had to wait behind another
+#     transaction's uncommitted insert of the same key (X1: the key had no visible row, so there was nothing to lock; the check had already passed), bounded by the Edge's 5 s lock_timeout and 12 s transaction
+#     timeout. That leaves a programme row for a facility that is no longer on the roster, the same state "upsert, then import" produces serially (an import never deletes programme rows), so it is not a race
+#     the editor can close; the owner's off-roster query (tools/db/facility-programme-off-roster.sql) lists such rows.
 #
 #   R1. REPEATABLE READ is refused by the definer (42501): the roster can never be judged against a stale transaction snapshot. READ COMMITTED (control) passes.
 #   R2. An importer transaction that has written a new latest version (dropping facility A, adding B) and is still OPEN: the upsert for A is ok and does NOT wait for it (it finishes before the importer
@@ -22,6 +25,12 @@
 #       the CALL, not at BEGIN.
 #   R4. The editor never makes an import wait: an upsert transaction held open after a successful write does not block the importer, which commits a new version while it is open (no lock wait seen in
 #       pg_locks).
+#   X1. (the window that remains) a NEW key: the upsert's check passes, its INSERT then waits behind another transaction's uncommitted insert of the same key, the importer commits a version that drops
+#       the facility, the other transaction commits, the upsert completes: the row is accepted and off the roster. Measured, not hidden.
+#   X2. (closed) an EXISTING row whose lock is held by another transaction: the upsert waits at the row lock, the importer commits the drop meanwhile, and when the lock is released the upsert reads the
+#       roster, sees the drop and is refused. A DEMOTION that waited the same way is ok (a demotion needs no roster).
+#   X3. (closed) a delete of the row racing a demotion: the demotion has judged the row EXISTING; a plant hook (a BEFORE INSERT trigger that sleeps) opens a window between that test and the write; the owner's
+#       DELETE of the row must WAIT for the demotion (the row lock) and the row must end up deleted, not re-created as a new off-roster row.
 #
 # Usage: PGHOST=... PGPORT=... PGUSER=... PGDATABASE=... bash tools/db/test-programme-roster-race.sh
 # (tools/db/test.sh calls it with the harness role in PGUSER, after the stock concurrency step, against the same throwaway cluster and database.)
@@ -41,7 +50,7 @@ FAILED=0
 OUT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/golfraven-roster-race.XXXXXX")"
 
 U="ee40f000-0000-0000-0000-0000000000a1"; ORG="ee40f000-0000-0000-0000-0000000000b1"; CRED="ee40f000-0000-0000-0000-0000000000c1"; SESS="ee40f000-0000-0000-0000-0000000000d1"
-TRAIL="trl_race140"; FA="fac_race140_a"; FB="fac_race140_b"; FC="fac_race140_c"; FD="fac_race140_d"
+TRAIL="trl_race140"; FA="fac_race140_a"; FB="fac_race140_b"; FC="fac_race140_c"; FD="fac_race140_d"; FE="fac_race140_e"; FG="fac_race140_g"; FH="fac_race140_h"
 TH="$(printf '%s' "race140-$$-$RANDOM-$(date +%s%N)" | sha256sum | cut -d' ' -f1)"
 
 hq() { "${HARNESS_PSQL[@]}" -c "$1" | tr -d '[:space:]'; }
@@ -60,6 +69,7 @@ revoke_temp_grants() {
 cleanup() {
   set +e
   hx "ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_insert_guard_trg; ALTER TABLE app.partner_session ENABLE TRIGGER partner_session_guard_trg;" 2>/dev/null
+  hx "DROP TRIGGER IF EXISTS zz40r_slow_trg ON app.facility_programme; DROP FUNCTION IF EXISTS public.zz40r_slow();" 2>/dev/null
   hx "DELETE FROM app.partner_session WHERE id = '$SESS'; DELETE FROM app.partner_credential WHERE id = '$CRED';" 2>/dev/null
   hx "SET ROLE service_role;
       DELETE FROM app.facility_programme WHERE trail_id = '$TRAIL';
@@ -68,9 +78,9 @@ cleanup() {
       DELETE FROM app.trail_programme WHERE trail_id = '$TRAIL';
       DELETE FROM app.partner_member WHERE org_id = '$ORG'; DELETE FROM app.partner_scope WHERE org_id = '$ORG'; DELETE FROM app.partner_org WHERE id = '$ORG';
       DELETE FROM app.catalog_course WHERE id LIKE 'crs_race140%';
-      DELETE FROM app.catalog_facility WHERE id IN ('$FA', '$FB', '$FC', '$FD');
+      DELETE FROM app.catalog_facility WHERE id IN ('$FA', '$FB', '$FC', '$FD', '$FE', '$FG', '$FH');
       DELETE FROM app.catalog_trail WHERE id = '$TRAIL';
-      DELETE FROM app.catalog_id_ledger WHERE id IN ('$TRAIL', '$FA', '$FB', '$FC', '$FD') OR id LIKE 'crs_race140%';" 2>/dev/null
+      DELETE FROM app.catalog_id_ledger WHERE id IN ('$TRAIL', '$FA', '$FB', '$FC', '$FD', '$FE', '$FG', '$FH') OR id LIKE 'crs_race140%';" 2>/dev/null
   hx "SET ROLE service_role; SELECT private.delete_my_data(u.id) FROM auth.users u WHERE u.id = '$U';" 2>/dev/null
   hx "DROP POLICY IF EXISTS zz40r_cred ON app.partner_credential; DROP POLICY IF EXISTS zz40r_sess ON app.partner_session; DROP POLICY IF EXISTS zz40r_audit ON app.audit_log;" 2>/dev/null
   revoke_temp_grants app.partner_credential app.partner_session
@@ -90,11 +100,13 @@ hx "
   SET ROLE service_role;
   INSERT INTO auth.users (id, email) VALUES ('$U', 'race140@partner.test') ON CONFLICT (id) DO NOTHING;
   INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES
-    ('$TRAIL', 'trail', 'verified', 1), ('$FA', 'facility', 'verified', 1), ('$FB', 'facility', 'verified', 1), ('$FC', 'facility', 'verified', 1), ('$FD', 'facility', 'verified', 1);
+    ('$TRAIL', 'trail', 'verified', 1), ('$FA', 'facility', 'verified', 1), ('$FB', 'facility', 'verified', 1), ('$FC', 'facility', 'verified', 1), ('$FD', 'facility', 'verified', 1),
+    ('$FE', 'facility', 'verified', 1), ('$FG', 'facility', 'verified', 1), ('$FH', 'facility', 'verified', 1);
   INSERT INTO app.catalog_trail (id, slug, name, catalog_version) VALUES ('$TRAIL', 'trl-race140', 'Race trail', 1);
   INSERT INTO app.catalog_facility (id, slug, name, region, tz, catalog_version) VALUES
     ('$FA', 'fac-race140-a', 'Race A', 'US-TN', 'America/Chicago', 1), ('$FB', 'fac-race140-b', 'Race B', 'US-TN', 'America/Chicago', 1),
-    ('$FC', 'fac-race140-c', 'Race C', 'US-TN', 'America/Chicago', 1), ('$FD', 'fac-race140-d', 'Race D', 'US-TN', 'America/Chicago', 1);
+    ('$FC', 'fac-race140-c', 'Race C', 'US-TN', 'America/Chicago', 1), ('$FD', 'fac-race140-d', 'Race D', 'US-TN', 'America/Chicago', 1),
+    ('$FE', 'fac-race140-e', 'Race E', 'US-TN', 'America/Chicago', 1), ('$FG', 'fac-race140-g', 'Race G', 'US-TN', 'America/Chicago', 1), ('$FH', 'fac-race140-h', 'Race H', 'US-TN', 'America/Chicago', 1);
   INSERT INTO app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, effective_from) VALUES ('$TRAIL', 1, 'facility', 'facility', now());
   INSERT INTO app.catalog_roster_member (trail_id, roster_version, unit, facility_id, stop_order) VALUES ('$TRAIL', 1, 'facility', '$FA', 1);
   INSERT INTO app.trail_programme (trail_id, status) VALUES ('$TRAIL', 'live');
@@ -122,7 +134,7 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session('$TH');
 SELECT pg_sleep($1);
 SELECT 'called:' || extract(epoch FROM clock_timestamp());
-SELECT 'status:' || o_status FROM private.partner_facility_programme_upsert_for_partner('$TRAIL', '$2', 'accepted', true, false, 'ok', true, NULL, 'rotating');
+SELECT 'status:' || o_status FROM private.partner_facility_programme_upsert_for_partner('$TRAIL', '$2', '${PART:-accepted}', true, false, 'ok', true, NULL, '${QR:-rotating}');
 SELECT 'done:' || extract(epoch FROM clock_timestamp());
 SELECT pg_sleep($3);
 SELECT 'action_end:' || extract(epoch FROM clock_timestamp());
@@ -228,6 +240,83 @@ elif [ "$SB" -ne 0 ]; then fail "R4: the importer failed: $(cat "$OUT_DIR/imp4.e
 elif [ "$WAITED" = "yes" ]; then fail "R4: the importer was seen WAITING on a lock while the upsert transaction was open"
 elif ! before_after "$IM_END" "$A_END"; then fail "R4: the importer committed at $IM_END, not before the upsert transaction ended at $A_END (it waited)"
 else echo "PASS: R4 -> the importer wrote and committed version 4 while an upsert transaction was open: never seen waiting, and it finished before the upsert transaction did (the check takes no lock on the roster)"; fi
+
+# ---------------------------------------------------------------------------
+# X1. A NEW key whose INSERT waits behind another transaction's uncommitted insert of the same key: the check passed BEFORE the wait (the one window that remains)
+# ---------------------------------------------------------------------------
+echo "tools/db/test-programme-roster-race.sh: X1. a new-key upsert that waits behind an uncommitted insert of the same key"
+# latest version 4 holds D only; version 5 holds E (the facility the upsert will be about)
+roster_version_sql 5 "$FE" 0 | "${IMP_PSQL[@]}" >"$OUT_DIR/imp5.out" 2>"$OUT_DIR/imp5.err"
+"${IMP_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE service_role; INSERT INTO app.facility_programme (trail_id, facility_id, participation) VALUES ('$TRAIL', '$FE', 'invited'); SELECT pg_sleep(4.5); SELECT 'holder_end:' || extract(epoch FROM clock_timestamp()); COMMIT;" >"$OUT_DIR/x1h.out" 2>"$OUT_DIR/x1h.err" &
+PH=$!
+sleep 1.0 # the holder has inserted the key (uncommitted)
+action_sql 0 "$FE" 0 | edge race_a >"$OUT_DIR/x1.out" 2>"$OUT_DIR/x1.err" &
+PA=$!
+sleep 1.0 # the upsert passed its check (version 5 names E) and is waiting for the holder
+XW=no; for _ in $(seq 1 10); do n=$(hq "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE a.application_name = 'race_a' AND NOT l.granted"); [ "$n" != "0" ] && { XW=yes; break; }; sleep 0.1; done
+roster_version_sql 6 "$FG" 0 | "${IMP_PSQL[@]}" >"$OUT_DIR/imp6.out" 2>"$OUT_DIR/imp6.err" # the drop: E is gone from the latest version
+I_END=$(sed -n 's/^import_end://p' "$OUT_DIR/imp6.out")
+set +e; wait "$PH"; wait "$PA"; SA=$?; set -e
+A_DONE=$(sed -n 's/^done://p' "$OUT_DIR/x1.out")
+X1ROW=$(programme_row "$FE")
+if [ "$XW" != "yes" ]; then fail "X1: the upsert was never seen WAITING on the other transaction's insert"
+elif [ "$SA" -ne 0 ] || [ "$(status_of "$OUT_DIR/x1.out")" != "ok" ]; then fail "X1: the upsert did not complete ok after the other transaction committed: $(cat "$OUT_DIR/x1.err")"
+elif ! before_after "$I_END" "$A_DONE"; then fail "X1: the upsert finished at $A_DONE, not after the importer's drop committed at $I_END"
+elif [ "$X1ROW" != "accepted/rotating" ]; then fail "X1: the row is not the upsert's: $X1ROW"
+else echo "PASS: X1 -> the new-key upsert passed its check on version 5, waited behind an uncommitted insert of the same key, and completed AFTER the importer's drop (version 6) committed: the row is accepted and off the roster, the same state 'upsert, then import' leaves (the off-roster query lists it)"; fi
+
+# ---------------------------------------------------------------------------
+# X2. An EXISTING row whose lock is held: the upsert reads the roster after the wait
+# ---------------------------------------------------------------------------
+echo "tools/db/test-programme-roster-race.sh: X2. an update of an existing row that waits for the row lock reads the roster AFTER the wait"
+# version 6 holds G only: put G's row in place (ok on version 6), then hold its lock from another transaction
+action_sql 0 "$FG" 0 | edge race_a >"$OUT_DIR/x2s.out" 2>"$OUT_DIR/x2s.err" || true
+if [ "$(status_of "$OUT_DIR/x2s.out")" != "ok" ]; then fail "X2: could not set up facility G's row on version 6: $(cat "$OUT_DIR/x2s.err")"; fi
+"${IMP_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE service_role; UPDATE app.facility_programme SET wifi_note = 'lock holder' WHERE trail_id = '$TRAIL' AND facility_id = '$FG'; SELECT pg_sleep(4.5); SELECT 'holder_end:' || extract(epoch FROM clock_timestamp()); COMMIT;" >"$OUT_DIR/x2h.out" 2>"$OUT_DIR/x2h.err" &
+PH=$!
+sleep 1.0
+QR=static_pin action_sql 0 "$FG" 0 | edge race_a >"$OUT_DIR/x2.out" 2>"$OUT_DIR/x2.err" &
+PA=$!
+sleep 1.0
+XW=no; for _ in $(seq 1 10); do n=$(hq "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE a.application_name = 'race_a' AND NOT l.granted"); [ "$n" != "0" ] && { XW=yes; break; }; sleep 0.1; done
+roster_version_sql 7 "$FD" 0 | "${IMP_PSQL[@]}" >"$OUT_DIR/imp7.out" 2>"$OUT_DIR/imp7.err" # the drop: G is gone from the latest version
+set +e; wait "$PH"; wait "$PA"; SA=$?; set -e
+if [ "$XW" != "yes" ]; then fail "X2: the upsert was never seen WAITING for the row lock"
+elif [ "$SA" -eq 0 ] || ! refused "$OUT_DIR/x2.err"; then fail "X2: the upsert that waited for the row lock across the importer's drop was not refused (exit $SA): $(cat "$OUT_DIR/x2.out" "$OUT_DIR/x2.err")"
+elif [ "$(programme_row "$FG")" != "accepted/rotating" ]; then fail "X2: the row is not as the lock holder left it: $(programme_row "$FG")"
+else echo "PASS: X2a -> an upsert of an existing row waited for its row lock, the importer committed a version that drops the facility meanwhile, and when the lock was released the upsert read the roster AFTER the wait and was refused (22023)"; fi
+# the same wait, but a DEMOTION: no roster is needed, so the wait ends in ok
+"${IMP_PSQL[@]}" -c "BEGIN; SET LOCAL ROLE service_role; UPDATE app.facility_programme SET wifi_note = 'lock holder 2' WHERE trail_id = '$TRAIL' AND facility_id = '$FG'; SELECT pg_sleep(3.0); COMMIT;" >"$OUT_DIR/x2h2.out" 2>"$OUT_DIR/x2h2.err" &
+PH=$!
+sleep 1.0
+PART=left action_sql 0 "$FG" 0 | edge race_a >"$OUT_DIR/x2d.out" 2>"$OUT_DIR/x2d.err" || true
+set +e; wait "$PH"; set -e
+if [ "$(status_of "$OUT_DIR/x2d.out")" != "ok" ] || [ "$(programme_row "$FG")" != "left/rotating" ]; then fail "X2b: the demotion that waited for the row lock was not ok (row: $(programme_row "$FG")): $(cat "$OUT_DIR/x2d.err")"
+else echo "PASS: X2b -> a DEMOTION of the same off-roster row that waited for the lock is ok, and the row says left (a demotion needs no roster)"; fi
+
+# ---------------------------------------------------------------------------
+# X3. A delete racing a demotion: the demotion's row lock keeps the row from being deleted between its "is there a row" test and its write
+# ---------------------------------------------------------------------------
+echo "tools/db/test-programme-roster-race.sh: X3. a delete of the row racing a demotion (a sleeping BEFORE INSERT trigger opens the window)"
+hx "SET ROLE service_role; INSERT INTO app.facility_programme (trail_id, facility_id, participation) VALUES ('$TRAIL', '$FH', 'accepted');"
+hx "CREATE OR REPLACE FUNCTION public.zz40r_slow() RETURNS trigger LANGUAGE plpgsql AS \$z\$ BEGIN PERFORM pg_sleep(2.5); RETURN NEW; END \$z\$;
+    CREATE TRIGGER zz40r_slow_trg BEFORE INSERT ON app.facility_programme FOR EACH ROW WHEN (NEW.facility_id = '$FH') EXECUTE FUNCTION public.zz40r_slow();"
+PART=left action_sql 0 "$FH" 0 | edge race_a >"$OUT_DIR/x3.out" 2>"$OUT_DIR/x3.err" &
+PA=$!
+sleep 1.0 # the demotion has locked the existing row and is inside its INSERT, in the trigger's sleep
+"${IMP_PSQL[@]}" -c "SET ROLE service_role; DELETE FROM app.facility_programme WHERE trail_id = '$TRAIL' AND facility_id = '$FH'; SELECT 'deleted:' || extract(epoch FROM clock_timestamp());" >"$OUT_DIR/x3d.out" 2>"$OUT_DIR/x3d.err" &
+PB=$!
+XW=no; for _ in $(seq 1 20); do n=$(hq "SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a USING (pid) WHERE a.application_name = 'race_imp' AND NOT l.granted"); [ "$n" != "0" ] && { XW=yes; break; }; sleep 0.1; done
+set +e; wait "$PA"; SA=$?; wait "$PB"; SB=$?; set -e
+A_END=$(sed -n 's/^done://p' "$OUT_DIR/x3.out"); D_AT=$(sed -n 's/^deleted://p' "$OUT_DIR/x3d.out")
+N=$(hq "SET ROLE service_role; SELECT count(*) FROM app.facility_programme WHERE trail_id = '$TRAIL' AND facility_id = '$FH'" | tail -1)
+hx "DROP TRIGGER IF EXISTS zz40r_slow_trg ON app.facility_programme; DROP FUNCTION IF EXISTS public.zz40r_slow();"
+if [ "$SA" -ne 0 ] || [ "$(status_of "$OUT_DIR/x3.out")" != "ok" ]; then fail "X3: the demotion was not ok: $(cat "$OUT_DIR/x3.err")"
+elif [ "$SB" -ne 0 ]; then fail "X3: the delete failed: $(cat "$OUT_DIR/x3d.err")"
+elif [ "$XW" != "yes" ]; then fail "X3: the delete was never seen WAITING for the demotion's row lock"
+elif ! before_after "$A_END" "$D_AT"; then fail "X3: the delete completed at $D_AT, before the demotion finished at $A_END"
+elif [ "$N" != "0" ]; then fail "X3: the row exists after the delete ($N): the demotion re-created a row that was deleted under it (an off-roster row created as an UPDATE)"
+else echo "PASS: X3 -> the owner's delete of the row WAITED for the demotion (the row lock taken at the existence test) and ran after it: the row is gone, not re-created as a new off-roster row"; fi
 
 if [ "$FAILED" -ne 0 ]; then echo "tools/db/test-programme-roster-race.sh: FAILED" >&2; exit 1; fi
 echo "tools/db/test-programme-roster-race.sh: all programme roster race cases passed"

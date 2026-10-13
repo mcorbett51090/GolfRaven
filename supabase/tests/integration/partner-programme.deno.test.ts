@@ -832,7 +832,7 @@ async function adminMember(): Promise<Member> {
 }
 
 Deno.test(
-  "0110 / S6 (section 140): a facility that is not on the trail's current roster is refused through the real handler, 422 invalid_request, and nothing is stored; an unknown facility is the same 422 (it was a 500); each way onto the roster admits it, a later version that drops it refuses the next write and leaves the stored row; a manager is 403 first; an admin is held to the same rule",
+  "0110 / S6 (section 140): a facility that is not on the trail's current roster is refused through the real handler, 422 invalid_request, and nothing is stored; an unknown facility is the same 422 (it was a 500); each way onto the roster admits it, a later version that drops it refuses a write that would keep it accepted and leaves the stored row, while a demotion to left is allowed and cannot be taken back; a manager is 403 first; an admin is held to the same rule",
   DT,
   async () => {
     const trail = await newTrail(); // roster version 1: fac_x and fac_y
@@ -911,7 +911,7 @@ Deno.test(
       assertEquals([name, stored?.qrMode], [name, qrMode]);
     }
 
-    // a later version drops z: the next write is refused and the stored row is left exactly as it was (and the list still shows it)
+    // a later version drops z: a write that would leave it ACCEPTED is refused and the stored row is left exactly as it was (and the list still shows it)
     version += 1;
     await addRoster(trail, version, [{ facility: "fac_x" }]);
     const rowBefore = (await facilityRows(trail)).find((r) => r.facilityId === z.facility);
@@ -919,7 +919,7 @@ Deno.test(
       op,
       "POST",
       "programme/facility",
-      facilityBody(trail, z.facility, { qrMode: "rotating", participation: "left" }),
+      facilityBody(trail, z.facility, { qrMode: "rotating" }),
     );
     assertEquals([dropped.status, await errOf(dropped)], [422, "invalid_request"]);
     assertEquals((await facilityRows(trail)).find((r) => r.facilityId === z.facility), rowBefore);
@@ -929,6 +929,36 @@ Deno.test(
       ((await dataOf(listed)).facilities as Array<{ facilityId: string }>).some((f) => f.facilityId === z.facility),
       "a row written while z was on the roster is still listed after the roster dropped it",
     );
+    // the operator's off-switch: the EXISTING row may be demoted (and edited in the same call) although z is off the roster; the player-lane gate (accepted) then no longer holds
+    const demoted = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, z.facility, { participation: "left", qrMode: "both" }),
+    );
+    assertEquals(demoted.status, 200, await demoted.clone().text());
+    const rowDemoted = (await facilityRows(trail)).find((r) => r.facilityId === z.facility);
+    assertEquals([rowDemoted?.participation, rowDemoted?.qrMode], ["left", "both"]);
+    // ... but not taken back, not left invited, and no NEW off-roster row is created, whatever its participation
+    for (const participation of ["accepted", "invited"]) {
+      const back = await prgCall(
+        op,
+        "POST",
+        "programme/facility",
+        facilityBody(trail, z.facility, { participation }),
+      );
+      assertEquals([participation, back.status, await errOf(back)], [participation, 422, "invalid_request"]);
+    }
+    assertEquals((await facilityRows(trail)).find((r) => r.facilityId === z.facility)?.participation, "left");
+    const fresh = await newFacility();
+    const newLeft = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, fresh.facility, { participation: "left" }),
+    );
+    assertEquals([newLeft.status, await errOf(newLeft)], [422, "invalid_request"]);
+    assertEquals((await facilityRows(trail)).some((r) => r.facilityId === fresh.facility), false);
 
     // a manager is refused on authority first (403), whatever the facility
     const manager = await newMember("manager");
@@ -969,5 +999,29 @@ Deno.test(
       facilityBody(adminTrail, "fac_y"),
     );
     assertEquals(adminOn.status, 200, await adminOn.clone().text());
+    // the admin is held to the demotion rule too: an off-roster row the owner planted can be demoted but not kept accepted
+    await rows(
+      "app.facility_programme",
+      (sql) =>
+        sql`insert into app.facility_programme (trail_id, facility_id, participation) values (${adminTrail}, ${z.facility}, 'accepted')`,
+    );
+    const keep = await prgCall(
+      admin,
+      "POST",
+      "programme/facility",
+      facilityBody(adminTrail, z.facility, { qrMode: "static_pin" }),
+    );
+    assertEquals([keep.status, await errOf(keep)], [422, "invalid_request"]);
+    const adminDemote = await prgCall(
+      admin,
+      "POST",
+      "programme/facility",
+      facilityBody(adminTrail, z.facility, { participation: "declined" }),
+    );
+    assertEquals(adminDemote.status, 200, await adminDemote.clone().text());
+    assertEquals(
+      (await facilityRows(adminTrail)).find((r) => r.facilityId === z.facility)?.participation,
+      "declined",
+    );
   },
 );

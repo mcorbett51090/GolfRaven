@@ -9,12 +9,13 @@
 -- second bind in one transaction is itself refused); the admin's scenario cells sit in one SAVEPOINT; the operator binds once for the main body.
 --
 --   A  the function and what registers it                                  B  what private_definer may now read, and what it may not
---   C  staff and manager are refused first (42501, never 22023)             D  the admin is held to the same rule: the four roster legs, and every way to be OFF the roster
---   E  the owner's off-roster query agrees with the definer, row by row    F  the operator: the 138.4 reproduction, the four legs as a positive control, and the negatives
+--   C  staff and manager are refused first (42501, never 22023)             D  the admin is held to the same rule: the four roster legs, every way to be OFF the roster, and the DEMOTION exception
+--   E  the owner's off-roster query agrees with the definer, row by row    F  the operator: the 138.4 reproduction, the four legs as a positive control, the negatives, the demotion off-switch
+--   G  the owner's query refuses to run as a role that is subject to RLS
 
 \set QUIET 1
 BEGIN;
-SELECT plan(98);
+SELECT plan(129);
 
 -- ----------------------------------------------------------------------------
 -- 0. Setup
@@ -63,13 +64,13 @@ END
 $f$;
 
 -- the facility programme upsert as the BOUND member: the status ('ok' | 'no_trail'), or 'ERR <sqlstate> <message>' (the refusal rolls back to the block, so a refused call has written nothing)
-CREATE FUNCTION pg_temp.fp_try(p_label text, p_trail text, p_fac text, p_part text DEFAULT 'accepted', p_qr text DEFAULT 'rotating') RETURNS text LANGUAGE plpgsql AS $f$
+CREATE FUNCTION pg_temp.fp_try(p_label text, p_trail text, p_fac text, p_part text DEFAULT 'accepted', p_qr text DEFAULT 'rotating', p_note text DEFAULT NULL) RETURNS text LANGUAGE plpgsql AS $f$
 DECLARE r record;
 BEGIN
   PERFORM pg_temp.seed_step(p_label, '{"mfa_s": 240, "aal": 2}'::jsonb);
   EXECUTE 'SET LOCAL ROLE edge_partner';
   BEGIN
-    SELECT * INTO r FROM private.partner_facility_programme_upsert_for_partner(p_trail, p_fac, p_part, true, false, 'ok', true, NULL, p_qr);
+    SELECT * INTO r FROM private.partner_facility_programme_upsert_for_partner(p_trail, p_fac, p_part, true, false, 'ok', true, p_note, p_qr);
     EXECUTE 'RESET ROLE';
     RETURN r.o_status;
   EXCEPTION WHEN OTHERS THEN
@@ -137,27 +138,28 @@ SELECT pg_temp.mk_session('ad', '00000000-0000-0000-0000-4000000000d0', :'c_ad',
 --   fac_rd  named through an any_of_course_ids member         fac_re  named through a hole member written the way the importer writes it (course_id AND hole_id)
 --   fac_rf  a facility that exists and is on no roster          fac_rg  on an OLDER roster version only        fac_rh  on the LATEST version only
 --   fac_rj  on ANOTHER trail's roster only          fac_rk / fac_rl  two unrelated facilities, one named by a roster and one not          fac_rm / fac_rn  named by a removed member (rn also by a current one)
+--   fac_rq / fac_rr  named by a member whose removed_on is in the FUTURE / is TODAY (still a non-null removed_on: the rule is removed_on IS NULL and nothing else)
 -- ----------------------------------------------------------------------------
 SET LOCAL ROLE service_role;
 INSERT INTO app.catalog_id_ledger (id, kind, status, first_catalog_version) VALUES
   ('fac_z', 'facility', 'verified', 1), ('fac_ra', 'facility', 'verified', 1), ('fac_rb', 'facility', 'verified', 1), ('fac_rc', 'facility', 'verified', 1), ('fac_rd', 'facility', 'verified', 1),
   ('fac_re', 'facility', 'verified', 1), ('fac_rf', 'facility', 'verified', 1), ('fac_rg', 'facility', 'verified', 1), ('fac_rh', 'facility', 'verified', 1), ('fac_rj', 'facility', 'verified', 1),
-  ('fac_rk', 'facility', 'verified', 1), ('fac_rl', 'facility', 'verified', 1), ('fac_rm', 'facility', 'verified', 1), ('fac_rn', 'facility', 'verified', 1),
+  ('fac_rk', 'facility', 'verified', 1), ('fac_rl', 'facility', 'verified', 1), ('fac_rm', 'facility', 'verified', 1), ('fac_rn', 'facility', 'verified', 1), ('fac_rq', 'facility', 'verified', 1), ('fac_rr', 'facility', 'verified', 1),
   ('crs_z1', 'course', 'verified', 1), ('crs_z2', 'course', 'verified', 1), ('crs_ra1', 'course', 'verified', 1), ('crs_rb1', 'course', 'verified', 1), ('crs_rc1', 'course', 'verified', 1),
   ('crs_rd1', 'course', 'verified', 1), ('crs_rd2', 'course', 'verified', 1), ('crs_re1', 'course', 'verified', 1), ('crs_rf1', 'course', 'verified', 1), ('crs_rg1', 'course', 'verified', 1),
   ('crs_rh1', 'course', 'verified', 1), ('crs_rj1', 'course', 'verified', 1), ('crs_rk1', 'course', 'verified', 1), ('crs_rk2', 'course', 'verified', 1), ('crs_rk3', 'course', 'verified', 1),
-  ('crs_rl1', 'course', 'verified', 1), ('crs_rm1', 'course', 'verified', 1), ('crs_rn1', 'course', 'verified', 1),
+  ('crs_rl1', 'course', 'verified', 1), ('crs_rm1', 'course', 'verified', 1), ('crs_rn1', 'course', 'verified', 1), ('crs_rq1', 'course', 'verified', 1), ('crs_rr1', 'course', 'verified', 1),
   ('hol_z1', 'hole', 'verified', 1), ('hol_rc1', 'hole', 'verified', 1), ('hol_re1', 'hole', 'verified', 1), ('hol_rk1', 'hole', 'verified', 1),
   ('trl_88a', 'trail', 'verified', 1), ('trl_88b', 'trail', 'verified', 1), ('trl_88c', 'trail', 'verified', 1), ('trl_88c2', 'trail', 'verified', 1), ('trl_88d', 'trail', 'verified', 1),
   ('trl_88e', 'trail', 'verified', 1), ('trl_88f', 'trail', 'verified', 1), ('trl_88g', 'trail', 'verified', 1), ('trl_88h', 'trail', 'verified', 1), ('trl_88i', 'trail', 'verified', 1),
   ('trl_88k', 'trail', 'verified', 1), ('trl_88n', 'trail', 'verified', 1);
 INSERT INTO app.catalog_facility (id, slug, name, region, tz, catalog_version)
 SELECT f, replace(f, '_', '-'), 'Facility ' || f, 'US-TN', 'America/Chicago', 1
-FROM unnest(ARRAY['fac_z', 'fac_ra', 'fac_rb', 'fac_rc', 'fac_rd', 'fac_re', 'fac_rf', 'fac_rg', 'fac_rh', 'fac_rj', 'fac_rk', 'fac_rl', 'fac_rm', 'fac_rn']) AS f;
+FROM unnest(ARRAY['fac_z', 'fac_ra', 'fac_rb', 'fac_rc', 'fac_rd', 'fac_re', 'fac_rf', 'fac_rg', 'fac_rh', 'fac_rj', 'fac_rk', 'fac_rl', 'fac_rm', 'fac_rn', 'fac_rq', 'fac_rr']) AS f;
 INSERT INTO app.catalog_course (id, facility_id, name, catalog_version) VALUES
   ('crs_z1', 'fac_z', 'Z1', 1), ('crs_z2', 'fac_z', 'Z2', 1), ('crs_ra1', 'fac_ra', 'RA1', 1), ('crs_rb1', 'fac_rb', 'RB1', 1), ('crs_rc1', 'fac_rc', 'RC1', 1), ('crs_rd1', 'fac_rd', 'RD1', 1),
   ('crs_rd2', 'fac_rd', 'RD2', 1), ('crs_re1', 'fac_re', 'RE1', 1), ('crs_rf1', 'fac_rf', 'RF1', 1), ('crs_rg1', 'fac_rg', 'RG1', 1), ('crs_rh1', 'fac_rh', 'RH1', 1), ('crs_rj1', 'fac_rj', 'RJ1', 1),
-  ('crs_rk1', 'fac_rk', 'RK1', 1), ('crs_rk2', 'fac_rk', 'RK2', 1), ('crs_rk3', 'fac_rk', 'RK3', 1), ('crs_rl1', 'fac_rl', 'RL1', 1), ('crs_rm1', 'fac_rm', 'RM1', 1), ('crs_rn1', 'fac_rn', 'RN1', 1);
+  ('crs_rk1', 'fac_rk', 'RK1', 1), ('crs_rk2', 'fac_rk', 'RK2', 1), ('crs_rk3', 'fac_rk', 'RK3', 1), ('crs_rl1', 'fac_rl', 'RL1', 1), ('crs_rm1', 'fac_rm', 'RM1', 1), ('crs_rn1', 'fac_rn', 'RN1', 1), ('crs_rq1', 'fac_rq', 'RQ1', 1), ('crs_rr1', 'fac_rr', 'RR1', 1);
 INSERT INTO app.catalog_hole (id, course_id, number, catalog_version) VALUES
   ('hol_z1', 'crs_z1', 1, 1), ('hol_rc1', 'crs_rc1', 1, 1), ('hol_re1', 'crs_re1', 1, 1), ('hol_rk1', 'crs_rk1', 1, 1);
 INSERT INTO app.catalog_trail (id, slug, name, catalog_version)
@@ -176,6 +178,8 @@ INSERT INTO app.catalog_roster_member (trail_id, roster_version, unit, course_id
   ('trl_88e', 1, 'facility', NULL, NULL, 'fac_rm', NULL, 1, current_date - 1),
   ('trl_88e', 1, 'facility', NULL, NULL, 'fac_rn', NULL, 2, current_date - 1),
   ('trl_88e', 1, 'course',   'crs_rn1', NULL, NULL, NULL, 3, NULL),
+  ('trl_88e', 1, 'facility', NULL, NULL, 'fac_rq', NULL, 4, current_date + 30),
+  ('trl_88e', 1, 'facility', NULL, NULL, 'fac_rr', NULL, 5, current_date),
   ('trl_88f', 1, 'facility', NULL, NULL, 'fac_rg', NULL, 1, NULL),
   ('trl_88f', 2, 'facility', NULL, NULL, 'fac_rh', NULL, 1, NULL),
   ('trl_88g', 1, 'facility', NULL, NULL, 'fac_rg', NULL, 1, NULL),
@@ -194,14 +198,14 @@ INSERT INTO app.facility_programme (trail_id, facility_id, participation) VALUES
   ('trl_88a', 'fac_ra', 'accepted'), ('trl_88a', 'fac_z', 'accepted'), ('trl_88a', 'fac_rj', 'invited'),
   ('trl_88b', 'fac_rb', 'accepted'), ('trl_88b', 'fac_ra', 'accepted'),
   ('trl_88c', 'fac_rc', 'accepted'), ('trl_88c2', 'fac_re', 'accepted'), ('trl_88d', 'fac_rd', 'accepted'),
-  ('trl_88e', 'fac_rm', 'accepted'), ('trl_88e', 'fac_rn', 'accepted'),
+  ('trl_88e', 'fac_rm', 'accepted'), ('trl_88e', 'fac_rn', 'accepted'), ('trl_88e', 'fac_rq', 'accepted'), ('trl_88e', 'fac_rr', 'accepted'),
   ('trl_88f', 'fac_rg', 'accepted'), ('trl_88f', 'fac_rh', 'accepted'), ('trl_88g', 'fac_rg', 'declined'),
   ('trl_88h', 'fac_rj', 'accepted'), ('trl_88i', 'fac_x', 'accepted'),
   ('trl_88k', 'fac_rk', 'accepted'), ('trl_88k', 'fac_rl', 'left');
 RESET ROLE;
 
 -- ----------------------------------------------------------------------------
--- A. The function and what registers it  (11)
+-- A. The function and what registers it  (12)
 -- ----------------------------------------------------------------------------
 SELECT ok(has_function_privilege('edge_partner', 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure, 'EXECUTE'), 'the programme editor is still edge_partner''s');
 SELECT is((SELECT array_agg(r.n ORDER BY r.n) FROM unnest(ARRAY['anon', 'authenticated', 'service_role', 'edge_actor', 'edge_system', 'edge_partner', 'edge_partner_minter', 'edge_gateway']) r(n)
@@ -216,10 +220,12 @@ SELECT ok((SELECT position('v_uid := private.partner_authorize(NULL, p_trail_id,
               AND position('v_uid := private.partner_authorize(' IN prosrc) < position('catalog_roster_member' IN prosrc)
               AND position('catalog_roster_member' IN prosrc) < position('INSERT INTO app.facility_programme' IN prosrc)
               AND position('no_trail' IN prosrc) < position('catalog_roster_member' IN prosrc)
+              AND position('fp.facility_id = p_facility_id FOR NO KEY UPDATE;' IN prosrc) > position('no_trail' IN prosrc)
+              AND position('fp.facility_id = p_facility_id FOR NO KEY UPDATE;' IN prosrc) < position('catalog_roster_member' IN prosrc)
            FROM pg_proc WHERE oid = 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure),
-  'the leading partner_authorize call (check 14) is still first; the roster check comes after no_trail and BEFORE the write');
-SELECT ok((SELECT obj_description(oid, 'pg_proc') LIKE '0059/0110 (S6, section 140)%22023%' FROM pg_proc WHERE oid = 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure),
-  'the function comment says 0110 and the refusal');
+  'the leading partner_authorize call (check 14) is still first; after no_trail the existing row is locked (FOR NO KEY UPDATE), then the roster is read, and both come BEFORE the write');
+SELECT ok((SELECT obj_description(oid, 'pg_proc') LIKE '0059/0110 (S6, section 140)%22023%DEMOTION%' FROM pg_proc WHERE oid = 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure),
+  'the function comment says 0110, the refusal and the demotion exception');
 SET LOCAL ROLE service_role;
 SELECT is((SELECT note FROM private.function_inventory WHERE function_name = 'partner_facility_programme_upsert_for_partner'),
   '0059/0110 (S6, section 140): edge_partner only; class A3; facility_programme upsert; the facility must be on the trail''s current roster (22023)', 'the function_inventory note says 0110');
@@ -237,7 +243,7 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname LIKE 'pd\_p
   'no new policy reads a setting: no GUC window (the hard rule)');
 
 -- ----------------------------------------------------------------------------
--- B. What private_definer may now read, and what it may not  (17)
+-- B. What private_definer may now read, and what it may not  (18)
 -- ----------------------------------------------------------------------------
 SELECT is((SELECT count(*)::int FROM pg_attribute a
            WHERE a.attrelid IN ('app.catalog_roster_member'::regclass, 'app.catalog_roster_version'::regclass, 'app.catalog_course'::regclass, 'app.catalog_hole'::regclass)
@@ -253,8 +259,24 @@ SELECT ok(NOT EXISTS (SELECT 1 FROM unnest(ARRAY['app.catalog_roster_member', 'a
 SELECT ok(NOT EXISTS (SELECT 1 FROM pg_attribute a
                       WHERE a.attrelid IN ('app.catalog_roster_member'::regclass, 'app.catalog_roster_version'::regclass, 'app.catalog_course'::regclass, 'app.catalog_hole'::regclass)
                         AND a.attnum > 0 AND NOT a.attisdropped AND has_column_privilege('private_definer', a.attrelid, a.attnum, 'INSERT,UPDATE,REFERENCES')), 'and no column-level write on them');
-SELECT ok(NOT EXISTS (SELECT 1 FROM unnest(ARRAY['edge_partner', 'anon', 'edge_partner_minter']) r(n), unnest(ARRAY['app.catalog_roster_member', 'app.catalog_roster_version']) t(n)
-                      WHERE has_table_privilege(r.n, t.n, 'SELECT,INSERT,UPDATE,DELETE')), 'edge_partner, edge_partner_minter and anon hold nothing on the roster tables: the lane reads the roster only through the definer');
+-- no OTHER role gained anything: the privileges of five roles over every column of the four tables are exactly what they were before 0110 (the literal was captured on the 0109 schema; a sweep over
+-- COLUMNS, because has_table_privilege cannot see a column-level grant). S = select, I = insert, U = update, R = references; one entry per (role, table), the distinct per-column patterns.
+SELECT is((SELECT array_agg(x ORDER BY x) FROM (
+  SELECT r.n || '|' || c.relname || '|' || string_agg(DISTINCT
+           CASE WHEN has_column_privilege(r.n, a.attrelid, a.attnum, 'SELECT') THEN 'S' ELSE '-' END || CASE WHEN has_column_privilege(r.n, a.attrelid, a.attnum, 'INSERT') THEN 'I' ELSE '-' END
+           || CASE WHEN has_column_privilege(r.n, a.attrelid, a.attnum, 'UPDATE') THEN 'U' ELSE '-' END || CASE WHEN has_column_privilege(r.n, a.attrelid, a.attnum, 'REFERENCES') THEN 'R' ELSE '-' END, '/') AS x
+  FROM unnest(ARRAY['edge_partner', 'edge_actor', 'authenticated', 'anon', 'service_role']) r(n), pg_class c JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+  WHERE c.oid IN ('app.catalog_roster_member'::regclass, 'app.catalog_roster_version'::regclass, 'app.catalog_course'::regclass, 'app.catalog_hole'::regclass)
+  GROUP BY r.n, c.relname) q),
+  ARRAY['anon|catalog_course|----', 'anon|catalog_hole|----', 'anon|catalog_roster_member|----', 'anon|catalog_roster_version|----',
+        'authenticated|catalog_course|S---', 'authenticated|catalog_hole|S---', 'authenticated|catalog_roster_member|S---', 'authenticated|catalog_roster_version|S---',
+        'edge_actor|catalog_course|S---', 'edge_actor|catalog_hole|S---', 'edge_actor|catalog_roster_member|----', 'edge_actor|catalog_roster_version|----',
+        'edge_partner|catalog_course|----', 'edge_partner|catalog_hole|----', 'edge_partner|catalog_roster_member|----', 'edge_partner|catalog_roster_version|----',
+        'service_role|catalog_course|SIU-', 'service_role|catalog_hole|SIU-', 'service_role|catalog_roster_member|SIU-', 'service_role|catalog_roster_version|SIU-'],
+  'no role other than private_definer gained a column privilege on the four tables: edge_partner, edge_actor, authenticated, anon and service_role hold exactly what they held before 0110');
+SELECT ok(NOT EXISTS (SELECT 1 FROM unnest(ARRAY['edge_partner', 'edge_actor', 'authenticated', 'anon', 'edge_partner_minter']) r(n), unnest(ARRAY['app.catalog_roster_member', 'app.catalog_roster_version', 'app.catalog_course', 'app.catalog_hole']) t(n)
+                      WHERE has_table_privilege(r.n, t.n, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')),
+  'and none of them holds a table-level write, DELETE, TRUNCATE, REFERENCES or TRIGGER on them');
 -- the policies: with NO binding private_definer reads no roster row, with every setting the repository has ever keyed a policy on planted
 SELECT is(pg_temp.as_definer($q$SELECT (SELECT count(*) FROM app.catalog_roster_member)::text || '/' || (SELECT count(*) FROM app.catalog_roster_version)::text
                                        || '/' || (SELECT count(*) FROM app.catalog_course)::text || '/' || (SELECT count(*) FROM app.catalog_hole)::text$q$),
@@ -283,7 +305,7 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
 RESET ROLE;
 SELECT is(pg_temp.as_definer($q$SELECT count(*) FILTER (WHERE trail_id = 'trl_t')::text || '/' || count(*) FILTER (WHERE trail_id <> 'trl_t')::text FROM app.catalog_roster_member$q$),
-  '2/0', 'B5: bound to the operator of trl_t: its two roster members (helpers.sql) and NOT ONE member of any other trail (the section 140 fixtures hold 15)');
+  '2/0', 'B5: bound to the operator of trl_t: its two roster members (helpers.sql) and NOT ONE member of any other trail (the section 140 fixtures hold 17)');
 SELECT is(pg_temp.as_definer($q$SELECT count(*) FILTER (WHERE trail_id = 'trl_t')::text || '/' || count(*) FILTER (WHERE trail_id <> 'trl_t')::text FROM app.catalog_roster_version$q$),
   '1/0', 'B6: and its roster version, no other trail''s');
 SELECT is(pg_temp.as_definer($q$SELECT id FROM app.catalog_roster_member LIMIT 1$q$), 'ERR 42501', 'B7: the roster member id is not a granted column (permission denied, not an empty result)');
@@ -293,12 +315,23 @@ SELECT is(pg_temp.as_definer($q$SELECT name FROM app.catalog_course LIMIT 1$q$),
 SELECT is(pg_temp.as_definer($q$WITH d AS (DELETE FROM app.catalog_roster_member RETURNING 1) SELECT count(*)::text FROM d$q$), 'ERR 42501', 'B11: and it cannot delete a roster member');
 ROLLBACK TO SAVEPOINT b_operator;
 
+SAVEPOINT b_user;
+-- a PLAYER-lane binding (kind user), emulated the way matrix 24 does: the row bind_actor writes
+SET LOCAL ROLE private_definer;
+INSERT INTO private.actor_binding (backend_pid, xact, actor_uid, kind) VALUES (pg_backend_pid(), pg_current_xact_id(), '00000000-0000-0000-0000-00000000000a', 'user')
+ON CONFLICT (backend_pid) DO UPDATE SET xact = EXCLUDED.xact, actor_uid = EXCLUDED.actor_uid, kind = EXCLUDED.kind;
+RESET ROLE;
+SELECT is(pg_temp.as_definer($q$SELECT (SELECT count(*) FROM app.catalog_roster_member)::text || '/' || (SELECT count(*) FROM app.catalog_roster_version)::text
+                                       || '/' || (SELECT count(*) FROM app.catalog_course)::text || '/' || (SELECT count(*) FROM app.catalog_hole)::text$q$),
+  '0/0/0/0', 'B13: a PLAYER-lane (user) binding reads no row of any of the four tables through a private_definer function: the policies admit a partner binding and nothing else');
+ROLLBACK TO SAVEPOINT b_user;
+
 SAVEPOINT b_admin;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
 SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
 RESET ROLE;
-SELECT is(pg_temp.as_definer($q$SELECT (count(*) FILTER (WHERE trail_id <> 'trl_t') >= 15 AND count(*) FILTER (WHERE trail_id = 'trl_t') = 2)::text FROM app.catalog_roster_member$q$), 'true',
+SELECT is(pg_temp.as_definer($q$SELECT (count(*) FILTER (WHERE trail_id <> 'trl_t') >= 17 AND count(*) FILTER (WHERE trail_id = 'trl_t') = 2)::text FROM app.catalog_roster_member$q$), 'true',
   'B12: bound to an ADMIN: every trail''s roster (the control that the cells above can fail)');
 ROLLBACK TO SAVEPOINT b_admin;
 
@@ -333,7 +366,7 @@ RESET ROLE;
 ROLLBACK TO SAVEPOINT c_a3;
 
 -- ----------------------------------------------------------------------------
--- D. The ADMIN is held to the same rule: each roster leg, and every way to be off the roster  (34)
+-- D. The ADMIN is held to the same rule: each roster leg, and every way to be off the roster, and the demotion exception  (51)
 -- ----------------------------------------------------------------------------
 SAVEPOINT d_admin;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
@@ -358,6 +391,8 @@ SELECT is(pg_temp.fp_try('ad', 'trl_88k', 'fac_rl'), :'m_roster', 'D11: fac_rl (
 -- every way to be off the roster
 SELECT is(pg_temp.fp_try('ad', 'trl_88e', 'fac_rm'), :'m_roster', 'D12: a member with removed_on set (the latest version) does not count');
 SELECT is(pg_temp.fp_try('ad', 'trl_88e', 'fac_rn'), 'ok', 'D13: the same facility named by a removed member AND by a current member (a course of it) is ok');
+SELECT is(pg_temp.fp_try('ad', 'trl_88e', 'fac_rq'), :'m_roster', 'D13b: a member whose removed_on is in the FUTURE is not on the roster either: the rule is removed_on IS NULL and nothing else (a non-null date removes the member from the editor at once)');
+SELECT is(pg_temp.fp_try('ad', 'trl_88e', 'fac_rr'), :'m_roster', 'D13c: nor is one whose removed_on is TODAY');
 SELECT is(pg_temp.fp_try('ad', 'trl_88f', 'fac_rg'), :'m_roster', 'D14: a facility on an OLDER roster version only (removed_on NULL there) is 22023');
 SELECT is(pg_temp.fp_try('ad', 'trl_88f', 'fac_rh'), 'ok', 'D15: a facility on the LATEST version only is ok (the latest version is the one that counts)');
 SELECT is(pg_temp.fp_try('ad', 'trl_88g', 'fac_rg'), :'m_roster', 'D16: a latest version with NO members refuses even a facility the previous version named');
@@ -375,19 +410,43 @@ SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_ra', 'bogus'), :'m_shape', 'D27: 
 SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_z', 'bogus'), :'m_shape', 'D28: ... and on an off-roster one');
 SELECT is(pg_temp.fp_try('ad', 'trl_88n', 'fac_z'), 'no_trail', 'D29: a trail with no programme row answers no_trail BEFORE the roster is consulted (an unchanged status)');
 SELECT is(pg_temp.fp_try('ad', 'trl_u', 'fac_z'), 'no_trail', 'D30: ... also for a trail with no roster (trl_u)');
--- what a refusal does and does not do: eight owner-planted rows that are OFF the roster, each refused as an UPDATE (participation -> left); the table, byte for byte, is what it was
+-- THE DEMOTION EXCEPTION. Ten owner-planted programme rows are OFF the roster (the E list). A call that would LEAVE one of them accepted or invited is refused and the table, byte for byte, is what it was
 SELECT count(*)::int AS audits_d1 FROM app.audit_log WHERE action = 'partner.facility_programme_upsert' \gset
 SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t.trail_id, t.facility_id), '')) AS h_d0 FROM app.facility_programme t \gset
-SELECT count(*)::int AS n_refused FROM (VALUES ('trl_88a', 'fac_z'), ('trl_88a', 'fac_rj'), ('trl_88b', 'fac_ra'), ('trl_88e', 'fac_rm'), ('trl_88f', 'fac_rg'), ('trl_88g', 'fac_rg'), ('trl_88i', 'fac_x'), ('trl_88k', 'fac_rl')) v(t, f)
-  WHERE pg_temp.fp_try('ad', v.t, v.f, 'left') = :'m_roster' \gset
-SELECT is(:n_refused, 8, 'D31: all eight owner-planted off-roster rows are refused as an UPDATE too (the check is on the upsert, not on the insert only)');
-SELECT is(md5(coalesce((SELECT string_agg(t::text, '|' ORDER BY t.trail_id, t.facility_id) FROM app.facility_programme t), '')), :'h_d0', 'D32: and the programme table is byte for byte what it was: a refused call changes no row');
-SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.facility_programme_upsert') - :audits_d1, 0, 'D33: and writes no audit row');
-SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.facility_programme_upsert') - :audits_d0, 9, 'D34: the nine successful writes of this section (D1 D3 D5 D7 D8 D10 D13 D15 D18) are the only audited ones; no_trail and every refusal wrote none');
+SELECT count(*)::int AS n_keep FROM (VALUES ('trl_88a', 'fac_z'), ('trl_88a', 'fac_rj'), ('trl_88b', 'fac_ra'), ('trl_88e', 'fac_rm'), ('trl_88e', 'fac_rq'), ('trl_88e', 'fac_rr'), ('trl_88f', 'fac_rg'), ('trl_88g', 'fac_rg'),
+                                        ('trl_88i', 'fac_x'), ('trl_88k', 'fac_rl')) v(t, f)
+  WHERE pg_temp.fp_try('ad', v.t, v.f, 'accepted', 'static_pin') = :'m_roster' \gset
+SELECT count(*)::int AS n_inv FROM (VALUES ('trl_88a', 'fac_z'), ('trl_88a', 'fac_rj'), ('trl_88b', 'fac_ra'), ('trl_88e', 'fac_rm'), ('trl_88e', 'fac_rq'), ('trl_88e', 'fac_rr'), ('trl_88f', 'fac_rg'), ('trl_88g', 'fac_rg'),
+                                        ('trl_88i', 'fac_x'), ('trl_88k', 'fac_rl')) v(t, f)
+  WHERE pg_temp.fp_try('ad', v.t, v.f, 'invited') = :'m_roster' \gset
+SELECT is(:n_keep, 10, 'D31: all ten off-roster rows are refused when the call keeps them ACCEPTED (here while changing the qr mode), and this includes re-accepting the declined (trl_88g) and the left (trl_88k) one');
+SELECT is(:n_inv, 10, 'D32: and when it leaves them INVITED (not a player-lane value, but not a demotion either: only declined and left are)');
+SELECT is(md5(coalesce((SELECT string_agg(t::text, '|' ORDER BY t.trail_id, t.facility_id) FROM app.facility_programme t), '')), :'h_d0', 'D33: the programme table is byte for byte what it was after all twenty refusals');
+SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.facility_programme_upsert') - :audits_d1, 0, 'D34: and they wrote no audit row');
+-- creating a row at all is reach (has_facility_scope reads the row, not its participation): refused whatever the participation
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_rb', 'left'), :'m_roster', 'D35: a NEW off-roster row created as left is refused');
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_rb', 'declined'), :'m_roster', 'D36: and as declined');
+SELECT is((SELECT count(*)::int FROM app.facility_programme WHERE trail_id = 'trl_88a' AND facility_id = 'fac_rb'), 0, 'D37: and no row was created');
+-- the demotions: an EXISTING off-roster row may go to left or declined; that cannot add reach
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_z', 'left'), 'ok', 'D38: an off-roster accepted row is demoted to left: ok');
+SELECT is((SELECT participation::text FROM app.facility_programme WHERE trail_id = 'trl_88a' AND facility_id = 'fac_z'), 'left', 'D39: the row is kept and says left');
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_rj', 'declined'), 'ok', 'D40: an off-roster invited row is demoted to declined: ok');
+SELECT is(pg_temp.fp_try('ad', 'trl_88b', 'fac_ra', 'left', 'static_pin'), 'ok', 'D41: a demotion may change the other columns in the same call (qr mode)');
+SELECT is((SELECT participation::text || '/' || qr_mode::text FROM app.facility_programme WHERE trail_id = 'trl_88b' AND facility_id = 'fac_ra'), 'left/static_pin', 'D42: and both landed');
+-- a demoted row stays editable but cannot be taken back
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_z', 'left', 'both', 'closed for the winter'), 'ok', 'D43: an update of nothing but the note and the qr mode of a LEFT off-roster row is ok');
+SELECT is((SELECT participation::text || '/' || qr_mode::text || '/' || wifi_note FROM app.facility_programme WHERE trail_id = 'trl_88a' AND facility_id = 'fac_z'), 'left/both/closed for the winter', 'D44: and landed, participation untouched');
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_z', 'accepted'), :'m_roster', 'D45: re-accepting a LEFT off-roster row is refused');
+SELECT is(pg_temp.fp_try('ad', 'trl_88a', 'fac_z', 'invited'), :'m_roster', 'D46: so is leaving it invited');
+SELECT is((SELECT participation::text FROM app.facility_programme WHERE trail_id = 'trl_88a' AND facility_id = 'fac_z'), 'left', 'D47: and it still says left');
+-- the player-lane gate (participation = accepted, 0046 / 0051 / 0055 / 0056 / 0064 / 0067): none of the demoted rows passes it any more
+SELECT is((SELECT count(*)::int FROM app.facility_programme WHERE ((trail_id = 'trl_88a' AND facility_id IN ('fac_z', 'fac_rj')) OR (trail_id = 'trl_88b' AND facility_id = 'fac_ra')) AND participation = 'accepted'), 0,
+  'D48: the three demoted rows no longer pass participation = accepted, the player-lane gate (check-ins, marker attests and receipts at that facility stop)');
+SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.facility_programme_upsert') - :audits_d0, 13, 'D49: the thirteen successful writes of this section (the nine of D1-D18 and the four demotion / edit writes) are the only audited ones; no_trail and every refusal wrote none');
 ROLLBACK TO SAVEPOINT d_admin;
 
 -- ----------------------------------------------------------------------------
--- E. The owner's off-roster query lists exactly what the definer would refuse  (4)
+-- E. The owner's off-roster query lists exactly what the definer would refuse to leave accepted  (4)
 -- ----------------------------------------------------------------------------
 -- The query text between the markers is the one in tools/db/facility-programme-off-roster.sql, held identical by supabase/tests/unit/facility-programme-off-roster-parity.test.ts. It is run as service_role
 -- (BYPASSRLS): the roster tables are FORCE ROW LEVEL SECURITY, and a role that is subject to RLS would read an empty roster and list every row.
@@ -414,8 +473,8 @@ ORDER BY fp.trail_id, fp.facility_id
 -- END off-roster query
 ;
 SELECT is((SELECT array_agg(trail_id || ':' || facility_id ORDER BY trail_id, facility_id) FROM e88_off),
-  ARRAY['trl_88a:fac_rj', 'trl_88a:fac_z', 'trl_88b:fac_ra', 'trl_88e:fac_rm', 'trl_88f:fac_rg', 'trl_88g:fac_rg', 'trl_88i:fac_x', 'trl_88k:fac_rl'],
-  'E1: over the eighteen programme rows (seventeen planted, plus trl_t / fac_x from helpers.sql) the query lists the eight whose facility is off its trail''s roster');
+  ARRAY['trl_88a:fac_rj', 'trl_88a:fac_z', 'trl_88b:fac_ra', 'trl_88e:fac_rm', 'trl_88e:fac_rq', 'trl_88e:fac_rr', 'trl_88f:fac_rg', 'trl_88g:fac_rg', 'trl_88i:fac_x', 'trl_88k:fac_rl'],
+  'E1: over the twenty programme rows (nineteen planted, plus trl_t / fac_x from helpers.sql) the query lists the ten whose facility is off its trail''s roster');
 SELECT is((SELECT array_agg(trail_id || ':' || participation ORDER BY trail_id, facility_id) FROM e88_off WHERE trail_id IN ('trl_88g', 'trl_88k', 'trl_88i')),
   ARRAY['trl_88g:declined', 'trl_88i:accepted', 'trl_88k:left'], 'E2: and it shows each row''s participation (a declined or left row is listed too: it is still a grant, G3 is a separate decision)');
 RESET ROLE;
@@ -425,13 +484,45 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_ad');
 RESET ROLE;
 SELECT is((SELECT array_agg(trail_id || ':' || facility_id ORDER BY trail_id, facility_id) FROM e88_rows WHERE pg_temp.fp_try('ad', trail_id, facility_id) = :'m_roster'),
-  ARRAY['trl_88a:fac_rj', 'trl_88a:fac_z', 'trl_88b:fac_ra', 'trl_88e:fac_rm', 'trl_88f:fac_rg', 'trl_88g:fac_rg', 'trl_88i:fac_x', 'trl_88k:fac_rl'],
-  'E3: the DEFINER, asked for every one of the eighteen pairs, refuses exactly the same eight (the query and the check are one rule)');
+  ARRAY['trl_88a:fac_rj', 'trl_88a:fac_z', 'trl_88b:fac_ra', 'trl_88e:fac_rm', 'trl_88e:fac_rq', 'trl_88e:fac_rr', 'trl_88f:fac_rg', 'trl_88g:fac_rg', 'trl_88i:fac_x', 'trl_88k:fac_rl'],
+  'E3: the DEFINER, asked to write every one of the twenty pairs as accepted, refuses exactly the same ten (the query and the check are one rule)');
 SELECT is((SELECT count(*)::int FROM e88_rows WHERE pg_temp.fp_try('ad', trail_id, facility_id) = 'ok'), 10, 'E4: and accepts the other ten');
 ROLLBACK TO SAVEPOINT e_admin;
 
 -- ----------------------------------------------------------------------------
--- F. The OPERATOR of trl_t: the 138.4 reproduction, the four legs as a positive control, and the negatives  (27)
+-- G. The owner's query refuses to run as a role that is subject to row level security  (3)
+-- ----------------------------------------------------------------------------
+-- The guard text between the markers is the one at the top of tools/db/facility-programme-off-roster.sql (held identical by the parity unit test). Without it a role subject to the FORCE RLS on the roster
+-- tables reads an EMPTY roster, so the query would list EVERY programme row (or, run over an empty programme, print an empty list that looks like "all clean").
+CREATE FUNCTION pg_temp.guard_as(p_role text) RETURNS text LANGUAGE plpgsql AS $f$
+BEGIN
+  EXECUTE format('SET LOCAL ROLE %I', p_role);
+  BEGIN
+    EXECUTE $g$
+-- BEGIN rls guard
+DO $guard$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolbypassrls)) THEN
+    RAISE EXCEPTION 'facility-programme-off-roster: run this as a role that bypasses row level security (service_role, or the superuser); % is subject to it, reads an empty roster and would list every programme row', current_user USING ERRCODE = '42501';
+  END IF;
+END
+$guard$
+-- END rls guard
+    $g$;
+    EXECUTE 'RESET ROLE';
+    RETURN 'ran';
+  EXCEPTION WHEN OTHERS THEN
+    EXECUTE 'RESET ROLE';
+    RETURN 'ERR ' || SQLSTATE;
+  END;
+END
+$f$;
+SELECT is(pg_temp.guard_as('authenticated'), 'ERR 42501', 'G1: as authenticated (subject to RLS) the guard raises 42501 before any query could print a misleading answer');
+SELECT is(pg_temp.guard_as('private_definer'), 'ERR 42501', 'G2: and as private_definer (NOBYPASSRLS)');
+SELECT is(pg_temp.guard_as('service_role'), 'ran', 'G3: as service_role (BYPASSRLS) the guard passes and the query below it runs');
+
+-- ----------------------------------------------------------------------------
+-- F. The OPERATOR of trl_t: the 138.4 reproduction, the four legs as a positive control, and the negatives  (36)
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.seed_step('op', '{"mfa_s": 240, "aal": 2, "reauth_s": 240}'::jsonb);
 SET LOCAL ROLE edge_partner;
@@ -487,14 +578,23 @@ SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_nope'), :'m_roster', 'F21: an unkno
 SELECT is(pg_temp.fp_try('op', 'trl_t', NULL), :'m_shape', 'F22: NULL is the argument-shape 22023');
 SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'bogus'), :'m_shape', 'F23: a bad participation on an on-roster facility: the shape refusal, before the roster');
 
--- a roster version with no members, then the limit this change does not remove
+-- version 6 has no members: the existing fac_z row (written while fac_z was on the roster, accepted) is now OFF the roster
 SET LOCAL ROLE service_role;
 INSERT INTO app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, effective_from) VALUES ('trl_t', 6, 'facility', 'facility', now());
 RESET ROLE;
-SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'left'), :'m_roster', 'F24: version 6 has no members: the EXISTING fac_z row cannot be updated (participation left) either');
-SELECT is((SELECT participation::text FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z'), 'accepted', 'F25: and it still says accepted');
-SELECT is(pg_temp.reach('fac_z'), true, 'F26: KNOWN LIMIT, pinned: that row, written while fac_z was on the roster, is still a grant after the roster dropped it (0110 changes the WRITE only; the owner''s query lists such rows; option B of section 138.3 is the fix for the read, and this cell flips to false when it lands)');
-SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.facility_programme_upsert') - :audits_f0, 4, 'F27: the refusals since wrote no audit row');
+SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'accepted', 'static_pin'), :'m_roster', 'F24: keeping the existing fac_z row ACCEPTED while changing its qr mode is refused');
+SELECT is((SELECT participation::text || '/' || qr_mode::text FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z'), 'accepted/rotating', 'F25: and the row is as it was');
+SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_rd', 'left'), :'m_roster', 'F26: a NEW off-roster row created as left is refused (the operator is held to it as the admin is)');
+SELECT is((SELECT count(*)::int FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_rd'), 0, 'F27: and no row was created');
+SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'left', 'static_pin'), 'ok', 'F28: THE OFF-SWITCH: the operator demotes the off-roster fac_z row to left (and changes its qr mode in the same call): ok');
+SELECT is((SELECT participation::text || '/' || qr_mode::text FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z'), 'left/static_pin', 'F29: the row is kept and says left');
+SELECT is((SELECT count(*)::int FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z' AND participation = 'accepted'), 0, 'F30: the trl_t / fac_z row no longer passes participation = accepted, the player-lane gate: check-ins, marker attests and receipts for that trail at fac_z stop');
+SELECT is(pg_temp.reach('fac_z'), true, 'F31: KNOWN LIMIT, pinned: but the reach stays. has_facility_scope reads the row and not its participation (the G3 filter is absent), so the operator still reaches fac_z until the row is deleted or option B / G3 lands (this cell flips to false then)');
+SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'left', 'both', 'closed for the winter'), 'ok', 'F32: an update of nothing but the note and the qr mode of the left row is ok');
+SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'accepted'), :'m_roster', 'F33: re-accepting it is refused');
+SELECT is(pg_temp.fp_try('op', 'trl_t', 'fac_z', 'declined'), 'ok', 'F34: left -> declined is ok (both are demotions)');
+SELECT is((SELECT participation::text || '/' || qr_mode::text || '/' || coalesce(wifi_note, '<none>') FROM app.facility_programme WHERE trail_id = 'trl_t' AND facility_id = 'fac_z'), 'declined/rotating/<none>', 'F35: and the row says declined (the note and the qr mode are the ones that call sent)');
+SELECT is((SELECT count(*)::int FROM app.audit_log WHERE action = 'partner.facility_programme_upsert') - :audits_f0, 7, 'F36: the seven successful writes (four legs, the demotion, the note update, left -> declined) are audited and the refusals wrote none');
 
 SELECT * FROM finish();
 ROLLBACK;
