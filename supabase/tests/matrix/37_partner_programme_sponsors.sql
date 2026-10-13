@@ -17,6 +17,7 @@ SELECT plan(58);
 GRANT edge_partner, edge_actor, private_definer TO CURRENT_USER WITH SET TRUE;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.partner_credential, app.partner_session TO CURRENT_USER;
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.trail_programme, app.facility_programme, app.offer, app.sponsorship, app.partner_org TO CURRENT_USER;
+GRANT SELECT, INSERT ON app.catalog_roster_version, app.catalog_roster_member TO CURRENT_USER;
 GRANT SELECT ON app.operator_rollup, app.sponsor_rollup, app.special_marker_stock, app.audit_log TO CURRENT_USER;
 ALTER TABLE app.partner_session DISABLE TRIGGER partner_session_insert_guard_trg;
 ALTER TABLE app.partner_credential DISABLE TRIGGER partner_credential_insert_guard_trg;
@@ -27,6 +28,8 @@ CREATE POLICY zz37_fp ON app.facility_programme FOR ALL TO CURRENT_USER USING (t
 CREATE POLICY zz37_of ON app.offer FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz37_sp ON app.sponsorship FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz37_po ON app.partner_org FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz37_rv ON app.catalog_roster_version FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
+CREATE POLICY zz37_rm ON app.catalog_roster_member FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 CREATE POLICY zz37_or ON app.operator_rollup FOR SELECT TO CURRENT_USER USING (true);
 CREATE POLICY zz37_sr ON app.sponsor_rollup FOR SELECT TO CURRENT_USER USING (true);
 CREATE POLICY zz37_st ON app.special_marker_stock FOR SELECT TO CURRENT_USER USING (true);
@@ -141,6 +144,10 @@ SELECT pg_temp.mk_session('ad', '00000000-0000-0000-0000-4000000000d0', :'c_ad',
 
 INSERT INTO app.partner_org (id, kind, name)
 VALUES ('10000000-0000-0000-0000-000000003701', 'sponsor', 'Matrix Sponsor Org');
+
+-- 0110: a NEW programme row needs the facility on the trail's current roster; trl_u (which the admin cell below uses) gets a roster naming crs_x1 (fac_x), as trl_t has in helpers.sql
+INSERT INTO app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, effective_from) VALUES ('trl_u', 1, 'course', 'facility', now());
+INSERT INTO app.catalog_roster_member (trail_id, roster_version, unit, course_id, stop_order) VALUES ('trl_u', 1, 'course', 'crs_x1', 1);
 
 INSERT INTO app.offer (id, trail_id, facility_id, eligibility, funder, budget_cap, face_value, valid_from, valid_to, status)
 VALUES ('60000000-0000-0000-0000-000000003701', 'trl_t', 'fac_x', '{}'::jsonb, 'operator', 250, 15, current_date, current_date + 30, 'draft');

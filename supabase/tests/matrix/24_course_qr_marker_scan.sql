@@ -173,8 +173,8 @@ SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.course_p
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname IN ('marker_scan_for_actor', 'marker_cosignal_attach_for_actor', 'course_pin_attempt_for_actor', 'course_qr_public_key_for_actor')
              AND p.pronargs >= 1 AND pg_get_function_identity_arguments(p.oid) ~* '(^|, )p_(user|uid|actor)'), 0, 'no `_for_actor` definer takes a user id argument: a wrong uid cannot even be expressed');
 
-SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'catalog_roster'), 0,
-  'DEPARTURE 10, pinned: the player lane consults app.facility_programme (the partner programme), NEVER the catalog roster: a programme facility outside the trail''s roster earns a credit that counts for nothing, and a roster member with no programme row cannot be bought at; keeping the two in step is the programme editor''s (S6), not the scan''s');
+SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'catalog_roster' AND p.proname <> 'partner_facility_programme_upsert_for_partner'), 0,
+  'DEPARTURE 10, pinned (0110: the programme editor partner_facility_programme_upsert_for_partner is the one exception, it checks a NEW row against the roster): the player lane consults app.facility_programme (the partner programme), NEVER the catalog roster: a programme facility outside the trail''s roster earns a credit that counts for nothing, and a roster member with no programme row cannot be bought at; keeping the two in step is the programme editor''s (S6), not the scan''s');
 -- ----------------------------------------------------------------------------
 -- 3. The derivation against OUTSIDE test vectors (run as private_definer: the owner is the only role that may call the core)
 -- ----------------------------------------------------------------------------

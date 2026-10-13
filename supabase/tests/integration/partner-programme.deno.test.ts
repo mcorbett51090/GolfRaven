@@ -134,6 +134,33 @@ async function newTrail(): Promise<string> {
     (sql) =>
       sql`insert into app.catalog_trail (id, slug, name, catalog_version) values (${id}, ${id.replaceAll("_", "-")}, ${"Trail " + id}, 1)`,
   );
+  // 0110: a NEW facility row needs the facility on the trail's current roster, so the trail gets one, naming the courses of the seeded fac_x and fac_y
+  await rows(
+    "app.catalog_roster_version",
+    (sql) =>
+      sql`insert into app.catalog_roster_version (trail_id, version, completion_unit, marker_unit, effective_from) values (${id}, 1, 'course', 'facility', now())`,
+  );
+  await rows(
+    "app.catalog_roster_member",
+    (sql) =>
+      sql`insert into app.catalog_roster_member (trail_id, roster_version, unit, course_id, stop_order) values (${id}, 1, 'course', 'crs_x1', 1), (${id}, 1, 'course', 'crs_y1', 2)`,
+  );
+  return id;
+}
+/** A catalog facility that no roster names (a ledger row and a facility; no course). */
+async function newOffRosterFacility(): Promise<string> {
+  seq += 1;
+  const id = `fac_pg_${RUN}_${seq}`;
+  await rows(
+    "app.catalog_id_ledger",
+    (sql) =>
+      sql`insert into app.catalog_id_ledger (id, kind, status, first_catalog_version) values (${id}, 'facility', 'verified', 1)`,
+  );
+  await rows(
+    "app.catalog_facility",
+    (sql) =>
+      sql`insert into app.catalog_facility (id, slug, name, region, tz, catalog_version) values (${id}, ${id.replaceAll("_", "-")}, ${"Facility " + id}, 'US-TN', 'America/Chicago', 1)`,
+  );
   return id;
 }
 /** A member of a fresh org with a real credential and a session from the real mint: an operator of `trailId` (operator org, trail scope), or a manager of fac_x (facility org). */
@@ -763,6 +790,74 @@ Deno.test(
       (await prgCall(calm, "GET", `rollups/operator?trailId=${trail}`)).status,
       200,
       "another member is not slowed",
+    );
+  },
+);
+
+Deno.test(
+  "0110 / S6: the programme editor refuses a NEW row for a facility that is not on the trail's roster (422 invalid_request, nothing written), the same for an id that is in no catalog (not a 500), accepts a facility that is, and leaves an EXISTING row editable (an operator can still set it to left)",
+  DT,
+  async () => {
+    const trail = await newTrail();
+    const op = await newMember("operator", trail);
+    assertEquals(
+      (await prgCall(op, "POST", "programme/trail", trailBody(trail))).status,
+      200,
+    );
+    const off = await newOffRosterFacility();
+
+    const refused = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, off),
+    );
+    assertEquals(
+      [refused.status, await errOf(refused)],
+      [422, "invalid_request"],
+    );
+    const unknown = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, `fac_nope_${RUN}`),
+    );
+    assertEquals(
+      [unknown.status, await errOf(unknown)],
+      [422, "invalid_request"],
+      "an id that is in no catalog is the same refusal, not a database error",
+    );
+    assertEquals(await facilityRows(trail), [], "no refusal wrote a row");
+
+    const ok = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, "fac_x"),
+    );
+    assertEquals(ok.status, 200, await ok.clone().text());
+    assertEquals(
+      (await facilityRows(trail)).map((r) => r.facilityId),
+      ["fac_x"],
+    );
+
+    // a row that exists for an off-roster facility (written before the gate, or the roster changed since) stays editable
+    await rows(
+      "app.facility_programme",
+      (sql) =>
+        sql`insert into app.facility_programme (trail_id, facility_id, participation) values (${trail}, ${off}, 'accepted')`,
+    );
+    const left = await prgCall(
+      op,
+      "POST",
+      "programme/facility",
+      facilityBody(trail, off, { participation: "left" }),
+    );
+    assertEquals(left.status, 200, await left.clone().text());
+    assertEquals(
+      (await facilityRows(trail)).find((r) => r.facilityId === off)
+        ?.participation,
+      "left",
     );
   },
 );
