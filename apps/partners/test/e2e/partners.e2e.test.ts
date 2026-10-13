@@ -1182,6 +1182,27 @@ suite("apps/partners in Chromium", () => {
         expect(server.sessions()).toEqual([]);
       });
 
+      it.each(["return", "timer"] as const)("R1 (%s path): the first session is open and GET pin answers only 1.5 s after the cancel: still signed-out when it does, no forced-PIN screen, the invitee's session REVOKED, no live session, the token out of the heap", async (path) => {
+        server.state.delayAfter["pin"] = 1500;
+        const w = await toPasskeyStep();
+        await w.page.getByTestId("enrol-create-passkey").click();
+        await expect.poll(() => server.log.some((r) => r.method === "GET" && r.path.endsWith("/partner-session/pin"))).toBe(true);
+        expect(await screen(w)).toBe("enrol"); // registerFirst has adopted the first session; the PIN read is still on its way
+        await setVisibility(w, "hidden");
+        if (path === "return") {
+          await wallClockJump(w, 120_000);
+          await setVisibility(w, "visible");
+        } else await w.page.clock.runFor(120_000);
+        await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 1000 });
+        await w.page.waitForTimeout(2500); // the late answer has arrived by now
+        expect(await screen(w)).toBe("signed-out");
+        expect(await w.page.locator('[data-screen="pin-setup"]').count()).toBe(0);
+        await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+        expect(server.sessions()).toEqual([]);
+        expect(await heapContains(w.page, server.issuedTokens[0]!)).toBe(false);
+        expect(await w.violations()).toEqual([]);
+      });
+
       it("the earlier steps hold nothing a bystander could complete (a one-time token that still needs the code mailed to the invitee), so a long hide leaves them: the token step and the code step are still on screen", async () => {
         const { token } = server.addInvite({ email: INVITEE });
         const w = await openFakeClock(`/invite#${token}`);

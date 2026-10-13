@@ -263,6 +263,8 @@ function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?
 
 const noticeKind = (st: AppState): string | null => (st.screen === "signed-out" ? (st.notice?.kind ?? null) : null);
 const CANCELLED = { screen: "signed-out", notice: { kind: "error", message: { key: "error.cancelled" } } } as const;
+/** The screen after the auto-lock cancels an enrolment. */
+const STOPPED_SCREEN = { screen: "signed-out", notice: null } as const;
 
 /** A stand-in controller that only records what the auto-lock asks of it. */
 function stubController(state: { screen: AppState["screen"]; step?: string }) {
@@ -948,6 +950,41 @@ describe("auto-lock: an enrolment left at the passkey step is not completable by
     expect(credentialPosts(t)).toEqual([]);
     expect(t.w.server.sessions()).toEqual([]);
     expect(t.controller.getState()).toEqual({ screen: "signed-out", notice: null });
+  });
+
+  describe.each([
+    ["GET session", "/partner-session/session"],
+    ["GET pin", "/partner-session/pin"],
+  ] as const)("P1: the first session is open and %s is still being read when the limit passes", (_name, route) => {
+    it.each(["return", "timer"] as const)("(%s path) the cancel is not undone when the read settles: still signed-out, never signed-in again, and the invitee's session is REVOKED with its own token and never held", async (path) => {
+      let armed = false;
+      const hold = holdResponses((u, m) => armed && u.endsWith(route) && m === "GET"); // the answer arrives AFTER the cancel (a real fetch would too)
+      const t = autoSetup({ wrapFetch: hold.wrap });
+      await toPasskeyStep(t);
+      armed = true;
+      const p = t.controller.createPasskey();
+      await vi.waitFor(() => expect(hold.pending()).toBe(1));
+      expect(t.controller.getState()).toMatchObject({ screen: "enrol", step: "passkey", busy: true });
+      expect(t.api.hasSession()).toBe(true); // registerFirst has adopted the first session
+      t.doc.hide();
+      if (path === "return") {
+        t.clock.jump(AUTO_LOCK_HIDDEN_MS);
+        t.doc.show();
+      } else t.clock.advance(AUTO_LOCK_HIDDEN_MS);
+      expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
+      const afterCancel = t.states.length;
+      hold.release();
+      await p;
+      await tick(80);
+      expect(t.states.slice(afterCancel).map((x) => x.screen)).toEqual([]); // nothing was drawn after the cancel
+      expect(t.controller.getState()).toEqual(STOPPED_SCREEN);
+      expect(t.api.hasSession()).toBe(false);
+      expect(t.w.server.state.revokedSessions.size).toBe(1);
+      expect(t.w.server.sessions()).toEqual([]);
+      const revoke = t.sent.filter((r) => r.authorization !== null && /\/sign-out$/.test(r.url));
+      expect(revoke).toHaveLength(1);
+      expect(revoke[0]).toMatchObject({ authorization: `Bearer ${t.w.server.issuedTokens[0]}`, hasSessionAtSend: false });
+    });
   });
 
   it("the credentials request is already on the wire when the limit passes: cancelled, and the first session the server opens is revoked on arrival and never held", async () => {

@@ -22,7 +22,7 @@ import type {
   TrailProgrammeUpsert,
 } from "../api/admin-routes";
 import type { PartnerApi, SessionEndReason } from "../api/client";
-import { isPartnerApiError } from "../api/errors";
+import { isPartnerApiError, PartnerApiError } from "../api/errors";
 import type { InviteRole } from "../api/invites-routes";
 import type { AttestKind, OfferRedeemMode, RedeemMethod, StockMoveKind } from "../api/work-routes";
 import type { SessionGrant } from "../api/types";
@@ -275,14 +275,22 @@ export function createController(deps: ControllerDeps): AppController {
       inviteAccept.hold(token);
     },
     // the first session is open: show it, and ask for the first PIN before anything else (design 6.1 step 5). A person who already has one (a recovery) goes home.
+    // The flow can be cancelled while this runs (the hidden-time auto-lock cancels an enrolment, 140.8): `cancel()` drops the flow's state but not the client's
+    // session, so after EVERY read the signal is checked, and a cancelled run throws. The flow's catch then revokes the session it holds (copy, wipe, send) and
+    // shows nothing; without the checks a read that settled after the cancel put the invitee's forced first-PIN screen back on top of a live session.
     async onSession(grant: SessionGrant, signal: AbortSignal) {
+      const stillWanted = () => {
+        if (signal.aborted) throw new PartnerApiError("aborted");
+      };
       const session = await api.session(signal);
+      stillWanted();
       let mode: "set" | "change" | "locked" = "set";
       try {
         mode = await pinSetupMode(api);
       } catch {
         // unknown: ask for a PIN, the safe side
       }
+      stillWanted();
       const panel = mode === "set" ? ({ kind: "pin-setup", mode: "set", forced: true, canSkip: false, busy: false, notice: null } as const) : null;
       const pending = inviteAccept.hasPending();
       set({
