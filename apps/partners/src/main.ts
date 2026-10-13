@@ -8,7 +8,7 @@
 import { createPartnerApi } from "./api/client";
 import { createController } from "./app/controller";
 import { consumeInviteLink } from "./app/invite-link";
-import { installPageLifecycle } from "./app/lifecycle";
+import { installAutoLock, installPageLifecycle } from "./app/lifecycle";
 import { LOCALES, resolveLocale, type Locale } from "./i18n";
 import { render } from "./ui/render";
 
@@ -39,6 +39,7 @@ function draw(): void {
 
 controller.subscribe(draw);
 installPageLifecycle(window, api, controller);
+installAutoLock(controller, { document });
 draw();
 // an invite link opens the enrolment screen; the token is read from the fragment and removed from the address bar (invite-link.ts)
 consumeInviteLink(link, controller);
