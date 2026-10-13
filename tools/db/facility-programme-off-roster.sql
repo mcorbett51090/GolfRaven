@@ -1,9 +1,9 @@
 -- tools/db/facility-programme-off-roster.sql
 --
--- READ-ONLY. Lists every app.facility_programme row whose facility is NOT on its trail's CURRENT roster: the rows migration 0110 (design section 140) would now refuse to create, or to leave accepted, and
+-- READ-ONLY. Lists every app.facility_programme row whose facility is NOT on its trail's CURRENT roster: the rows migration 0110 (design section 141) would now refuse to create, or to leave accepted, and
 -- the rows a bug or a hand edit made BEFORE it. Why you want this list: private.has_facility_scope (0007) lets an OPERATOR reach any facility for which a facility_programme row exists for a trail it
 -- operates, so a row whose facility is not on the trail's roster is a standing grant of reach to a facility that has nothing to do with that trail (design section 138.1). 0110 fixes the WRITE only; a row
--- written earlier stays a grant until somebody removes it or the read is fixed (section 138.3, option B). Nothing is deployed as of section 140, so none are expected; run this ONCE at the first deploy,
+-- written earlier stays a grant until somebody removes it or the read is fixed (section 138.3, option B). Nothing is deployed as of section 141, so none are expected; run this ONCE at the first deploy,
 -- after the catalogue has been imported and before the first operator signs in.
 --
 -- The roster test is the one the editor applies (0110): a member of the trail's LATEST roster version (the greatest catalog_roster_version.version) with removed_on IS NULL (any non-null date, past or

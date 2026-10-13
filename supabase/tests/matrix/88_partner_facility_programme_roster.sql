@@ -1,5 +1,5 @@
 -- 88_partner_facility_programme_roster.sql
--- P5 section 140 (0110): the programme editor refuses a facility that is not on the trail's CURRENT roster (the owner's decision A on the section 138 finding). Before 0110
+-- P5 section 141 (0110): the programme editor refuses a facility that is not on the trail's CURRENT roster (the owner's decision A on the section 138 finding). Before 0110
 -- partner_facility_programme_upsert_for_partner wrote a facility_programme row for ANY facility, and private.has_facility_scope lets an operator reach any facility for which such a row exists for
 -- a trail it operates, so an operator could write itself reach to a facility that has nothing to do with its trail (138.1 / 138.4).
 --
@@ -224,11 +224,11 @@ SELECT ok((SELECT position('v_uid := private.partner_authorize(NULL, p_trail_id,
               AND position('fp.facility_id = p_facility_id FOR NO KEY UPDATE;' IN prosrc) < position('catalog_roster_member' IN prosrc)
            FROM pg_proc WHERE oid = 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure),
   'the leading partner_authorize call (check 14) is still first; after no_trail the existing row is locked (FOR NO KEY UPDATE), then the roster is read, and both come BEFORE the write');
-SELECT ok((SELECT obj_description(oid, 'pg_proc') LIKE '0059/0110 (S6, section 140)%22023%DEMOTION%' FROM pg_proc WHERE oid = 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure),
+SELECT ok((SELECT obj_description(oid, 'pg_proc') LIKE '0059/0110 (S6, section 141)%22023%DEMOTION%' FROM pg_proc WHERE oid = 'private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text)'::regprocedure),
   'the function comment says 0110, the refusal and the demotion exception');
 SET LOCAL ROLE service_role;
 SELECT is((SELECT note FROM private.function_inventory WHERE function_name = 'partner_facility_programme_upsert_for_partner'),
-  '0059/0110 (S6, section 140): edge_partner only; class A3; facility_programme upsert; the facility must be on the trail''s current roster (22023)', 'the function_inventory note says 0110');
+  '0059/0110 (S6, section 141): edge_partner only; class A3; facility_programme upsert; the facility must be on the trail''s current roster (22023)', 'the function_inventory note says 0110');
 SELECT ok((SELECT expected_edge_partner AND NOT expected_anon AND NOT expected_authenticated AND NOT expected_service_role AND NOT expected_edge_actor AND NOT expected_edge_system
            FROM private.function_inventory WHERE function_name = 'partner_facility_programme_upsert_for_partner'), 'and its registered EXECUTE set is still edge_partner alone');
 SELECT is((SELECT count(*)::int FROM private.definer_policy_allowlist
@@ -305,7 +305,7 @@ SET LOCAL ROLE edge_partner;
 SELECT private.bind_partner_session(:'th_op');
 RESET ROLE;
 SELECT is(pg_temp.as_definer($q$SELECT count(*) FILTER (WHERE trail_id = 'trl_t')::text || '/' || count(*) FILTER (WHERE trail_id <> 'trl_t')::text FROM app.catalog_roster_member$q$),
-  '2/0', 'B5: bound to the operator of trl_t: its two roster members (helpers.sql) and NOT ONE member of any other trail (the section 140 fixtures hold 17)');
+  '2/0', 'B5: bound to the operator of trl_t: its two roster members (helpers.sql) and NOT ONE member of any other trail (the section 141 fixtures hold 17)');
 SELECT is(pg_temp.as_definer($q$SELECT count(*) FILTER (WHERE trail_id = 'trl_t')::text || '/' || count(*) FILTER (WHERE trail_id <> 'trl_t')::text FROM app.catalog_roster_version$q$),
   '1/0', 'B6: and its roster version, no other trail''s');
 SELECT is(pg_temp.as_definer($q$SELECT id FROM app.catalog_roster_member LIMIT 1$q$), 'ERR 42501', 'B7: the roster member id is not a granted column (permission denied, not an empty result)');

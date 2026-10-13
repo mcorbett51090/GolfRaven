@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/db/test-programme-roster-race.sh
 #
-# P5 section 140 (0110): "a roster change racing the programme editor". The editor (private.partner_facility_programme_upsert_for_partner) refuses a facility that is not on the trail's LATEST roster
+# P5 section 141 (0110): "a roster change racing the programme editor". The editor (private.partner_facility_programme_upsert_for_partner) refuses a facility that is not on the trail's LATEST roster
 # version. pgTAP runs inside ONE transaction on ONE connection, so it cannot show what happens when the importer commits a new roster version while an upsert is in flight; this script is the part that
 # needs TWO REAL, concurrent sessions. The ACTION session is a real `edge_gateway` login (trust-authenticated in the harness cluster) that switches to edge_partner, binds a real partner session (an
 # operator of the test trail, at aal 2 with a live second factor) and calls the definer; the IMPORTER session is the harness role acting as service_role, writing roster versions the way the catalogue

@@ -22,7 +22,7 @@ import type {
   TrailProgrammeUpsert,
 } from "../api/admin-routes";
 import type { PartnerApi, SessionEndReason } from "../api/client";
-import { isPartnerApiError } from "../api/errors";
+import { isPartnerApiError, PartnerApiError } from "../api/errors";
 import type { InviteRole } from "../api/invites-routes";
 import type { AttestKind, OfferRedeemMode, RedeemMethod, StockMoveKind } from "../api/work-routes";
 import type { SessionGrant } from "../api/types";
@@ -42,20 +42,30 @@ import { createWorkScreens } from "./work";
 
 export type { AppState, EnrolState, Notice, Panel, SignedInState, WorkView } from "./state";
 
+/** How a lock was asked for. A plain `lock()` is the Lock button. */
+export interface LockOptions {
+  /** The page locked itself after being hidden too long (lifecycle.ts): the screen then says why ("locked-away"). Everything else is the same lock. */
+  readonly away?: boolean;
+  /** The page may be going away (it is hidden, so it may be frozen next): send the revoking request as a keepalive request, as `pagehide` does. */
+  readonly keepalive?: boolean;
+}
+
 export interface AppController extends StepUp {
   getState(): AppState;
   subscribe(listener: (state: AppState) => void): () => void;
   signIn(): Promise<void>;
-  cancelSignIn(): void;
+  /** Cancel (the button), or the hidden-time auto-lock (`keepalive`: the page is hidden and may be frozen next, so the revoke of a session already opened must be able to outlive it). */
+  cancelSignIn(opts?: { keepalive?: boolean }): void;
   refresh(): Promise<void>;
   signOut(): Promise<void>;
-  lock(): Promise<void>;
+  lock(opts?: LockOptions): Promise<void>;
   /** The page went away (pagehide) or came back from the back/forward cache (pageshow persisted): signed-out, nothing held, no matter what the state was. */
   reset(opts?: { keepalive?: boolean }): void;
 
   /** Invite and enrolment acceptance (pre-session; see enrol-flow.ts). `startEnrol({ token })` is what an invite link calls. */
   startEnrol(opts?: { token?: string }): void;
-  cancelEnrol(): void;
+  /** Back to sign-in. `away`: the hidden-time auto-lock cancelled it, and the screen says the enrolment stopped (the accepted invite is spent). */
+  cancelEnrol(opts?: { away?: boolean }): void;
   requestEnrolCode(pasted?: string): Promise<void>;
   submitEnrolCode(code: string): Promise<void>;
   createPasskey(): Promise<void>;
@@ -266,14 +276,22 @@ export function createController(deps: ControllerDeps): AppController {
       inviteAccept.hold(token);
     },
     // the first session is open: show it, and ask for the first PIN before anything else (design 6.1 step 5). A person who already has one (a recovery) goes home.
+    // The flow can be cancelled while this runs (the hidden-time auto-lock cancels an enrolment, 140.8): `cancel()` drops the flow's state but not the client's
+    // session, so after EVERY read the signal is checked, and a cancelled run throws. The flow's catch then revokes the session it holds (copy, wipe, send) and
+    // shows nothing; without the checks a read that settled after the cancel put the invitee's forced first-PIN screen back on top of a live session.
     async onSession(grant: SessionGrant, signal: AbortSignal) {
+      const stillWanted = () => {
+        if (signal.aborted) throw new PartnerApiError("aborted");
+      };
       const session = await api.session(signal);
+      stillWanted();
       let mode: "set" | "change" | "locked" = "set";
       try {
         mode = await pinSetupMode(api);
       } catch {
         // unknown: ask for a PIN, the safe side
       }
+      stillWanted();
       const panel = mode === "set" ? ({ kind: "pin-setup", mode: "set", forced: true, canSkip: false, busy: false, notice: null } as const) : null;
       const pending = inviteAccept.hasPending();
       set({
@@ -291,6 +309,11 @@ export function createController(deps: ControllerDeps): AppController {
   });
   /** The sign-in in progress; null when none, or once it was cancelled (the flow then drops whatever it produces). */
   let abort: AbortController | null = null;
+  /**
+   * The notice the session end that `end()` is causing right now should show instead of its reason's default (a lock that came from the hidden-time
+   * auto-lock says "locked-away"). Non-null only for the synchronous span of `op()`, which is where the client wipes the token and tells the listener below.
+   */
+  let endNotice: Notice | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   const listeners = new Set<(s: AppState) => void>();
 
@@ -308,7 +331,7 @@ export function createController(deps: ControllerDeps): AppController {
   api.onSessionEnded((reason) => {
     panels.sessionEnded();
     inviteAccept.reset();
-    if (state.screen === "signed-in") set({ screen: "signed-out", notice: NOTICE_FOR_REASON[reason] });
+    if (state.screen === "signed-in") set({ screen: "signed-out", notice: endNotice ?? NOTICE_FOR_REASON[reason] });
   });
 
   /** After a 429 the sign-in button is disabled for the server's Retry-After. */
@@ -334,7 +357,13 @@ export function createController(deps: ControllerDeps): AppController {
     if (state.screen !== "signed-in") return;
     let failed = false;
     // `op` wipes the token and notifies BEFORE it sends (client.ts): the listener above has moved the screen to signed-out by the time it returns its promise
-    const pending = op();
+    endNotice = { kind: plain } as Notice;
+    let pending: Promise<void>;
+    try {
+      pending = op();
+    } finally {
+      endNotice = null;
+    }
     if (state.screen === "signed-in") set({ screen: "signed-out", notice: { kind: plain } as Notice });
     try {
       await pending;
@@ -404,13 +433,13 @@ export function createController(deps: ControllerDeps): AppController {
       }
     },
 
-    cancelSignIn() {
+    cancelSignIn(opts = {}) {
       if (state.screen !== "signing-in" || abort === null) return;
       abort.abort();
       abort = null;
       // the screen leaves "signing-in" at once, whatever the request on the wire is doing; a token that already exists is revoked now, and one that is
       // still on its way is revoked on arrival (api.verify)
-      void dropSession();
+      void dropSession(opts.keepalive === true);
       set({ screen: "signed-out", notice: CANCELLED });
     },
 
@@ -429,7 +458,7 @@ export function createController(deps: ControllerDeps): AppController {
     },
 
     startEnrol: (opts) => enrol.start(opts),
-    cancelEnrol: () => enrol.cancel(),
+    cancelEnrol: (opts = {}) => enrol.cancel(opts.away === true ? { kind: "enrol-stopped" } : undefined),
     requestEnrolCode: (pasted) => enrol.requestCode(pasted),
     submitEnrolCode: (code) => enrol.submitCode(code),
     createPasskey: () => enrol.createPasskey(),
@@ -549,7 +578,7 @@ export function createController(deps: ControllerDeps): AppController {
 
     signOut: () => end(() => api.signOut(), "sign-out-offline", "signed-out"),
 
-    lock: () => end(() => api.lock(), "lock-offline", "locked"),
+    lock: (opts = {}) => end(() => api.lock({ keepalive: opts.keepalive === true }), "lock-offline", opts.away === true ? "locked-away" : "locked"),
 
     reset(opts = {}) {
       abort?.abort();

@@ -339,7 +339,7 @@ describe("thrown refusals roll back and map", () => {
     expect((await call(deps, "POST", "programme/trail", { headers: auth(), body: TRAIL_BODY })).status).toBe(401);
   });
 
-  it("0110 (section 140): a facility the database refuses as not on the trail's roster is 22023, answered 422 invalid_request, rolled back and never committed; a refused authority is 403", async () => {
+  it("0110 (section 141): a facility the database refuses as not on the trail's roster is 22023, answered 422 invalid_request, rolled back and never committed; a refused authority is 403", async () => {
     const { w, deps } = world();
     w.throwIn = "facilityUpsert";
     w.throwWith = new PartnerInvalidArgument();

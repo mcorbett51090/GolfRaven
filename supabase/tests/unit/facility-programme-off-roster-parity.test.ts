@@ -1,10 +1,10 @@
 // supabase/tests/unit/facility-programme-off-roster-parity.test.ts
 //
-// P5 section 140 (0110): the roster rule exists in FOUR places that must stay one rule, and a fifth fact (the pinned pre-image) must stay true.
+// P5 section 141 (0110): the roster rule exists in FOUR places that must stay one rule, and a fifth fact (the pinned pre-image) must stay true.
 //   1. the definer: the EXISTS in migration 0110 (private.partner_facility_programme_upsert_for_partner);
 //   2. the owner's query: tools/db/facility-programme-off-roster.sql (run once at the first deploy to list the rows written before the fix);
 //   3. the same query inside matrix 88 (which runs it against the definer, row by row);
-//   4. the same query in the design log (section 140), where the owner reads it;
+//   4. the same query in the design log (section 141), where the owner reads it;
 //   5. the md5 pinned in 0110 must be the md5 of the 0059 function source, and the new body must be that source plus the listed edit and nothing else.
 // A change to one copy that is not made to the others turns the owner's list into a lie about the rule the editor enforces; this test is what makes that a build failure.
 import { createHash } from "node:crypto";
@@ -44,7 +44,7 @@ function markedAs(text: string, begin: string, end: string, where: string): stri
   return text.slice(a, b);
 }
 
-describe("section 140: the off-roster query and the editor's check are one rule", () => {
+describe("section 141: the off-roster query and the editor's check are one rule", () => {
   const q = squash(marked(tool, "tools/db/facility-programme-off-roster.sql"));
 
   it("the query is not empty and is a read-only SELECT", () => {
@@ -56,7 +56,7 @@ describe("section 140: the off-roster query and the editor's check are one rule"
     expect(squash(marked(matrix, "matrix 88"))).toBe(q);
   });
 
-  it("the design log (section 140) prints the same text", () => {
+  it("the design log (section 141) prints the same text", () => {
     expect(squash(marked(design, "partner-auth-design.md"))).toBe(q);
   });
 
@@ -87,7 +87,7 @@ describe("section 140: the off-roster query and the editor's check are one rule"
   });
 });
 
-describe("section 140: 0110 is the 0059 function plus the one listed edit, and changes no data", () => {
+describe("section 141: 0110 is the 0059 function plus the one listed edit, and changes no data", () => {
   // prosrc of the 0059 definer: the text between the dollar quotes of its CREATE FUNCTION, verbatim
   const m59 = /CREATE FUNCTION private\.partner_facility_programme_upsert_for_partner\([\s\S]*?\nAS \$\$([\s\S]*?)\$\$;/.exec(mig0059);
   const src59 = m59 ? m59[1]! : "";

@@ -122,7 +122,7 @@ async function signInAs(uid: string): Promise<Member> {
 
 /**
  * A trail of its own: a ledger row and a catalog trail (the programme upsert answers `not_found` for a trail the ledger does not know), and, unless `roster` is false, a roster (version 1) that
- * names fac_x and fac_y as facility members: since 0110 (section 140) the facility programme editor refuses a facility that is not on the trail's current roster, so a trail that is going to be
+ * names fac_x and fac_y as facility members: since 0110 (section 141) the facility programme editor refuses a facility that is not on the trail's current roster, so a trail that is going to be
  * given facility programmes needs one.
  */
 async function newTrail(roster = true): Promise<string> {
@@ -832,7 +832,7 @@ async function adminMember(): Promise<Member> {
 }
 
 Deno.test(
-  "0110 / S6 (section 140): a facility that is not on the trail's current roster is refused through the real handler, 422 invalid_request, and nothing is stored; an unknown facility is the same 422 (it was a 500); each way onto the roster admits it, a later version that drops it refuses a write that would keep it accepted and leaves the stored row, while a demotion to left is allowed and cannot be taken back; a manager is 403 first; an admin is held to the same rule",
+  "0110 / S6 (section 141): a facility that is not on the trail's current roster is refused through the real handler, 422 invalid_request, and nothing is stored; an unknown facility is the same 422 (it was a 500); each way onto the roster admits it, a later version that drops it refuses a write that would keep it accepted and leaves the stored row, while a demotion to left is allowed and cannot be taken back; a manager is 403 first; an admin is held to the same rule",
   DT,
   async () => {
     const trail = await newTrail(); // roster version 1: fac_x and fac_y

@@ -1,6 +1,6 @@
 -- 0110_partner_facility_programme_roster.sql
 --
--- P5 section 140 (the owner's decision A on the finding of section 138): the programme editor refuses a facility that is not on the trail's CURRENT roster.
+-- P5 section 141 (the owner's decision A on the finding of section 138): the programme editor refuses a facility that is not on the trail's CURRENT roster.
 --
 -- WHAT WAS WRONG (observed on the real database, section 138.1). private.has_facility_scope (0007, E6) lets an OPERATOR reach a facility when app.facility_programme holds ANY row
 -- (trail, facility) for a trail the operator is scoped to. private.partner_facility_programme_upsert_for_partner (0059, class A3) writes those rows for ANY p_facility_id: its only
@@ -32,7 +32,7 @@
 -- Only then do the grants, the policies and the function change. After the redefinition the migration asserts again that the live source IS that edited source, that every attribute is unchanged, and that the new reads are exactly the intended ones. (A post-check alone leaves the redefinition applied when
 -- a runner does not wrap the file in a transaction; the pin does not.)
 --
--- DELIBERATELY NOT HERE (section 140): the G3 participation filter (a declined / left facility giving no reach) is a separate decision the owner has not made; rows written BEFORE
+-- DELIBERATELY NOT HERE (section 141): the G3 participation filter (a declined / left facility giving no reach) is a separate decision the owner has not made; rows written BEFORE
 -- this migration are not touched, listed or repaired by it (the query in tools/db/facility-programme-off-roster.sql lists them for the first deploy); any other consumer of
 -- has_facility_scope. Nothing from 0001-0109 is edited and this migration changes no data.
 
@@ -72,7 +72,7 @@ UPDATE r110_fn SET exp_src = pg_temp.r110_edit(old_src,
     $n1$    RETURN QUERY SELECT 'no_trail'::text;
     RETURN;
   END IF;
-  -- 0110 (section 140): the facility is on THIS trail's CURRENT roster: a member of the trail's latest roster version, not removed, that names the facility, a course of it, a hole of it, or a
+  -- 0110 (section 141): the facility is on THIS trail's CURRENT roster: a member of the trail's latest roster version, not removed, that names the facility, a course of it, a hole of it, or a
   -- course of it inside any_of_course_ids. An unknown facility is the same refusal. The check precedes the write, so a refused call writes (and audits) nothing.
   -- ONE exception, because it cannot add reach: an EXISTING row for this (trail, facility) may be DEMOTED (resulting participation declined or left) whether or not the facility is on the roster, so
   -- the operator keeps its off-switch for the player lane (participation = accepted is the player-lane gate) after an import drops the facility. Creating a row (an INSERT, whatever its participation: a
@@ -214,7 +214,7 @@ BEGIN
     RETURN QUERY SELECT 'no_trail'::text;
     RETURN;
   END IF;
-  -- 0110 (section 140): the facility is on THIS trail's CURRENT roster: a member of the trail's latest roster version, not removed, that names the facility, a course of it, a hole of it, or a
+  -- 0110 (section 141): the facility is on THIS trail's CURRENT roster: a member of the trail's latest roster version, not removed, that names the facility, a course of it, a hole of it, or a
   -- course of it inside any_of_course_ids. An unknown facility is the same refusal. The check precedes the write, so a refused call writes (and audits) nothing.
   -- ONE exception, because it cannot add reach: an EXISTING row for this (trail, facility) may be DEMOTED (resulting participation declined or left) whether or not the facility is on the roster, so
   -- the operator keeps its off-switch for the player lane (participation = accepted is the player-lane gate) after an import drops the facility. Creating a row (an INSERT, whatever its participation: a
@@ -261,7 +261,7 @@ END
 $$;
 
 COMMENT ON FUNCTION private.partner_facility_programme_upsert_for_partner(text, text, text, boolean, boolean, text, boolean, text, text) IS
-  '0059/0110 (S6, section 140). edge_partner only; class A3 (operator of the trail, or an admin). Upsert facility_programme (not pin_epoch). The facility must be on the trail''s current roster (the latest roster version, a member not removed that names the facility or a course / hole / any_of course of it), else 22023, for an operator and an admin alike; the one exception is the DEMOTION of an existing row (resulting participation declined or left), which cannot add reach. Statuses: ok | no_trail.';
+  '0059/0110 (S6, section 141). edge_partner only; class A3 (operator of the trail, or an admin). Upsert facility_programme (not pin_epoch). The facility must be on the trail''s current roster (the latest roster version, a member not removed that names the facility or a course / hole / any_of course of it), else 22023, for an operator and an admin alike; the one exception is the DEMOTION of an existing row (resulting participation declined or left), which cannot add reach. Statuses: ok | no_trail.';
 
 RESET ROLE;
 REVOKE CREATE ON SCHEMA private FROM private_definer;
@@ -289,7 +289,7 @@ BEGIN
   IF v_src IS DISTINCT FROM r.exp_src OR v_src = r.old_src THEN
     RAISE EXCEPTION '0110: partner_facility_programme_upsert_for_partner differs from its previous definition by more than the intended roster check';
   END IF;
-  IF v_cmt IS NULL OR v_cmt NOT LIKE '0059/0110 (S6, section 140)%' THEN
+  IF v_cmt IS NULL OR v_cmt NOT LIKE '0059/0110 (S6, section 141)%' THEN
     RAISE EXCEPTION '0110: the comment of partner_facility_programme_upsert_for_partner was not updated';
   END IF;
   -- the leading authorisation call is still there and still first (check 14), and the roster check precedes the write
@@ -345,7 +345,7 @@ CREATE POLICY current_user_edit_function_inventory_0110 ON private.function_inve
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 
 UPDATE private.function_inventory
-SET note = '0059/0110 (S6, section 140): edge_partner only; class A3; facility_programme upsert; the facility must be on the trail''s current roster (22023)'
+SET note = '0059/0110 (S6, section 141): edge_partner only; class A3; facility_programme upsert; the facility must be on the trail''s current roster (22023)'
 WHERE schema_name = 'private'
   AND function_name = 'partner_facility_programme_upsert_for_partner';
 
@@ -356,10 +356,10 @@ GRANT INSERT, UPDATE ON private.definer_policy_allowlist TO CURRENT_USER;
 CREATE POLICY current_user_seed_definer_policy_allowlist_0110 ON private.definer_policy_allowlist
   FOR ALL TO CURRENT_USER USING (true) WITH CHECK (true);
 INSERT INTO private.definer_policy_allowlist (schema_name, table_name, policy_name, command, scoped, note, role_name) VALUES
-  ('app', 'catalog_roster_member', 'pd_partner_roster_read_member', 'SELECT', true, '0110 (section 140): roster members of a trail the bound partner member operates (or an admin); the programme editor''s roster check', 'private_definer'),
-  ('app', 'catalog_roster_version', 'pd_partner_roster_read_version', 'SELECT', true, '0110 (section 140): roster versions of a trail the bound partner member operates (or an admin); the latest version for the roster check', 'private_definer'),
-  ('app', 'catalog_course', 'pd_partner_roster_read_course', 'SELECT', true, '0110 (section 140): course -> facility mapping (public catalogue data) under a partner binding; the roster check', 'private_definer'),
-  ('app', 'catalog_hole', 'pd_partner_roster_read_hole', 'SELECT', true, '0110 (section 140): hole -> course mapping (public catalogue data) under a partner binding; the roster check', 'private_definer');
+  ('app', 'catalog_roster_member', 'pd_partner_roster_read_member', 'SELECT', true, '0110 (section 141): roster members of a trail the bound partner member operates (or an admin); the programme editor''s roster check', 'private_definer'),
+  ('app', 'catalog_roster_version', 'pd_partner_roster_read_version', 'SELECT', true, '0110 (section 141): roster versions of a trail the bound partner member operates (or an admin); the latest version for the roster check', 'private_definer'),
+  ('app', 'catalog_course', 'pd_partner_roster_read_course', 'SELECT', true, '0110 (section 141): course -> facility mapping (public catalogue data) under a partner binding; the roster check', 'private_definer'),
+  ('app', 'catalog_hole', 'pd_partner_roster_read_hole', 'SELECT', true, '0110 (section 141): hole -> course mapping (public catalogue data) under a partner binding; the roster check', 'private_definer');
 UPDATE private.definer_policy_allowlist al
 SET using_expr = pg_get_expr(pol.polqual, pol.polrelid),
     with_check_expr = pg_get_expr(pol.polwithcheck, pol.polrelid)

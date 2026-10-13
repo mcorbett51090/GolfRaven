@@ -173,7 +173,7 @@ SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.oid IN ('private.course_p
 SELECT is((SELECT count(*)::int FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.proname IN ('marker_scan_for_actor', 'marker_cosignal_attach_for_actor', 'course_pin_attempt_for_actor', 'course_qr_public_key_for_actor')
              AND p.pronargs >= 1 AND pg_get_function_identity_arguments(p.oid) ~* '(^|, )p_(user|uid|actor)'), 0, 'no `_for_actor` definer takes a user id argument: a wrong uid cannot even be expressed');
 
--- 0110 (section 140) narrowed this from "no private function reads the roster" to "exactly ONE does, and it is the programme editor": S2a item 10 gave the programme editor the job of keeping the
+-- 0110 (section 141) narrowed this from "no private function reads the roster" to "exactly ONE does, and it is the programme editor": S2a item 10 gave the programme editor the job of keeping the
 -- programme in step with the roster, and 0110 is where it started doing it (it refuses a facility that is not on the trail's current roster). The player lane is still pinned: a SECOND reader, such as a
 -- scan or a co-signal definer, makes this array differ and fails the cell.
 SELECT is((SELECT coalesce(array_agg(p.proname::text ORDER BY p.proname), ARRAY[]::text[]) FROM pg_proc p WHERE p.pronamespace = 'private'::regnamespace AND p.prosrc ~ 'catalog_roster'),
