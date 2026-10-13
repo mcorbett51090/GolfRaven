@@ -26,8 +26,8 @@ import type { EnrolState, Host, Notice } from "./state";
 export interface EnrolFlow {
   /** Opens the enrolment screen from sign-in. With a token (from a link) the field is skipped; without one the person pastes it. */
   start(opts?: { token?: string }): void;
-  /** Back to sign-in; drops the token and the challenge, and aborts a ceremony that is waiting. */
-  cancel(): void;
+  /** Back to sign-in; drops the token and the challenge, and aborts a ceremony that is waiting. `notice` is shown on the sign-in screen in the same transition. */
+  cancel(notice?: Notice): void;
   /** Step 1. `pasted` is used only when no token is held yet; it may be the whole link or just the token. */
   requestCode(pasted?: string): Promise<void>;
   /** Step 2. */
@@ -118,10 +118,10 @@ export function createEnrolFlow(deps: EnrolDeps): EnrolFlow {
       });
     },
 
-    cancel() {
+    cancel(notice) {
       if (host.getState().screen !== "enrol") return;
       drop();
-      host.set({ screen: "signed-out", notice: null });
+      host.set({ screen: "signed-out", notice: notice ?? null });
     },
 
     async requestCode(pasted) {

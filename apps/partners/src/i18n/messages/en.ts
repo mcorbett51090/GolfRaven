@@ -15,6 +15,7 @@ export const en = {
   "signIn.cancel": "Cancel",
 
   "notice.locked": "Locked. Sign in again with your passkey to continue.",
+  "notice.lockedAway": "Locked because you were away. Sign in again with your passkey to continue.",
   "notice.signedOut": "You are signed out.",
   "notice.expired": "Your session has ended. Sign in again.",
   "notice.signOutOffline": "You are signed out on this device, but the server could not be reached. The session will end on its own.",
@@ -82,6 +83,7 @@ export const en = {
   "notice.enrolExistingMember": "You already have a passkey. Sign in with it, then join the organisation from the home screen.",
   "notice.enrolRecoverRequired": "Your account needs to be recovered first. Ask a manager for help.",
   "notice.enrolSaved": "Your passkey is saved. Sign in with it to continue.",
+  "notice.enrolStopped": "Enrolment stopped because the page was left open. Ask a manager for a new link.",
   "notice.enrolCodeSent": "If the invite is valid, a code was emailed to the address it was sent to. Enter it below.",
   "notice.pinSet": "Your PIN is set.",
   "notice.pinChanged": "Your PIN is changed.",
