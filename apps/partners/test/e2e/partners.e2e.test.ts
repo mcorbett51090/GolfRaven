@@ -889,11 +889,15 @@ suite("apps/partners in Chromium", () => {
       const now = await w.page.evaluate(() => Date.now());
       await w.page.clock.setSystemTime(now + ms);
     };
-    /** The app with Playwright's clock installed from the first line and then PAUSED: time moves only when a cell says so (`wallClockJump`, or `clock.runFor` for the timers). */
+    /**
+     * The app with Playwright's clock installed from the first line and then PAUSED: time moves only when a cell says so (`wallClockJump`, or `clock.runFor` for the timers).
+     * The pause target is 10 s ahead of the page's clock, not 1 ms: an installed clock keeps running between reading it and pausing it, and a target already in the
+     * past makes `pauseAt` throw ("Cannot fast-forward to the past"), which a loaded machine hit (11 of the 13 cells failed on a 300 ms gap with the old 1 ms).
+     */
     const openFakeClock = async (path = "/") => {
       const w = await open(path, { fakeClock: true });
       const now = await w.page.evaluate(() => Date.now());
-      await w.page.clock.pauseAt(now + 1);
+      await w.page.clock.pauseAt(now + 10_000);
       return w;
     };
     const lockRequests = () => server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-session/lock"));
