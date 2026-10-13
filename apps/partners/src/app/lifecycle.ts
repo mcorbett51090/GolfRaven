@@ -17,8 +17,12 @@
  * (the same lock the Lock button does: token wiped and listeners told first, then `POST lock` revokes the session). Two paths, because a hidden page's
  * timers can be throttled or the page frozen outright (iOS suspends a backgrounded page):
  *
- *   - on `visibilitychange` to visible, the wall-clock time since it went hidden is compared with the limit. This is the path that is reliable: it needs no
- *     timer to have run. `Date.now()` is used because a frozen page's monotonic clock may not advance while the wall clock does;
+ *   - on `visibilitychange` to visible, the time since it went hidden is compared with the limit. This is the path that is reliable: it needs no timer to
+ *     have run. TWO clocks are read, and the page locks if EITHER says the limit has passed (or if either is not a sensible number): the wall clock
+ *     (`Date.now()`: it keeps counting while a frozen page's monotonic clock may stand still, e.g. device asleep) and the monotonic clock
+ *     (`performance.now()`: it cannot be set, so someone who sets the device's date back into the window cannot make an awake, away device look as if it
+ *     had been away briefly). A monotonic clock never runs faster than real time and a wall clock that jumps forward only locks early, which costs one
+ *     passkey tap; neither can make the page lock late;
  *   - a timer set when the page went hidden locks it the moment the limit passes, if the page is still running. Best effort, and the only one that can act
  *     while the page is still hidden (so the revoke can reach the server before the device sleeps).
  *
@@ -61,6 +65,8 @@ export interface AutoLockDeps {
   readonly document: VisibilitySource;
   /** Wall-clock milliseconds. Default: `Date.now()`, looked up at call time. Injected for tests. */
   readonly nowMs?: () => number;
+  /** Monotonic milliseconds. Default: `performance.now()`, looked up at call time (NaN, which locks, where there is no `performance`). Injected for tests. */
+  readonly monoMs?: () => number;
   /** Default: `setTimeout`. Injected for tests. */
   readonly setTimer?: (fn: () => void, ms: number) => unknown;
   /** Default: `clearTimeout`. Injected for tests. */
@@ -70,10 +76,12 @@ export interface AutoLockDeps {
 export function installAutoLock(controller: AppController, deps: AutoLockDeps): void {
   const doc = deps.document;
   const now = deps.nowMs ?? (() => Date.now());
+  const mono = deps.monoMs ?? (() => (typeof performance === "undefined" ? Number.NaN : performance.now()));
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms));
   const clearTimer = deps.clearTimer ?? ((handle: unknown): void => clearTimeout(handle as ReturnType<typeof setTimeout>));
-  /** When the current hidden stretch began; null while the page is visible (or before the first `hidden`). */
+  /** When the current hidden stretch began, on the wall clock and on the monotonic clock; null while the page is visible (or before the first `hidden`). */
   let hiddenAt: number | null = null;
+  let hiddenMono = Number.NaN;
   let timer: unknown = null;
 
   /** The page has been away long enough. `stillHidden`: this runs from the timer, so the page may be about to be frozen and the revoke must be able to outlive it. */
@@ -93,6 +101,7 @@ export function installAutoLock(controller: AppController, deps: AutoLockDeps): 
     if (doc.visibilityState === "hidden") {
       if (hiddenAt !== null) return; // already hidden: the stretch keeps its start (a repeated event must not buy more time)
       hiddenAt = now();
+      hiddenMono = mono();
       timer = setTimer(() => {
         timer = null;
         if (hiddenAt !== null) awayTooLong(true);
@@ -103,8 +112,12 @@ export function installAutoLock(controller: AppController, deps: AutoLockDeps): 
     const since = hiddenAt;
     hiddenAt = null;
     if (since === null) return; // visible without a preceding hidden: nothing is known about any time away
-    const away = now() - since;
-    // Fail closed: a clock that went backwards (or a value that is not a number) cannot prove the page was away for less than the limit, so it locks.
-    if (!(away >= 0 && away < AUTO_LOCK_HIDDEN_MS)) awayTooLong(false);
+    const wallAway = now() - since;
+    const monoAway = mono() - hiddenMono;
+    // Fail closed, on both clocks: only an elapsed time that is a sensible number BELOW the limit on BOTH of them lets the page stay. A clock that went
+    // backwards (or is not a number) cannot prove the page was away briefly, and a wall clock that someone set back into the window is outvoted by the
+    // monotonic clock, which cannot be set.
+    const brief = (ms: number) => ms >= 0 && ms < AUTO_LOCK_HIDDEN_MS;
+    if (!(brief(wallAway) && brief(monoAway))) awayTooLong(false);
   });
 }

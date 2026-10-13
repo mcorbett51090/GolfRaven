@@ -900,6 +900,16 @@ suite("apps/partners in Chromium", () => {
       await w.page.clock.pauseAt(now + 10_000);
       return w;
     };
+    /**
+     * SYNTHETIC monotonic advance. Playwright's clock moves `Date` and `performance.now()` together (`setSystemTime` moves `Date` alone, `runFor` moves both and fires the
+     * timers), so it cannot model a device that stays awake while its page is frozen and whose date is then set back. This wraps the fake clock's `performance.now()` so
+     * the page's monotonic clock reads `ms` further on: the awake half of that scenario, with no timer run. The date set back is the real `setSystemTime`.
+     */
+    const monotonicAdvance = (w: Watch, ms: number) =>
+      w.page.evaluate((add) => {
+        const orig = performance.now.bind(performance);
+        performance.now = () => orig() + add;
+      }, ms);
     const lockRequests = () => server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-session/lock"));
 
     it("RETURN PATH (the reliable one: the page was frozen, no timer ran): hidden, the wall clock moves 120 000 ms, visible -> locked at once with the new notice; the session is REVOKED, the old token is refused, the token is out of the heap", async () => {
@@ -945,6 +955,36 @@ suite("apps/partners in Chromium", () => {
       await wallClockJump(w, 30_000);
       await setVisibility(w, "visible");
       expect(await screen(w)).toBe("signed-in");
+    });
+
+    it("E1: the date is set BACK into the 2-minute window on a device that stayed awake (the monotonic advance is synthetic, see monotonicAdvance): locked on return, session revoked, token out of the heap. The wall-clock-only mutant is killed here and by the unit cell G1", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      const token = server.issuedTokens[0]!;
+      await setVisibility(w, "hidden");
+      const hiddenAt = await w.page.evaluate(() => Date.now());
+      await monotonicAdvance(w, 600_000); // ten minutes pass on the device
+      await w.page.clock.setSystemTime(hiddenAt + 10_000); // someone sets the date to 10 s after the page went hidden
+      expect(await w.page.evaluate(() => Date.now())).toBe(hiddenAt + 10_000);
+      await setVisibility(w, "visible");
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked because you were away");
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+      expect(lockRequests()[0]!.authorization).toBe(`Bearer ${token}`);
+      expect(await heapContains(w.page, token)).toBe(false);
+    });
+
+    it("E1 control: the date set back into the window while the monotonic clock ALSO says the page was away briefly stays signed in (both clocks agree; the browser has nothing to go on and none is needed)", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      await setVisibility(w, "hidden");
+      const hiddenAt = await w.page.evaluate(() => Date.now());
+      await w.page.clock.setSystemTime(hiddenAt + 10_000);
+      await setVisibility(w, "visible");
+      expect(await screen(w)).toBe("signed-in");
+      await w.page.getByTestId("refresh").click();
+      await w.page.waitForFunction(() => !(document.querySelector('[data-testid="refresh"]') as HTMLButtonElement | null)?.disabled);
+      expect(server.state.revokedSessions.size).toBe(0);
     });
 
     it("the same page in French says the same thing in French", async () => {

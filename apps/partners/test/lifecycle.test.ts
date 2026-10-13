@@ -109,10 +109,12 @@ class FakeDocument extends EventTarget {
 }
 
 /**
- * A wall clock and its timers. The timers run on their OWN monotonic time, as a browser's do, so moving the wall clock never moves a timer.
- * `advance` is time passing normally (both clocks move; every due timer fires, in order, at its own instant). `jump` is the wall clock moving
- * while NO timer runs: a frozen page, a closed lid, a backgrounded iPad, or a clock that is set. The return-path cells use `jump`, so the timer cannot be
- * what locks.
+ * A wall clock, a monotonic clock and timers. The timers run on the monotonic clock, as a browser's do, so moving the wall clock never moves a timer.
+ *   - `advance`: time passing normally. Both clocks move and every due timer fires, in order, at its own instant.
+ *   - `elapse`: time passing for a FROZEN page on a device that is awake. Both clocks move and NO timer runs (iOS freezes a backgrounded page).
+ *   - `jump`: the WALL clock moving alone with no timer: a clock that is set, or a device asleep whose monotonic clock stood still. The return-path cells
+ *     use it, so the timer cannot be what locks.
+ *   - `monoJump`: the monotonic clock moving alone (only to model a broken one).
  */
 function fakeClock(start = 1_800_000_000_000) {
   let wall = start;
@@ -120,8 +122,10 @@ function fakeClock(start = 1_800_000_000_000) {
   let next = 1;
   const timers = new Map<number, { at: number; fn: () => void; ms: number }>();
   let override: (() => number) | null = null;
+  let monoOverride: (() => number) | null = null;
   return {
     now: () => (override === null ? wall : override()),
+    monoNow: () => (monoOverride === null ? mono : monoOverride()),
     setTimer: (fn: () => void, ms: number): unknown => {
       const id = next++;
       timers.set(id, { at: mono + ms, fn, ms });
@@ -146,9 +150,20 @@ function fakeClock(start = 1_800_000_000_000) {
     jump(ms: number): void {
       wall += ms;
     },
+    elapse(ms: number): void {
+      wall += ms;
+      mono += ms;
+    },
+    monoJump(ms: number): void {
+      mono += ms;
+    },
     /** From now on `now()` returns what `f` says (a clock that is broken). */
     breakWith(f: () => number): void {
       override = f;
+    },
+    /** From now on `monoNow()` returns what `f` says. */
+    breakMonoWith(f: () => number): void {
+      monoOverride = f;
     },
     pendingDelays: (): number[] => [...timers.values()].map((v) => v.ms),
   };
@@ -234,7 +249,7 @@ function autoSetup(opts: { wrapFetch?: (f: typeof fetch) => typeof fetch; sheet?
   const clock = fakeClock();
   const target = new EventTarget();
   installPageLifecycle(target, api, controller);
-  installAutoLock(controller, { document: doc, nowMs: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  installAutoLock(controller, { document: doc, nowMs: clock.now, monoMs: clock.monoNow, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
   const pagehide = () => target.dispatchEvent(new Event("pagehide"));
   const pageshow = (persisted: boolean) => target.dispatchEvent(Object.assign(new Event("pageshow"), { persisted }));
   /** The requests that revoke a session: POST lock / POST sign-out, which carry a bearer. */
@@ -260,7 +275,7 @@ function stubController(screen: AppState["screen"]) {
   } as unknown as AppController;
   const doc = new FakeDocument();
   const clock = fakeClock();
-  installAutoLock(controller, { document: doc, nowMs: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  installAutoLock(controller, { document: doc, nowMs: clock.now, monoMs: clock.monoNow, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
   return { calls, doc, clock };
 }
 
@@ -545,6 +560,125 @@ describe("auto-lock: event sequences", () => {
   });
 });
 
+describe("auto-lock: two clocks (a wall clock that is set back must not buy time)", () => {
+  it("G1: the device is awake and the page is frozen for 10 minutes, then someone sets the date back to 10 s after the page went hidden: the wall clock says 10 s, the monotonic clock says 10 minutes, and it LOCKS", async () => {
+    const { controller, doc, clock, api, w, revokes } = autoSetup();
+    await controller.signIn();
+    const token = w.server.issuedTokens[0]!;
+    doc.hide();
+    clock.elapse(600_000); // 10 minutes pass; the frozen page runs no timer
+    clock.jump(-590_000); // the date is set back to hide + 10 s
+    doc.show();
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked-away" } });
+    expect(api.hasSession()).toBe(false);
+    await tick();
+    expect(revokes()).toHaveLength(1);
+    expect(revokes()[0]).toMatchObject({ url: `${API_BASE}/partner-session/lock`, authorization: `Bearer ${token}` });
+    expect(w.server.state.revokedSessions.size).toBe(1);
+  });
+
+  it("the date set back to exactly the moment the page went hidden (a wall-clock elapsed of 0) locks too", async () => {
+    const { controller, doc, clock } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.elapse(300_000);
+    clock.jump(-300_000);
+    doc.show();
+    expect(controller.getState().screen).toBe("signed-out");
+  });
+
+  it.each([
+    [119_999, false],
+    [120_000, true],
+    [120_001, true],
+  ])("the monotonic clock alone is judged on the same limit: %i ms of monotonic time with the wall clock showing none, locked = %s", async (ms, locked) => {
+    const { controller, doc, clock } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.elapse(ms);
+    clock.jump(-ms); // the wall clock is back where it started
+    doc.show();
+    expect(controller.getState().screen).toBe(locked ? "signed-out" : "signed-in");
+  });
+
+  it("both clocks agree on a short absence: it stays (the control for the cells above)", async () => {
+    const { controller, doc, clock, revokes } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.elapse(60_000);
+    doc.show();
+    await tick();
+    expect(controller.getState().screen).toBe("signed-in");
+    expect(revokes()).toHaveLength(0);
+  });
+
+  it("the opposite: the wall clock jumps FORWARD past the limit while the monotonic clock says the page was away briefly. It locks. That is intended: a forward jump can only lock early, which costs one passkey tap, never late", async () => {
+    const { controller, doc, clock } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.jump(130_000);
+    doc.show();
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked-away" } });
+  });
+
+  it("a monotonic clock that is not a number, or that went backwards, locks (fail closed), as the wall clock does", async () => {
+    const nan = autoSetup();
+    await nan.controller.signIn();
+    nan.doc.hide();
+    nan.clock.breakMonoWith(() => Number.NaN);
+    nan.doc.show();
+    expect(nan.controller.getState().screen).toBe("signed-out");
+    const back = autoSetup();
+    await back.controller.signIn();
+    back.doc.hide();
+    back.clock.monoJump(-5_000);
+    back.doc.show();
+    expect(back.controller.getState().screen).toBe("signed-out");
+    const broken = autoSetup(); // not a number already when the page went hidden
+    await broken.controller.signIn();
+    broken.clock.breakMonoWith(() => Number.NaN);
+    broken.doc.hide();
+    broken.doc.show();
+    expect(broken.controller.getState().screen).toBe("signed-out");
+  });
+
+  it("a repeated hidden does not restart the monotonic stretch either: 100 000 + 20 000 ms since the FIRST hide locks with the wall clock set back", async () => {
+    const { controller, doc, clock } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.elapse(100_000);
+    doc.hide();
+    clock.elapse(20_000);
+    clock.jump(-120_000);
+    doc.show();
+    expect(controller.getState().screen).toBe("signed-out");
+  });
+
+  it("a fresh stretch reads both clocks again: after a short hide the next hide starts from now on both", async () => {
+    const { controller, doc, clock } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.elapse(60_000);
+    doc.show();
+    clock.elapse(500_000); // visible for a long time: not an absence
+    doc.hide();
+    clock.elapse(60_000);
+    clock.jump(-60_000);
+    doc.show();
+    expect(controller.getState().screen).toBe("signed-in");
+  });
+
+  it("the timer path does not read either clock: a wall clock set back and a monotonic clock that stands still do not stop it", async () => {
+    const { controller, doc, clock } = autoSetup();
+    await controller.signIn();
+    doc.hide();
+    clock.jump(-1_000_000);
+    clock.breakMonoWith(() => 0);
+    clock.advance(AUTO_LOCK_HIDDEN_MS);
+    expect(controller.getState().screen).toBe("signed-out");
+  });
+});
+
 describe("auto-lock: states that hold no session", () => {
   it("signed out: nothing is sent and the state object is untouched, however long the page is hidden (both paths)", async () => {
     const { controller, doc, clock, sent } = autoSetup();
@@ -736,7 +870,38 @@ describe("auto-lock: the other things in flight", () => {
 });
 
 describe("auto-lock: the real clock and timers when none are injected", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("the monotonic clock defaults to performance.now(), looked up when used: it alone can lock, with the real wall clock showing next to nothing", async () => {
+    const w = makeWorld();
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const doc = new FakeDocument();
+    installAutoLock(controller, { document: doc }); // no clock, no timers
+    await controller.signIn();
+    doc.hide();
+    const real = performance.now.bind(performance);
+    vi.spyOn(performance, "now").mockImplementation(() => real() + AUTO_LOCK_HIDDEN_MS); // spied AFTER install: a reference taken at load would not see it
+    doc.show();
+    expect(controller.getState()).toEqual({ screen: "signed-out", notice: { kind: "locked-away" } });
+  });
+
+  it("a page with no performance object cannot prove an absence was brief, so it locks instead of throwing", async () => {
+    const w = makeWorld();
+    const api = createPartnerApi({ baseUrl: API_BASE, fetch: w.fetch });
+    const controller = createController({ api, webauthn: { credentials: w.auth.credentials, supported: true } });
+    const doc = new FakeDocument();
+    installAutoLock(controller, { document: doc });
+    await controller.signIn();
+    vi.stubGlobal("performance", undefined);
+    doc.hide();
+    doc.show();
+    expect(controller.getState().screen).toBe("signed-out");
+  });
 
   it("defaults to Date.now() and setTimeout, looked up when they are used (so a page-level fake clock, such as Playwright's, drives them)", async () => {
     const w = makeWorld();
