@@ -97,7 +97,7 @@ suite("apps/partners in Chromium", () => {
     readonly requests: string[];
   }
 
-  async function open(path = "/", opts: { ambientCookie?: boolean; bfcache?: boolean } = {}): Promise<Watch> {
+  async function open(path = "/", opts: { ambientCookie?: boolean; bfcache?: boolean; fakeClock?: boolean } = {}): Promise<Watch> {
     if (opts.bfcache) bfBrowser ??= await launchWithBackForwardCache();
     const context = await (opts.bfcache ? bfBrowser! : browser!).newContext();
     contexts.push(context);
@@ -119,6 +119,8 @@ suite("apps/partners in Chromium", () => {
       window.addEventListener("pageshow", (ev) => g.__pageshows.push(ev.persisted));
     });
     const auth = await addVirtualAuthenticator(page, credential, "localhost");
+    // Playwright's clock is installed BEFORE the page loads (its own advice), so every Date and timer the app uses is the fake one from the first line; it is paused by the cell
+    if (opts.fakeClock) await page.clock.install();
     await page.goto(`${pageOrigin}${path}`, { waitUntil: "load" });
     return {
       page,
@@ -861,6 +863,263 @@ suite("apps/partners in Chromium", () => {
       await w.page.waitForFunction(() => (document.querySelector('[data-testid="out"]')?.textContent ?? "").includes("stepUp"));
       expect(JSON.parse((await w.page.getByTestId("out").textContent())!)).toMatchObject({ ok: true, stepUp: "cancelled" });
       expect(wire().filter((r) => r.path.endsWith("/step-up/pin"))).toHaveLength(0);
+    });
+  });
+
+  describe("auto-lock: a page hidden for 120 000 ms locks itself (owner decision, design 140)", () => {
+    /**
+     * SYNTHETIC visibility. Nothing in this repo's Chromium (Playwright 1.56.1 / chromium-1194) flips `document.visibilityState` for real: pages are kept visible
+     * by Playwright's focus emulation in the headless shell, in full headless and in headed mode under Xvfb; `Page.setWebLifecycleState`, a second tab with
+     * `bringToFront`, a background `Target.createTarget` and a minimized window were each tried and left it `visible` (design 140, "What the browser cell does
+     * and does not prove"). So the page is made to REPORT hidden or visible and the real event is fired at the real document. What this proves is the built
+     * bundle's wiring and behaviour (main.ts -> the page's own document, real fetch, real timers under `page.clock`, the real handler and the real heap); what
+     * it does not prove is that WebKit fires `visibilitychange` when an iPad is locked or an app is switched: that is the on-device check.
+     */
+    const setVisibility = (w: Watch, state: "hidden" | "visible") =>
+      w.page.evaluate((st) => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => st });
+        Object.defineProperty(document, "hidden", { configurable: true, get: () => st === "hidden" });
+        document.dispatchEvent(new Event("visibilitychange"));
+      }, state);
+    /**
+     * The page's wall clock moves forward by exactly `ms` and NO timer runs (a frozen page, a closed lid): Playwright's `clock.setSystemTime`, on a clock that
+     * `openFakeClock` paused (an installed clock keeps ticking in real time until it is paused, which would add a few milliseconds to every boundary below).
+     */
+    const wallClockJump = async (w: Watch, ms: number) => {
+      const now = await w.page.evaluate(() => Date.now());
+      await w.page.clock.setSystemTime(now + ms);
+    };
+    /** The app with Playwright's clock installed from the first line and then PAUSED: time moves only when a cell says so (`wallClockJump`, or `clock.runFor` for the timers). */
+    const openFakeClock = async (path = "/") => {
+      const w = await open(path, { fakeClock: true });
+      const now = await w.page.evaluate(() => Date.now());
+      await w.page.clock.pauseAt(now + 1);
+      return w;
+    };
+    const lockRequests = () => server.log.filter((r) => r.method === "POST" && r.path.endsWith("/partner-session/lock"));
+
+    it("RETURN PATH (the reliable one: the page was frozen, no timer ran): hidden, the wall clock moves 120 000 ms, visible -> locked at once with the new notice; the session is REVOKED, the old token is refused, the token is out of the heap", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      const token = server.issuedTokens[0]!;
+      expect(await heapContains(w.page, token)).toBe(true);
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 120_000);
+      expect(await screen(w), "nothing happens while it is hidden and no timer runs").toBe("signed-in");
+      await setVisibility(w, "visible");
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      expect(await textOf(w.page.getByTestId("notice"))).toBe("Locked because you were away. Sign in again with your passkey to continue.");
+      expect(await w.page.getByTestId("session-fields").count()).toBe(0);
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+      expect(lockRequests()).toHaveLength(1);
+      expect(lockRequests()[0]!.authorization).toBe(`Bearer ${token}`);
+      expect(server.state.lockCalls).toBe(1);
+      expect(server.state.signOutCalls).toBe(0);
+      const res = await fetch(`${apiOrigin}/functions/v1/partner-session/session`, { headers: { authorization: `Bearer ${token}`, "content-type": "application/json", origin: pageOrigin } });
+      expect(res.status).toBe(401);
+      expect(await heapContains(w.page, token)).toBe(false);
+      expect(await w.violations()).toEqual([]);
+      expect(w.pageErrors).toEqual([]);
+    });
+
+    it("after an auto-lock the next session needs a new passkey tap and is a NEW session, like after any lock (no heap snapshot in this cell: a passkey sign-in after one failed once in this harness, see the MEDIUM-2 cell)", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 120_000);
+      await setVisibility(w, "visible");
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+      const optionsBefore = apiCalls().filter((r) => r.path.endsWith("/options")).length;
+      await signIn(w);
+      expect(apiCalls().filter((r) => r.path.endsWith("/options")).length).toBe(optionsBefore + 1);
+      expect(server.issuedTokens).toHaveLength(2);
+      expect(server.issuedTokens[0]).not.toBe(server.issuedTokens[1]);
+      expect(server.sessions()).toHaveLength(1);
+      // the earlier hidden stretch is forgotten: a short hide does not lock the new session
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 30_000);
+      await setVisibility(w, "visible");
+      expect(await screen(w)).toBe("signed-in");
+    });
+
+    it("the same page in French says the same thing in French", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      await w.page.getByTestId("lang-toggle").click();
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 120_000);
+      await setVisibility(w, "visible");
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      expect(await textOf(w.page.getByTestId("notice"))).toBe("Verrouillé après une période d'absence. Reconnectez-vous avec votre clé d'accès pour continuer.");
+    });
+
+    it("119 999 ms hidden is NOT enough: still signed in, the same token still works (Refresh), nothing is revoked, and a second, longer cycle then locks", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      const token = server.issuedTokens[0]!;
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 119_999);
+      await setVisibility(w, "visible");
+      expect(await screen(w)).toBe("signed-in");
+      await w.page.getByTestId("refresh").click();
+      await w.page.waitForFunction(() => !(document.querySelector('[data-testid="refresh"]') as HTMLButtonElement | null)?.disabled);
+      expect(await screen(w)).toBe("signed-in");
+      expect(server.state.revokedSessions.size).toBe(0);
+      expect(lockRequests()).toHaveLength(0);
+      // a visible event with no preceding hidden is nothing, however far the clock has moved
+      await wallClockJump(w, 600_000);
+      await setVisibility(w, "visible");
+      expect(await screen(w)).toBe("signed-in");
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 130_000);
+      await setVisibility(w, "visible");
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+      expect(await heapContains(w.page, token)).toBe(false);
+    });
+
+    it("TIMER PATH (best effort, acts while still hidden): nothing at 119 999 ms of timer time, locked at 120 000 ms with the page still hidden; the visible event afterwards sends nothing more", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      const token = server.issuedTokens[0]!;
+      await setVisibility(w, "hidden");
+      await w.page.clock.runFor(119_999);
+      expect(await screen(w)).toBe("signed-in");
+      expect(lockRequests()).toHaveLength(0);
+      await w.page.clock.runFor(1);
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      expect(await w.page.evaluate(() => document.visibilityState)).toBe("hidden");
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked because you were away");
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+      expect(lockRequests()[0]!.authorization).toBe(`Bearer ${token}`);
+      expect(await heapContains(w.page, token)).toBe(false);
+      await setVisibility(w, "visible");
+      await w.page.waitForTimeout(300);
+      expect(lockRequests()).toHaveLength(1);
+      expect(server.state.lockCalls).toBe(1);
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked because you were away");
+      expect(await w.violations()).toEqual([]);
+    });
+
+    it("visible cancels the timer: a short hide, then a long stretch of timer time while visible, locks nothing", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      await setVisibility(w, "hidden");
+      await w.page.clock.runFor(10_000);
+      await setVisibility(w, "visible");
+      await w.page.clock.runFor(600_000);
+      expect(await screen(w)).toBe("signed-in");
+      expect(lockRequests()).toHaveLength(0);
+    });
+
+    it("a refresh that never answers when the lock fires: the screen is locked at once, the hung request is aborted, the token is out of the heap, and the refresh cannot bring the signed-in screen back", async () => {
+      const w = await openFakeClock();
+      await signIn(w);
+      const token = server.issuedTokens[0]!;
+      server.state.hang.add("session");
+      await w.page.getByTestId("refresh").click();
+      await expect.poll(() => w.page.locator("main").getAttribute("aria-busy")).toBe("true");
+      await setVisibility(w, "hidden");
+      await w.page.clock.runFor(120_000);
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 2000 });
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("Locked because you were away");
+      await expect.poll(() => server.state.revokedSessions.size).toBe(1);
+      expect(await heapContains(w.page, token)).toBe(false);
+      await w.page.waitForTimeout(500);
+      expect(await screen(w)).toBe("signed-out");
+    });
+
+    it("a sign-in whose verify is still on the wire: a 119 999 ms hide changes nothing and the sign-in completes", async () => {
+      const w = await openFakeClock();
+      server.state.delayAfter["verify"] = 1500;
+      await w.page.getByTestId("sign-in").click();
+      await expect.poll(() => server.log.some((r) => r.path.endsWith("/verify") && r.method === "POST")).toBe(true);
+      expect(await screen(w)).toBe("signing-in");
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 119_999);
+      await setVisibility(w, "visible");
+      expect(await screen(w)).toBe("signing-in");
+      await w.page.locator('[data-screen="signed-in"]').waitFor({ timeout: 8000 });
+      expect(server.state.revokedSessions.size).toBe(0);
+    });
+
+    it("a sign-in whose verify is still on the wire when the page has been hidden 120 000 ms: cancelled as Cancel is, and the session the server opened is REVOKED, never held", async () => {
+      const w = await openFakeClock();
+      server.state.delayAfter["verify"] = 1500;
+      await w.page.getByTestId("sign-in").click();
+      await expect.poll(() => server.log.some((r) => r.path.endsWith("/verify") && r.method === "POST")).toBe(true);
+      expect(await screen(w)).toBe("signing-in");
+      await setVisibility(w, "hidden");
+      await wallClockJump(w, 120_000);
+      await setVisibility(w, "visible");
+      await w.page.locator('[data-screen="signed-out"]').waitFor({ timeout: 1000 });
+      expect(await textOf(w.page.getByTestId("notice"))).toContain("cancelled");
+      expect(server.sessions()).toHaveLength(1); // minted by the server, response not yet delivered
+      await expect.poll(() => server.state.revokedSessions.size, { timeout: 8000 }).toBe(1);
+      expect(server.sessions()).toEqual([]);
+      expect(await screen(w)).toBe("signed-out");
+      expect(await heapContains(w.page, server.issuedTokens[0]!)).toBe(false);
+    });
+
+    it("OBSERVATION (pinned, chromium-1194): a passkey ceremony does not hide the page. Through a whole sign-in (the virtual authenticator, verify held for a second) no visibilitychange and no pagehide fires and the page stays visible, so the auto-lock never sees it. What an iPad's own passkey sheet does is an on-device check (design 140)", async () => {
+      const w = await open("/");
+      await w.page.evaluate(() => {
+        const g = window as unknown as { __seen: string[] };
+        g.__seen = [];
+        document.addEventListener("visibilitychange", () => g.__seen.push(`visibilitychange:${document.visibilityState}`));
+        window.addEventListener("pagehide", () => g.__seen.push("pagehide"));
+        const poll = window.setInterval(() => {
+          if (document.visibilityState !== "visible") g.__seen.push(`state:${document.visibilityState}`);
+        }, 20);
+        window.addEventListener("pageshow", () => window.clearInterval(poll), { once: true });
+      });
+      server.state.delayAfter["verify"] = 1000;
+      await w.page.getByTestId("sign-in").click();
+      await expect.poll(() => server.log.some((r) => r.path.endsWith("/verify") && r.method === "POST")).toBe(true);
+      expect(await screen(w)).toBe("signing-in");
+      await w.page.locator('[data-screen="signed-in"]').waitFor({ timeout: 8000 });
+      expect(await w.page.evaluate(() => (window as unknown as { __seen: string[] }).__seen)).toEqual([]);
+      expect(await w.page.evaluate(() => document.visibilityState)).toBe("visible");
+      expect(await w.page.evaluate(() => (window as unknown as { __pageshows: boolean[] }).__pageshows)).toEqual([false]);
+    });
+
+    it("signed out: a long hide changes nothing and sends nothing", async () => {
+      const w = await openFakeClock();
+      await setVisibility(w, "hidden");
+      await w.page.clock.runFor(300_000);
+      await wallClockJump(w, 300_000);
+      await setVisibility(w, "visible");
+      await w.page.waitForTimeout(200);
+      expect(await screen(w)).toBe("signed-out");
+      expect(apiCalls()).toEqual([]);
+    });
+
+    it("REAL events: leaving the page and coming back through the back/forward cache fires visibilitychange hidden then visible in Chromium; with the auto-lock installed the restored page is still signed-out, holds no token, and the visible event locks nothing and sends nothing more", async () => {
+      const w = await open("/app-cacheable.html", { bfcache: true });
+      await w.page.evaluate(() => {
+        const g = window as unknown as { __order: string[] };
+        g.__order = [];
+        window.addEventListener("pagehide", (ev) => g.__order.push(`pagehide:${(ev as PageTransitionEvent).persisted}`));
+        document.addEventListener("visibilitychange", () => g.__order.push(`visibilitychange:${document.visibilityState}`));
+        window.addEventListener("pageshow", (ev) => g.__order.push(`pageshow:${(ev as PageTransitionEvent).persisted}`));
+      });
+      await signIn(w);
+      const token = server.issuedTokens[0]!;
+      await w.page.goto(`${pageOrigin}/manifest.webmanifest`, { waitUntil: "load" });
+      await w.page.goBack({ waitUntil: "commit" });
+      await w.page.locator("main").waitFor();
+      const order = await w.page.evaluate(() => (window as unknown as { __order: string[] }).__order);
+      // observed (pinned, chromium-1194): the page left through pagehide and became hidden; the restore showed it and made it visible again
+      expect(order.filter((e) => e.startsWith("visibilitychange")), JSON.stringify(order)).toEqual(["visibilitychange:hidden", "visibilitychange:visible"]);
+      expect(order.indexOf("visibilitychange:hidden")).toBeGreaterThan(order.indexOf("pagehide:true"));
+      expect(order).toContain("pageshow:true");
+      await w.page.waitForTimeout(300);
+      expect(await screen(w)).toBe("signed-out");
+      expect(await heapContains(w.page, token)).toBe(false);
+      expect(lockRequests()).toEqual([]); // the pagehide sign-out revoked it; the auto-lock added nothing
+      expect(server.log.filter((r) => r.authorization !== null && r.path.endsWith("/sign-out"))).toHaveLength(1);
+      expect(await w.violations()).toEqual([]);
     });
   });
 });
