@@ -6047,6 +6047,81 @@ Numbering: **migration 0111, matrix 89, this section 142.** The owner asked for 
 
 ### 142.5 Verification
 
-Branch: `claude/golfraven-p5-113-next-ft2plx` (base `6099979`). Squash SHA recorded after merge.
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `6099979`). Merged as `22d16a6` (#185).
 
 - Matrix 89 31/31 in `superuser` and `restricted`; matrix 88 with F31 flipped; the full harness as above; the unit suite 104 files / 1940 tests (main's, unchanged by this change); `check-migrations-immutable.sh` OK. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+
+## 143. As built: a sponsorship has to cover what it funds (migration 0112, the sponsorship rules of §137.3)
+
+Numbering: **migration 0112, matrix 90, this section 143.** §137 made a sponsorship that funds an offer, or a trail's special marker, **the trail's own**; §137.3 listed what it left open as product calls (_must it be live, in scope, current_; _are `special_marker_funded_by` and the id tied together_). The owner's answer this session (2026-10-13) was _"recommend and go with the recommendation"_; this section builds that recommendation. Product behaviour changes in the three ways below; the Edge is unchanged (no new status, so the portal needs nothing); no UI flag flips; no CAMERA / OCR.
+
+### 143.1 What was built
+
+- **`supabase/migrations/0112_partner_sponsorship_rules.sql`**: `CREATE OR REPLACE` of three definers, the 0059 / 0109 bodies verbatim plus the checks below; owner, ACL, `search_path`, volatility and signatures untouched.
+  1. **Offer write** (`partner_offer_upsert_for_partner`): the sponsorship an offer names must also have a **scope of `offers` or `both`**. It is the same refusal as every other funder mismatch (`bad_funder`, 422), so a foreign id, an unknown id and a wrong-scope sponsorship are **one answer**.
+  2. **The admin's approve** (`partner_offer_approve_for_partner`): an offer whose funder is `sponsor` goes live only if its sponsorship is **`live`, of the offer's trail, and of scope `offers` or `both`**; otherwise **22023** (the Edge answers 422 `invalid_request` and the transaction writes nothing). This is the check that matters: a sponsorship is edited while it is a draft, so a draft offer written against a good sponsorship can be left pointing at one that has since changed, and the live status is final. It also catches an offer written before 0109 against another trail's sponsorship.
+  3. **The trail programme** (`partner_trail_programme_upsert_for_partner`): a special-marker sponsorship must have scope `special_marker` or `both` (22023), asked **after** the 0109 "is it one of this trail" check, so the scope answer (_"the sponsorship must cover the special marker"_) is only ever given about the operator's own sponsorships, and a foreign id with the right scope is answered exactly as an id that names none. `special_marker_funded_by = trail` with a sponsorship id is 22023. **`sponsor` with no id is still accepted** (a programme may say so before the sponsorship exists).
+  - **The self-check.** Before any statement that changes the database a `DO` block aborts unless each live function's source hashes to the pinned md5 of its 0059 / 0109 body (`ecfd014b…` approve, `702be1ae…` offer upsert, `6a1f069e…` programme upsert; the three were computed from the migration files and then confirmed by the migration applying cleanly on the real schema), the owner, security, volatility and `search_path` are as left, and `edge_partner` (and nobody else) may execute. A temp table keeps the ACLs and argument lists; a second `DO` block afterwards asserts the new text is there and nothing else moved. The `function_inventory` notes and the function comments say 0112.
+- **`supabase/tests/matrix/90_partner_sponsorship_rules.sql`** (47 cells): the admin's approve (an operator-funded offer as before; a live `offers` and a live `both` sponsorship approve; a draft, an ended, a special-marker-only and another trail's sponsorship are each 22023 and leave the offer a draft; a live offer on an ended sponsorship is still `not_draft`; an unknown offer is still `not_found`; **only the approvals are audited**) and the flow the rule exists for (a draft offer on a draft sponsorship that is then **edited to the special marker alone** and made live cannot be approved; repointed at a live offers sponsorship it can); the offer write (live `offers` and `both` ok, a special-marker sponsorship `bad_funder` whatever its status, a draft or ended `offers` sponsorship still accepted for a **draft** offer, the 0109 refusals unchanged, an edit of a draft to a wrong-scope sponsorship leaves it as it was); the programme (scope, the message that says why, the foreign-id answers equal, `trail` with an id, `sponsor` with none, `trail` with none, no funder with an id); and the ACL, owner, security, volatility and `search_path` of all three. The admin cells sit in a `SAVEPOINT` that is rolled back, because a second session bind in one transaction is refused (the matrix 37 pattern).
+- **`supabase/tests/integration/partner-sponsorship-rules.deno.test.ts`** (4 cells; the REAL `offers-admin`, `programme-config` and `sponsorships-admin` handlers over the REAL `privileged.ts`, a real operator and the seeded admin with real sessions, every cell on its own trail): **(1)** an offer written against a draft sponsorship is approved only after the sponsorship is approved (422 `invalid_request` first, still a draft, then 200); **(2)** scope: a special-marker sponsorship does not fund an offer (422 `bad_funder`, nothing written), an offers-only sponsorship does not fund the special marker (422 `invalid_request`, the programme keeps what it had), `offers` / `both` fund an offer and `special_marker` / `both` fund the marker; **(3)** `trail` with an id is 422, `sponsor` with no id and `trail` with none are accepted; **(4)** the flow through the real routes: edit the draft sponsorship to the special marker, approve it, the offer cannot be approved, repoint it, it can. **The cells prove the previous Edge works with the new migration**: the two new refusals arrive as the existing 22023 mapping.
+- The existing `partner-sponsor-binding` (0109) cells are unchanged and pass: their sponsorships are `offers` (offers) or `special_marker` (marker) scope.
+- Design log: §142.5 now records its squash SHA.
+
+### 143.2 What an operator and an admin notice
+
+- **An operator** can still write the offer first and approve the sponsorship afterwards (the order of work is theirs); a special-marker-only sponsorship no longer funds an offer, and an offers-only sponsorship no longer funds the marker. A programme that says the trail pays no longer carries a sponsorship id.
+- **An admin** gets a 422 `invalid_request` on approving a sponsor-funded offer whose sponsorship is not live and in scope. The portal shows its generic invalid-request message `[the portal text was not read this session]`; no new status was added on purpose, so the portal needs no change, at the cost of a less specific message.
+
+### 143.3 Measured, not assumed
+
+- **The cells can fail — 14 of 14 mutants killed, and the schema without 0112 fails 20 of the 47 cells** (scratch copy through the real harness, pgTAP step only, the repo's files never touched; the control is 47/47; each mutant keeps the text the migration's own post-check looks for, so the check cannot be what kills it). Cell numbers are matrix 90's in execution order (1–17 the admin's approve and the flow, 18–29 the offer write, 30–43 the programme, 44–47 identity):
+
+  | Mutant                                                      | Cells that fail                             |
+  | ----------------------------------------------------------- | ------------------------------------------- |
+  | M1 offer write: the scope check is switched off             | 21–23, 26–29                                |
+  | M2 offer write: scope `both` is not accepted                | 20                                          |
+  | M3 approve: the whole sponsorship check is switched off     | 5–9, 12, 15–17                              |
+  | M4 approve: a draft sponsorship is accepted                 | 5, 9, 12                                    |
+  | M5 approve: the scope is not asked                          | 7, 9, 12, 15–17                             |
+  | M6 approve: the offer's trail is not matched                | 8, 9, 12                                    |
+  | M7 approve: an ended sponsorship is accepted                | 6, 9, 12                                    |
+  | M8 approve: the refusal is 42501, not 22023                 | 5–8, 15                                     |
+  | M9 programme: the scope check is switched off               | 33–35, 40                                   |
+  | M10 programme: scope `both` is not accepted                 | 31                                          |
+  | M11 programme: a trail-funded marker with an id is accepted | 38–40                                       |
+  | M12 programme: funder NULL with an id is also refused       | 43                                          |
+  | M13 programme: the 0109 trail check accepts a foreign id    | 36, 37, 40                                  |
+  | M14 the migration is absent (the schema before 0112)        | 5–9, 12, 15–17, 21–23, 28, 29, 33–35, 38–40 |
+
+- **Slips of my own, found by running it:** my first matrix 90 bound the operator, then the admin, then the operator again in one transaction, and the second bind was refused (`partner_session_refused`: a transaction cannot be re-bound), so the file stopped at cell 12; the admin cells now sit in a rolled-back `SAVEPOINT` before the one durable operator bind, and the flow runs entirely as the admin (the operator definers read only the trail's scope, which an admin has). My first mutation run drove the whole harness for every mutant, including the race and concurrency scripts, which made one mutant take several minutes; the runner now stops after the pgTAP step (the Deno layer is run separately below).
+- **The Deno layer was mutated separately** (a failing pgTAP step aborts the harness before the Deno step, so the two layers have to be run on their own; the runner swaps in a trivially passing matrix file and runs only the new integration file): **8 of 8 mutants killed** (control 4/4; each cell is named by its leading words):
+
+  | Mutant                                                   | Cells that fail                                    |
+  | -------------------------------------------------------- | -------------------------------------------------- |
+  | D1 offer write: the scope check is switched off          | 2 (scope)                                          |
+  | D3 approve: the whole sponsorship check is switched off  | 1 (draft sponsorship), 4 (the flow)                |
+  | D4 approve: a draft sponsorship is accepted              | 1                                                  |
+  | D5 approve: the scope is not asked                       | 4                                                  |
+  | D8 approve: the refusal is 42501, not 22023              | 1, 4 (403 where 422 `invalid_request` is expected) |
+  | D9 programme: the scope check is switched off            | 2                                                  |
+  | D11 programme: a trail-funded marker with an id accepted | 3                                                  |
+  | D14 the migration is absent                              | 1, 2, 3, 4                                         |
+
+- **Full, unpatched harness on the tree of the code commit (`4d8593f`; the design commit after it changes only this file), `superuser` then `restricted`, in a scratch copy of the worktree: exit 0 in both modes.** pgTAP **111 files / 6636 tests PASS** (the 110 / 6589 of §142 plus matrix 90's 47); the race and concurrency scripts (including the programme roster race of §141) pass; the Deno integration suite **462 passed, 0 failed** in each (the 458 of §141 plus these 4); `verify-function-inventory` OK; `service-role-lint` clean. `tools/db/check-migrations-immutable.sh --base origin/main`: OK, 111 files byte-identical. The unit suite was not run by me this time; the CI job `install / typecheck / build / test` (which runs it) was green on `4d8593f` and on the design commit.
+
+### 143.4 Not built, honestly
+
+- **Dates are not compared.** The sponsorship's `starts_on` / `ends_on` are not checked against the offer's validity window or against today; a sponsorship that is `live` but past its end date still funds an offer at approve. Status and scope were the recommendation; dates are a further product call.
+- **A draft offer may still name a draft or an ended sponsorship** (the live check is at the approve, on purpose). A live offer is not re-checked when its sponsorship later ends: the rule is about going live, not about staying live.
+- **A programme with no funder (`NULL`) may still carry a sponsorship id**, and the programme write has **no later gate**, so it is checked against the sponsorship as it is at the time of the write (a draft sponsorship edited afterwards is not looked at again). The only readers of `special_marker_sponsorship_id` I found are the operator's own programme read (0059) and the Edge's mapping of it; no definer acts on it `[a grep over the migrations and the Edge, not a proof]`, so these two residuals are about the data's honesty, not about a consumer acting on it.
+- **Existing rows are not repaired.** Nothing is deployed, so none are expected `[unverified: there is no production database to ask]`; the migration changes writes and the approve only.
+- **The settlement export is still not driven with a sponsor-funded offer** (§137.3 third bullet): that is the next test.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+- **§137.3's first two bullets are superseded by this section** (except as listed above).
+
+### 143.5 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `22d16a6`). Squash SHA recorded after merge.
+
+- Matrix 90 47/47 in `superuser` (its own run, and in the full harness) and in `restricted` (the full harness); the new integration file 4/4 in both modes; the full harness as above; `check-migrations-immutable.sh` OK. Local Node is 22 (repo pins `>=24`); CI uses Node 24.
+- Not run: the staging path probe against a live gateway (§20.12), anything on a hosted database, the portal's rendering of the 422 `invalid_request` an admin now gets on approving an out-of-rule offer, and the settlement export with a sponsor-funded offer (§137.3, next).
