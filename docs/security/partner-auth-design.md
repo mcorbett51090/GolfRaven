@@ -5620,3 +5620,70 @@ SELECT private.partner_invite_create_for_partner('10000000-0000-0000-0000-000000
 ### 138.5 Verification
 
 Branch: `claude/golfraven-p5-113-next-ft2plx` (base `23aafa1 / #178`). Merged as `59dc9a8` (#179). No code, migration or test changed; the numbers of §137 stand. The probe ran four times on the real database in `superuser` mode only (the first two runs were my own probe slips, above and a missing `reauth_until`); I did not repeat it in `restricted` mode.
+
+## 139. As built: a new programme row needs the facility on the trail's roster (migration 0110) — closes §138
+
+Numbering: **migration 0110, matrix 88, this section 139.** Migration 0108 and matrix 86 stay reserved for the open draft PR #162 (owner's instruction, 2026-10-13); 0109 and matrix 87 are §137. **Owner decision, 2026-10-13:** §138.3 **option A**. This is the fix for §138 (an operator could write a programme row for any facility and thereby give itself reach to it). Product behaviour changes for the one refusal below; the Edge is unchanged; no UI flag flips; no CAMERA / OCR.
+
+### 139.1 What was built
+
+- **`supabase/migrations/0110_partner_facility_programme_roster_gate.sql`**
+  1. **Four narrow catalog reads for `private_definer`**, each a column-limited `GRANT SELECT` plus one `SELECT` policy keyed on the partner binding kind (public catalog data, so that is the whole predicate): `catalog_roster_version(trail_id, version)`, `catalog_roster_member(trail_id, roster_version, course_id, any_of_course_ids, facility_id, hole_id, removed_on)`, `catalog_course(id, facility_id)`, `catalog_hole(id, course_id)`. Each is registered in `private.definer_policy_allowlist` with its derived expression and in `supabase/tests/fixtures/definer_policy_exprs.txt`.
+  2. **`partner_facility_programme_upsert_for_partner`** (`CREATE OR REPLACE`, the 0059 body verbatim plus one check; owner, ACL, `search_path`, volatility untouched; the 0107 pattern, with a `DO` block asserting the new text, the unchanged EXECUTE set and the four derived expressions): **when no row exists yet for `(trail, facility)`, the facility must be on the trail's current roster, else 22023** (the Edge's 422 `invalid_request`). The check comes after `no_trail`, so a trail with no programme is still `no_trail`; it applies to an admin too; **an existing row stays editable**, so an operator can still set it to `left` or `declined` on a facility that has since left the roster.
+  - **"On the current roster"** is the test the player-side progress RPC already uses (0011): the trail's **latest `roster_version`**, members with **`removed_on IS NULL`**, and a member names the facility **directly** (`facility_id`), **through a course** (`course_id`, or any element of `any_of_course_ids`) or **through a hole** (hole → course → facility).
+  - Statuses are unchanged, so **the Edge needs no change and there is no deploy-order hazard.**
+- **Existing tests this moved, and why:** matrix 37 gives `trl_u` a roster naming `crs_x1` (its admin cell upserts `fac_x` there); the DEPARTURE 10 pin in matrix 24 (no `private` function reads `catalog_roster`) now names the programme editor as its **one exception**, which is exactly the sentence that pin already ended with (_"keeping the two in step is the programme editor's (S6) job"_); the programme integration test's own trails get a roster naming the courses of `fac_x` and `fac_y`.
+- **`supabase/tests/matrix/88_partner_facility_programme_roster_gate.sql`** (34 cells): the four new reads are closed without a partner binding while rows exist; **every way a roster names a facility and the ways it does not** (unit facility; a course; `any_of_course_ids` including its second element; a hole; a removed member; only the latest version; a trail with no roster; another trail's roster; an id in no catalog), each on a trail of its own so `trl_t`'s roster is never touched; the operator (control: `fac_y` is on the roster, gets a row, and then has reach); **the §138 escalation closed** (the operator is refused a manager and a staff invite at the organisation of `fac_z2`, tries to add `fac_z2` to its programme and is refused, no row, still no reach, and still refused the invites — before 0109 this was `ok`, `ok`); an existing off-roster row stays editable; the repair query of 139.3 finds exactly the off-roster row; ACL, owner and `search_path` unchanged; only the two successful writes are audited.
+- **`partner-programme.deno.test.ts`** (5 → 6 cells; the REAL handler over the REAL `privileged.ts`): a new cell drives the refusal (422 `invalid_request`, nothing written), an id in no catalog (the same 422, **not a 500**), an on-roster facility (200), and an existing off-roster row edited to `left` (200).
+- Design log: §138.5 already records `59dc9a8` (#179).
+
+### 139.2 Measured, not assumed
+
+- **The cells can fail — 11 of 11 mutants of the migration killed by the pgTAP cells, and the three that reach the Edge also killed by the Deno cell** (scratch copy through the real harness, the repo's files never touched; controls 33/33 and 6/6; the two layers run on their own because a failing pgTAP step aborts the harness before the Deno step):
+
+  | Mutant                                                             | pgTAP cells (88) that fail | Deno cell |
+  | ------------------------------------------------------------------ | -------------------------- | --------- |
+  | M1 the gate is switched off                                        | 6, 8, 11–14, 16, 21–25, 33 | fails     |
+  | M2 an existing row is gated too (no exemption)                     | 26, 27, 33                 | fails     |
+  | M3 a removed member still counts                                   | 11, 16                     | —         |
+  | M4 any roster version counts                                       | 12, 16                     | —         |
+  | M5 `any_of_course_ids` is ignored                                  | 9                          | —         |
+  | M6 the hole branch is dead                                         | 10                         | —         |
+  | M7 the `course_id` branch is dead                                  | 7, 12, 18, 19, 33          | —         |
+  | M8 any trail's roster counts                                       | 6, 8, 11, 16               | —         |
+  | M9 the unit-facility branch is dead                                | 5                          | —         |
+  | M10 the refusal is 42501, not 22023                                | 6, 8, 11–14, 21            | fails     |
+  | M11 the roster-member read policy is open without a binding        | 2                          | —         |
+
+  (Cell numbers are those of the 33-cell file the mutants ran against; the 34th cell, the repair query of 139.3, was added afterwards and reads only, so no mutant touches it.)
+
+- **Slips of my own, found by running it:** (1) my `DO` assertion that the four allow-list expressions were derived ran **after** the seed policy was dropped, so row-level security hid the rows and the migration aborted (0055 asserts before the drop); (2) a **double quote inside a comment in the function body** tripped check 14 (the first-statement lexer refuses a body with a double quote, a backslash or a dollar quote), which failed eleven cells of matrix 10 with no hint that the cause was a comment; (3) in my first matrix 88 draft a helper returned the text `ok` for each of seven trails, and **`pg_prove` counted those lines as seven extra passing tests** (`Tests=40` for a plan of 33) — silenced with `\gset`; (4) in `restricted` mode the current user may not execute `has_facility_scope` (granted to `authenticated` and `service_role`), so the cells call it as `service_role`; (5) the existing matrix 37 and the DEPARTURE 10 pin both needed the changes listed in 139.1.
+- **Full, unpatched harness on the final tree, `superuser` then `restricted`, in a scratch copy with a throwaway `.git` so every step runs, and after listing the files the scratch copy held that the tree does not track (build output only):** **exit 0 in both modes**: pgTAP **108 files / 6352 tests PASS** (the 107 / 6318 of §137 plus matrix 88's 34); the Deno integration suite **456 passed, 0 failed** in each (the 455 that were there plus the one new programme cell); the function-inventory checks, the policy-expression fixture check and `service-role-lint` clean. Unit suite 103 files / 1925 tests, unchanged.
+
+### 139.3 Not built, honestly
+
+- **Rows written before 0110 are not repaired.** Nothing is deployed, so none are expected `[unverified]`; if any exist, the programme rows whose facility is off the current roster are the ones §138 describes as grants, and this query (the gate's own test written over the existing rows; matrix 88 runs it against a planted row and the on-roster rows) lists them:
+
+  ```sql
+  SELECT fp.trail_id, fp.facility_id
+  FROM app.facility_programme fp
+  WHERE NOT EXISTS (
+    SELECT 1 FROM app.catalog_roster_member rm
+    WHERE rm.trail_id = fp.trail_id AND rm.removed_on IS NULL
+      AND rm.roster_version = (SELECT max(v.version) FROM app.catalog_roster_version v WHERE v.trail_id = fp.trail_id)
+      AND (rm.facility_id = fp.facility_id
+           OR EXISTS (SELECT 1 FROM app.catalog_course c WHERE c.facility_id = fp.facility_id AND (c.id = rm.course_id OR c.id = ANY (rm.any_of_course_ids)))
+           OR EXISTS (SELECT 1 FROM app.catalog_hole h JOIN app.catalog_course c ON c.id = h.course_id WHERE h.id = rm.hole_id AND c.facility_id = fp.facility_id)));
+  ```
+
+- **Reach still follows every row, including `declined` and `left` (G3).** That filter on `has_facility_scope` is the next migration (owner's instruction), and it is the other half of the §138 story: until it lands, an operator who sets an off-roster row to `left` (which this migration deliberately allows) keeps the reach that row gave it.
+- **A roster has to exist before a programme can name any facility.** A new trail's operator cannot add facilities until the roster is imported; whether the importer maintains `removed_on` and how a roster comes to exist is `[unverified]` (the importer is outside 0002).
+- **The portal's wording for a 422 `invalid_request` on the facility screen was not checked**; the Edge answer is generic by design.
+- The sponsorship rules of §137.3 (the owner delegated them: live at the offer's approve, scope at write, funder `trail` with an id refused) are the next migration after this one.
+- U1 condition (3) / Q7 email notice; staging path probe against a live gateway (§20.12); OCR / aHash / UI flag flips / CAMERA. `MARKER_COSIGNAL_UI_ENABLED` / `CHECKIN_UI_ENABLED` / `RECEIPTS_UPLOAD_UI_ENABLED` stay `false`.
+
+### 139.4 Verification
+
+Branch: `claude/golfraven-p5-113-next-ft2plx` (base `7e89b3a / #180`). Squash SHA recorded after merge.
+
+- Matrix 88 34/34 in `superuser` and `restricted`; the programme integration file 6/6 in both; the full harness as above; the unit suite 103 files / 1925 tests (unchanged); `check-migrations-immutable.sh` OK (108 files byte-identical to the base). Local Node is 22 (repo pins `>=24`); CI uses Node 24.
