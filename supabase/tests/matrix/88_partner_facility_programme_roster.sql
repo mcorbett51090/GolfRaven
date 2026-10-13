@@ -237,7 +237,7 @@ SELECT is((SELECT count(*)::int FROM pg_policy pol WHERE pol.polname LIKE 'pd\_p
   'no new policy reads a setting: no GUC window (the hard rule)');
 
 -- ----------------------------------------------------------------------------
--- B. What private_definer may now read, and what it may not  (21)
+-- B. What private_definer may now read, and what it may not  (17)
 -- ----------------------------------------------------------------------------
 SELECT is((SELECT count(*)::int FROM pg_attribute a
            WHERE a.attrelid IN ('app.catalog_roster_member'::regclass, 'app.catalog_roster_version'::regclass, 'app.catalog_course'::regclass, 'app.catalog_hole'::regclass)
@@ -333,7 +333,7 @@ RESET ROLE;
 ROLLBACK TO SAVEPOINT c_a3;
 
 -- ----------------------------------------------------------------------------
--- D. The ADMIN is held to the same rule: each roster leg, and every way to be off the roster  (35)
+-- D. The ADMIN is held to the same rule: each roster leg, and every way to be off the roster  (34)
 -- ----------------------------------------------------------------------------
 SAVEPOINT d_admin;
 SELECT pg_temp.seed_step('ad', '{"mfa_s": 240, "aal": 2}'::jsonb);
@@ -431,7 +431,7 @@ SELECT is((SELECT count(*)::int FROM e88_rows WHERE pg_temp.fp_try('ad', trail_i
 ROLLBACK TO SAVEPOINT e_admin;
 
 -- ----------------------------------------------------------------------------
--- F. The OPERATOR of trl_t: the 138.4 reproduction, the four legs as a positive control, and the negatives
+-- F. The OPERATOR of trl_t: the 138.4 reproduction, the four legs as a positive control, and the negatives  (27)
 -- ----------------------------------------------------------------------------
 SELECT pg_temp.seed_step('op', '{"mfa_s": 240, "aal": 2, "reauth_s": 240}'::jsonb);
 SET LOCAL ROLE edge_partner;
